@@ -185,7 +185,7 @@ TEST(test_whitespace_only)
  * ------------------------------------------------------------------------ */
 TEST(test_single_char_tokens)
 {
-    struct { const char *src; TokenType type; } cases[] = {
+    struct { const char *src; CdoTokenType type; } cases[] = {
         { "(", TOK_LPAREN   }, { ")", TOK_RPAREN   },
         { "{", TOK_LBRACE   }, { "}", TOK_RBRACE   },
         { "[", TOK_LBRACKET }, { "]", TOK_RBRACKET },
@@ -211,7 +211,7 @@ TEST(test_single_char_tokens)
  * ------------------------------------------------------------------------ */
 TEST(test_multi_char_operators)
 {
-    struct { const char *src; TokenType type; } cases[] = {
+    struct { const char *src; CdoTokenType type; } cases[] = {
         { "~>",  TOK_PIPE_OP     },
         { "~!>", TOK_FILTER_OP   },
         { "->",  TOK_RANGE_ASC   },
@@ -333,7 +333,7 @@ TEST(test_keywords_in_sequence)
 TEST(test_all_keywords)
 {
     /* Verify every keyword is recognised when surrounded by spaces. */
-    struct { const char *kw; TokenType expected; } kws[] = {
+    struct { const char *kw; CdoTokenType expected; } kws[] = {
         {"IF",TOK_IF},{"ELSE",TOK_ELSE},{"WHILE",TOK_WHILE},{"FOR",TOK_FOR},
         {"FUNCTION",TOK_FUNCTION},{"CLASS",TOK_CLASS},{"RETURN",TOK_RETURN},
         {"THROW",TOK_THROW},{"TRY",TOK_TRY},{"CATCH",TOK_CATCH},

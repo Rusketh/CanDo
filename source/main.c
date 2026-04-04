@@ -36,6 +36,11 @@
 
 #include <limits.h>
 
+#if defined(_WIN32) || defined(_WIN64)
+#  include <windows.h>
+#  define realpath(path, out) _fullpath(out, path, PATH_MAX)
+#endif
+
 int main(int argc, char *argv[])
 {
     if (argc < 2) {

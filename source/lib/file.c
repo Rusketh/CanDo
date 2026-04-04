@@ -21,6 +21,32 @@
 #include <dirent.h>
 #include <errno.h>
 
+#if defined(_WIN32) || defined(_WIN64)
+#include <io.h>
+#include <direct.h>
+#define mkdir(path, mode) _mkdir(path)
+
+static ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
+    if (*lineptr == NULL) {
+        *n = 128;
+        *lineptr = malloc(*n);
+    }
+    size_t i = 0;
+    int c;
+    while ((c = fgetc(stream)) != EOF) {
+        if (i + 1 >= *n) {
+            *n *= 2;
+            *lineptr = realloc(*lineptr, *n);
+        }
+        (*lineptr)[i++] = (char)c;
+        if (c == '\n') break;
+    }
+    if (c == EOF && i == 0) return -1;
+    (*lineptr)[i] = '\0';
+    return (ssize_t)i;
+}
+#endif
+
 /* =========================================================================
  * Internal helpers
  * ======================================================================= */

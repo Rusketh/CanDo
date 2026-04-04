@@ -38,6 +38,7 @@
 #  include <dlfcn.h>
 #else
 #  include <windows.h>
+#  define realpath(path, out) _fullpath(out, path, PATH_MAX)
 #endif
 
 /* =========================================================================
@@ -61,7 +62,11 @@ static bool resolve_path(CandoVM *vm, const char *raw_path,
 {
     char joined[PATH_MAX];
 
+#if defined(_WIN32) || defined(_WIN64)
+    if (raw_path[0] == '/' || raw_path[0] == '\\' || (isalpha(raw_path[0]) && raw_path[1] == ':')) {
+#else
     if (raw_path[0] == '/') {
+#endif
         /* Already absolute. */
         if (strlen(raw_path) >= PATH_MAX) return false;
         if (!realpath(raw_path, out)) return false;
@@ -72,7 +77,11 @@ static bool resolve_path(CandoVM *vm, const char *raw_path,
     const char *caller_file = NULL;
     for (int i = (int)vm->frame_count - 1; i >= 0; i--) {
         const char *name = vm->frames[i].closure->chunk->name;
+#if defined(_WIN32) || defined(_WIN64)
+        if (name && (name[0] == '/' || name[0] == '\\' || (isalpha(name[0]) && name[1] == ':'))) {
+#else
         if (name && name[0] == '/') {
+#endif
             caller_file = name;
             break;
         }
@@ -85,6 +94,7 @@ static bool resolve_path(CandoVM *vm, const char *raw_path,
         if (len >= PATH_MAX) return false;
         memcpy(base_dir, caller_file, len + 1);
         char *slash = strrchr(base_dir, '/');
+        if (!slash) slash = strrchr(base_dir, '\\');
         if (slash && slash != base_dir) *slash = '\0';
         else { base_dir[0] = '.'; base_dir[1] = '\0'; }
     } else {

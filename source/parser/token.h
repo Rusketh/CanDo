@@ -13,7 +13,7 @@
 #include "../core/common.h"
 
 /* -------------------------------------------------------------------------
- * TokenType -- discriminant for every lexeme the scanner can produce.
+ * CdoTokenType -- discriminant for every lexeme the scanner can produce.
  *
  * Ordering within groups is arbitrary; do not rely on numeric values.
  * ------------------------------------------------------------------------ */
@@ -117,7 +117,7 @@ typedef enum {
     TOK_ERROR,           /* unrecognised input; message in CandoLexer       */
 
     TOK_COUNT            /* number of distinct token types (keep last)      */
-} TokenType;
+} CdoTokenType;
 
 /* -------------------------------------------------------------------------
  * CandoToken -- a single lexed token.
@@ -126,7 +126,7 @@ typedef enum {
  * that buffer lives.  The token does NOT copy the lexeme.
  * ------------------------------------------------------------------------ */
 typedef struct {
-    TokenType   type;
+    CdoTokenType   type;
     const char *start;   /* pointer to the first byte of the lexeme        */
     u32         length;  /* byte count of the lexeme                       */
     u32         line;    /* 1-based line number of the first character      */
@@ -134,10 +134,10 @@ typedef struct {
 } CandoToken;
 
 /* -------------------------------------------------------------------------
- * cando_token_type_name -- return a static ASCII name for a TokenType.
+ * cando_token_type_name -- return a static ASCII name for a CdoTokenType.
  * Useful for diagnostics and test assertions.
  * ------------------------------------------------------------------------ */
-const char *cando_token_type_name(TokenType t);
+const char *cando_token_type_name(CdoTokenType t);
 
 /* -------------------------------------------------------------------------
  * cando_keyword_type -- if the given identifier lexeme (length `len`) is a
@@ -146,6 +146,6 @@ const char *cando_token_type_name(TokenType t);
  * The comparison is case-sensitive: Cando keywords are all upper-case
  * ("IF", "WHILE", ...) except for "pipe" which is lower-case.
  * ------------------------------------------------------------------------ */
-TokenType cando_keyword_type(const char *ident, u32 len);
+CdoTokenType cando_keyword_type(const char *ident, u32 len);
 
 #endif /* CANDO_TOKEN_H */

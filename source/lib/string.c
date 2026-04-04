@@ -21,7 +21,9 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <regex.h>
+#if !defined(_WIN32) && !defined(_WIN64)
+#  include <regex.h>
+#endif
 #include <stdarg.h>
 
 /* =========================================================================
@@ -196,6 +198,7 @@ static int str_find(CandoVM *vm, int argc, CandoValue *args) {
     }
 
     /* Regex search. */
+#if !defined(_WIN32) && !defined(_WIN64)
     regex_t re;
     if (regcomp(&re, pat->data, REG_EXTENDED) != 0) {
         cando_vm_error(vm, "string.find: invalid regex pattern '%s'",
@@ -208,6 +211,10 @@ static int str_find(CandoVM *vm, int argc, CandoValue *args) {
     if (r == REG_NOMATCH) { cando_vm_push(vm, cando_null()); return 1; }
     cando_vm_push(vm, cando_number((f64)m.rm_so));
     return 1;
+#else
+    cando_vm_error(vm, "string.find: regex not supported on this platform");
+    return -1;
+#endif
 }
 
 /* =========================================================================
@@ -251,6 +258,7 @@ static int str_split(CandoVM *vm, int argc, CandoValue *args) {
     }
 
     /* Regex split. */
+#if !defined(_WIN32) && !defined(_WIN64)
     regex_t re;
     if (regcomp(&re, pat->data, REG_EXTENDED) != 0) {
         cando_vm_error(vm, "string.split: invalid regex pattern '%s'",
@@ -282,6 +290,11 @@ static int str_split(CandoVM *vm, int argc, CandoValue *args) {
     regfree(&re);
     cando_vm_push(vm, arr_val);
     return 1;
+#else
+    cando_vm_error(vm, "string.split: regex not supported on this platform");
+    cando_value_release(arr_val);
+    return -1;
+#endif
 }
 
 /* =========================================================================
@@ -341,6 +354,7 @@ static int str_replace(CandoVM *vm, int argc, CandoValue *args) {
     }
 
     /* Regex replacement (replaces all occurrences). */
+#if !defined(_WIN32) && !defined(_WIN64)
     regex_t re;
     if (regcomp(&re, pat->data, REG_EXTENDED) != 0) {
         cando_vm_error(vm, "string.replace: invalid regex pattern '%s'", pat->data);
@@ -391,6 +405,10 @@ static int str_replace(CandoVM *vm, int argc, CandoValue *args) {
     cando_free(buf);
     cando_vm_push(vm, cando_string_value(res));
     return 1;
+#else
+    cando_vm_error(vm, "string.replace: regex not supported on this platform");
+    return -1;
+#endif
 }
 
 /* =========================================================================
@@ -485,6 +503,7 @@ static int str_match(CandoVM *vm, int argc, CandoValue *args) {
     if (end   > s->length) end   = s->length;
 
     /* Compile regex with up to 16 capture groups. */
+#if !defined(_WIN32) && !defined(_WIN64)
     regex_t re;
     if (regcomp(&re, pat->data, REG_EXTENDED) != 0) {
         cando_vm_error(vm, "string.match: invalid regex pattern '%s'",
@@ -511,6 +530,10 @@ static int str_match(CandoVM *vm, int argc, CandoValue *args) {
     regfree(&re);
 
     CandoValue arr_val = cando_bridge_new_array(vm);
+#else
+    cando_vm_error(vm, "string.match: regex not supported on this platform");
+    return -1;
+#endif
     CdoObject *arr = cando_bridge_resolve(vm, arr_val.as.handle);
 
     if (r == REG_NOMATCH) {
