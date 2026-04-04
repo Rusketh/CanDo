@@ -24,8 +24,10 @@ run_test() {
         PASS=$((PASS + 1))
     else
         echo "  FAIL  $name"
-        echo "        expected: $(printf '%s' "$expected" | head -5)"
-        echo "        actual:   $(printf '%s' "$actual"   | head -5)"
+        echo "        expected:"
+        echo "$expected"
+        echo "        actual:"
+        echo "$actual"
         FAIL=$((FAIL + 1))
     fi
 }
