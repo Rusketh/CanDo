@@ -47,14 +47,14 @@ jobs:
         with:
           msystem: MINGW64
           update: true
-          pacboy: gcc:p make:p
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
 
       # -ldl is not needed on Windows (LoadLibrary is used instead).
       # -lws2_32 is required for POSIX socket compatibility in http.c.
       - name: Run tests
-        run: |
-          export PATH="/usr/bin:/mingw64/bin:$PATH"
-          make test
+        run: make test
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

@@ -13,6 +13,13 @@ SCRIPTS="tests/scripts"
 PASS=0
 FAIL=0
 
+# Detect Windows (MSYS2/MinGW) vs Unix for OS-sensitive expected values.
+if [[ "${MSYSTEM:-}" == MINGW* ]] || [[ "${OS:-}" == "Windows_NT" ]]; then
+    PLATFORM_OS_NAME="windows"
+else
+    PLATFORM_OS_NAME="unix"
+fi
+
 run_test() {
     local name="$1"
     local script="$2"
@@ -26,6 +33,19 @@ run_test() {
         echo "  FAIL  $name"
         echo "        expected: $(printf '%s' "$expected" | head -5)"
         echo "        actual:   $(printf '%s' "$actual"   | head -5)"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# run_smoke: only verifies exit code 0 (output is dynamic or informational).
+run_smoke() {
+    local name="$1"
+    local script="$2"
+    if "$CANDO" "$script" > /dev/null 2>&1; then
+        echo "  PASS  $name"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL  $name"
         FAIL=$((FAIL + 1))
     fi
 }
@@ -84,7 +104,7 @@ run_test "threads" "$SCRIPTS/threads.cdo" \
     "$(printf '42\n10\n20\ntrue\nsleep_ok\nid_ok\n99\ntrue\nnull\n7\n1\n2\n3\ndone\nerror\nbad\ntrue\ntrue\n77\n88\ncaught_err\nalready\nfalse')"
 
 run_test "lib_os" "$SCRIPTS/lib_os.cdo" \
-    "$(printf 'os.name: unix\nos_time_ok\nos_clock_ok\nPATH_ok\nCANDO_TEST: Hello')"
+    "$(printf 'os.name: %s\nos_time_ok\nos_clock_ok\nPATH_ok\nCANDO_TEST: Hello' "$PLATFORM_OS_NAME")"
 
 run_test "lib_datetime" "$SCRIPTS/lib_datetime.cdo" \
     "$(printf 'now_ok\nFormatted: 2023-10-27\nparse_ok')"
@@ -96,10 +116,17 @@ run_test "lib_crypto" "$SCRIPTS/lib_crypto.cdo" \
     "$(printf 'md5_ok\nsha256_ok\naGVsbG8gd29ybGQA\nhello world')"
 
 run_test "lib_sys" "$SCRIPTS/lib_sys.cdo" \
-    "$(printf 'pid_ok\nppid_ok')"
+    "$(printf 'pid_ok\nppid_ok\nlookup_ok')"
 
 run_test "lib_enhance" "$SCRIPTS/lib_enhance.cdo" \
     "$(printf "math.log10(100):  2\nmath.exp(0):  1\nstartsWith('hello'):  true\nendsWith('world'):  true\nreplace('world', 'cando'): hello cando\nformat: Hello Alice, age 30")"
+
+run_smoke "test_array"    "$SCRIPTS/test_array.cdo"
+run_smoke "test_crypto"   "$SCRIPTS/test_crypto.cdo"
+run_smoke "test_datetime" "$SCRIPTS/test_datetime.cdo"
+run_smoke "test_enhance"  "$SCRIPTS/test_enhance.cdo"
+run_smoke "test_os"       "$SCRIPTS/test_os.cdo"
+run_smoke "test_sys"      "$SCRIPTS/test_sys.cdo"
 
 echo "-----------------------"
 echo "Results: $PASS passed, $FAIL failed"
