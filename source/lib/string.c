@@ -530,10 +530,6 @@ static int str_match(CandoVM *vm, int argc, CandoValue *args) {
     regfree(&re);
 
     CandoValue arr_val = cando_bridge_new_array(vm);
-#else
-    cando_vm_error(vm, "string.match: regex not supported on this platform");
-    return -1;
-#endif
     CdoObject *arr = cando_bridge_resolve(vm, arr_val.as.handle);
 
     if (r == REG_NOMATCH) {
@@ -569,6 +565,10 @@ static int str_match(CandoVM *vm, int argc, CandoValue *args) {
     cando_vm_push(vm, cando_bool(true));
     cando_vm_push(vm, arr_val);
     return 2;
+#else
+    cando_vm_error(vm, "string.match: regex not supported on this platform");
+    return -1;
+#endif
 }
 
 /* =========================================================================

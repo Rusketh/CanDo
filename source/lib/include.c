@@ -33,6 +33,7 @@
 #include <string.h>
 #include <limits.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #if !defined(_WIN32) && !defined(_WIN64)
 #  include <dlfcn.h>
