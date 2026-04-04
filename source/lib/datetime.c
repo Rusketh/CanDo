@@ -17,6 +17,15 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(_WIN32) || defined(_WIN64)
+/* Minimal strptime for Windows (or just fallback) */
+static char *strptime_fallback(const char *buf, const char *fmt, struct tm *tm) {
+    (void)buf; (void)fmt; (void)tm;
+    return NULL;
+}
+#define strptime strptime_fallback
+#endif
+
 /* =========================================================================
  * datetime.now() → number
  * ======================================================================= */

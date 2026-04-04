@@ -53,7 +53,17 @@ static int os_setenv(CandoVM *vm, int argc, CandoValue *args)
         return 1;
     }
 
+#if defined(_WIN32) || defined(_WIN64)
+    if (!overwrite) {
+        if (getenv(name)) {
+            cando_vm_push(vm, cando_bool(true));
+            return 1;
+        }
+    }
+    int res = _putenv_s(name, value);
+#else
     int res = setenv(name, value, overwrite ? 1 : 0);
+#endif
     cando_vm_push(vm, cando_bool(res == 0));
     return 1;
 }

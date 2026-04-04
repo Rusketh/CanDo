@@ -52,7 +52,9 @@ jobs:
       # -ldl is not needed on Windows (LoadLibrary is used instead).
       # -lws2_32 is required for POSIX socket compatibility in http.c.
       - name: Run tests
-        run: make test LDFLAGS="-lm -lws2_32"
+        run: |
+          export PATH="/usr/bin:/mingw64/bin:$PATH"
+          make test
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

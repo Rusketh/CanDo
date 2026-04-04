@@ -12,8 +12,13 @@
 
 #include <stdio.h>
 #include <string.h>
+#if defined(_WIN32) || defined(_WIN64)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <netdb.h>
 #include <arpa/inet.h>
+#endif
 
 static int net_lookup(CandoVM *vm, int argc, CandoValue *args)
 {
@@ -46,6 +51,10 @@ static int net_lookup(CandoVM *vm, int argc, CandoValue *args)
 
 void cando_lib_net_register(CandoVM *vm)
 {
+#if defined(_WIN32) || defined(_WIN64)
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
     CandoValue net_val = cando_bridge_new_object(vm);
     CdoObject *net_obj = cando_bridge_resolve(vm, net_val.as.handle);
 

@@ -28,7 +28,13 @@ CFLAGS_CANDO  = -std=c11 -Wall -Wextra -pthread -D_GNU_SOURCE \
 # VM uses GCC computed-goto extension; suppress the pedantic warning.
 CFLAGS_VM     = -std=c11 -Wall -Wextra -pthread -D_GNU_SOURCE \
                 -I source/core -I source/vm -iquote source/object
-LDFLAGS       = -lm -ldl
+
+# OS detection for LDFLAGS
+ifeq ($(OS),Windows_NT)
+    LDFLAGS = -lm -lws2_32
+else
+    LDFLAGS = -lm -ldl
+endif
 
 CORE_SRCS = \
     source/core/common.c          \
