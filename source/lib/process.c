@@ -11,6 +11,9 @@
 
 #include <unistd.h>
 #include <sys/types.h>
+#if defined(_WIN32) || defined(_WIN64)
+#include <process.h>
+#endif
 
 static int process_pid(CandoVM *vm, int argc, CandoValue *args)
 {
@@ -22,7 +25,11 @@ static int process_pid(CandoVM *vm, int argc, CandoValue *args)
 static int process_ppid(CandoVM *vm, int argc, CandoValue *args)
 {
     (void)argc; (void)args;
+#if defined(_WIN32) || defined(_WIN64)
+    cando_vm_push(vm, cando_number(0.0)); /* getppid not standard on Windows */
+#else
     cando_vm_push(vm, cando_number((f64)getppid()));
+#endif
     return 1;
 }
 
