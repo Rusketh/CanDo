@@ -37,7 +37,9 @@ int cando_native_print(CandoVM *vm, int argc, CandoValue *args)
     for (int i = 0; i < argc; i++) {
         if (i > 0) putchar(' ');
         char *s = cando_value_tostring(args[i]);
-        fputs(s, stdout);
+        for (char *p = s; *p; p++) {
+            if (*p != '\t') putchar(*p);
+        }
         free(s);
     }
     putchar('\n');

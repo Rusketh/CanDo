@@ -18,7 +18,7 @@ run_test() {
     local script="$2"
     local expected="$3"
     local actual
-    actual=$("$CANDO" "$script" 2>&1)
+    actual=$("$CANDO" "$script" 2>&1 | tr -d '\r')
     if [ "$actual" = "$expected" ]; then
         echo "  PASS  $name"
         PASS=$((PASS + 1))
