@@ -150,6 +150,15 @@ $(CANDO_BIN): $(CANDO_SRCS)
 build-cando: $(CANDO_BIN)
 
 test: all
+ifeq ($(OS),Windows_NT)
+	./$(TEST_CORE_BIN)
+	./$(TEST_OBJECT_BIN)
+	./$(TEST_THREAD_BIN)
+	./$(TEST_LEXER_BIN)
+	./$(TEST_PARSER_BIN)
+	./$(TEST_VM_BIN)
+	sh tests/integration/run_tests.sh ./$(CANDO_BIN)
+else
 	./$(TEST_CORE_BIN)
 	./$(TEST_OBJECT_BIN)
 	./$(TEST_THREAD_BIN)
@@ -157,6 +166,7 @@ test: all
 	./$(TEST_PARSER_BIN)
 	./$(TEST_VM_BIN)
 	bash tests/integration/run_tests.sh ./$(CANDO_BIN)
+endif
 
 test_integration: $(CANDO_BIN)
 	bash tests/integration/run_tests.sh ./$(CANDO_BIN)

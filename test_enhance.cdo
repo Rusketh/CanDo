@@ -1,8 +1,0 @@
-print("math.log10(100): ", math.log10(100));
-print("math.exp(1): ", math.exp(1));
-
-VAR s = "hello world";
-print("startsWith('hello'): ", s:startsWith("hello"));
-print("endsWith('world'): ", s:endsWith("world"));
-print("replace('world', 'cando'): " + s:replace("world", "cando"));
-print("format: " + string.format("Hello %s, age %d", "Alice", 30));

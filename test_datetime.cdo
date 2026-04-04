@@ -1,9 +1,0 @@
-VAR now = datetime.now();
-print("datetime.now(): ", now);
-print("Formatted now: " + datetime.format(now, "%Y-%m-%d %H:%M:%S"));
-
-VAR ts = datetime.parse("2023-10-27 10:00:00", "%Y-%m-%d %H:%M:%S");
-print("Parsed ts: ", ts);
-if (ts != NULL) {
-    print("Re-formatted ts: " + datetime.format(ts, "%A, %B %d, %Y"));
-}
