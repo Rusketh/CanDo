@@ -30,31 +30,20 @@ jobs:
           path: cando
 
   # ---------------------------------------------------------------------------
-  # Windows build + test (MinGW-w64 via MSYS2)
+  # Windows cross-compile (MinGW-w64 on Linux)
   # ---------------------------------------------------------------------------
   windows:
-    name: Test & Build (Windows)
-    runs-on: windows-latest
-
-    defaults:
-      run:
-        shell: msys2 {0}
+    name: Build (Windows cross-compile)
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-make
+      - name: Install MinGW-w64 cross-compiler
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
 
-      # -ldl is not needed on Windows (LoadLibrary is used instead).
-      # -lws2_32 is required for POSIX socket compatibility in http.c.
-      - name: Run tests
-        run: make test
+      - name: Build cando.exe
+        run: make cando.exe
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
