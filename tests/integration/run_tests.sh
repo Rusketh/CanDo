@@ -59,7 +59,7 @@ run_test "functions" "$SCRIPTS/functions.cdo" \
     "$(printf 'hello from function\n7\n30\n0\n1\n8\n3\n7\n12\n5\n8')"
 
 run_test "strings" "$SCRIPTS/strings.cdo" \
-    "$(printf 'hello world\n5\nstring\nnumber\nbool\nnull\n42\n3.1400000000000001\ntrue\ntrue\nfalse\ntrue\n5\nworld\nhello world\nHELLO WORLD\nhi\nabc\ndef\nababab\n6\na\nb\nc\ncount: 99')"
+    "$(printf 'hello world\n5\nstring\nnumber\nbool\nnull\n42\n3.14\ntrue\ntrue\nfalse\ntrue\n5\nworld\nhello world\nHELLO WORLD\nhi\nabc\ndef\nababab\n6\na\nb\nc\ncount: 99')"
 
 run_test "arrays" "$SCRIPTS/arrays.cdo" \
     "$(printf '3\n10\n20\n30\n99\n15\n1\n2\n3\n4\n0\n1\n4\n9\n15')"

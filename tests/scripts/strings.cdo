@@ -33,10 +33,10 @@ print(string.right("abcdef", 3));
 print(string.repeat("ab", 3));
 
 /* find */
-print(string.find("hello world", "world"));
+print(string.find("hello world", "world", TRUE));
 
 /* split */
-VAR parts = string.split("a,b,c", ",");
+VAR parts = string.split("a,b,c", ",", TRUE);
 print(parts[0]);
 print(parts[1]);
 print(parts[2]);

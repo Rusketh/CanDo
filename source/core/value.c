@@ -103,7 +103,7 @@ char *cando_value_tostring(CandoValue v) {
             if (n == (i64)n)
                 snprintf(buf, sizeof(buf), "%" PRId64, (i64)n);
             else
-                snprintf(buf, sizeof(buf), "%.17g", n);
+                snprintf(buf, sizeof(buf), "%.15g", n);
             return strdup(buf);
         }
         case TYPE_STRING:
