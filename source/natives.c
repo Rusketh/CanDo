@@ -6,6 +6,7 @@
 
 #include "natives.h"
 #include "vm/bridge.h"
+#include "object/array.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -33,9 +34,28 @@ const char *cando_native_names[CANDO_NATIVE_MAX] = {
  * ===================================================================== */
 int cando_native_print(CandoVM *vm, int argc, CandoValue *args)
 {
-    (void)vm;
+    bool first = true;
     for (int i = 0; i < argc; i++) {
-        if (i > 0) putchar(' ');
+        /* Arrays (including range results) are expanded element-by-element. */
+        if (cando_is_object(args[i])) {
+            CdoObject *obj = cando_bridge_resolve(vm, args[i].as.handle);
+            if (obj && obj->kind == OBJ_ARRAY) {
+                u32 len = cdo_array_len(obj);
+                for (u32 j = 0; j < len; j++) {
+                    if (!first) putchar(' ');
+                    first = false;
+                    CdoValue cv = cdo_null();
+                    cdo_array_rawget_idx(obj, j, &cv);
+                    CandoValue v = cando_bridge_to_cando(vm, cv);
+                    char *s = cando_value_tostring(v);
+                    fputs(s, stdout);
+                    free(s);
+                }
+                continue;
+            }
+        }
+        if (!first) putchar(' ');
+        first = false;
         char *s = cando_value_tostring(args[i]);
         fputs(s, stdout);
         free(s);

@@ -58,7 +58,7 @@ static void        parse_precedence(CandoParser *p, Precedence min_prec);
 static void        parse_statement(CandoParser *p);
 static void        parse_block(CandoParser *p);
 static void        parse_function_expr(CandoParser *p, bool can_assign);
-static const ParseRule *get_rule(TokenType t);
+static const ParseRule *get_rule(CandoTokenType t);
 
 /* ---- chunk shortcut --------------------------------------------------- */
 static CandoChunk *cur(CandoParser *p) { return p->chunk; }
@@ -95,19 +95,19 @@ static void advance(CandoParser *p)
     }
 }
 
-static bool check(CandoParser *p, TokenType t)
+static bool check(CandoParser *p, CandoTokenType t)
 {
     return p->current.type == t;
 }
 
-static bool match(CandoParser *p, TokenType t)
+static bool match(CandoParser *p, CandoTokenType t)
 {
     if (!check(p, t)) return false;
     advance(p);
     return true;
 }
 
-static void consume(CandoParser *p, TokenType t, const char *msg)
+static void consume(CandoParser *p, CandoTokenType t, const char *msg)
 {
     if (check(p, t)) { advance(p); return; }
     error_current(p, msg);
@@ -288,7 +288,7 @@ static void parse_grouping(CandoParser *p, bool can_assign)
 static void parse_unary(CandoParser *p, bool can_assign)
 {
     (void)can_assign;
-    TokenType op = p->previous.type;
+    CandoTokenType op = p->previous.type;
     parse_precedence(p, PREC_UNARY);
     switch (op) {
     case TOK_MINUS: emit_op(p, OP_NEG); break;
@@ -461,7 +461,7 @@ static void parse_unpack(CandoParser *p, bool can_assign)
 static void parse_binary(CandoParser *p, bool can_assign)
 {
     (void)can_assign;
-    TokenType op = p->previous.type;
+    CandoTokenType op = p->previous.type;
     const ParseRule *rule = get_rule(op);
     Precedence next = (op == TOK_CARET)
                       ? rule->precedence
@@ -541,7 +541,7 @@ static void parse_binary(CandoParser *p, bool can_assign)
         CandoOpcode plain_op = (op == TOK_GT) ? OP_GT : OP_GEQ;
         CandoOpcode stack_op = (op == TOK_GT) ? OP_GT_STACK : OP_GEQ_STACK;
         CandoOpcode spread_op = (op == TOK_GT) ? OP_GT_SPREAD : OP_GEQ_SPREAD;
-        TokenType right_tok = p->current.type;
+        CandoTokenType right_tok = p->current.type;
         if (right_tok == TOK_LT || right_tok == TOK_LEQ) {
             /* Range check — truncate RHS call to first value if needed. */
             if (_was_call && !_was_unpack) emit_op(p, OP_TRUNCATE_RET);
@@ -1081,7 +1081,7 @@ static const ParseRule RULES[TOK_COUNT] = {
     [TOK_FILTER_OP]      = { NULL,                 parse_filter_op,  PREC_PIPE_PREC  },
 };
 
-static const ParseRule *get_rule(TokenType t)
+static const ParseRule *get_rule(CandoTokenType t)
 {
     if ((u32)t >= TOK_COUNT) return &RULES[TOK_EOF];
     return &RULES[t];
@@ -1292,6 +1292,15 @@ static void parse_for(CandoParser *p)
 
     parse_expression(p);   /* iterable — now on stack */
     consume(p, TOK_LBRACE, "expected '{' after FOR iterable");
+
+    /* If the iterable is a range (->/<-), it produces an array of values.
+     * FOR IN over a range should iterate those values, not indices, so
+     * override to OF mode (values) regardless of IN/OF keyword. */
+    if (keys_mode && cur(p)->code_len > 0) {
+        u8 last_op = cur(p)->code[cur(p)->code_len - 1];
+        if (last_op == (u8)OP_RANGE_ASC || last_op == (u8)OP_RANGE_DESC)
+            keys_mode = false;
+    }
 
     /* OP_FOR_INIT mode: 1 = keys (IN), 0 = values (OF/OVER) */
     emit_op_a(p, OP_FOR_INIT, keys_mode ? 1 : 0);

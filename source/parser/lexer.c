@@ -25,8 +25,8 @@
  * token.c functions -- token type names and keyword table
  * ======================================================================= */
 
-/* Maps every TokenType to a short printable name. */
-const char *cando_token_type_name(TokenType t)
+/* Maps every CandoTokenType to a short printable name. */
+const char *cando_token_type_name(CandoTokenType t)
 {
     switch (t) {
     case TOK_NUMBER:         return "NUMBER";
@@ -122,14 +122,14 @@ const char *cando_token_type_name(TokenType t)
 }
 
 /* -------------------------------------------------------------------------
- * Keyword table -- maps identifier text to its keyword TokenType.
+ * Keyword table -- maps identifier text to its keyword CandoTokenType.
  * All entries are kept in a simple linear list; the number of keywords is
  * small enough that a hash table would be premature.
  * ------------------------------------------------------------------------ */
 typedef struct {
     const char *text;
     u32         len;
-    TokenType   type;
+    CandoTokenType   type;
 } KeywordEntry;
 
 static const KeywordEntry KEYWORDS[] = {
@@ -163,7 +163,7 @@ static const KeywordEntry KEYWORDS[] = {
     { "pipe",     4,  TOK_PIPE_KW  },  /* lower-case: implicit loop var */
 };
 
-TokenType cando_keyword_type(const char *ident, u32 len)
+CandoTokenType cando_keyword_type(const char *ident, u32 len)
 {
     /* Only pure all-uppercase or pure all-lowercase identifiers can be
      * keywords.  Mixed-case (e.g. "If", "eLsE") are plain identifiers.  */
@@ -235,7 +235,7 @@ static bool lex_match(CandoLexer *lex, char expected)
 
 /* Build a token at the given start position. */
 static CandoToken make_token(const CandoLexer *lex,
-                              TokenType type,
+                              CandoTokenType type,
                               usize start_pos,
                               u32 start_line,
                               usize start_line_start)
@@ -404,7 +404,7 @@ static CandoToken lex_ident(CandoLexer *lex,
     }
 
     u32 len = (u32)(lex->pos - start_pos);
-    TokenType kw = cando_keyword_type(lex->source + start_pos, len);
+    CandoTokenType kw = cando_keyword_type(lex->source + start_pos, len);
     return make_token(lex, kw, start_pos, start_line, start_line_start);
 }
 

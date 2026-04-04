@@ -117,7 +117,7 @@ typedef enum {
     TOK_ERROR,           /* unrecognised input; message in CandoLexer       */
 
     TOK_COUNT            /* number of distinct token types (keep last)      */
-} TokenType;
+} CandoTokenType;
 
 /* -------------------------------------------------------------------------
  * CandoToken -- a single lexed token.
@@ -126,7 +126,7 @@ typedef enum {
  * that buffer lives.  The token does NOT copy the lexeme.
  * ------------------------------------------------------------------------ */
 typedef struct {
-    TokenType   type;
+    CandoTokenType   type;
     const char *start;   /* pointer to the first byte of the lexeme        */
     u32         length;  /* byte count of the lexeme                       */
     u32         line;    /* 1-based line number of the first character      */
@@ -137,7 +137,7 @@ typedef struct {
  * cando_token_type_name -- return a static ASCII name for a TokenType.
  * Useful for diagnostics and test assertions.
  * ------------------------------------------------------------------------ */
-const char *cando_token_type_name(TokenType t);
+const char *cando_token_type_name(CandoTokenType t);
 
 /* -------------------------------------------------------------------------
  * cando_keyword_type -- if the given identifier lexeme (length `len`) is a
@@ -146,6 +146,6 @@ const char *cando_token_type_name(TokenType t);
  * The comparison is case-sensitive: Cando keywords are all upper-case
  * ("IF", "WHILE", ...) except for "pipe" which is lower-case.
  * ------------------------------------------------------------------------ */
-TokenType cando_keyword_type(const char *ident, u32 len);
+CandoTokenType cando_keyword_type(const char *ident, u32 len);
 
 #endif /* CANDO_TOKEN_H */

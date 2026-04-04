@@ -2486,19 +2486,20 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "range requires numbers");
                 goto handle_error;
             }
-            /* Push values ascending from ceil(a) to floor(b) inclusive,
-             * then push the count so FOR_INIT knows how many values.    */
-            i64 from = (i64)a.as.number;
-            i64 to   = (i64)b.as.number;
-            i64 count = (to >= from) ? (to - from + 1) : 0;
+            i64 from  = (i64)a.as.number;
+            i64 to    = (i64)b.as.number;
+            /* Build an array so the range is a single value on the stack.
+             * This lets it be used as a for-loop iterable, a function
+             * argument, an assignment target, etc. without corrupting the
+             * call frame. */
+            SYNC_IP();
+            CandoValue arr_val = cando_bridge_new_array(vm);
+            CdoObject *arr     = cando_bridge_resolve(vm, arr_val.as.handle);
             for (i64 v = from; v <= to; v++) {
-                if (vm->stack_top - vm->stack >= CANDO_STACK_MAX - 2) {
-                    vm_runtime_error(vm, "range too large for stack");
-                    goto handle_error;
-                }
-                PUSH(cando_number((f64)v));
+                CdoValue cv = cdo_number((f64)v);
+                cdo_array_push(arr, cv);
             }
-            PUSH(cando_number((f64)count));
+            PUSH(arr_val);
             DISPATCH();
         }
         OP_CASE(OP_RANGE_DESC): {
@@ -2507,23 +2508,21 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "range requires numbers");
                 goto handle_error;
             }
-            i64 from = (i64)a.as.number;
-            i64 to   = (i64)b.as.number;
-            i64 count = (from >= to) ? (from - to + 1) : 0;
+            i64 from  = (i64)a.as.number;
+            i64 to    = (i64)b.as.number;
+            SYNC_IP();
+            CandoValue arr_val = cando_bridge_new_array(vm);
+            CdoObject *arr     = cando_bridge_resolve(vm, arr_val.as.handle);
             for (i64 v = from; v >= to; v--) {
-                if (vm->stack_top - vm->stack >= CANDO_STACK_MAX - 2) {
-                    vm_runtime_error(vm, "range too large for stack");
-                    goto handle_error;
-                }
-                PUSH(cando_number((f64)v));
+                CdoValue cv = cdo_number((f64)v);
+                cdo_array_push(arr, cv);
             }
-            PUSH(cando_number((f64)count));
+            PUSH(arr_val);
             DISPATCH();
         }
         OP_CASE(OP_FOR_INIT): {
             /* mode: 1 = keys (FOR IN), 0 = values (FOR OF/OVER)
              * Stack before: [..., iterable]
-             * Range (iterable is number): values already on stack; push [count, 0].
              * Array IN:  push indices 0..len-1, then [count, 0].
              * Array OF:  push element values,   then [count, 0].
              * Object IN: push field name strings (FIFO order), then [count, 0].
@@ -2533,12 +2532,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             u16 keys_mode = READ_U16();
             CandoValue iterable = POP();
 
-            if (cando_is_number(iterable)) {
-                /* Range: count value; range values already on stack.      */
-                i64 count = (i64)iterable.as.number;
-                PUSH(cando_number((f64)count));
-                PUSH(cando_number(0.0));
-            } else if (cando_is_object(iterable)) {
+            if (cando_is_object(iterable)) {
                 CdoObject *obj = cando_bridge_resolve(vm, (HandleIndex)iterable.as.handle);
                 if (obj->kind == OBJ_ARRAY) {
                     u32 len = cdo_array_len(obj);

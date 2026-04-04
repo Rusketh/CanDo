@@ -32,12 +32,27 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
-#include <unistd.h>
 
-#if !defined(_WIN32) && !defined(_WIN64)
-#  include <dlfcn.h>
-#else
+#if defined(_WIN32) || defined(_WIN64)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef _WIN32_WINNT
+#    define _WIN32_WINNT 0x0600
+#  endif
 #  include <windows.h>
+#  include <direct.h>   /* _getcwd */
+/* Provide realpath via _fullpath */
+static char *realpath(const char *path, char *out) {
+    return _fullpath(out, path, PATH_MAX);
+}
+static char *getcwd_compat(char *buf, size_t sz) {
+    return _getcwd(buf, (int)sz);
+}
+#  define getcwd getcwd_compat
+#else
+#  include <unistd.h>
+#  include <dlfcn.h>
 #endif
 
 /* =========================================================================
@@ -61,7 +76,13 @@ static bool resolve_path(CandoVM *vm, const char *raw_path,
 {
     char joined[PATH_MAX];
 
-    if (raw_path[0] == '/') {
+#if defined(_WIN32) || defined(_WIN64)
+    bool is_abs = (raw_path[0] == '/' || raw_path[0] == '\\'
+                   || (raw_path[0] && raw_path[1] == ':'));
+#else
+    bool is_abs = (raw_path[0] == '/');
+#endif
+    if (is_abs) {
         /* Already absolute. */
         if (strlen(raw_path) >= PATH_MAX) return false;
         if (!realpath(raw_path, out)) return false;
@@ -72,10 +93,14 @@ static bool resolve_path(CandoVM *vm, const char *raw_path,
     const char *caller_file = NULL;
     for (int i = (int)vm->frame_count - 1; i >= 0; i--) {
         const char *name = vm->frames[i].closure->chunk->name;
-        if (name && name[0] == '/') {
-            caller_file = name;
-            break;
-        }
+        if (!name) continue;
+#if defined(_WIN32) || defined(_WIN64)
+        bool frame_abs = (name[0] == '/' || name[0] == '\\'
+                          || (name[0] && name[1] == ':'));
+#else
+        bool frame_abs = (name[0] == '/');
+#endif
+        if (frame_abs) { caller_file = name; break; }
     }
 
     char base_dir[PATH_MAX];

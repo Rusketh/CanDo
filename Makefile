@@ -58,6 +58,8 @@ LEXER_SRCS = $(CORE_SRCS) source/parser/lexer.c
 PARSER_SRCS = $(LEXER_SRCS) source/parser/parser.c \
               source/vm/opcodes.c source/vm/chunk.c
 
+CANDO_WIN_EXTRA = source/compat/win_regex.c
+
 CANDO_SRCS = \
     source/core/common.c          \
     source/core/value.c           \
@@ -177,5 +179,15 @@ test_vm: $(TEST_VM_BIN)
 test_thread: $(TEST_THREAD_BIN)
 	./$(TEST_THREAD_BIN)
 
+# Windows cross-compilation (requires mingw-w64)
+MINGW_CC    = x86_64-w64-mingw32-gcc
+CFLAGS_WIN  = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0600 \
+              -iquote source/core -iquote source/parser -iquote source/vm \
+              -iquote source/object -iquote source -iquote source/compat
+LDFLAGS_WIN = -lm -lws2_32
+
+cando.exe: $(CANDO_SRCS) $(CANDO_WIN_EXTRA)
+	$(MINGW_CC) $(CFLAGS_WIN) $^ -o $@ $(LDFLAGS_WIN)
+
 clean:
-	rm -f $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN) $(CANDO_BIN)
+	rm -f $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN) $(CANDO_BIN) cando.exe

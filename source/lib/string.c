@@ -21,7 +21,11 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <regex.h>
+#if defined(_WIN32) || defined(_WIN64)
+#  include "../compat/win_regex.h"
+#else
+#  include <regex.h>
+#endif
 #include <stdarg.h>
 
 /* =========================================================================

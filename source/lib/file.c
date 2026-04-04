@@ -17,9 +17,46 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
-#include <dirent.h>
 #include <errno.h>
+
+#if defined(_WIN32) || defined(_WIN64)
+#  include <io.h>        /* _access */
+#  include <direct.h>   /* _mkdir */
+#  include <dirent.h>   /* MinGW-w64 provides this */
+#  define access(p,m)  _access((p),(m))
+#  define F_OK 0
+/* getline is not available on Windows; provide a minimal replacement */
+static ssize_t win_getline(char **lineptr, size_t *n, FILE *stream)
+{
+    if (!lineptr || !n || !stream) return -1;
+    if (!*lineptr || *n == 0) {
+        *n = 128;
+        *lineptr = (char *)malloc(*n);
+        if (!*lineptr) return -1;
+    }
+    int c;
+    size_t len = 0;
+    while ((c = fgetc(stream)) != EOF) {
+        if (len + 2 > *n) {
+            size_t new_n = *n * 2;
+            char *tmp = (char *)realloc(*lineptr, new_n);
+            if (!tmp) return -1;
+            *lineptr = tmp;
+            *n = new_n;
+        }
+        (*lineptr)[len++] = (char)c;
+        if (c == '\n') break;
+    }
+    if (len == 0 && c == EOF) return -1;
+    (*lineptr)[len] = '\0';
+    return (ssize_t)len;
+}
+#  define getline win_getline
+/* ssize_t is already provided by MinGW via corecrt.h */
+#else
+#  include <unistd.h>
+#  include <dirent.h>
+#endif
 
 /* =========================================================================
  * Internal helpers
@@ -247,8 +284,11 @@ static int file_mkdir(CandoVM *vm, int argc, CandoValue *args)
         cando_vm_error(vm, "file.mkdir: path must be a string");
         return -1;
     }
-    /* 0755 permissions */
+#if defined(_WIN32) || defined(_WIN64)
+    bool ok = (_mkdir(libutil_arg_cstr(args[0])) == 0 || errno == EEXIST);
+#else
     bool ok = (mkdir(libutil_arg_cstr(args[0]), 0755) == 0 || errno == EEXIST);
+#endif
     cando_vm_push(vm, cando_bool(ok));
     return 1;
 }
