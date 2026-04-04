@@ -1,0 +1,28 @@
+/* eval.cdo -- Integration tests for the eval() built-in */
+
+/* Basic eval: returns result of last expression */
+print(eval("1 + 2 + 3"));
+
+/* Eval with name option: chunk name is cosmetic; result is unchanged */
+print(eval("10 * 5", { name: "named_script" }));
+
+/* Sandbox: native functions (print, etc.) remain accessible */
+eval("print('from_sandbox')", { sandbox: true });
+
+/* Sandbox: outer globals are isolated -- assigning the same name inside
+   the sandbox does not change the outer variable */
+VAR x = 10;
+eval("VAR x = 99;", { sandbox: true });
+print(x);
+
+/* Sandbox: VAR declarations inside do not leak to outer scope */
+eval("VAR box_var = 999;", { sandbox: true });
+TRY {
+    print(box_var);
+    print("leaked");
+} CATCH (e) {
+    print("contained");
+}
+
+/* name and sandbox options together */
+print(eval("7 * 6", { name: "combo", sandbox: true }));

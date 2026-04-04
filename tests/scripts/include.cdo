@@ -1,0 +1,26 @@
+/* include.cdo -- integration tests for the include() built-in */
+
+/* --- Relative path: module returns a function --- */
+VAR greet = include("modules/greeting.cdo");
+print(greet("World"));      /* Hello, World! */
+print(greet("Cando"));      /* Hello, Cando! */
+
+/* --- Relative path: module returns an object --- */
+VAR c = include("modules/constants.cdo");
+print(c.pi > 3.14);         /* true  */
+print(c.version);            /* 1     */
+
+/* --- Caching: same path → same object, state is shared --- */
+VAR counter  = include("modules/counter.cdo");
+counter.inc();
+counter.inc();
+counter.inc();
+print(counter.get());        /* 3     */
+
+VAR counter2 = include("modules/counter.cdo");
+counter2.inc();              /* shares the same closure as counter */
+print(counter.get());        /* 4  (same underlying object) */
+
+/* --- Absolute path works the same as relative --- */
+VAR greet2 = include("modules/greeting.cdo");
+print(greet2("Cache"));      /* Hello, Cache! (cached; same fn) */

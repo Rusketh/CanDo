@@ -1,0 +1,46 @@
+/* strings.cdo -- string operations and string library */
+
+/* Concatenation */
+print("hello" + " " + "world");
+
+/* Length operator */
+print(#"hello");
+
+/* type() and toString() */
+print(type("hi"));
+print(type(42));
+print(type(TRUE));
+print(type(NULL));
+print(toString(42));
+print(toString(3.14));
+print(toString(TRUE));
+
+/* String comparison */
+print("abc" == "abc");
+print("abc" == "def");
+print("abc" != "def");
+
+/* string library: length, sub, case */
+print(string.length("hello"));
+print(string.sub("hello world", 6, 11));
+print(string.toLower("HELLO WORLD"));
+print(string.toUpper("hello world"));
+
+/* trim, left, right, repeat */
+print(string.trim("  hi  "));
+print(string.left("abcdef", 3));
+print(string.right("abcdef", 3));
+print(string.repeat("ab", 3));
+
+/* find */
+print(string.find("hello world", "world"));
+
+/* split */
+VAR parts = string.split("a,b,c", ",");
+print(parts[0]);
+print(parts[1]);
+print(parts[2]);
+
+/* Concatenation with toString */
+VAR msg = "count: " + toString(99);
+print(msg);

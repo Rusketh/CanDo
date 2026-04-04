@@ -1,0 +1,47 @@
+/* arrays.cdo -- array literals, indexing, length, FOR IN/OF */
+
+/* Literal and indexing */
+VAR a = [10, 20, 30];
+print(#a);
+print(a[0]);
+print(a[1]);
+print(a[2]);
+
+/* Assignment to index */
+a[1] = 99;
+print(a[1]);
+
+/* FOR IN over array */
+VAR arr = [4, 5, 6];
+VAR sum = 0;
+FOR v OF arr {
+    sum = sum + v;
+}
+print(sum);
+
+/* Nested arrays */
+VAR matrix = [[1, 2], [3, 4]];
+print(matrix[0][0]);
+print(matrix[0][1]);
+print(matrix[1][0]);
+print(matrix[1][1]);
+
+/* Build array in loop */
+VAR result = [];
+VAR i = 0;
+WHILE i < 4 {
+    result[i] = i * i;
+    i = i + 1;
+}
+print(result[0]);
+print(result[1]);
+print(result[2]);
+print(result[3]);
+
+/* Passing array to function */
+FUNCTION array_sum(arr) {
+    VAR total = 0;
+    FOR v OF arr { total = total + v; }
+    RETURN total;
+}
+print(array_sum([1, 2, 3, 4, 5]));

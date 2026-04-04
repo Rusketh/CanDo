@@ -1,0 +1,8 @@
+# Custom exclusions
+.claude/
+project.txt
+todo.txt
+
+# Common OS junk
+.DS_Store
+Thumbs.db

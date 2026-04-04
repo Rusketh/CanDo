@@ -1,0 +1,5 @@
+/* greeting.cdo -- module that returns a function */
+
+RETURN FUNCTION(name) {
+    RETURN "Hello, " + name + "!";
+};

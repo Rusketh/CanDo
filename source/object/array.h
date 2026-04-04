@@ -1,0 +1,39 @@
+/*
+ * array.h -- Array specialisation for CdoObject.
+ *
+ * Arrays are CdoObjects with kind == OBJ_ARRAY and a dense CdoValue[]
+ * for numeric-indexed storage.  They also carry a hash table for
+ * non-numeric / meta fields.
+ *
+ * Must compile with gcc -std=c11.
+ */
+
+#ifndef CDO_ARRAY_H
+#define CDO_ARRAY_H
+
+#include "object.h"
+
+/* -----------------------------------------------------------------------
+ * Array creation
+ * --------------------------------------------------------------------- */
+
+/* Allocate a new empty array object. */
+CdoObject *cdo_array_new(void);
+
+/* -----------------------------------------------------------------------
+ * Array operations (valid only on OBJ_ARRAY objects)
+ * --------------------------------------------------------------------- */
+
+/* Append val to the end of the dense storage. Returns false if readonly. */
+bool cdo_array_push(CdoObject *arr, CdoValue val);
+
+/* Read item at idx from dense storage. Returns false if out of bounds. */
+bool cdo_array_rawget_idx(const CdoObject *arr, u32 idx, CdoValue *out);
+
+/* Write item at idx (grows and zero-fills if needed). Returns false if readonly. */
+bool cdo_array_rawset_idx(CdoObject *arr, u32 idx, CdoValue val);
+
+/* Return the number of items in the dense storage. */
+u32 cdo_array_len(const CdoObject *arr);
+
+#endif /* CDO_ARRAY_H */

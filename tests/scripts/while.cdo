@@ -1,0 +1,35 @@
+/* while.cdo -- WHILE loops */
+
+/* Basic count up */
+VAR i = 0;
+WHILE i < 5 {
+    print(i);
+    i = i + 1;
+}
+
+/* Count down */
+VAR j = 3;
+WHILE j > 0 {
+    print(j);
+    j = j - 1;
+}
+
+/* Accumulate */
+VAR sum = 0;
+VAR k = 1;
+WHILE k <= 5 {
+    sum = sum + k;
+    k = k + 1;
+}
+print(sum);
+
+/* Nested WHILE */
+VAR row = 1;
+WHILE row <= 2 {
+    VAR col = 1;
+    WHILE col <= 2 {
+        print(row * 10 + col);
+        col = col + 1;
+    }
+    row = row + 1;
+}

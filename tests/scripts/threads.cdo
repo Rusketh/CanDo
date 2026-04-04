@@ -1,0 +1,160 @@
+/* threads.cdo -- Threading runtime tests.
+ *
+ * Tests:
+ *   1.  spawn a thread and await its return value
+ *   2.  multi-return from a thread
+ *   3.  thread.done() polling
+ *   4.  thread.sleep() basic delay
+ *   5.  thread.id() returns a non-zero number
+ *   6.  thread.join() blocks and returns results
+ *   7.  thread.cancel() marks a slow thread as cancelled
+ *   8.  await on a thread that returns no values
+ *   9.  `thread` wrapping an expression (not just a block)
+ *  10.  multiple concurrent threads
+ *  11.  thread.state() — pending/running/done
+ *  12.  thread.state() — error state
+ *  13.  thread.error() — retrieves error value
+ *  14.  thread.current() — returns null on main thread
+ *  15.  thread.current() — returns non-null inside thread
+ *  16.  thread.then() fires callback with return values
+ *  17.  thread.then() fires immediately when already done
+ *  18.  thread.catch() fires callback on error
+ *  19.  thread.catch() fires immediately when already errored
+ *  20.  thread.then() does NOT fire on error
+ */
+
+/* ----- 1. Spawn and await a simple return value -------------------------- */
+var t1 = thread { return 42; };
+var r1 = await t1;
+print(r1);   /* expected: 42 */
+
+/* ----- 2. Multi-return from a thread ------------------------------------- */
+var t2 = thread { return 10, 20; };
+var a, b = await t2;
+print(a);    /* expected: 10 */
+print(b);    /* expected: 20 */
+
+/* ----- 3. thread.done() polls completion --------------------------------- */
+var t3 = thread { return true; };
+await t3;
+print(thread.done(t3));   /* expected: true */
+
+/* ----- 4. thread.sleep() -- just verify it doesn't crash ----------------- */
+thread.sleep(1);
+print("sleep_ok");   /* expected: sleep_ok */
+
+/* ----- 5. thread.id() returns a number > 0 ------------------------------- */
+var my_id = thread.id();
+if my_id > 0 {
+    print("id_ok");    /* expected: id_ok */
+} else {
+    print("id_fail");
+}
+
+/* ----- 6. thread.join() mirrors await ------------------------------------ */
+var t6 = thread { return 99; };
+var r6 = thread.join(t6);
+print(r6);   /* expected: 99 */
+
+/* ----- 7. thread.cancel() on a pending/running thread -------------------- */
+var t7 = thread { thread.sleep(60000); return 1; };
+var cancelled = thread.cancel(t7);
+print(cancelled);   /* expected: true */
+
+/* ----- 8. Thread returns no values (implicit null) ----------------------- */
+var t8 = thread { var x = 1 + 1; };
+var r8 = await t8;
+print(r8);   /* expected: null */
+
+/* ----- 9. Thread wrapping a plain expression ----------------------------- */
+function add(x, y) { return x + y; }
+var t9 = thread add(3, 4);
+var r9 = await t9;
+print(r9);   /* expected: 7 */
+
+/* ----- 10. Multiple concurrent threads ----------------------------------- */
+var ta = thread { return 1; };
+var tb = thread { return 2; };
+var tc = thread { return 3; };
+var ra = await ta;
+var rb = await tb;
+var rc = await tc;
+print(ra);   /* expected: 1 */
+print(rb);   /* expected: 2 */
+print(rc);   /* expected: 3 */
+
+/* ----- 11. thread.state() reflects lifecycle ----------------------------- */
+var t11 = thread { return 55; };
+await t11;
+print(thread.state(t11));   /* expected: done */
+
+/* ----- 12. thread.state() for an errored thread -------------------------- */
+var t12 = thread { throw "boom"; };
+try { await t12; } catch(e) {}
+print(thread.state(t12));   /* expected: error */
+
+/* ----- 13. thread.error() retrieves the error value ---------------------- */
+var t13 = thread { throw "bad"; };
+try { await t13; } catch(e) {}
+print(thread.error(t13));   /* expected: bad */
+
+/* ----- 14. thread.current() returns null on the main thread -------------- */
+var main_cur = thread.current();
+print(main_cur == null);   /* expected: true */
+
+/* ----- 15. thread.current() returns a valid handle inside a thread ------- */
+var t15_result = false;
+var t15 = thread {
+    var me = thread.current();
+    return me != null;
+};
+t15_result = await t15;
+print(t15_result);   /* expected: true */
+
+/* ----- 16. thread.then() fires callback with return values --------------- */
+var then16_got = 0;
+var t16 = thread { return 77; };
+thread.then(t16, function(r) {
+    then16_got = r;
+});
+await t16;
+thread.sleep(5);   /* give callback a moment if async */
+print(then16_got);   /* expected: 77 */
+
+/* ----- 17. thread.then() fires immediately when thread already done ------- */
+var then17_got = 0;
+var t17 = thread { return 88; };
+await t17;
+thread.then(t17, function(r) {
+    then17_got = r;
+});
+print(then17_got);   /* expected: 88 (synchronous) */
+
+/* ----- 18. thread.catch() fires callback on error ------------------------ */
+var catch18_got = "";
+var t18 = thread { throw "caught_err"; };
+thread.catch(t18, function(e) {
+    catch18_got = e;
+});
+try { await t18; } catch(e) {}
+thread.sleep(5);
+print(catch18_got);   /* expected: caught_err */
+
+/* ----- 19. thread.catch() fires immediately when already errored --------- */
+var catch19_got = "";
+var t19 = thread { throw "already"; };
+try { await t19; } catch(e) {}
+thread.catch(t19, function(e) {
+    catch19_got = e;
+});
+print(catch19_got);   /* expected: already (synchronous) */
+
+/* ----- 20. thread.then() does NOT fire when thread errors ---------------- */
+var then20_fired = false;
+var t20 = thread { throw "nope"; };
+thread.then(t20, function(r) {
+    then20_fired = true;
+});
+try { await t20; } catch(e) {}
+thread.sleep(5);
+print(then20_fired);   /* expected: false */

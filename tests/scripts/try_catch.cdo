@@ -1,0 +1,75 @@
+/* try_catch.cdo -- TRY / CATCH / FINALY / THROW */
+
+/* Single-arg throw/catch */
+TRY {
+    THROW "oops";
+} CATCH (e) {
+    print("caught: " + e);
+}
+
+/* Multi-arg throw/catch */
+TRY {
+    THROW 404, "not found";
+} CATCH (code, msg) {
+    print(code);
+    print(msg);
+}
+
+/* Fewer thrown than caught (extras are null) */
+TRY {
+    THROW "only one";
+} CATCH (a, b) {
+    print(a);
+    print(b == NULL);
+}
+
+/* More thrown than caught (extras dropped) */
+TRY {
+    THROW 1, 2, 3;
+} CATCH (x) {
+    print(x);
+}
+
+/* FINALY always runs */
+TRY {
+    THROW "boom";
+} CATCH (e) {
+    print("catch: " + e);
+} FINALY {
+    print("finally");
+}
+
+/* FINALY without throw */
+TRY {
+    print("try_body");
+} CATCH (e) {
+    print("FAIL");
+} FINALY {
+    print("finaly_no_throw");
+}
+
+/* Runtime errors are catchable */
+TRY {
+    VAR bad = 1 / 0;
+} CATCH (msg) {
+    print("div_by_zero_caught");
+}
+
+/* Nested try: rethrow */
+TRY {
+    TRY {
+        THROW "inner";
+    } CATCH (e) {
+        THROW "rethrown: " + e;
+    }
+} CATCH (e) {
+    print(e);
+}
+
+/* Catch with multiple locals works */
+TRY {
+    THROW 10, 20;
+} CATCH (a, b) {
+    VAR sum = a + b;
+    print(sum);
+}

@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux build + test
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Test & Build (Linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make
+
+      - name: Run tests
+        run: make test
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: cando-linux-x86_64
+          path: cando
+
+  # ---------------------------------------------------------------------------
+  # Windows build + test (MinGW-w64 via MSYS2)
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Test & Build (Windows)
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          pacboy: gcc:p make:p
+
+      # -ldl is not needed on Windows (LoadLibrary is used instead).
+      # -lws2_32 is required for POSIX socket compatibility in http.c.
+      - name: Run tests
+        run: make test LDFLAGS="-lm -lws2_32"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: cando-windows-x86_64
+          path: cando.exe

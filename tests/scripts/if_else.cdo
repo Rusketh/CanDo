@@ -1,0 +1,38 @@
+/* if_else.cdo -- IF, ELSE, ELSE IF chains */
+
+/* Simple IF true */
+IF 1 < 2 { print("if_true"); }
+
+/* IF false with ELSE */
+IF 2 < 1 { print("FAIL"); } ELSE { print("else_branch"); }
+
+/* ELSE IF chain */
+FUNCTION grade(n) {
+    IF n >= 90 { RETURN "A"; }
+    ELSE IF n >= 80 { RETURN "B"; }
+    ELSE IF n >= 70 { RETURN "C"; }
+    ELSE { RETURN "F"; }
+}
+print(grade(95));
+print(grade(82));
+print(grade(74));
+print(grade(55));
+
+/* Consecutive IFs (regression test) */
+VAR a = 1;
+IF a == 1 { print("first"); }
+IF a == 1 { print("second"); }
+IF a == 2 { print("FAIL"); }
+
+/* Nested IF */
+VAR x = 5;
+IF x > 0 {
+    IF x > 3 { print("big_positive"); }
+    ELSE { print("small_positive"); }
+}
+
+/* Variable in scope */
+IF TRUE {
+    VAR msg = "scoped";
+    print(msg);
+}

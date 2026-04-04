@@ -1,0 +1,36 @@
+/* objects.cdo -- object literals, field access, passing objects */
+
+/* Literal and field access */
+VAR obj = { name: "Alice", age: 30 };
+print(obj.name);
+print(obj.age);
+
+/* Adding fields */
+obj.city = "NYC";
+print(obj.city);
+
+/* Updating fields */
+obj.age = 31;
+print(obj.age);
+
+/* Nested objects */
+VAR person = { name: "Bob", addr: { street: "Main St", zip: 12345 } };
+print(person.name);
+print(person.addr.street);
+print(person.addr.zip);
+
+/* Object passed to function */
+FUNCTION describe(p) {
+    RETURN p.name + " age " + toString(p.age);
+}
+VAR me = { name: "Eve", age: 25 };
+print(describe(me));
+
+/* Objects with multiple locals */
+FUNCTION make_point(x, y) {
+    VAR pt = { x: x, y: y };
+    RETURN pt;
+}
+VAR p = make_point(3, 4);
+print(p.x);
+print(p.y);

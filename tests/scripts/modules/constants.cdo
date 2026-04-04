@@ -1,0 +1,6 @@
+/* constants.cdo -- module that returns an object with named constants */
+
+RETURN {
+    pi:      3.14159265358979,
+    version: 1
+};

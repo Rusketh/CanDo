@@ -1,0 +1,53 @@
+/* functions.cdo -- functions, args, return, recursion, multi-return, locals */
+
+/* No-arg function */
+FUNCTION greet() {
+    print("hello from function");
+}
+greet();
+
+/* Return value */
+FUNCTION add(a, b) {
+    RETURN a + b;
+}
+print(add(3, 4));
+
+/* Multiple local variables */
+FUNCTION locals_test() {
+    VAR x = 10;
+    VAR y = 20;
+    VAR z = x + y;
+    RETURN z;
+}
+print(locals_test());
+
+/* Recursion */
+FUNCTION fib(n) {
+    IF n <= 1 { RETURN n; }
+    RETURN fib(n - 1) + fib(n - 2);
+}
+print(fib(0));
+print(fib(1));
+print(fib(6));
+
+/* Multi-return */
+FUNCTION minmax(a, b) {
+    IF a < b { RETURN a, b; }
+    RETURN b, a;
+}
+VAR lo, hi = minmax(7, 3);
+print(lo);
+print(hi);
+
+/* Nested function calls */
+FUNCTION double(n) { RETURN n * 2; }
+FUNCTION quad(n) { RETURN double(double(n)); }
+print(quad(3));
+
+/* Function with conditional local */
+FUNCTION abs_val(n) {
+    IF n < 0 { RETURN -n; }
+    RETURN n;
+}
+print(abs_val(-5));
+print(abs_val(8));

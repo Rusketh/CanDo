@@ -1,0 +1,21 @@
+/* math_lib.cdo -- math module functions and constants */
+
+print(math.abs(-7));
+print(math.abs(3));
+print(math.floor(3.9));
+print(math.ceil(3.1));
+print(math.round(2.5));
+print(math.round(2.4));
+print(math.sqrt(25));
+print(math.sqrt(4));
+print(math.min(5, 3, 8, 1));
+print(math.max(5, 3, 8, 1));
+print(math.clamp(15, 0, 10));
+print(math.clamp(-5, 0, 10));
+print(math.clamp(5, 0, 10));
+print(math.pow(2, 10));
+print(math.log(1));
+
+/* Constants */
+IF math.pi > 3.14 && math.pi < 3.15 { print("pi_ok"); }
+IF math.e > 2.71 && math.e < 2.72 { print("e_ok"); }

@@ -1,0 +1,85 @@
+/* comparison.cdo -- comparison operators, logical operators, multi-comparison */
+
+/* Basic comparisons */
+print(1 < 2);
+print(2 > 1);
+print(1 == 1);
+print(1 != 2);
+print(3 <= 3);
+print(3 >= 3);
+print(2 <= 1);
+
+/* Logical AND / OR */
+print(TRUE && TRUE);
+print(TRUE && FALSE);
+print(FALSE || TRUE);
+print(FALSE || FALSE);
+
+/* Short-circuit: combined */
+print(1 < 2 && 3 < 4);
+print(1 < 2 && 3 > 4);
+print(1 > 2 || 3 < 4);
+
+/* NOT */
+print(!TRUE);
+print(!FALSE);
+
+/* Multi-comparison (chained) in IF context */
+VAR x = 5;
+IF x > 1, 2, 3 { print("gt_multi_pass"); }
+IF x > 1, 10 { print("FAIL"); } ELSE { print("gt_multi_fail"); }
+IF x < 10, 20 { print("lt_multi_pass"); }
+IF x == 5, 5 { print("eq_multi_pass"); }
+IF x == 5, 6 { print("FAIL"); } ELSE { print("eq_multi_fail"); }
+
+/* --- Function-call comparison ------------------------------------------ */
+
+/* two_vals returns 3 then 100; small_vals returns 1 then 2 */
+FUNCTION two_vals()   { RETURN 3, 100; }
+FUNCTION small_vals() { RETURN 1, 2; }
+FUNCTION three_vals() { RETURN 1, 999, 2; }
+FUNCTION ret_3_5()    { RETURN 3, 5; }
+
+VAR y = 5;
+
+/* Plain call: only the FIRST return value is used.
+ * 5 > two_vals() → 5 > 3 (true); 100 is discarded. */
+IF y > two_vals() { print("first_only_pass"); }
+
+/* Contrast with spread: 5 > ...two_vals() → 5>3 AND 5>100 → false */
+IF y > ...two_vals() { print("FAIL"); } ELSE { print("spread_all_fail"); }
+
+/* Unpack (...): ALL return values are compared.
+ * 5 > ...small_vals() → 5>1 AND 5>2 → true */
+IF y > ...small_vals() { print("spread_gt_pass"); }
+
+/* 5 < ...small_vals() → 5<1 AND 5<2 → false */
+IF y < ...small_vals() { print("FAIL"); } ELSE { print("spread_lt_fail"); }
+
+/* == spread: true when left matches ANY return value */
+IF y == ...ret_3_5() { print("spread_eq_pass"); }    /* 5==3 OR 5==5 → true */
+
+/* != spread: true when left matches NONE of the return values */
+IF y != ...ret_3_5() { print("FAIL"); } ELSE { print("spread_neq_fail"); }
+
+/* >= / <= spread */
+IF y >= ...small_vals() { print("spread_geq_pass"); }  /* 5>=1 AND 5>=2 → true */
+IF y <= ...two_vals()   { print("FAIL"); } ELSE { print("spread_leq_fail"); } /* 5<=3 AND 5<=100 → false */
+
+/* Mask: selected return values only.
+ * (~.~) three_vals() → keeps 1st and 3rd (1 and 2), skips 2nd (999).
+ * 5 > 1 AND 5 > 2 → true */
+IF y > (~.~) three_vals() { print("mask_gt_pass"); }
+
+/* 5 < 1 AND 5 < 2 → false */
+IF y < (~.~) three_vals() { print("FAIL"); } ELSE { print("mask_lt_fail"); }
+
+/* (~~~) keeps all three: 5>1 AND 5>999 AND 5>2 → false */
+IF y > (~~~) three_vals() { print("FAIL"); } ELSE { print("mask_all_fail"); }
+
+/* Comma list: each call is truncated to first return value.
+ * y > two_vals(), 4 → y > 3 AND y > 4 → true */
+IF y > two_vals(), 4 { print("list_call_pass"); }
+
+/* y > two_vals(), 6 → y > 3 AND y > 6 → false */
+IF y > two_vals(), 6 { print("FAIL"); } ELSE { print("list_call_fail"); }

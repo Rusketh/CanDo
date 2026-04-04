@@ -1,0 +1,8 @@
+/* counter.cdo -- module with private state (closure over VAR) */
+
+VAR count = 0;
+
+RETURN {
+    inc: FUNCTION() { count = count + 1; },
+    get: FUNCTION() { RETURN count; }
+};
