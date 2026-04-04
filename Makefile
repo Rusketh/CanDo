@@ -2,7 +2,7 @@
 #
 # Targets:
 #   all           build all test binaries and cando executable (default)
-#   cando         build the cando script interpreter executable
+#   build-cando   build the cando script interpreter executable
 #   test          build and run all tests
 #   test_core     build and run core tests only
 #   test_object   build and run object tests only
@@ -29,11 +29,13 @@ CFLAGS_CANDO  = -std=c11 -Wall -Wextra -pthread -D_GNU_SOURCE \
 CFLAGS_VM     = -std=c11 -Wall -Wextra -pthread -D_GNU_SOURCE \
                 -I source/core -I source/vm -iquote source/object
 
-# OS detection for LDFLAGS
+# OS detection for LDFLAGS and EXE extension
 ifeq ($(OS),Windows_NT)
     LDFLAGS = -lm -lws2_32
+    EXE     = .exe
 else
     LDFLAGS = -lm -ldl
+    EXE     =
 endif
 
 CORE_SRCS = \
@@ -97,7 +99,7 @@ CANDO_SRCS = \
     source/lib/net.c          \
     source/main.c
 
-CANDO_BIN = cando
+CANDO_BIN = cando$(EXE)
 
 VM_SRCS = \
     source/vm/opcodes.c \
@@ -107,12 +109,12 @@ VM_SRCS = \
     source/vm/debug.c
 
 # --- test binaries ---
-TEST_CORE_BIN    = tests/test_core
-TEST_OBJECT_BIN  = tests/test_object
-TEST_LEXER_BIN   = tests/test_lexer
-TEST_PARSER_BIN  = tests/test_parser
-TEST_VM_BIN      = tests/test_vm
-TEST_THREAD_BIN  = tests/test_thread
+TEST_CORE_BIN    = tests/test_core$(EXE)
+TEST_OBJECT_BIN  = tests/test_object$(EXE)
+TEST_LEXER_BIN   = tests/test_lexer$(EXE)
+TEST_PARSER_BIN  = tests/test_parser$(EXE)
+TEST_VM_BIN      = tests/test_vm$(EXE)
+TEST_THREAD_BIN  = tests/test_thread$(EXE)
 
 TEST_CORE_SRCS   = $(CORE_SRCS)   tests/test_core.c
 TEST_OBJECT_SRCS = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_object.c
@@ -120,7 +122,7 @@ TEST_LEXER_SRCS  = $(LEXER_SRCS)  tests/test_lexer.c
 TEST_PARSER_SRCS = $(PARSER_SRCS) tests/test_parser.c
 TEST_THREAD_SRCS = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_thread.c
 
-.PHONY: all cando test test_core test_object test_lexer test_parser test_vm test_thread test_integration clean
+.PHONY: all build-cando test test_core test_object test_lexer test_parser test_vm test_thread test_integration clean
 
 all: $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN) $(CANDO_BIN)
 
@@ -145,7 +147,7 @@ $(TEST_THREAD_BIN): $(TEST_THREAD_SRCS)
 $(CANDO_BIN): $(CANDO_SRCS)
 	$(CC) $(CFLAGS_CANDO) $^ -o $@ $(LDFLAGS)
 
-cando: $(CANDO_BIN)
+build-cando: $(CANDO_BIN)
 
 test: all
 	./$(TEST_CORE_BIN)
@@ -154,10 +156,10 @@ test: all
 	./$(TEST_LEXER_BIN)
 	./$(TEST_PARSER_BIN)
 	./$(TEST_VM_BIN)
-	bash tests/integration/run_tests.sh
+	bash tests/integration/run_tests.sh ./$(CANDO_BIN)
 
 test_integration: $(CANDO_BIN)
-	bash tests/integration/run_tests.sh
+	bash tests/integration/run_tests.sh ./$(CANDO_BIN)
 
 test_core: $(TEST_CORE_BIN)
 	./$(TEST_CORE_BIN)
