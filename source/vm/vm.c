@@ -69,6 +69,7 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     vm->thread_result_count = 0;
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) vm->thread_results[i] = cando_null();
     vm->string_proto    = cando_null();
+    vm->array_proto     = cando_null();
 
     /* Module cache — initially empty. */
     vm->module_cache       = NULL;
@@ -112,6 +113,7 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
     child->thread_result_count = 0;
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) child->thread_results[i] = cando_null();
     child->string_proto    = cando_value_copy(parent->string_proto);
+    child->array_proto     = cando_value_copy(parent->array_proto);
 
     /* Module cache: child VMs do not cache modules independently. */
     child->module_cache       = NULL;
@@ -2181,6 +2183,40 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 }
                 vm_runtime_error(vm, "string method is not callable");
                 goto handle_error;
+            }
+
+            /* Array method call. */
+            if (cando_is_object(receiver)) {
+                CdoObject *robj = cando_bridge_resolve(vm, receiver.as.handle);
+                if (robj && robj->kind == OBJ_ARRAY && cando_is_object(vm->array_proto)) {
+                    CandoValue name_val = frame->closure->chunk->constants[name_ci];
+                    CdoString *akey = cando_bridge_intern_key(name_val.as.string);
+                    CdoObject *aproto = cando_bridge_resolve(vm, vm->array_proto.as.handle);
+                    CdoValue amethod_cdo = cdo_null();
+                    cdo_object_get(aproto, akey, &amethod_cdo);
+                    cdo_string_release(akey);
+                    CandoValue amethod = cando_bridge_to_cando(vm, amethod_cdo);
+
+                    if (IS_NATIVE_FN(amethod)) {
+                        u32 ni = NATIVE_INDEX(amethod);
+                        CandoValue *callee_slot = vm->stack_top - arg_count - 1;
+                        SYNC_IP();
+                        int ret = vm->native_fns[ni](vm, (int)arg_count + 1, callee_slot);
+                        if (vm->has_error) goto handle_error;
+                        if (ret < 0) ret = 0;
+                        CandoValue *ret_src = vm->stack_top - ret;
+                        for (u32 i = 0; i < (u32)arg_count + 1; i++) cando_value_release(callee_slot[i]);
+                        for (int i = 0; i < ret; i++) callee_slot[i] = ret_src[i];
+                        if (ret == 0) {
+                            callee_slot[0] = cando_null();
+                            vm->stack_top = callee_slot + 1;
+                        } else {
+                            vm->stack_top = callee_slot + ret;
+                        }
+                        vm->last_ret_count = ret;
+                        DISPATCH();
+                    }
+                }
             }
 
             if (!cando_is_object(receiver)) {

@@ -83,6 +83,24 @@ run_test "include" "$SCRIPTS/include.cdo" \
 run_test "threads" "$SCRIPTS/threads.cdo" \
     "$(printf '42\n10\n20\ntrue\nsleep_ok\nid_ok\n99\ntrue\nnull\n7\n1\n2\n3\ndone\nerror\nbad\ntrue\ntrue\n77\n88\ncaught_err\nalready\nfalse')"
 
+run_test "lib_os" "$SCRIPTS/lib_os.cdo" \
+    "$(printf 'os.name: unix\nos_time_ok\nos_clock_ok\nPATH_ok\nCANDO_TEST: Hello')"
+
+run_test "lib_datetime" "$SCRIPTS/lib_datetime.cdo" \
+    "$(printf 'now_ok\nFormatted: 2023-10-27\nparse_ok')"
+
+run_test "lib_array" "$SCRIPTS/lib_array.cdo" \
+    "$(printf '3\n4\n4\n3\n2\n4\n6\n4\n6\n6')"
+
+run_test "lib_crypto" "$SCRIPTS/lib_crypto.cdo" \
+    "$(printf 'md5_ok\nsha256_ok\naGVsbG8gd29ybGQA\nhello world')"
+
+run_test "lib_sys" "$SCRIPTS/lib_sys.cdo" \
+    "$(printf 'pid_ok\nppid_ok')"
+
+run_test "lib_enhance" "$SCRIPTS/lib_enhance.cdo" \
+    "$(printf "math.log10(100):  2\nmath.exp(0):  1\nstartsWith('hello'):  true\nendsWith('world'):  true\nreplace('world', 'cando'): hello cando\nformat: Hello Alice, age 30")"
+
 echo "-----------------------"
 echo "Results: $PASS passed, $FAIL failed"
 

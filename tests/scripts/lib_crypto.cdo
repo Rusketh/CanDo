@@ -1,0 +1,9 @@
+IF crypto.md5("") != NULL { print("md5_ok"); }
+IF crypto.sha256("") != NULL { print("sha256_ok"); }
+
+VAR msg = "hello world";
+VAR enc = crypto.base64Encode(msg);
+print(enc);
+
+VAR dec = crypto.base64Decode(enc);
+print(dec);

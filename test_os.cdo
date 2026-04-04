@@ -1,0 +1,16 @@
+print("os.name: " + os.name);
+print("os.time(): ", os.time());
+print("os.clock(): ", os.clock());
+
+VAR path = os.getenv("PATH");
+if (path != NULL) {
+    print("PATH is set");
+} else {
+    print("PATH is NOT set");
+}
+
+os.setenv("CANDO_TEST", "Hello");
+print("CANDO_TEST: " + os.getenv("CANDO_TEST"));
+
+VAR res = os.execute("echo 'Hello from shell'");
+print("os.execute result: ", res);
