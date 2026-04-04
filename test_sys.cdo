@@ -1,0 +1,5 @@
+print("process.pid(): ", process.pid());
+print("process.ppid(): ", process.ppid());
+
+VAR ips = net.lookup("localhost");
+print("net.lookup('localhost'): ", ips);

@@ -1,0 +1,3 @@
+print("crypto.md5(''): ", crypto.md5(""));
+print("crypto.sha256(''): ", crypto.sha256(""));
+print("crypto.base64Encode('hello'): ", crypto.base64Encode("hello"));

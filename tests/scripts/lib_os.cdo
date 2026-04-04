@@ -1,0 +1,9 @@
+print("os.name: " + os.name);
+IF type(os.time()) == "number" { print("os_time_ok"); }
+IF type(os.clock()) == "number" { print("os_clock_ok"); }
+
+VAR path = os.getenv("PATH");
+IF path != NULL { print("PATH_ok"); }
+
+os.setenv("CANDO_TEST", "Hello");
+print("CANDO_TEST: " + os.getenv("CANDO_TEST"));

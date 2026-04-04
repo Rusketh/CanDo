@@ -1,0 +1,6 @@
+VAR now = datetime.now();
+IF type(now) == "number" { print("now_ok"); }
+print("Formatted: " + datetime.format(1698400800, "%Y-%m-%d"));
+
+VAR ts = datetime.parse("2023-10-27", "%Y-%m-%d");
+IF ts != NULL { print("parse_ok"); }

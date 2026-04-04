@@ -83,6 +83,12 @@ CANDO_SRCS = \
     source/lib/json.c         \
     source/lib/csv.c          \
     source/lib/thread.c       \
+    source/lib/os.c           \
+    source/lib/datetime.c     \
+    source/lib/array.c        \
+    source/lib/crypto.c       \
+    source/lib/process.c      \
+    source/lib/net.c          \
     source/main.c
 
 CANDO_BIN = cando

@@ -243,6 +243,18 @@ static int math_log(CandoVM *vm, int argc, CandoValue *args) {
     return 1;
 }
 
+static int math_log10(CandoVM *vm, int argc, CandoValue *args) {
+    f64 val = libutil_arg_num_at(args, argc, 0, 0.0);
+    cando_vm_push(vm, cando_number(log10(val)));
+    return 1;
+}
+
+static int math_exp(CandoVM *vm, int argc, CandoValue *args) {
+    f64 val = libutil_arg_num_at(args, argc, 0, 0.0);
+    cando_vm_push(vm, cando_number(exp(val)));
+    return 1;
+}
+
 /* =========================================================================
  * math.abs(n) / math.sqrt(n) / math.pow(base, exp)
  * ======================================================================= */
@@ -302,6 +314,8 @@ void cando_lib_math_register(CandoVM *vm)
     libutil_set_method(vm, math_obj, "floor",  math_floor);
     libutil_set_method(vm, math_obj, "ceil",   math_ceil);
     libutil_set_method(vm, math_obj, "log",    math_log);
+    libutil_set_method(vm, math_obj, "log10",  math_log10);
+    libutil_set_method(vm, math_obj, "exp",    math_exp);
     libutil_set_method(vm, math_obj, "abs",    math_abs);
     libutil_set_method(vm, math_obj, "sqrt",   math_sqrt);
     libutil_set_method(vm, math_obj, "pow",    math_pow);

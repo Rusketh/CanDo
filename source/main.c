@@ -27,6 +27,12 @@
 #include "lib/json.h"
 #include "lib/csv.h"
 #include "lib/thread.h"
+#include "lib/os.h"
+#include "lib/datetime.h"
+#include "lib/array.h"
+#include "lib/crypto.h"
+#include "lib/process.h"
+#include "lib/net.h"
 
 #include <limits.h>
 
@@ -103,6 +109,12 @@ int main(int argc, char *argv[])
     cando_lib_json_register(&vm);
     cando_lib_csv_register(&vm);
     cando_lib_thread_register(&vm);
+    cando_lib_os_register(&vm);
+    cando_lib_datetime_register(&vm);
+    cando_lib_array_register(&vm);
+    cando_lib_crypto_register(&vm);
+    cando_lib_process_register(&vm);
+    cando_lib_net_register(&vm);
 
     /* Execute */
     if (argc >= 3 && strcmp(argv[2], "--disasm") == 0)

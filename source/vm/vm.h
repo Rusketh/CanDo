@@ -255,6 +255,7 @@ struct CandoVM {
 
     /* Built-in type prototypes ----------------------------------------- */
     CandoValue     string_proto;    /* string method table (or null)        */
+    CandoValue     array_proto;     /* array method table (or null)         */
 
     /* Module cache (used by include()) --------------------------------- */
     CandoModuleEntry *module_cache;       /* heap array of cached entries   */
