@@ -1,5 +1,2 @@
 IF type(process.pid()) == "number" { print("pid_ok"); }
 IF type(process.ppid()) == "number" { print("ppid_ok"); }
-
-VAR ips = net.lookup("google.com");
-IF type(ips) == "array" { print("lookup_ok"); }

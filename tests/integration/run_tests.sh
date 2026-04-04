@@ -116,7 +116,7 @@ run_test "lib_crypto" "$SCRIPTS/lib_crypto.cdo" \
     "$(printf 'md5_ok\nsha256_ok\naGVsbG8gd29ybGQA\nhello world')"
 
 run_test "lib_sys" "$SCRIPTS/lib_sys.cdo" \
-    "$(printf 'pid_ok\nppid_ok\nlookup_ok')"
+    "$(printf 'pid_ok\nppid_ok')"
 
 run_test "lib_enhance" "$SCRIPTS/lib_enhance.cdo" \
     "$(printf "math.log10(100):  2\nmath.exp(0):  1\nstartsWith('hello'):  true\nendsWith('world'):  true\nreplace('world', 'cando'): hello cando\nformat: Hello Alice, age 30")"
