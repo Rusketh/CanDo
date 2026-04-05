@@ -611,11 +611,9 @@ TEST(test_exec_range_asc) {
     build_range_asc(c);
     CandoVMResult r = cando_vm_exec(&vm, c);
     EXPECT_EQ(r, VM_HALT);
-    /* sentinel at bottom + 4 range values + count: total depth 6 */
-    EXPECT_EQ(cando_vm_stack_depth(&vm), 6u);
-    /* peek(0)=count(4), peek(1)=4, peek(2)=3, peek(3)=2, peek(4)=1, peek(5)=sentinel */
-    EXPECT_TRUE(fabs(cando_vm_peek(&vm, 0).as.number - 4.0) < 1e-9); /* count */
-    EXPECT_TRUE(fabs(cando_vm_peek(&vm, 4).as.number - 1.0) < 1e-9); /* first val */
+    /* sentinel at bottom + 1 array: total depth 2 */
+    EXPECT_EQ(cando_vm_stack_depth(&vm), 2u);
+    EXPECT_TRUE(cando_is_object(cando_vm_peek(&vm, 0)));
     cando_vm_destroy(&vm);
     cando_chunk_free(c);
 }

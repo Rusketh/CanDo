@@ -85,6 +85,9 @@ run_test "arrays" "$SCRIPTS/arrays.cdo" \
 run_test "objects" "$SCRIPTS/objects.cdo" \
     "$(printf 'Alice\n30\nNYC\n31\nBob\nMain St\n12345\nEve age 25\n3\n4')"
 
+run_test "method_call" "$SCRIPTS/method_call.cdo" \
+    "$(printf 't:meth():\n100\nt::meth():\n100\nChained fluent:\n300\ns:toUpper():\nHELLO\nFluent string equal:\ntrue')"
+
 run_test "try_catch" "$SCRIPTS/try_catch.cdo" \
     "$(printf 'caught: oops\n404\nnot found\nonly one\ntrue\n1\ncatch: boom\nfinally\ntry_body\nfinaly_no_throw\ndiv_by_zero_caught\nrethrown: inner\n30')"
 
