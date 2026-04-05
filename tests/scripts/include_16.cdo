@@ -1,0 +1,15 @@
+/* include_16.cdo -- test including a module that returns 16 values */
+
+/* --- First load --- */
+VAR v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16 = include("modules/multi_16.cdo");
+
+print(v1);
+print(v8);
+print(v16);
+
+/* --- From cache --- */
+VAR c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16 = include("modules/multi_16.cdo");
+
+print(c1 == v1);
+print(c8 == v8);
+print(c16 == v16);

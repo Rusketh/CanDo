@@ -708,6 +708,32 @@ print(toString(TRUE));    // true
 
 ## Standard Library
 
+### Include
+
+The `include(path)` function loads and executes a Cando script or binary extension module.
+
+```cando
+VAR mymod = include("utils.cdo");
+```
+
+#### Multiple Return Values
+
+If the included script returns multiple values, `include()` returns all of them.
+
+```cando
+// module.cdo
+RETURN 1, 2, 3;
+
+// main.cdo
+VAR x, y, z = include("module.cdo");
+```
+
+#### Caching
+
+Modules are cached by their absolute canonical path. Subsequent calls to `include()` with the same path will return the cached values without re-executing the script. All return values are correctly cached and restored.
+
+---
+
 ### Math Module
 
 Access via `math.`:
@@ -854,8 +880,18 @@ eval("print('hello from sandbox')", { sandbox: true });
 
 | Function               | Description                                                    |
 |------------------------|----------------------------------------------------------------|
-| `eval(code)`           | Execute `code` string; return result of last expression        |
+| `eval(code)`           | Execute `code` string; return all results from the last expression |
 | `eval(code, options)`  | Same, with `name` and/or `sandbox` options                     |
+
+#### Multiple Return Values in Eval
+
+`eval` can return multiple values if the evaluated code ends with a `RETURN` statement containing multiple values or an expression that produces multiple results.
+
+```cando
+VAR a, b = eval("RETURN 10, 20");
+print(a); // 10
+print(b); // 20
+```
 
 ---
 

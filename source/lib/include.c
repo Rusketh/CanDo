@@ -139,7 +139,8 @@ static CandoModuleEntry *cache_find(CandoVM *vm, const char *canonical_path)
 
 /* Append a new entry to the cache; returns a pointer to the slot. */
 static CandoModuleEntry *cache_insert(CandoVM *vm, const char *canonical_path,
-                                      CandoValue value, void *dl_handle,
+                                      CandoValue *values, u32 value_count,
+                                      void *dl_handle,
                                       CandoClosure *closure, CandoChunk *chunk)
 {
     if (vm->module_cache_count >= vm->module_cache_cap) {
@@ -151,7 +152,15 @@ static CandoModuleEntry *cache_insert(CandoVM *vm, const char *canonical_path,
 
     CandoModuleEntry *e = &vm->module_cache[vm->module_cache_count++];
     e->path      = strdup(canonical_path); /* owned by the cache */
-    e->value     = cando_value_copy(value);
+    e->value_count = value_count;
+    if (value_count > 0) {
+        e->values = (CandoValue *)cando_alloc(value_count * sizeof(CandoValue));
+        for (u32 i = 0; i < value_count; i++) {
+            e->values[i] = cando_value_copy(values[i]);
+        }
+    } else {
+        e->values = NULL;
+    }
     e->dl_handle = dl_handle;
     e->closure   = closure; /* kept alive so OBJ_FUNCTION handles remain valid */
     e->chunk     = chunk;   /* kept alive as long as closure->chunk references it */
@@ -163,8 +172,8 @@ static CandoModuleEntry *cache_insert(CandoVM *vm, const char *canonical_path,
  * ======================================================================= */
 
 static bool load_script(CandoVM *vm, const char *canonical_path,
-                        CandoValue *result_out, CandoClosure **closure_out,
-                        CandoChunk **chunk_out)
+                        CandoValue **results_out, u32 *result_count_out,
+                        CandoClosure **closure_out, CandoChunk **chunk_out)
 {
     /* Read file. */
     FILE *f = fopen(canonical_path, "r");
@@ -207,8 +216,8 @@ static bool load_script(CandoVM *vm, const char *canonical_path,
     }
     cando_free(source);
 
-    *result_out = cando_null();
-    CandoVMResult res = cando_vm_exec_eval_module(vm, chunk, result_out,
+    CandoVMResult res = cando_vm_exec_eval_module(vm, chunk, results_out,
+                                                  result_count_out,
                                                   closure_out);
     if (res == VM_RUNTIME_ERR) {
         /* On failure the closure was already freed inside exec_eval_module. */
@@ -302,28 +311,50 @@ static int native_include(CandoVM *vm, int argc, CandoValue *args)
     /* --- Check cache --- */
     CandoModuleEntry *cached = cache_find(vm, canonical);
     if (cached) {
-        cando_vm_push(vm, cached->value);
-        return 1;
+        for (u32 i = 0; i < cached->value_count; i++) {
+            cando_vm_push(vm, cando_value_copy(cached->values[i]));
+        }
+        vm->last_ret_count = (int)cached->value_count;
+        return (int)cached->value_count;
     }
 
     /* --- Load the module --- */
-    CandoValue    result         = cando_null();
-    void         *dl_handle      = NULL;
-    CandoClosure *module_closure = NULL;
-    CandoChunk   *module_chunk   = NULL;
-    bool          ok;
+    CandoValue    *results        = NULL;
+    u32            result_count   = 0;
+    void          *dl_handle      = NULL;
+    CandoClosure  *module_closure = NULL;
+    CandoChunk    *module_chunk   = NULL;
+    bool           ok;
 
-    if (path_is_binary(canonical))
-        ok = load_binary(vm, canonical, &result, &dl_handle);
-    else
-        ok = load_script(vm, canonical, &result, &module_closure, &module_chunk);
+    if (path_is_binary(canonical)) {
+        CandoValue binary_res = cando_null();
+        ok = load_binary(vm, canonical, &binary_res, &dl_handle);
+        if (ok) {
+            results = (CandoValue *)cando_alloc(sizeof(CandoValue));
+            results[0] = binary_res;
+            result_count = 1;
+        }
+    } else {
+        ok = load_script(vm, canonical, &results, &result_count, &module_closure, &module_chunk);
+    }
 
     if (!ok) return -1; /* vm->has_error already set */
 
     /* --- Cache (closure + chunk kept alive so OBJ_FUNCTION values remain valid) --- */
-    cache_insert(vm, canonical, result, dl_handle, module_closure, module_chunk);
-    cando_vm_push(vm, result);
-    return 1;
+    cache_insert(vm, canonical, results, result_count, dl_handle, module_closure, module_chunk);
+
+    for (u32 i = 0; i < result_count; i++) {
+        cando_vm_push(vm, cando_value_copy(results[i]));
+    }
+    vm->last_ret_count = (int)result_count;
+
+    /* Cleanup temporary results array. */
+    if (results) {
+        for (u32 i = 0; i < result_count; i++) cando_value_release(results[i]);
+        cando_free(results);
+    }
+
+    return (int)result_count;
 }
 
 /* =========================================================================

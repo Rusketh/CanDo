@@ -69,7 +69,8 @@ typedef struct CandoClosure CandoClosure;
  * ===================================================================== */
 typedef struct CandoModuleEntry {
     char         *path;      /* heap-allocated NUL-terminated absolute path  */
-    CandoValue    value;     /* cached module export (retained)              */
+    CandoValue   *values;    /* cached module exports (retained)             */
+    u32           value_count;
     void         *dl_handle; /* dlopen handle, or NULL for script modules    */
     CandoClosure *closure;   /* module closure kept alive for OBJ_FUNCTION   */
     CandoChunk   *chunk;     /* compiled chunk kept alive while closure lives */
@@ -243,8 +244,10 @@ struct CandoVM {
     int            spread_extra;   /* accumulated extra args from spreading */
 
     /* Eval re-entrancy ------------------------------------------------- */
-    u32            eval_stop_frame; /* frame_count at which OP_RETURN stops */
-    CandoValue     eval_result;     /* result captured when VM_EVAL_DONE    */
+    u32            eval_stop_frame;   /* frame_count at which OP_RETURN stops */
+    CandoValue    *eval_results;      /* captured results when VM_EVAL_DONE   */
+    u32            eval_result_count;
+    u32            eval_result_cap;
 
     /* Thread result capture (used by cando_vm_exec_closure) ----------- */
     /* When thread_stop_frame is non-zero, OP_RETURN at that frame depth
@@ -322,7 +325,7 @@ CandoVMResult cando_vm_exec(CandoVM *vm, CandoChunk *chunk);
  * The chunk must outlive this call; the caller is responsible for freeing it.
  */
 CandoVMResult cando_vm_exec_eval(CandoVM *vm, CandoChunk *chunk,
-                                  CandoValue *result_out);
+                                  CandoValue **results_out, u32 *count_out);
 
 /*
  * cando_vm_exec_closure -- execute a script closure on `vm` starting at
@@ -349,7 +352,7 @@ CandoVMResult cando_vm_exec_closure(CandoVM *vm, CandoClosure *closure,
  * On error: *closure_out is set to NULL.
  */
 CandoVMResult cando_vm_exec_eval_module(CandoVM *vm, CandoChunk *chunk,
-                                         CandoValue *result_out,
+                                         CandoValue **results_out, u32 *count_out,
                                          CandoClosure **closure_out);
 
 /* =========================================================================
