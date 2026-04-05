@@ -133,8 +133,9 @@ static int native_eval(CandoVM *vm, int argc, CandoValue *args)
     CandoGlobalEnv *saved_globals = NULL;
     if (sandbox) sandbox_enter(vm, &saved_globals);
 
-    CandoValue    result = cando_null();
-    CandoVMResult res    = cando_vm_exec_eval(vm, chunk, &result);
+    CandoValue   *results = NULL;
+    u32           result_count = 0;
+    CandoVMResult res = cando_vm_exec_eval(vm, chunk, &results, &result_count);
     cando_chunk_free(chunk);
 
     if (sandbox) sandbox_exit(vm, &saved_globals);
@@ -144,8 +145,18 @@ static int native_eval(CandoVM *vm, int argc, CandoValue *args)
         return -1;
     }
 
-    cando_vm_push(vm, result);
-    return 1;
+    if (result_count == 0) {
+        cando_vm_push(vm, cando_null());
+        vm->last_ret_count = 0;
+        return 1;
+    } else {
+        for (u32 i = 0; i < result_count; i++) {
+            cando_vm_push(vm, results[i]);
+        }
+        vm->last_ret_count = (int)result_count;
+        cando_free(results);
+        return (int)result_count;
+    }
 }
 
 void cando_lib_eval_register(CandoVM *vm)

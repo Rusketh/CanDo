@@ -235,13 +235,22 @@ static int native_eval(CandoVM *vm, int argc, CandoValue *args)
         return -1;
     }
 
-    CandoValue result = cando_null();
-    CandoVMResult r = cando_vm_exec_eval(vm, chunk, &result);
+    CandoValue *results = NULL;
+    u32         count = 0;
+    CandoVMResult r = cando_vm_exec_eval(vm, chunk, &results, &count);
     cando_chunk_free(chunk);
 
     if (r == VM_RUNTIME_ERR) return -1;
-    cando_vm_push(vm, result);
-    return 1;
+
+    if (count == 0) {
+        cando_vm_push(vm, cando_null());
+        return 1;
+    }
+    for (u32 i = 0; i < count; i++) {
+        cando_vm_push(vm, results[i]);
+    }
+    cando_free(results);
+    return (int)count;
 }
 ```
 

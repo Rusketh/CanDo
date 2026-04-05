@@ -63,8 +63,10 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     vm->error_msg[0]    = '\0';
     vm->last_ret_count  = 0;
     vm->spread_extra    = 0;
-    vm->eval_stop_frame = 0;
-    vm->eval_result     = cando_null();
+    vm->eval_stop_frame = ~0u;
+    vm->eval_results     = NULL;
+    vm->eval_result_count = 0;
+    vm->eval_result_cap   = 0;
     vm->thread_stop_frame  = ~0u;  /* ~0u = "not set"; 0 is a valid stop boundary */
     vm->thread_result_count = 0;
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) vm->thread_results[i] = cando_null();
@@ -107,8 +109,10 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
     child->error_msg[0]    = '\0';
     child->last_ret_count  = 0;
     child->spread_extra    = 0;
-    child->eval_stop_frame = 0;
-    child->eval_result     = cando_null();
+    child->eval_stop_frame = ~0u;
+    child->eval_results     = NULL;
+    child->eval_result_count = 0;
+    child->eval_result_cap   = 0;
     child->thread_stop_frame   = ~0u;  /* ~0u = "not set" */
     child->thread_result_count = 0;
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) child->thread_results[i] = cando_null();
@@ -175,11 +179,20 @@ void cando_vm_destroy(CandoVM *vm) {
 
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) cando_value_release(vm->error_vals[i]);
 
+    /* Release eval results. */
+    for (u32 i = 0; i < vm->eval_result_count; i++) {
+        cando_value_release(vm->eval_results[i]);
+    }
+    cando_free(vm->eval_results);
+
     /* Release module cache. */
     for (u32 i = 0; i < vm->module_cache_count; i++) {
         CandoModuleEntry *e = &vm->module_cache[i];
         cando_free(e->path);
-        cando_value_release(e->value);
+        for (u32 j = 0; j < e->value_count; j++) {
+            cando_value_release(e->values[j]);
+        }
+        cando_free(e->values);
         cando_closure_free(e->closure); /* NULL-safe; frees script-module closures */
         cando_chunk_free(e->chunk);     /* NULL-safe; chunk owned by module entry  */
         if (e->dl_handle) {
@@ -658,15 +671,19 @@ CandoVMResult cando_vm_exec(CandoVM *vm, CandoChunk *chunk) {
 }
 
 CandoVMResult cando_vm_exec_eval(CandoVM *vm, CandoChunk *chunk,
-                                  CandoValue *result_out) {
+                                  CandoValue **results_out, u32 *count_out) {
     /* Save outer eval state so nested evals don't interfere. */
-    u32        saved_stop   = vm->eval_stop_frame;
-    CandoValue saved_result = vm->eval_result;
+    u32         saved_stop   = vm->eval_stop_frame;
+    CandoValue *saved_results = vm->eval_results;
+    u32         saved_count   = vm->eval_result_count;
+    u32         saved_cap     = vm->eval_result_cap;
 
     /* The stop marker is the current frame depth.  When OP_RETURN brings
      * frame_count back to this value, VM_EVAL_DONE is returned.          */
     vm->eval_stop_frame = vm->frame_count;
-    vm->eval_result     = cando_null();
+    vm->eval_results     = NULL;
+    vm->eval_result_count = 0;
+    vm->eval_result_cap   = 0;
 
     CandoClosure *closure = cando_closure_new(chunk);
     cando_vm_push(vm, cando_null()); /* slot 0 placeholder */
@@ -674,36 +691,47 @@ CandoVMResult cando_vm_exec_eval(CandoVM *vm, CandoChunk *chunk,
         cando_vm_pop(vm);            /* remove the placeholder */
         cando_closure_free(closure);
         vm->eval_stop_frame = saved_stop;
-        vm->eval_result     = saved_result;
+        vm->eval_results     = saved_results;
+        vm->eval_result_count = saved_count;
+        vm->eval_result_cap   = saved_cap;
         return VM_RUNTIME_ERR;
     }
 
     CandoVMResult res = vm_run(vm);
     cando_closure_free(closure);
 
-    if (result_out) {
-        *result_out     = vm->eval_result;
+    if (results_out && count_out) {
+        *results_out = vm->eval_results;
+        *count_out   = vm->eval_result_count;
     } else {
-        cando_value_release(vm->eval_result);
+        for (u32 i = 0; i < vm->eval_result_count; i++)
+            cando_value_release(vm->eval_results[i]);
+        cando_free(vm->eval_results);
     }
 
     /* Restore outer eval state. */
-    vm->eval_result     = saved_result;
+    vm->eval_results     = saved_results;
+    vm->eval_result_count = saved_count;
+    vm->eval_result_cap   = saved_cap;
     vm->eval_stop_frame = saved_stop;
     return res;
 }
 
 CandoVMResult cando_vm_exec_eval_module(CandoVM *vm, CandoChunk *chunk,
-                                         CandoValue *result_out,
+                                         CandoValue **results_out, u32 *count_out,
                                          CandoClosure **closure_out) {
     /* Identical to cando_vm_exec_eval, but transfers the closure to the
      * caller instead of freeing it.  The caller is responsible for calling
      * cando_closure_free() when the closure is no longer needed.           */
-    u32        saved_stop   = vm->eval_stop_frame;
-    CandoValue saved_result = vm->eval_result;
+    u32         saved_stop   = vm->eval_stop_frame;
+    CandoValue *saved_results = vm->eval_results;
+    u32         saved_count   = vm->eval_result_count;
+    u32         saved_cap     = vm->eval_result_cap;
 
     vm->eval_stop_frame = vm->frame_count;
-    vm->eval_result     = cando_null();
+    vm->eval_results     = NULL;
+    vm->eval_result_count = 0;
+    vm->eval_result_cap   = 0;
 
     CandoClosure *closure = cando_closure_new(chunk);
     cando_vm_push(vm, cando_null()); /* slot 0 placeholder */
@@ -711,7 +739,9 @@ CandoVMResult cando_vm_exec_eval_module(CandoVM *vm, CandoChunk *chunk,
         cando_vm_pop(vm);
         cando_closure_free(closure);
         vm->eval_stop_frame = saved_stop;
-        vm->eval_result     = saved_result;
+        vm->eval_results     = saved_results;
+        vm->eval_result_count = saved_count;
+        vm->eval_result_cap   = saved_cap;
         if (closure_out) *closure_out = NULL;
         return VM_RUNTIME_ERR;
     }
@@ -725,13 +755,18 @@ CandoVMResult cando_vm_exec_eval_module(CandoVM *vm, CandoChunk *chunk,
         cando_closure_free(closure); /* caller opted out */
     }
 
-    if (result_out) {
-        *result_out = vm->eval_result;
+    if (results_out && count_out) {
+        *results_out = vm->eval_results;
+        *count_out   = vm->eval_result_count;
     } else {
-        cando_value_release(vm->eval_result);
+        for (u32 i = 0; i < vm->eval_result_count; i++)
+            cando_value_release(vm->eval_results[i]);
+        cando_free(vm->eval_results);
     }
 
-    vm->eval_result     = saved_result;
+    vm->eval_results     = saved_results;
+    vm->eval_result_count = saved_count;
+    vm->eval_result_cap   = saved_cap;
     vm->eval_stop_frame = saved_stop;
     return res;
 }
@@ -2370,15 +2405,24 @@ static CandoVMResult vm_run(CandoVM *vm) {
             }
 
             /* Eval re-entrancy: if we've returned back to the eval boundary,
-             * stash the result and signal the outer vm_run to stop. */
-            if (vm->eval_stop_frame != 0 &&
+             * stash the results and signal the outer vm_run to stop. */
+            if (vm->eval_stop_frame != ~0u &&
                 vm->frame_count == vm->eval_stop_frame) {
+                vm->last_ret_count = (int)ret_count;
                 if (frame->is_fluent) {
                     for (u16 i = 0; i < ret_count; i++) cando_value_release(ret_start[i]);
-                    vm->eval_result = fluent_receiver;
+                    vm->eval_results = (CandoValue *)cando_alloc(sizeof(CandoValue));
+                    vm->eval_results[0] = fluent_receiver;
+                    vm->eval_result_count = 1;
+                    vm->eval_result_cap = 1;
                 } else {
-                    vm->eval_result = (ret_count > 0) ? ret_start[0] : cando_null();
-                    for (u16 i = 1; i < ret_count; i++)
+                    vm->eval_result_count = ret_count;
+                    vm->eval_result_cap = ret_count > 0 ? ret_count : 1;
+                    vm->eval_results = (CandoValue *)cando_alloc(
+                        vm->eval_result_cap * sizeof(CandoValue));
+                    for (u16 i = 0; i < ret_count; i++)
+                        vm->eval_results[i] = cando_value_copy(ret_start[i]);
+                    for (u16 i = 0; i < ret_count; i++)
                         cando_value_release(ret_start[i]);
                 }
                 vm->stack_top = frame->slots;

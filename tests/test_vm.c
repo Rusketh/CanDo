@@ -980,46 +980,117 @@ TEST(test_exec_cmp_stack) {
 }
 
 /* =========================================================================
- * Test: multi-return — user-defined function returns 2 values
- * =====================================================================
- * Chunk layout:
- *   [0]  OP_JUMP → main         (skip function body)
- *   [3]  fn: OP_CONST(10), OP_CONST(20), OP_RETURN 2
- *   [12] main: OP_CONST(3.0 = fn PC), OP_CALL 0, OP_HALT
- * After call: stack = [NULL-sentinel, 10, 20]
+ * Test: multi-return — user-defined function returns 16 values
  * ===================================================================== */
-static void build_multi_return(CandoChunk *c) {
+static void build_multi_return_16(CandoChunk *c) {
     /* Jump past function body */
     u32 skip = cando_chunk_emit_jump(c, OP_JUMP, 1);
 
-    /* Function body at offset 3 */
-    u16 c10 = cando_chunk_add_const(c, cando_number(10.0));
-    u16 c20 = cando_chunk_add_const(c, cando_number(20.0));
-    cando_chunk_emit_op_a(c, OP_CONST, c10, 1);
-    cando_chunk_emit_op_a(c, OP_CONST, c20, 1);
-    cando_chunk_emit_op_a(c, OP_RETURN, 2, 1);
+    /* Function body: push 1..16, return 16 */
+    u32 fn_start = c->code_len;
+    for (int i = 1; i <= 16; i++) {
+        u16 idx = cando_chunk_add_const(c, cando_number((f64)i));
+        cando_chunk_emit_op_a(c, OP_CONST, idx, 1);
+    }
+    cando_chunk_emit_op_a(c, OP_RETURN, 16, 1);
 
-    /* Main code: patch jump, push fn PC (3), call it */
+    /* Main code */
     cando_chunk_patch_jump(c, skip);
-    u16 fn_pc = cando_chunk_add_const(c, cando_number(3.0));
+    u16 fn_pc = cando_chunk_add_const(c, cando_number((f64)fn_start));
     cando_chunk_emit_op_a(c, OP_CONST, fn_pc, 1);
     cando_chunk_emit_op_a(c, OP_CALL, 0, 1);
     cando_chunk_emit_op(c, OP_HALT, 1);
 }
 
-TEST(test_exec_multi_return) {
+static void build_multi_return_method_16(CandoChunk *c) {
+    /* Jump past function body */
+    u32 skip = cando_chunk_emit_jump(c, OP_JUMP, 1);
+
+    /* Method body: push 1..16, return 16.
+     * args[0] is the receiver. */
+    u32 fn_start = c->code_len;
+    for (int i = 1; i <= 16; i++) {
+        u16 idx = cando_chunk_add_const(c, cando_number((f64)i));
+        cando_chunk_emit_op_a(c, OP_CONST, idx, 1);
+    }
+    cando_chunk_emit_op_a(c, OP_RETURN, 16, 1);
+
+    /* Main code */
+    cando_chunk_patch_jump(c, skip);
+
+    /* Create an object and set the method */
+    cando_chunk_emit_op(c, OP_NEW_OBJECT, 1);
+    u16 name_idx = cando_chunk_add_string_const(c, "meth", 4);
+    u16 meth_pc_idx = cando_chunk_add_const(c, cando_number((f64)fn_start));
+    cando_chunk_emit_op_a(c, OP_CONST, meth_pc_idx, 1);
+    cando_chunk_emit_op_a(c, OP_SET_FIELD, name_idx, 1);
+
+    /* Call the method: obj:meth() -> OP_METHOD_CALL "meth" argc=0 (total 1 with receiver) */
+    cando_chunk_emit_op_ab(c, OP_METHOD_CALL, name_idx, 0, 1);
+    cando_chunk_emit_op(c, OP_HALT, 1);
+}
+
+TEST(test_exec_multi_return_16) {
     CandoVM vm;
     cando_vm_init(&vm, NULL);
-    CandoChunk *c = cando_chunk_new("multi_ret", 0, false);
-    build_multi_return(c);
+    CandoChunk *c = cando_chunk_new("multi_ret_16", 0, false);
+    build_multi_return_16(c);
     CandoVMResult r = cando_vm_exec(&vm, c);
     EXPECT_EQ(r, VM_HALT);
-    /* Stack: NULL-sentinel + 10 + 20 = depth 3 */
-    EXPECT_EQ(cando_vm_stack_depth(&vm), 3u);
-    EXPECT_TRUE(fabs(cando_vm_peek(&vm, 0).as.number - 20.0) < 1e-9);
-    EXPECT_TRUE(fabs(cando_vm_peek(&vm, 1).as.number - 10.0) < 1e-9);
-    /* last_ret_count should be 2 after the call */
-    EXPECT_EQ(vm.last_ret_count, 2);
+    /* Stack: NULL-sentinel + 16 values = depth 17 */
+    EXPECT_EQ(cando_vm_stack_depth(&vm), 17u);
+    for (int i = 0; i < 16; i++) {
+        EXPECT_EQ((int)cando_vm_peek(&vm, i).as.number, 16 - i);
+    }
+    EXPECT_EQ(vm.last_ret_count, 16);
+    cando_vm_destroy(&vm);
+    cando_chunk_free(c);
+}
+
+TEST(test_exec_multi_return_method_16) {
+    CandoVM vm;
+    cando_vm_init(&vm, NULL);
+    CandoChunk *c = cando_chunk_new("multi_ret_meth_16", 0, false);
+    c->local_count = 1; /* slots for NEW_OBJECT and METHOD_CALL */
+    build_multi_return_method_16(c);
+    CandoVMResult r = cando_vm_exec(&vm, c);
+    EXPECT_EQ(r, VM_HALT);
+    /* Stack: NULL-sentinel + 16 values = depth 17 */
+    EXPECT_EQ(cando_vm_stack_depth(&vm), 17u);
+    for (int i = 0; i < 16; i++) {
+        EXPECT_EQ((int)cando_vm_peek(&vm, i).as.number, 16 - i);
+    }
+    EXPECT_EQ(vm.last_ret_count, 16);
+    cando_vm_destroy(&vm);
+    cando_chunk_free(c);
+}
+
+/* =========================================================================
+ * Test: eval multi-return — cando_vm_exec_eval returns 16 values
+ * ===================================================================== */
+TEST(test_eval_multi_return_16) {
+    CandoVM vm;
+    cando_vm_init(&vm, NULL);
+    CandoChunk *c = cando_chunk_new("eval_16", 0, false);
+    for (int i = 1; i <= 16; i++) {
+        u16 idx = cando_chunk_add_const(c, cando_number((f64)i));
+        cando_chunk_emit_op_a(c, OP_CONST, idx, 1);
+    }
+    cando_chunk_emit_op_a(c, OP_RETURN, 16, 1);
+
+    CandoValue *results = NULL;
+    u32 count = 0;
+    CandoVMResult r = cando_vm_exec_eval(&vm, c, &results, &count);
+    EXPECT_EQ(r, VM_EVAL_DONE);
+    EXPECT_EQ(count, 16u);
+    if (count == 16) {
+        for (int i = 0; i < 16; i++) {
+            EXPECT_EQ((int)results[i].as.number, i + 1);
+            cando_value_release(results[i]);
+        }
+    }
+    cando_free(results);
+
     cando_vm_destroy(&vm);
     cando_chunk_free(c);
 }
@@ -1227,7 +1298,9 @@ int main(void) {
     run_test("exec_eq_stack",     test_exec_eq_stack);
     run_test("exec_cmp_stack",    test_exec_cmp_stack);
     run_test("exec_mask_skip",    test_exec_mask_skip);
-    run_test("exec_multi_return", test_exec_multi_return);
+    run_test("exec_multi_return_16", test_exec_multi_return_16);
+    run_test("exec_multi_return_method_16", test_exec_multi_return_method_16);
+    run_test("test_eval_multi_return_16", test_eval_multi_return_16);
     run_test("exec_spread_ret",   test_exec_spread_ret);
     run_test("exec_for_range",    test_exec_for_range);
 
