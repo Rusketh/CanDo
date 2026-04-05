@@ -576,6 +576,7 @@ static bool vm_call(CandoVM *vm, CandoClosure *closure, u32 arg_count) {
     /* The function itself is just below the arguments on the stack. */
     frame->slots     = vm->stack_top - arg_count - 1;
     frame->ret_count = 0;
+    frame->is_fluent = false;
 
     /* Pre-allocate null slots for all local variables so the expression
      * evaluation stack always sits above the local variable area.
@@ -765,6 +766,7 @@ CandoVMResult cando_vm_exec_closure(CandoVM *vm, CandoClosure *closure,
     new_frame->ip        = closure->chunk->code + fn_pc;
     new_frame->slots     = vm->stack_top - 1; /* just the sentinel */
     new_frame->ret_count = 0;
+    new_frame->is_fluent = false;
 
     /* Pre-allocate null locals. */
     if (closure->chunk->local_count > 1) {
@@ -816,6 +818,7 @@ static void vm_call_closure_with_args(CandoVM *vm, CdoObject *fn_obj,
     new_frame->ip        = closure->chunk->code + fn_pc;
     new_frame->slots     = vm->stack_top - 1;   /* points at slot-0 */
     new_frame->ret_count = 0;
+    new_frame->is_fluent = false;
 
     /* Push the passed arguments as parameter slots, then nulls for any
      * remaining local variable slots declared by the main chunk.
@@ -2073,6 +2076,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 new_frame->ip        = chunk->code + pc;
                 new_frame->slots     = vm->stack_top - arg_count - 1;
                 new_frame->ret_count = 0;
+                new_frame->is_fluent = false;
 
                 /* Pre-allocate null slots for local variables so expression
                  * evaluation never overwrites them (same logic as vm_call). */
@@ -2116,6 +2120,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     new_frame->ip        = fn_closure->chunk->code + fn_pc;
                     new_frame->slots     = vm->stack_top - arg_count - 1;
                     new_frame->ret_count = 0;
+                    new_frame->is_fluent = false;
 
                     u32 np = arg_count + 1;
                     if (fn_closure->chunk->local_count > np) {
@@ -2131,234 +2136,175 @@ static CandoVMResult vm_run(CandoVM *vm) {
             vm_runtime_error(vm, "can only call functions (got object)");
             goto handle_error;
         }
-        OP_CASE(OP_METHOD_CALL): {
+        OP_CASE(OP_METHOD_CALL):
+        OP_CASE(OP_FLUENT_CALL): {
+            CandoOpcode op = (CandoOpcode)ip[-1];
             u16 name_ci   = READ_U16();
             u16 arg_count = READ_U16();
+            bool is_fluent = (op == OP_FLUENT_CALL);
+
             CandoValue receiver = *(vm->stack_top - arg_count - 1);
+            CdoValue method_cdo = cdo_null();
 
-            /* String method call: receiver is args[0], explicit args follow. */
             if (cando_is_string(receiver)) {
-                if (!cando_is_object(vm->string_proto)) {
-                    vm_runtime_error(vm,
-                        "method call on string: no string library loaded");
-                    goto handle_error;
-                }
-                CandoValue name_val = frame->closure->chunk->constants[name_ci];
-                CdoString *skey = cando_bridge_intern_key(name_val.as.string);
-                CdoObject *sproto = cando_bridge_resolve(
-                                        vm, vm->string_proto.as.handle);
-                CdoValue smethod_cdo = cdo_null();
-                cdo_object_get(sproto, skey, &smethod_cdo);
-                cdo_string_release(skey);
-                CandoValue smethod = cando_bridge_to_cando(vm, smethod_cdo);
-
-                if (IS_NATIVE_FN(smethod)) {
-                    u32 ni = NATIVE_INDEX(smethod);
-                    if (ni >= vm->native_count) {
-                        vm_runtime_error(vm,
-                            "invalid native string method index %u", ni);
-                        goto handle_error;
-                    }
-                    /* Pass receiver as args[0], explicit args as args[1..N]. */
-                    CandoValue *callee_slot = vm->stack_top - arg_count - 1;
-                    SYNC_IP();
-                    int ret = vm->native_fns[ni](vm,
-                                (int)arg_count + 1, callee_slot);
-                    if (vm->has_error) goto handle_error;
-                    if (ret < 0) ret = 0;
-                    CandoValue *ret_src = vm->stack_top - ret;
-                    /* Release receiver + explicit args. */
-                    for (u32 i = 0; i < (u32)arg_count + 1; i++)
-                        cando_value_release(callee_slot[i]);
-                    for (int i = 0; i < ret; i++)
-                        callee_slot[i] = ret_src[i];
-                    if (ret == 0) {
-                        callee_slot[0] = cando_null();
-                        vm->stack_top = callee_slot + 1;
-                    } else {
-                        vm->stack_top = callee_slot + ret;
-                    }
-                    vm->last_ret_count = ret;
-                    DISPATCH();
-                }
-                vm_runtime_error(vm, "string method is not callable");
-                goto handle_error;
-            }
-
-            /* Array method call. */
-            if (cando_is_object(receiver)) {
-                CdoObject *robj = cando_bridge_resolve(vm, receiver.as.handle);
-                if (robj && robj->kind == OBJ_ARRAY && cando_is_object(vm->array_proto)) {
+                if (cando_is_object(vm->string_proto)) {
                     CandoValue name_val = frame->closure->chunk->constants[name_ci];
-                    CdoString *akey = cando_bridge_intern_key(name_val.as.string);
-                    CdoObject *aproto = cando_bridge_resolve(vm, vm->array_proto.as.handle);
-                    CdoValue amethod_cdo = cdo_null();
-                    cdo_object_get(aproto, akey, &amethod_cdo);
-                    cdo_string_release(akey);
-                    CandoValue amethod = cando_bridge_to_cando(vm, amethod_cdo);
-
-                    if (IS_NATIVE_FN(amethod)) {
-                        u32 ni = NATIVE_INDEX(amethod);
-                        CandoValue *callee_slot = vm->stack_top - arg_count - 1;
-                        SYNC_IP();
-                        int ret = vm->native_fns[ni](vm, (int)arg_count + 1, callee_slot);
-                        if (vm->has_error) goto handle_error;
-                        if (ret < 0) ret = 0;
-                        CandoValue *ret_src = vm->stack_top - ret;
-                        for (u32 i = 0; i < (u32)arg_count + 1; i++) cando_value_release(callee_slot[i]);
-                        for (int i = 0; i < ret; i++) callee_slot[i] = ret_src[i];
-                        if (ret == 0) {
-                            callee_slot[0] = cando_null();
-                            vm->stack_top = callee_slot + 1;
-                        } else {
-                            vm->stack_top = callee_slot + ret;
-                        }
-                        vm->last_ret_count = ret;
-                        DISPATCH();
-                    }
+                    CdoString *skey = cando_bridge_intern_key(name_val.as.string);
+                    CdoObject *sproto = cando_bridge_resolve(vm, vm->string_proto.as.handle);
+                    cdo_object_get(sproto, skey, &method_cdo);
+                    cdo_string_release(skey);
                 }
-            }
+            } else if (cando_is_object(receiver)) {
+                CdoObject *robj = cando_bridge_resolve(vm, receiver.as.handle);
+                CandoValue name_val = frame->closure->chunk->constants[name_ci];
+                CdoString *key = cando_bridge_intern_key(name_val.as.string);
 
-            if (!cando_is_object(receiver)) {
+                /* Array method special case: look in array_proto if not found in array object. */
+                if (robj->kind == OBJ_ARRAY && cando_is_object(vm->array_proto)) {
+                    if (!cdo_object_get(robj, key, &method_cdo)) {
+                        CdoObject *aproto = cando_bridge_resolve(vm, vm->array_proto.as.handle);
+                        cdo_object_get(aproto, key, &method_cdo);
+                    }
+                } else {
+                    cdo_object_get(robj, key, &method_cdo);
+                }
+                cdo_string_release(key);
+            } else {
                 vm_runtime_error(vm, "method call on non-object (got %s)",
                                  cando_value_type_name((TypeTag)receiver.tag));
                 goto handle_error;
             }
 
-            CandoValue name_val = frame->closure->chunk->constants[name_ci];
-            CandoString *name_cs = name_val.as.string;
-            CdoString *key = cando_bridge_intern_key(name_cs);
-            CdoObject *obj = cando_bridge_resolve(vm, (HandleIndex)receiver.as.handle);
-            CdoValue method_cdo = cdo_null();
-            cdo_object_get(obj, key, &method_cdo);
-            cdo_string_release(key);
-
-            /* OBJ_FUNCTION (script closure created by OP_CLOSURE):
-             * access the raw CdoObject directly to avoid handle allocation. */
-            if (cdo_is_function(method_cdo)) {
-                CdoObject    *fn_obj    = method_cdo.as.object;
-                CandoClosure *fn_closure =
-                    (CandoClosure *)fn_obj->fn.script.bytecode;
-                u32 fn_pc = fn_obj->fn.script.param_count;
-                if (vm->frame_count >= CANDO_FRAMES_MAX) {
-                    vm_runtime_error(vm, "call stack overflow");
-                    goto handle_error;
-                }
-                SYNC_IP();
-                CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                new_frame->closure   = fn_closure;
-                new_frame->ip        = fn_closure->chunk->code + fn_pc;
-                new_frame->slots     = vm->stack_top - arg_count - 1;
-                new_frame->ret_count = 0;
-                u32 np = (u32)arg_count + 1;
-                if (fn_closure->chunk->local_count > np) {
-                    u32 ne = fn_closure->chunk->local_count - np;
-                    for (u32 i = 0; i < ne; i++) cando_vm_push(vm, cando_null());
-                }
-                LOAD_FRAME();
-                DISPATCH();
-            }
-
             CandoValue method = cando_bridge_to_cando(vm, method_cdo);
+            cdo_value_release(method_cdo);
 
-            if (IS_NATIVE_FN(method)) {
-                u32 ni = NATIVE_INDEX(method);
-                if (ni >= vm->native_count) {
-                    vm_runtime_error(vm, "invalid native method index %u", ni);
-                    goto handle_error;
-                }
-                CandoValue *callee_slot = vm->stack_top - arg_count - 1;
-                CandoValue *args = callee_slot + 1;
-                SYNC_IP();
-                int ret_count = vm->native_fns[ni](vm, (int)arg_count, args);
-                if (vm->has_error) goto handle_error;
-                if (ret_count < 0) ret_count = 0;
-                CandoValue *ret_src = vm->stack_top - ret_count;
-                for (u32 i = 0; i < (u32)arg_count; i++)
-                    cando_value_release(args[i]);
-                for (int i = 0; i < ret_count; i++)
-                    callee_slot[i] = ret_src[i];
-                if (ret_count == 0) {
-                    callee_slot[0] = cando_null();
-                    vm->stack_top = callee_slot + 1;
-                } else {
-                    vm->stack_top = callee_slot + ret_count;
-                }
-                vm->last_ret_count = ret_count;
-                DISPATCH();
+            bool callable = false;
+            if (IS_NATIVE_FN(method)) callable = true;
+            else if (cando_is_number(method)) callable = true;
+            else if (cando_is_object(method)) {
+                CdoObject *mo = cando_bridge_resolve(vm, method.as.handle);
+                if (mo->kind == OBJ_FUNCTION || mo->kind == OBJ_NATIVE) callable = true;
             }
 
-            if (cando_is_number(method)) {
-                /* Legacy path: method stored as a raw PC number (no closure). */
-                u32 pc = (u32)method.as.number;
-                CandoChunk *chunk = frame->closure->chunk;
-                if (vm->frame_count >= CANDO_FRAMES_MAX) {
-                    vm_runtime_error(vm, "call stack overflow");
-                    goto handle_error;
-                }
-                SYNC_IP();
-                CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                new_frame->closure   = frame->closure;
-                new_frame->ip        = chunk->code + pc;
-                new_frame->slots     = vm->stack_top - arg_count - 1;
-                new_frame->ret_count = 0;
-                LOAD_FRAME();
-                DISPATCH();
-            }
-
-            vm_runtime_error(vm, "method is not callable");
-            goto handle_error;
-        }
-        OP_CASE(OP_FLUENT_CALL): {
-            u16 name_ci   = READ_U16();
-            u16 arg_count = READ_U16();
-            CandoValue receiver = *(vm->stack_top - arg_count - 1);
-
-            if (!cando_is_object(receiver)) {
-                vm_runtime_error(vm, "fluent call on non-object (got %s)",
-                                 cando_value_type_name((TypeTag)receiver.tag));
+            if (!callable) {
+                cando_value_release(method);
+                vm_runtime_error(vm, "%s method is not callable", is_fluent ? "fluent" : "");
                 goto handle_error;
             }
 
-            CandoValue fname_val = frame->closure->chunk->constants[name_ci];
-            CandoString *fname_cs = fname_val.as.string;
-            CdoString *fkey = cando_bridge_intern_key(fname_cs);
-            CdoObject *fobj = cando_bridge_resolve(vm, (HandleIndex)receiver.as.handle);
-            CdoValue fmethod_cdo = cdo_null();
-            cdo_object_get(fobj, fkey, &fmethod_cdo);
-            cdo_string_release(fkey);
+            /* Shift stack up by 1 to make room for method at base[0].
+             * base layout: [method, receiver, arg1, ..., argN] */
+            if (vm->stack_top >= vm->stack + CANDO_STACK_MAX) {
+                cando_value_release(method);
+                vm_runtime_error(vm, "stack overflow in method call");
+                goto handle_error;
+            }
+            CandoValue *base = vm->stack_top - arg_count - 1;
+            for (int i = arg_count; i >= 0; i--) {
+                base[i + 1] = base[i];
+            }
+            base[0] = method;
+            vm->stack_top++;
+            u32 total_argc = arg_count + 1;
 
-            /* OBJ_FUNCTION (script closure via OP_CLOSURE). */
-            if (cdo_is_function(fmethod_cdo)) {
-                CdoObject    *fn_obj     = fmethod_cdo.as.object;
-                CandoClosure *fn_closure =
-                    (CandoClosure *)fn_obj->fn.script.bytecode;
-                u32 fn_pc = fn_obj->fn.script.param_count;
-                if (vm->frame_count >= CANDO_FRAMES_MAX) {
-                    vm_runtime_error(vm, "call stack overflow");
-                    goto handle_error;
-                }
+            /* Native function (sentinel) */
+            if (IS_NATIVE_FN(method)) {
+                u32 ni = NATIVE_INDEX(method);
+                CandoValue *args = base + 1;
                 SYNC_IP();
-                CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                new_frame->closure   = fn_closure;
-                new_frame->ip        = fn_closure->chunk->code + fn_pc;
-                new_frame->slots     = vm->stack_top - arg_count - 1;
-                new_frame->ret_count = 0;
-                u32 np = (u32)arg_count + 1;
-                if (fn_closure->chunk->local_count > np) {
-                    u32 ne = fn_closure->chunk->local_count - np;
-                    for (u32 i = 0; i < ne; i++) cando_vm_push(vm, cando_null());
+                int ret_count = vm->native_fns[ni](vm, (int)total_argc, args);
+                if (vm->has_error) goto handle_error;
+                if (ret_count < 0) ret_count = 0;
+
+                if (is_fluent) {
+                    /* Discard all return values. */
+                    for (int i = 0; i < ret_count; i++) {
+                        cando_value_release(cando_vm_pop(vm));
+                    }
+                    /* Keep receiver, release method and arguments. */
+                    CandoValue rec = base[1];
+                    cando_value_release(base[0]);
+                    for (u32 i = 2; i < total_argc + 1; i++) cando_value_release(base[i]);
+                    base[0] = rec;
+                    vm->stack_top = base + 1;
+                    vm->last_ret_count = 1;
+                } else {
+                    CandoValue *ret_src = vm->stack_top - ret_count;
+                    for (u32 i = 0; i < total_argc + 1; i++) cando_value_release(base[i]);
+                    for (int i = 0; i < ret_count; i++) base[i] = ret_src[i];
+                    if (ret_count == 0) {
+                        base[0] = cando_null();
+                        vm->stack_top = base + 1;
+                    } else {
+                        vm->stack_top = base + ret_count;
+                    }
+                    vm->last_ret_count = ret_count;
                 }
-                LOAD_FRAME();
                 DISPATCH();
             }
 
-            CandoValue fmethod = cando_bridge_to_cando(vm, fmethod_cdo);
+            /* OBJ_NATIVE object */
+            if (cando_is_object(method)) {
+                CdoObject *mo = cando_bridge_resolve(vm, method.as.handle);
+                if (mo->kind == OBJ_NATIVE) {
+                    CdoValue *cdo_args = (CdoValue *)cando_alloc(total_argc * sizeof(CdoValue));
+                    for (u32 i = 0; i < total_argc; i++) cdo_args[i] = cando_bridge_to_cdo(vm, base[i + 1]);
+                    SYNC_IP();
+                    CdoValue result = mo->fn.native.fn(NULL, cdo_args, total_argc);
+                    for (u32 i = 0; i < total_argc; i++) cdo_value_release(cdo_args[i]);
+                    cando_free(cdo_args);
+                    if (vm->has_error) { cdo_value_release(result); goto handle_error; }
 
-            if (cando_is_number(fmethod)) {
-                /* Legacy path: method stored as a raw PC number (no closure). */
-                u32 pc = (u32)fmethod.as.number;
-                CandoChunk *chunk = frame->closure->chunk;
+                    if (is_fluent) {
+                        cdo_value_release(result);
+                        CandoValue rec = base[1];
+                        cando_value_release(base[0]);
+                        for (u32 i = 2; i < total_argc + 1; i++) cando_value_release(base[i]);
+                        base[0] = rec;
+                        vm->stack_top = base + 1;
+                        vm->last_ret_count = 1;
+                    } else {
+                        CandoValue cv = cando_bridge_to_cando(vm, result);
+                        cdo_value_release(result);
+                        for (u32 i = 0; i < total_argc + 1; i++) cando_value_release(base[i]);
+                        base[0] = cv;
+                        vm->stack_top = base + 1;
+                        vm->last_ret_count = 1;
+                    }
+                    DISPATCH();
+                }
+            }
+
+            /* OBJ_FUNCTION (script closure) */
+            if (cando_is_object(method)) {
+                CdoObject *fn_obj = cando_bridge_resolve(vm, method.as.handle);
+                if (fn_obj->kind == OBJ_FUNCTION && fn_obj->fn.script.bytecode) {
+                    CandoClosure *fn_closure = (CandoClosure *)fn_obj->fn.script.bytecode;
+                    u32 fn_pc = fn_obj->fn.script.param_count;
+                    if (vm->frame_count >= CANDO_FRAMES_MAX) {
+                        vm_runtime_error(vm, "call stack overflow");
+                        goto handle_error;
+                    }
+                    SYNC_IP();
+                    CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
+                    new_frame->closure   = fn_closure;
+                    new_frame->ip        = fn_closure->chunk->code + fn_pc;
+                    new_frame->slots     = base;
+                    new_frame->ret_count = 0;
+                    new_frame->is_fluent = is_fluent;
+                    u32 np = total_argc + 1;
+                    if (fn_closure->chunk->local_count > np) {
+                        u32 ne = fn_closure->chunk->local_count - np;
+                        for (u32 i = 0; i < ne; i++) cando_vm_push(vm, cando_null());
+                    }
+                    LOAD_FRAME();
+                    DISPATCH();
+                }
+            }
+
+            /* Raw PC number */
+            if (cando_is_number(method)) {
+                u32 pc = (u32)method.as.number;
                 if (vm->frame_count >= CANDO_FRAMES_MAX) {
                     vm_runtime_error(vm, "call stack overflow");
                     goto handle_error;
@@ -2366,15 +2312,15 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 SYNC_IP();
                 CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
                 new_frame->closure   = frame->closure;
-                new_frame->ip        = chunk->code + pc;
-                new_frame->slots     = vm->stack_top - arg_count - 1;
+                new_frame->ip        = frame->closure->chunk->code + pc;
+                new_frame->slots     = base;
                 new_frame->ret_count = 0;
+                new_frame->is_fluent = is_fluent;
                 LOAD_FRAME();
                 DISPATCH();
             }
 
-            vm_runtime_error(vm, "fluent method is not callable");
-            goto handle_error;
+            CANDO_UNREACHABLE();
         }
         OP_CASE(OP_RETURN): {
             u16 ret_count = READ_U16();
@@ -2383,6 +2329,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
 
             /* Close any upvalues that pointed into this frame's stack. */
             vm_close_upvalues(vm, frame->slots);
+
+            CandoValue fluent_receiver = cando_null();
+            if (frame->is_fluent) {
+                /* Receiver is at frame->slots[1]. We must retain it. */
+                fluent_receiver = cando_value_copy(frame->slots[1]);
+            }
 
             /* Save return values (they're on top of the stack). */
             CandoValue *ret_start = vm->stack_top - ret_count;
@@ -2400,12 +2352,19 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * stash ALL return values and signal the outer vm_run to stop.  */
             if (vm->thread_stop_frame != ~0u &&
                 vm->frame_count == vm->thread_stop_frame) {
-                vm->thread_result_count = ret_count < CANDO_MAX_THROW_ARGS
-                                          ? ret_count : CANDO_MAX_THROW_ARGS;
-                for (u32 i = 0; i < vm->thread_result_count; i++)
-                    vm->thread_results[i] = cando_value_copy(ret_start[i]);
-                for (u16 i = 0; i < ret_count; i++)
-                    cando_value_release(ret_start[i]);
+                if (frame->is_fluent) {
+                    /* Discard return values, use receiver. */
+                    for (u16 i = 0; i < ret_count; i++) cando_value_release(ret_start[i]);
+                    vm->thread_results[0] = fluent_receiver;
+                    vm->thread_result_count = 1;
+                } else {
+                    vm->thread_result_count = ret_count < CANDO_MAX_THROW_ARGS
+                                              ? ret_count : CANDO_MAX_THROW_ARGS;
+                    for (u32 i = 0; i < vm->thread_result_count; i++)
+                        vm->thread_results[i] = cando_value_copy(ret_start[i]);
+                    for (u16 i = 0; i < ret_count; i++)
+                        cando_value_release(ret_start[i]);
+                }
                 vm->stack_top = frame->slots;
                 return VM_EVAL_DONE;
             }
@@ -2414,9 +2373,14 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * stash the result and signal the outer vm_run to stop. */
             if (vm->eval_stop_frame != 0 &&
                 vm->frame_count == vm->eval_stop_frame) {
-                vm->eval_result = (ret_count > 0) ? ret_start[0] : cando_null();
-                for (u16 i = 1; i < ret_count; i++)
-                    cando_value_release(ret_start[i]);
+                if (frame->is_fluent) {
+                    for (u16 i = 0; i < ret_count; i++) cando_value_release(ret_start[i]);
+                    vm->eval_result = fluent_receiver;
+                } else {
+                    vm->eval_result = (ret_count > 0) ? ret_start[0] : cando_null();
+                    for (u16 i = 1; i < ret_count; i++)
+                        cando_value_release(ret_start[i]);
+                }
                 vm->stack_top = frame->slots;
                 return VM_EVAL_DONE;
             }
@@ -2424,15 +2388,27 @@ static CandoVMResult vm_run(CandoVM *vm) {
             if (vm->frame_count == 0) {
                 /* Returning from the top-level script. */
                 vm->stack_top = vm->stack;
+                cando_value_release(fluent_receiver);
                 return VM_HALT;
             }
 
             /* Restore the caller's frame. */
             CandoValue *new_top = frame->slots; /* old frame base */
-            for (u16 i = 0; i < ret_count; i++) {
-                new_top[i] = ret_start[i];
+
+            if (frame->is_fluent) {
+                /* Discard all return values from the function. */
+                for (u16 i = 0; i < ret_count; i++) {
+                    cando_value_release(ret_start[i]);
+                }
+                new_top[0] = fluent_receiver;
+                vm->stack_top = new_top + 1;
+                vm->last_ret_count = 1;
+            } else {
+                for (u16 i = 0; i < ret_count; i++) {
+                    new_top[i] = ret_start[i];
+                }
+                vm->stack_top = new_top + ret_count;
             }
-            vm->stack_top = new_top + ret_count;
 
             LOAD_FRAME();
             DISPATCH();

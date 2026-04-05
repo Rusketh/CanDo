@@ -60,7 +60,12 @@ CdoValue cando_bridge_to_cdo(CandoVM *vm, CandoValue v) {
         }
         case TYPE_OBJECT: {
             CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
-            return cdo_object_value(obj);
+            switch (obj->kind) {
+                case OBJ_ARRAY:    return cdo_array_value(obj);
+                case OBJ_FUNCTION: return cdo_function_value(obj);
+                case OBJ_NATIVE:   return cdo_native_value(obj);
+                default:           return cdo_object_value(obj);
+            }
         }
         default: return cdo_null();
     }

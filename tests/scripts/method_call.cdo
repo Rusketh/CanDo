@@ -1,0 +1,32 @@
+/* method_call.cdo -- test method calls and fluent calls */
+
+VAR t = { };
+t.v = 100;
+t.meth = function(self) { return self.v; };
+
+print("t:meth():");
+print(t:meth());
+
+print("t::meth():");
+VAR t2 = t::meth();
+print(t2.v);
+
+/* Fluent chaining */
+t.set_v = function(self, new_v) {
+    self.v = new_v;
+    return 123; /* value to be discarded by fluent call */
+};
+
+print("Chained fluent:");
+t::set_v(200)::set_v(300);
+print(t.v);
+
+/* Native method (string library) */
+VAR s = "hello";
+print("s:toUpper():");
+print(s:toUpper());
+
+/* Native fluent (though string is immutable, we check it returns s) */
+VAR s2 = s::toUpper();
+print("Fluent string equal:");
+print(s == s2);

@@ -163,13 +163,13 @@ enables colon-syntax method calls on string literals:
 
 ### How it works
 
-`OP_METHOD_CALL` with a string receiver:
+`OP_METHOD_CALL` and `OP_FLUENT_CALL` with a string receiver:
 
 1. Checks `cando_is_string(receiver)`.
 2. Resolves `vm->string_proto` as a `CdoObject*`.
 3. Looks up the method name in the prototype (full `cdo_object_get` chain).
-4. If the result is a native sentinel, calls it with `(arg_count + 1)` args
-   starting from the callee slot (so `args[0]` = the receiver string).
+4. Shifts the stack up to make the receiver the first argument (slot 1) and the method the callee (slot 0).
+5. Calls the method. If it's a fluent call (`::`), the receiver is returned instead of the method's result.
 
 `OP_GET_FIELD` with a string receiver:
 
