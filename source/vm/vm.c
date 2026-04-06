@@ -878,6 +878,17 @@ static void vm_call_closure_with_args(CandoVM *vm, CdoObject *fn_obj,
  * ===================================================================== */
 int cando_vm_call_value(CandoVM *vm, CandoValue fn_val,
                          CandoValue *args, u32 argc) {
+    /* Support native functions as well. */
+    if (IS_NATIVE_FN(fn_val)) {
+        u32 ni = NATIVE_INDEX(fn_val);
+        if (ni >= vm->native_count) return 0;
+        int ret = vm->native_fns[ni](vm, (int)argc, args);
+        if (vm->has_error) return 0;
+        if (ret < 0) return 0;
+        /* Values are already pushed on stack by native. */
+        return ret;
+    }
+
     if (!cando_is_object(fn_val)) return 0;
     CdoObject *fn_obj = cando_bridge_resolve(vm, fn_val.as.handle);
     if (!fn_obj || fn_obj->kind != OBJ_FUNCTION) return 0;
@@ -1900,15 +1911,20 @@ static CandoVMResult vm_run(CandoVM *vm) {
             } else if (cando_is_object(a)) {
                 /* Check __len meta-method first. */
                 if (g_meta_len) {
+                    CandoValue a_copy = cando_value_copy(a);
                     if (cando_vm_call_meta(vm, a.as.handle,
                                            (struct CdoString *)g_meta_len,
-                                           &a, 1)) {
+                                           &a_copy, 1)) {
                         cando_value_release(a);
+                        cando_value_release(a_copy);
                         DISPATCH();
                     }
                     if (vm->has_error) {
-                        cando_value_release(a); goto handle_error;
+                        cando_value_release(a);
+                        cando_value_release(a_copy);
+                        goto handle_error;
                     }
+                    cando_value_release(a_copy);
                 }
                 CdoObject *obj = cando_bridge_resolve(vm, a.as.handle);
                 u32 len = cdo_object_length(obj);
@@ -2041,6 +2057,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * boundaries via include().                                  */
             u16 ci    = READ_U16();
             u32 fn_pc = (u32)frame->closure->chunk->constants[ci].as.number;
+
             CdoObject  *fn_obj = cdo_function_new(fn_pc,
                                                   (void *)frame->closure,
                                                   NULL, 0);
@@ -2359,7 +2376,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
         OP_CASE(OP_RETURN): {
             u16 ret_count = READ_U16();
-            vm->last_ret_count = (int)ret_count;
+            if (!frame->is_fluent) vm->last_ret_count = (int)ret_count;
             SYNC_IP();
 
             /* Close any upvalues that pointed into this frame's stack. */
@@ -2622,49 +2639,137 @@ static CandoVMResult vm_run(CandoVM *vm) {
             DISPATCH();
         }
         OP_CASE(OP_FOR_OVER_INIT): {
-            /* Function-based iterator.
-             * Stack before: [..., iterator_fn]
-             * Stack after:  [..., iterator_fn, null_state, 0]             */
-            u16 nvar = READ_U16(); CANDO_UNUSED(nvar);
-            /* iterator_fn stays; push null state and call count */
-            PUSH(cando_null());           /* state */
-            PUSH(cando_number(0.0));      /* call_count (unused for now) */
+            /* Lua-style triplet iterator initialization.
+             * MODE: Parser emits OP_SPREAD_RET before this if the last expr was a call.
+             *
+             * A = number of loop variables to bind.
+             * B = bit-packed: count of values provided in the expression | 0x8000 if last was call.
+             *
+             * Protocol:
+             * 1. iterator function
+             * 2. state
+             * 3. initial control variable
+             *
+             * Stack after: [..., iter_fn, state, control, num_vars (const)]
+             */
+            u16 nvar    = READ_U16();
+            u16 packed  = READ_U16();
+            u16 count   = packed & 0x7FFF;
+            bool is_call = (packed & 0x8000) != 0;
+
+            /* Total values on stack from the 'over' expression. */
+            int total = (int)count;
+            if (is_call) {
+                /* last_ret_count already includes the 1 we assumed in count. */
+                total = (int)count - 1 + vm->last_ret_count;
+            }
+            if (total < 1) {
+                PUSH(cando_null()); // iter
+                PUSH(cando_null()); // state
+                PUSH(cando_null()); // control
+            } else if (total == 1) {
+                PUSH(cando_null()); // state
+                PUSH(cando_null()); // control
+            } else if (total == 2) {
+                PUSH(cando_null()); // control
+            } else if (total > 3) {
+                /* Truncate to triplet. */
+                for (int i = 0; i < total - 3; i++) {
+                    cando_value_release(POP());
+                }
+            }
+
+            /* Record the number of loop variables. */
+            PUSH(cando_number((f64)nvar));
+            vm->last_ret_count = 0;
             DISPATCH();
         }
         OP_CASE(OP_FOR_OVER_NEXT): {
-            /* Stack: [..., iterator_fn, state, call_count]
-             * Call iterator_fn(). If result is null, done (pop 3, jump).
-             * Else push result as loop variable.
-             * Only native iterator functions supported.                   */
+            /* Lua-style triplet iterator step.
+             * Stack: [..., iterator_fn, state, control, nvar]
+             *
+             * Action: Call iterator_fn(state, control).
+             * 1. First return value -> new control.
+             * 2. Subsequent values -> loop variables (up to 16).
+             * 3. If new control is NULL -> exit loop.
+             */
             i16 off = (i16)(READ_U16());
-            CandoValue call_count_v = *(vm->stack_top - 1);
-            CandoValue state_v      = *(vm->stack_top - 2);
-            CandoValue iter_fn      = *(vm->stack_top - 3);
-            CANDO_UNUSED(state_v);
+            u16 nvar = (u16)((vm->stack_top - 1)->as.number);
+            CandoValue control = *(vm->stack_top - 2);
+            CandoValue state   = *(vm->stack_top - 3);
+            CandoValue iter    = *(vm->stack_top - 4);
 
-            if (!IS_NATIVE_FN(iter_fn)) {
-                vm_runtime_error(vm, "FOR OVER: only native iterator functions supported");
-                goto handle_error;
-            }
-            u32 ni = NATIVE_INDEX(iter_fn);
-            if (ni >= vm->native_count) {
-                vm_runtime_error(vm, "invalid native iterator index %u", ni);
-                goto handle_error;
-            }
+            /* Prepare arguments for call: [state, control] */
+            CandoValue args[2];
+            args[0] = cando_value_copy(state);
+            args[1] = cando_value_copy(control);
+
             SYNC_IP();
-            int ret = vm->native_fns[ni](vm, 0, NULL);
-            if (vm->has_error) goto handle_error;
-            if (ret < 0) ret = 0;
+            int ret_count = cando_vm_call_value(vm, iter, args, 2);
+            cando_value_release(args[0]);
+            cando_value_release(args[1]);
 
-            if (ret == 0) {
-                /* Iterator exhausted */
-                cando_value_release(POP()); /* call_count */
+            if (vm->has_error) goto handle_error;
+
+            /* Check termination: Lua stops when ALL values in the itorator are null.
+             * OR if it returned 0 values (effectively all null). */
+            bool stop_loop = false;
+            if (ret_count == 0) {
+                stop_loop = true;
+            } else {
+                /* Check if first is null (Lua style) or all are null (requested style) */
+                bool all_null = true;
+                for (int i = 0; i < ret_count; i++) {
+                    if (!cando_is_null(*(vm->stack_top - ret_count + i))) {
+                        all_null = false;
+                        break;
+                    }
+                }
+                if (all_null || cando_is_null(*(vm->stack_top - ret_count))) {
+                    stop_loop = true;
+                }
+            }
+
+            if (stop_loop) {
+                /* Loop finished. Clean up protocol triplet and nvar. */
+                for (int i = 0; i < ret_count; i++) cando_value_release(POP());
+                cando_value_release(POP()); /* nvar */
+                cando_value_release(POP()); /* control */
                 cando_value_release(POP()); /* state */
-                cando_value_release(POP()); /* iter_fn */
+                cando_value_release(POP()); /* iter */
+                vm->spread_extra = 0;
                 ip += off;
             } else {
-                /* Result is on stack_top; just increment call_count */
-                (vm->stack_top - 2 - ret)->as.number = call_count_v.as.number + 1.0;
+                /* 1. Update control value in-place in the triplet. */
+                CandoValue first_ret = (ret_count > 0) ? *(vm->stack_top - ret_count) : cando_null();
+                cando_value_release(*(vm->stack_top - ret_count - 2));
+                *(vm->stack_top - ret_count - 2) = cando_value_copy(first_ret);
+
+                /* 2. Push nvar loop variables.
+                 * Variables come from return values 2..N.
+                 * Pad with null if fewer than nvar.
+                 */
+                CandoValue *ret_base = vm->stack_top - ret_count;
+                CandoValue vars[16];
+
+                for (u16 i = 0; i < nvar && i < 16; i++) {
+                    if (i + 1 < (u16)ret_count) {
+                        vars[i] = cando_value_copy(ret_base[i + 1]);
+                    } else {
+                        vars[i] = cando_null();
+                    }
+                }
+
+                /* Release all return values. */
+                for (int i = 0; i < ret_count; i++) cando_value_release(POP());
+
+                /* Push the variables onto the stack for OP_DEF_LOCAL to pick up.
+                 * We push them in FORWARD order (var1, var2, ..., varN) because
+                 * the parser emits OP_DEF_LOCAL in REVERSE order (pop varN, ..., pop var1).
+                 */
+                for (int i = 0; i < (int)nvar && i < 16; i++) {
+                    PUSH(vars[i]);
+                }
             }
             DISPATCH();
         }

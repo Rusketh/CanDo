@@ -248,7 +248,7 @@ FOR i OF 1 -> 5 {
 }
 ```
 
-Iterate indices with `FOR IN`, values with `FOR OF`:
+Iterate indices with `FOR IN`, values with `FOR OF`. For custom iteration, see [FOR OVER](#for-over-loops).
 
 ```cando
 VAR fruits = ["apple", "banana", "cherry"];
@@ -388,6 +388,32 @@ VAR obj = { x: 1, y: 2 };
 FOR k IN obj { print(k); }   // x  y         (keys)
 FOR v OF obj { print(v); }   // 1  2         (values)
 ```
+
+### FOR OVER Loops
+
+`FOR OVER` implements a Lua-style iterator protocol. It expects the expression to evaluate to a triplet: `(iterator_function, state, initial_control_value)`.
+
+The loop calls the `iterator_function(state, control)` at each step.
+1. The **first** return value becomes the new control value for the next iteration.
+2. **Subsequent** return values are assigned to the loop variables.
+3. The loop terminates when the **first** return value is `NULL`.
+
+```cando
+FUNCTION myPairs(t) {
+    RETURN FUNCTION(s, c) {
+        IF (c >= #s) { RETURN NULL; }
+        VAR next_c = c + 1;
+        RETURN next_c, c, s[c]; // (next_control, loop_var1, loop_var2)
+    }, t, 0;
+}
+
+VAR arr = [10, 20, 30];
+FOR k, v OVER myPairs(arr) {
+    print(k, v); // 0 10, 1 20, 2 30
+}
+```
+
+Multiple loop variables (up to 16) are supported. If the iterator returns fewer values than requested, the extra variables are padded with `NULL`.
 
 ### FOR with Ranges
 

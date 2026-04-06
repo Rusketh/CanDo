@@ -1,0 +1,86 @@
+// Test script for 'over' loops with Lua-style triplet protocol
+
+FUNCTION myPairs(t) {
+    RETURN FUNCTION(s, c) {
+        VAR size = #s;
+        IF (c >= size) {
+            RETURN NULL;
+        }
+        VAR next_c = c + 1;
+        VAR val = s[c];
+        RETURN next_c, c, val;
+    }, t, 0;
+}
+
+print("--- Array iteration ---");
+VAR arr = [10, 20, 30];
+FOR k, v OVER myPairs(arr) {
+    print(k, v);
+}
+
+FUNCTION triplePairs(t) {
+    RETURN FUNCTION(s, c) {
+        VAR size = #s;
+        IF (c >= size) {
+            RETURN NULL;
+        }
+        VAR idx = c;
+        VAR val = s[idx];
+        RETURN c + 1, idx, val, val * 2;
+    }, t, 0;
+}
+
+print("--- Triple variable iteration ---");
+FOR k, v, x OVER triplePairs(arr) {
+    print(k, v, x);
+}
+
+print("--- Short variables (padding with null) ---");
+FOR k OVER myPairs(arr) {
+    print(k);
+}
+
+print("--- Extra variables (filling with null) ---");
+FOR k, v, x OVER myPairs(arr) {
+    print(k, v, x);
+}
+
+print("--- Single return iterator ---");
+FUNCTION simpleIter(n) {
+    // state = n, control = current index
+    RETURN FUNCTION(s, c) {
+        IF (c >= s) { RETURN NULL; }
+        VAR next_c = c + 1;
+        RETURN next_c, next_c * 10;
+    }, n, 0;
+}
+
+FOR val OVER simpleIter(3) {
+    print(val);
+}
+
+print("--- Many return values (16 limit) ---");
+FUNCTION manyIter(n) {
+    RETURN FUNCTION(s, c) {
+        IF (c >= s) { RETURN NULL; }
+        RETURN c + 1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16;
+    }, n, 0;
+}
+
+FOR v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16 OVER manyIter(1) {
+    print(v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16);
+}
+
+print("--- Multi-return padding ---");
+FUNCTION padIter(n) {
+    RETURN FUNCTION(s, c) {
+        IF (c >= s) { RETURN NULL; }
+        RETURN c + 1, "only_one";
+    }, n, 0;
+}
+
+FOR a, b, c OVER padIter(1) {
+    print(a, b, c);
+}
+
+print("DONE");
