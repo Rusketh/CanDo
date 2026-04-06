@@ -51,7 +51,7 @@
 #define CANDO_TRY_MAX          64     /* maximum nested try blocks          */
 #define CANDO_LOOP_MAX         64     /* maximum nested loop depth          */
 #define CANDO_NATIVE_MAX      128     /* maximum registered native functions */
-#define CANDO_MAX_THROW_ARGS   8      /* maximum values in one THROW        */
+#define CANDO_MAX_THROW_ARGS   32     /* maximum values in one THROW        */
 
 /* Forward declaration — CandoClosure is defined below. */
 typedef struct CandoClosure CandoClosure;
