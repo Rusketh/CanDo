@@ -40,6 +40,7 @@
 #include "../core/value.h"
 #include "../core/handle.h"
 #include "../core/memory.h"
+#include "../core/thread_platform.h"
 #include "chunk.h"
 #include "opcodes.h"
 
@@ -185,6 +186,18 @@ typedef struct CandoGlobalEnv {
 } CandoGlobalEnv;
 
 /* =========================================================================
+ * CandoThreadRegistry -- tracks all active spawned threads so the main
+ * thread can wait for them to finish before the process exits.
+ *
+ * Owned by the root VM; child thread VMs share it via pointer.
+ * ===================================================================== */
+typedef struct CandoThreadRegistry {
+    cando_mutex_t mutex;
+    cando_cond_t  cond;     /* signalled each time a thread finishes       */
+    u32           count;    /* number of threads currently alive           */
+} CandoThreadRegistry;
+
+/* =========================================================================
  * CandoVM -- the interpreter state.
  * ===================================================================== */
 typedef enum {
@@ -267,6 +280,11 @@ struct CandoVM {
     CandoModuleEntry *module_cache;       /* heap array of cached entries   */
     u32               module_cache_count; /* number of entries used         */
     u32               module_cache_cap;   /* allocated capacity             */
+
+    /* Active thread registry ------------------------------------------- */
+    /* Root VM owns the registry; child VMs share it via pointer.          */
+    CandoThreadRegistry *thread_registry;       /* shared pointer           */
+    CandoThreadRegistry *thread_registry_owned; /* non-NULL only on root VM */
 };
 
 /* =========================================================================
@@ -456,6 +474,16 @@ bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
  */
 struct CdoThread; /* forward — full type in object/thread.h */
 struct CdoThread *cando_current_thread(void);
+
+/*
+ * cando_vm_wait_all_threads -- block until all threads spawned from this VM
+ * (or any child VM sharing its registry) have finished.
+ *
+ * Call this after cando_vm_exec returns to ensure the process does not exit
+ * while spawned threads are still running.  Has no effect if no threads were
+ * ever spawned.
+ */
+void cando_vm_wait_all_threads(CandoVM *vm);
 
 /*
  * cando_vm_call_value -- call a Cando function value with argc arguments.

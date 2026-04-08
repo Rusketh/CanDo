@@ -31,6 +31,15 @@ CdoThread *cando_current_thread(void) {
     return tl_current_thread;
 }
 
+void cando_vm_wait_all_threads(CandoVM *vm) {
+    CandoThreadRegistry *reg = vm->thread_registry;
+    if (!reg) return;
+    cando_os_mutex_lock(&reg->mutex);
+    while (reg->count > 0)
+        cando_os_cond_wait(&reg->cond, &reg->mutex);
+    cando_os_mutex_unlock(&reg->mutex);
+}
+
 /* =========================================================================
  * Internal forward declarations
  * ===================================================================== */
@@ -78,6 +87,13 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     vm->module_cache_count = 0;
     vm->module_cache_cap   = 0;
 
+    /* Thread registry — root VM owns it. */
+    vm->thread_registry_owned = (CandoThreadRegistry *)cando_alloc(sizeof(CandoThreadRegistry));
+    cando_os_mutex_init(&vm->thread_registry_owned->mutex);
+    cando_os_cond_init(&vm->thread_registry_owned->cond);
+    vm->thread_registry_owned->count = 0;
+    vm->thread_registry = vm->thread_registry_owned;
+
     /* Initialise object layer and handle table (root VM owns both). */
     cdo_object_init();
     vm->handles_owned = (CandoHandleTable *)cando_alloc(sizeof(CandoHandleTable));
@@ -123,6 +139,10 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
     child->module_cache       = NULL;
     child->module_cache_count = 0;
     child->module_cache_cap   = 0;
+
+    /* Share parent's thread registry — child does not own it. */
+    child->thread_registry_owned = NULL;
+    child->thread_registry       = parent->thread_registry;
 
     /* Share parent's handle table and globals — no owned copies. */
     child->handles_owned = NULL;
@@ -204,6 +224,15 @@ void cando_vm_destroy(CandoVM *vm) {
         }
     }
     cando_free(vm->module_cache);
+
+    /* Destroy owned thread registry. */
+    if (vm->thread_registry_owned) {
+        cando_os_cond_destroy(&vm->thread_registry_owned->cond);
+        cando_os_mutex_destroy(&vm->thread_registry_owned->mutex);
+        cando_free(vm->thread_registry_owned);
+        vm->thread_registry_owned = NULL;
+    }
+    vm->thread_registry = NULL;
 }
 
 /* =========================================================================
@@ -666,6 +695,10 @@ CandoVMResult cando_vm_exec(CandoVM *vm, CandoChunk *chunk) {
         return VM_RUNTIME_ERR;
     }
     CandoVMResult result = vm_run(vm);
+    /* Wait for all spawned threads before freeing the closure.
+     * Thread functions share top_closure via fn_obj->fn.script.bytecode,
+     * so it must not be freed while any thread is still executing.        */
+    cando_vm_wait_all_threads(vm);
     cando_closure_free(top_closure);
     return result;
 }
@@ -1013,7 +1046,17 @@ cleanup:
     tl_current_thread = NULL;
     cando_vm_destroy(&child);
     cando_value_release(ta->fn_val);
+    /* Capture the registry pointer before freeing ta. */
+    CandoThreadRegistry *reg = ta->parent_vm->thread_registry;
     cando_free(ta);
+    /* Deregister from the registry last — this may wake the main thread,
+     * so no shared resources may be accessed after the broadcast.        */
+    if (reg) {
+        cando_os_mutex_lock(&reg->mutex);
+        if (reg->count > 0) reg->count--;
+        cando_os_cond_broadcast(&reg->cond);
+        cando_os_mutex_unlock(&reg->mutex);
+    }
     return CANDO_THREAD_RETURN_VAL;
 }
 
@@ -3067,11 +3110,25 @@ static CandoVMResult vm_run(CandoVM *vm) {
             ta->thread            = t;
             ta->thread_handle_val = thread_val;
 
+            /* Register thread in the registry before spawning. */
+            if (vm->thread_registry) {
+                cando_os_mutex_lock(&vm->thread_registry->mutex);
+                vm->thread_registry->count++;
+                cando_os_mutex_unlock(&vm->thread_registry->mutex);
+            }
+
             /* Spawn the OS thread. */
             SYNC_IP();
             if (!cando_os_thread_create(&t->os_thread,
                                         (cando_thread_fn_t)vm_thread_trampoline,
                                         ta)) {
+                /* Undo the registry increment on failure. */
+                if (vm->thread_registry) {
+                    cando_os_mutex_lock(&vm->thread_registry->mutex);
+                    vm->thread_registry->count--;
+                    cando_os_cond_broadcast(&vm->thread_registry->cond);
+                    cando_os_mutex_unlock(&vm->thread_registry->mutex);
+                }
                 cando_value_release(fn_val);
                 cando_value_release(ta->fn_val);
                 cando_free(ta);

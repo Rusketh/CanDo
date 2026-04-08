@@ -6,7 +6,7 @@
  *   thread.sleep(ms)      -- sleep the calling thread for ms milliseconds
  *   thread.id()           -- return the calling thread's numeric ID
  *   thread.done(t)        -- return true if thread t has finished
- *   thread.join(t)        -- block until thread t finishes; return its results
+ *   thread.join(t, ...)   -- block until all threads finish; return merged results
  *   thread.cancel(t)      -- mark thread t as cancelled (best-effort)
  *   thread.state(t)       -- return state string: "pending"|"running"|"done"|"error"|"cancelled"
  *   thread.error(t)       -- return the error value (or null if not errored)
@@ -97,35 +97,75 @@ static int thread_done(CandoVM *vm, int argc, CandoValue *args)
 }
 
 /* =========================================================================
- * thread.join(t) → <return values...>
+ * thread.join(t, ...) → <return values...>
+ * thread.join([t1, t2, ...]) → <return values...>
  *
- * Blocks until thread t finishes.  On success pushes all return values and
- * returns their count (may be 0).  If the thread ended with an error, one
- * null is pushed and 1 is returned.
+ * Blocks until all provided threads finish.  Accepts either:
+ *   - One or more thread handles as separate arguments: thread.join(t1, t2)
+ *   - A single array of thread handles: thread.join([t1, t2])
+ *
+ * Return values from all threads are merged into one stack in argument order.
+ * If a thread ended with an error or is not a valid thread, null is pushed
+ * for that thread's slot.
  * ======================================================================= */
 
-static int thread_join(CandoVM *vm, int argc, CandoValue *args)
-{
-    CdoThread *t = resolve_thread(vm, args, argc, 0);
+static int thread_join_one(CandoVM *vm, CdoThread *t) {
     if (!t) {
         cando_vm_push(vm, cando_null());
         return 1;
     }
-
     cdo_thread_wait(t);
-
     CdoThreadState s = atomic_load(&t->state);
-
     if (s == CDO_THREAD_DONE) {
         for (u32 i = 0; i < t->result_count; i++)
             cando_vm_push(vm, t->results[i]);
-        vm->last_ret_count = (int)t->result_count;
         return (int)t->result_count;
     }
-
     /* ERROR or CANCELLED — push null */
     cando_vm_push(vm, cando_null());
     return 1;
+}
+
+static int thread_join(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc == 0) {
+        cando_vm_push(vm, cando_null());
+        return 1;
+    }
+
+    /* Check if the single argument is an array of threads. */
+    if (argc == 1 && cando_is_object(args[0])) {
+        CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+        if (obj && obj->kind == OBJ_ARRAY) {
+            u32 len = cdo_array_len(obj);
+            if (len == 0) {
+                cando_vm_push(vm, cando_null());
+                return 1;
+            }
+            int total = 0;
+            for (u32 i = 0; i < len; i++) {
+                CdoValue cv = cdo_null();
+                cdo_array_rawget_idx(obj, i, &cv);
+                CandoValue v = cando_bridge_to_cando(vm, cv);
+                CdoThread *t = NULL;
+                if (cando_is_object(v)) {
+                    CdoObject *tobj = cando_bridge_resolve(vm, v.as.handle);
+                    if (tobj && tobj->kind == OBJ_THREAD)
+                        t = (CdoThread *)tobj;
+                }
+                total += thread_join_one(vm, t);
+            }
+            return total;
+        }
+    }
+
+    /* Multiple thread arguments (or single non-array argument). */
+    int total = 0;
+    for (int i = 0; i < argc; i++) {
+        CdoThread *t = resolve_thread(vm, args, argc, i);
+        total += thread_join_one(vm, t);
+    }
+    return total;
 }
 
 /* =========================================================================
