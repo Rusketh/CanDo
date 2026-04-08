@@ -14,4 +14,5 @@ tests/test_vm
 
 # Common OS junk
 .DS_Store
-Thumbs.db*.patch
+Thumbs.db
+*.patch
