@@ -5,6 +5,7 @@ todo.txt
 
 # Compiled binaries
 cando
+cando_asan
 tests/test_core
 tests/test_lexer
 tests/test_object

@@ -61,6 +61,7 @@ int cando_native_print(CandoVM *vm, int argc, CandoValue *args)
         free(s);
     }
     putchar('\n');
+    fflush(stdout);
     return 0;
 }
 

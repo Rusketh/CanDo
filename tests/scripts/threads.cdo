@@ -57,7 +57,7 @@ var r6 = thread.join(t6);
 print(r6);   /* expected: 99 */
 
 /* ----- 7. thread.cancel() on a pending/running thread -------------------- */
-var t7 = thread { thread.sleep(60000); return 1; };
+var t7 = thread { thread.sleep(200); return 1; };
 var cancelled = thread.cancel(t7);
 print(cancelled);   /* expected: true */
 
