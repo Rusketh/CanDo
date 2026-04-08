@@ -3,6 +3,15 @@
 project.txt
 todo.txt
 
+# Compiled binaries
+cando
+tests/test_core
+tests/test_lexer
+tests/test_object
+tests/test_parser
+tests/test_thread
+tests/test_vm
+
 # Common OS junk
 .DS_Store
 Thumbs.db
