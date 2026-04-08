@@ -227,7 +227,7 @@ static const CandoOpFmt s_opcode_fmts[OP_COUNT] = {
     [OP_LOOP]             = OPFMT_A,
     [OP_BREAK]            = OPFMT_A,
     [OP_CONTINUE]         = OPFMT_A,
-    [OP_LOOP_MARK]        = OPFMT_A,
+    [OP_LOOP_MARK]        = OPFMT_A_B,
     [OP_LOOP_END]         = OPFMT_NONE,
     /* Band 11: functions */
     [OP_CLOSURE]          = OPFMT_A,

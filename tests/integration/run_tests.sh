@@ -130,6 +130,9 @@ run_test "lib_sys" "$SCRIPTS/lib_sys.cdo" \
 run_test "lib_enhance" "$SCRIPTS/lib_enhance.cdo" \
     "$(printf "math.log10(100):  2\nmath.exp(0):  1\nstartsWith('hello'):  true\nendsWith('world'):  true\nreplace('world', 'cando'): hello cando\nformat: Hello Alice, age 30")"
 
+run_test "break_continue" "$SCRIPTS/break_continue.cdo" \
+    "$(printf '0\n1\n2\n1\n2\n4\n5\n10\n20\n10\n20\n40\n50\n0\n1\n0\n1\n2\n0\n1\n3\n4\n0\n10\n20\ndone')"
+
 run_smoke "test_array"    "$SCRIPTS/test_array.cdo"
 run_smoke "test_crypto"   "$SCRIPTS/test_crypto.cdo"
 run_smoke "test_datetime" "$SCRIPTS/test_datetime.cdo"

@@ -150,6 +150,46 @@ static void emit_loop(CandoParser *p, u32 loop_start)
     cando_chunk_emit_loop(cur(p), loop_start, emit_line(p));
 }
 
+/* ---- loop-mark helpers -------------------------------------------------
+ * OP_LOOP_MARK carries two operands (OPFMT_A_B, 5 bytes):
+ *   A = break_fwd  -- forward offset from (ip after instruction) to break target
+ *   B = packed     -- bits[13:0]=cont_back (backward offset to continue target)
+ *                     bits[15:14]=loop_type (CANDO_LOOP_*)
+ *
+ * emit_loop_mark: emits the instruction with a placeholder break_fwd (to be
+ *   patched later) and the known cont_back computed from loop_start.
+ *   Returns the patch position of the break_fwd operand.
+ *
+ * patch_loop_mark_break: patches break_fwd so ip+break_fwd lands at the
+ *   current code position (the instruction after the loop).
+ * ----------------------------------------------------------------------- */
+static u32 emit_loop_mark(CandoParser *p, u32 loop_start, u8 loop_type)
+{
+    /* OP_LOOP_MARK is 5 bytes: [op][A_lo][A_hi][B_lo][B_hi]
+     * After executing the instruction, ip = code_len + 5.
+     * cont_back = ip_after - loop_start.                         */
+    u32 mark_pos  = cur(p)->code_len;
+    u32 ip_after  = mark_pos + 5;
+    u16 cont_back = (u16)(ip_after - loop_start);
+    u16 b_packed  = (cont_back & 0x3FFF) | ((u16)loop_type << 14);
+    /* Emit with placeholder 0 for break_fwd; we'll patch it later. */
+    emit_op_ab(p, OP_LOOP_MARK, 0, b_packed);
+    /* The A operand (break_fwd) sits at mark_pos + 1. */
+    return mark_pos + 1;
+}
+
+static void patch_loop_mark_break(CandoParser *p, u32 patch_at)
+{
+    /* break_fwd is relative to ip *after* the full 5-byte instruction.
+     * The A operand is at patch_at; the instruction ends at patch_at + 4
+     * (2 bytes for A + 2 bytes for B already emitted).
+     * ip_after_instr = patch_at - 1 + 5 = patch_at + 4.
+     * break_fwd = code_len - (patch_at + 4).                    */
+    u32 ip_after = patch_at + 4; /* patch_at is 1 past the opcode byte */
+    i16 off      = (i16)((i32)cur(p)->code_len - (i32)ip_after);
+    cando_write_u16(&cur(p)->code[patch_at], (u16)off);
+}
+
 /* ---- constant helpers -------------------------------------------------- */
 
 /* Intern a string constant; returns pool index. */
@@ -1093,6 +1133,11 @@ static const ParseRule *get_rule(CandoTokenType t)
 
 static void parse_precedence(CandoParser *p, Precedence min_prec)
 {
+    /* Each expression parse starts with a clean call-flag so that flags from
+     * a prior expression (e.g. the FOR-OVER iterable) do not leak into the
+     * body and cause spurious OP_TRUNCATE_RET inside comparisons.           */
+    p->last_expr_was_call = false;
+
     advance(p);
     ParseFn prefix = get_rule(p->previous.type)->prefix;
     if (!prefix) {
@@ -1260,13 +1305,21 @@ static void parse_while(CandoParser *p)
     u32 exit_jump = emit_jump(p, OP_JUMP_IF_FALSE);
     emit_op(p, OP_POP);
 
+    /* OP_LOOP_MARK: records break/continue targets and stack depth.
+     * cont_ip  = loop_start (re-evaluate the condition on CONTINUE).
+     * break_ip = patched below to point past the final OP_POP.        */
+    u32 mark_patch = emit_loop_mark(p, loop_start, CANDO_LOOP_WHILE);
+
     scope_begin(p);
     parse_block(p);
     scope_end(p);
 
+    emit_op(p, OP_LOOP_END);
     emit_loop(p, loop_start);
     patch_jump(p, exit_jump);
     emit_op(p, OP_POP);
+    /* break_ip lands here — after the OP_POP that clears the condition. */
+    patch_loop_mark_break(p, mark_patch);
 }
 
 /* --- FOR loop -----------------------------------------------------------
@@ -1344,21 +1397,25 @@ static void parse_for(CandoParser *p)
         u32 exit_jump  = emit_jump(p, OP_FOR_OVER_NEXT);   /* jumps when exhausted */
 
         scope_begin(p);
-        /* OP_FOR_OVER_NEXT pushes variables. Bind them.
-         * Bind variables in reverse order of how they are pushed by NEXT.
-         * NEXT pushes var1, var2, ..., varN.
-         * DEF_LOCAL pops and assigns to the given slot.
-         * So we pop varN first, then varN-1, ..., var1. */
+        /* OP_FOR_OVER_NEXT pushes variables. Bind them in reverse order
+         * (NEXT pushes var1..varN; DEF_LOCAL pops from top = varN first). */
         for (int i = var_count - 1; i >= 0; i--) {
             u32 slot = declare_local(p, vars[i].name, vars[i].len, false);
             emit_op_a(p, OP_DEF_LOCAL, (u16)slot);
         }
 
+        /* LOOP_MARK: cont_ip = loop_start (re-run NEXT), break cleans up
+         * the 4-item iterator triplet via CANDO_LOOP_FOR_OVER handler.   */
+        u32 mark_patch = emit_loop_mark(p, loop_start, CANDO_LOOP_FOR_OVER);
+
         parse_block(p);
         scope_end(p);
 
+        emit_op(p, OP_LOOP_END);
         emit_loop(p, loop_start);
         patch_jump(p, exit_jump);
+        /* break_ip lands here — after the loop. */
+        patch_loop_mark_break(p, mark_patch);
     } else {
         /* If the iterable is a range (->/<-), it produces an array of values.
          * FOR IN over a range should iterate those values, not indices, so
@@ -1380,11 +1437,18 @@ static void parse_for(CandoParser *p)
         u32 slot = declare_local(p, vars[0].name, vars[0].len, false);
         emit_op_a(p, OP_DEF_LOCAL, (u16)slot);
 
+        /* LOOP_MARK: cont_ip = loop_start (re-run FOR_NEXT), break unwinds
+         * the FOR state ([val0..valN, count, index]) via CANDO_LOOP_FOR.  */
+        u32 mark_patch = emit_loop_mark(p, loop_start, CANDO_LOOP_FOR);
+
         parse_block(p);
         scope_end(p);
 
+        emit_op(p, OP_LOOP_END);
         emit_loop(p, loop_start);
         patch_jump(p, exit_jump);
+        /* break_ip lands here — after the loop. */
+        patch_loop_mark_break(p, mark_patch);
     }
 #undef MAX_FOR_VARS
 }

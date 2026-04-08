@@ -2010,35 +2010,68 @@ static CandoVMResult vm_run(CandoVM *vm) {
         OP_CASE(OP_BREAK): {
             u16 depth = READ_U16();
             if (vm->loop_depth == 0 || depth >= vm->loop_depth) {
-                vm_runtime_error(vm, "break depth %u exceeds loop depth %u",
+                vm_runtime_error(vm, "BREAK outside loop (depth %u, loop_depth %u)",
                                  depth, vm->loop_depth);
                 goto handle_error;
             }
-            u32 idx   = vm->loop_depth - 1 - depth;
-            ip        = vm->loop_stack[idx].break_ip;
+            u32 idx  = vm->loop_depth - 1 - depth;
+            u32 save = vm->loop_stack[idx].stack_save;
+            u8  ltyp = vm->loop_stack[idx].loop_type;
+
+            /* Release any temporaries above the saved stack mark. */
+            while ((u32)(vm->stack_top - vm->stack) > save)
+                cando_value_release(POP());
+
+            /* Release the loop's own iterator state left on the stack.
+             * FOR IN/OF:   [..., val0..valN, count, index]  → pop 2 + count
+             * FOR OVER:    [..., iter, state, control, nvar] → pop 4
+             * WHILE:       no extra state                    → pop 0        */
+            if (ltyp == CANDO_LOOP_FOR_OVER) {
+                cando_value_release(POP()); /* nvar    */
+                cando_value_release(POP()); /* control */
+                cando_value_release(POP()); /* state   */
+                cando_value_release(POP()); /* iter    */
+            } else if (ltyp == CANDO_LOOP_FOR) {
+                f64 count = (vm->stack_top - 1)->as.number; /* peek */
+                cando_value_release(POP()); /* index */
+                cando_value_release(POP()); /* count */
+                for (i64 vi = 0; vi < (i64)count; vi++)
+                    cando_value_release(POP());
+            }
+
+            vm->spread_extra = 0;
+            ip = vm->loop_stack[idx].break_ip;
             vm->loop_depth = idx;
             DISPATCH();
         }
         OP_CASE(OP_CONTINUE): {
             u16 depth = READ_U16();
             if (vm->loop_depth == 0 || depth >= vm->loop_depth) {
-                vm_runtime_error(vm, "continue depth %u exceeds loop depth %u",
+                vm_runtime_error(vm, "CONTINUE outside loop (depth %u, loop_depth %u)",
                                  depth, vm->loop_depth);
                 goto handle_error;
             }
             u32 idx = vm->loop_depth - 1 - depth;
             ip      = vm->loop_stack[idx].cont_ip;
+            vm->loop_depth = idx; /* pop frame; LOOP_MARK will re-push on next iteration */
             DISPATCH();
         }
         OP_CASE(OP_LOOP_MARK): {
-            /* Compiler inserts LOOP_MARK with A = forward offset to the
-             * break target.  We record cont_ip = current ip, break_ip =
-             * ip + A after reading the operand.                         */
+            /* Parser emits OP_LOOP_MARK at the top of each loop body.
+             * A = forward offset from (ip after instruction) to break target.
+             * B = packed: bits[13:0] = backward offset to continue target,
+             *             bits[15:14] = loop_type (CANDO_LOOP_*).          */
             u16 break_fwd = READ_U16();
+            u16 b_packed  = READ_U16();
+            u16 cont_back = b_packed & 0x3FFF;
+            u8  loop_type = (u8)((b_packed >> 14) & 0x3);
             CANDO_ASSERT_MSG(vm->loop_depth < CANDO_LOOP_MAX,
                              "loop depth overflow");
-            vm->loop_stack[vm->loop_depth].cont_ip  = ip; /* top of body */
-            vm->loop_stack[vm->loop_depth].break_ip = ip + break_fwd;
+            CandoLoopFrame *lf = &vm->loop_stack[vm->loop_depth];
+            lf->break_ip  = ip + break_fwd;
+            lf->cont_ip   = ip - cont_back;
+            lf->stack_save = (u32)(vm->stack_top - vm->stack);
+            lf->loop_type  = loop_type;
             vm->loop_depth++;
             DISPATCH();
         }
@@ -2434,13 +2467,18 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     vm->eval_result_cap = 1;
                 } else {
                     vm->eval_result_count = ret_count;
-                    vm->eval_result_cap = ret_count > 0 ? ret_count : 1;
-                    vm->eval_results = (CandoValue *)cando_alloc(
-                        vm->eval_result_cap * sizeof(CandoValue));
-                    for (u16 i = 0; i < ret_count; i++)
-                        vm->eval_results[i] = cando_value_copy(ret_start[i]);
-                    for (u16 i = 0; i < ret_count; i++)
-                        cando_value_release(ret_start[i]);
+                    if (ret_count > 0) {
+                        vm->eval_result_cap = ret_count;
+                        vm->eval_results = (CandoValue *)cando_alloc(
+                            ret_count * sizeof(CandoValue));
+                        for (u16 i = 0; i < ret_count; i++)
+                            vm->eval_results[i] = cando_value_copy(ret_start[i]);
+                        for (u16 i = 0; i < ret_count; i++)
+                            cando_value_release(ret_start[i]);
+                    } else {
+                        vm->eval_result_cap = 0;
+                        vm->eval_results    = NULL;
+                    }
                 }
                 vm->stack_top = frame->slots;
                 return VM_EVAL_DONE;
@@ -2708,27 +2746,14 @@ static CandoVMResult vm_run(CandoVM *vm) {
             int ret_count = cando_vm_call_value(vm, iter, args, 2);
             cando_value_release(args[0]);
             cando_value_release(args[1]);
+            vm->spread_extra = 0; /* prevent inner-call contamination */
 
             if (vm->has_error) goto handle_error;
 
-            /* Check termination: Lua stops when ALL values in the itorator are null.
-             * OR if it returned 0 values (effectively all null). */
-            bool stop_loop = false;
-            if (ret_count == 0) {
-                stop_loop = true;
-            } else {
-                /* Check if first is null (Lua style) or all are null (requested style) */
-                bool all_null = true;
-                for (int i = 0; i < ret_count; i++) {
-                    if (!cando_is_null(*(vm->stack_top - ret_count + i))) {
-                        all_null = false;
-                        break;
-                    }
-                }
-                if (all_null || cando_is_null(*(vm->stack_top - ret_count))) {
-                    stop_loop = true;
-                }
-            }
+            /* Lua-style termination: stop when the iterator returns nothing
+             * or its first return value is null (the new control value).    */
+            bool stop_loop = (ret_count == 0) ||
+                             cando_is_null(*(vm->stack_top - ret_count));
 
             if (stop_loop) {
                 /* Loop finished. Clean up protocol triplet and nvar. */

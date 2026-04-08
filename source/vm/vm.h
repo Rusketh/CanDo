@@ -155,8 +155,10 @@ typedef struct CandoTryFrame {
  * CandoLoopFrame -- one entry in the loop-depth stack.
  * ===================================================================== */
 typedef struct CandoLoopFrame {
-    u8 *break_ip;    /* target for OP_BREAK   (end of loop)              */
-    u8 *cont_ip;     /* target for OP_CONTINUE (top of loop body)        */
+    u8  *break_ip;    /* target for OP_BREAK   (end of loop)             */
+    u8  *cont_ip;     /* target for OP_CONTINUE (next iteration check)   */
+    u32  stack_save;  /* value-stack depth at loop body entry (for BREAK)*/
+    u8   loop_type;   /* one of CANDO_LOOP_* above                       */
 } CandoLoopFrame;
 
 /* =========================================================================

@@ -146,17 +146,15 @@ static int native_eval(CandoVM *vm, int argc, CandoValue *args)
     }
 
     if (result_count == 0) {
+        cando_free(results); /* NULL-safe; may have been allocated for a bare RETURN; */
         cando_vm_push(vm, cando_null());
-        vm->last_ret_count = 0;
         return 1;
-    } else {
-        for (u32 i = 0; i < result_count; i++) {
-            cando_vm_push(vm, results[i]);
-        }
-        vm->last_ret_count = (int)result_count;
-        cando_free(results);
-        return (int)result_count;
     }
+
+    for (u32 i = 0; i < result_count; i++)
+        cando_vm_push(vm, results[i]); /* transfer ownership to stack */
+    cando_free(results);               /* free the array wrapper, not the values */
+    return (int)result_count;
 }
 
 void cando_lib_eval_register(CandoVM *vm)

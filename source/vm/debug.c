@@ -178,7 +178,7 @@ u32 cando_instr_disasm(const CandoChunk *chunk, u32 offset, FILE *out) {
         case OP_LEQ_STACK:       return disasm_u16("OP_LEQ_STACK",       offset, chunk, out);
         case OP_GEQ_STACK:       return disasm_u16("OP_GEQ_STACK",       offset, chunk, out);
         case OP_RANGE_CHECK:     return disasm_u16("OP_RANGE_CHECK",     offset, chunk, out);
-        case OP_LOOP_MARK:       return disasm_u16("OP_LOOP_MARK",       offset, chunk, out);
+        case OP_LOOP_MARK:       return disasm_u16_u16("OP_LOOP_MARK",   offset, chunk, out);
         case OP_BREAK:           return disasm_u16("OP_BREAK",           offset, chunk, out);
         case OP_CONTINUE:        return disasm_u16("OP_CONTINUE",        offset, chunk, out);
 
