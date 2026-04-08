@@ -51,7 +51,7 @@
 #define CANDO_TRY_MAX          64     /* maximum nested try blocks          */
 #define CANDO_LOOP_MAX         64     /* maximum nested loop depth          */
 #define CANDO_NATIVE_MAX      128     /* maximum registered native functions */
-#define CANDO_MAX_THROW_ARGS   8      /* maximum values in one THROW        */
+#define CANDO_MAX_THROW_ARGS   32     /* maximum values in one THROW        */
 
 /* Forward declaration — CandoClosure is defined below. */
 typedef struct CandoClosure CandoClosure;
@@ -155,8 +155,10 @@ typedef struct CandoTryFrame {
  * CandoLoopFrame -- one entry in the loop-depth stack.
  * ===================================================================== */
 typedef struct CandoLoopFrame {
-    u8 *break_ip;    /* target for OP_BREAK   (end of loop)              */
-    u8 *cont_ip;     /* target for OP_CONTINUE (top of loop body)        */
+    u8  *break_ip;    /* target for OP_BREAK   (end of loop)             */
+    u8  *cont_ip;     /* target for OP_CONTINUE (next iteration check)   */
+    u32  stack_save;  /* value-stack depth at loop body entry (for BREAK)*/
+    u8   loop_type;   /* one of CANDO_LOOP_* above                       */
 } CandoLoopFrame;
 
 /* =========================================================================

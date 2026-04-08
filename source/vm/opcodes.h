@@ -20,6 +20,14 @@
 #include "../core/common.h"
 
 /* -------------------------------------------------------------------------
+ * Loop type identifiers -- stored in CandoLoopFrame.loop_type and encoded
+ * in bits[15:14] of OP_LOOP_MARK's B operand.
+ * ---------------------------------------------------------------------- */
+#define CANDO_LOOP_WHILE    0   /* WHILE loop                             */
+#define CANDO_LOOP_FOR      1   /* FOR IN / FOR OF loop                   */
+#define CANDO_LOOP_FOR_OVER 2   /* FOR OVER (Lua-style triplet) loop      */
+
+/* -------------------------------------------------------------------------
  * CandoOpcode -- the full Cando instruction set.
  *
  * Ordering within bands is stable; do not reorder without updating
@@ -121,10 +129,9 @@ typedef enum {
      * The VM walks the loop-frame stack A levels up and jumps.           */
     OP_BREAK,
     OP_CONTINUE,
-    /* Loop markers are emitted by the compiler to record the addresses
-     * of continue-target and break-target for a given loop depth.
-     * OP_LOOP_MARK has no runtime effect; it is a NOP with bookkeeping
-     * information used during compilation.                               */
+    /* Loop markers: OP_LOOP_MARK (OPFMT_A_B) records break/continue targets.
+     * A = forward offset to break target; B = packed(cont_back[13:0], type[15:14]).
+     * loop_type values (bits 15-14 of B):                                */
     OP_LOOP_MARK,
     OP_LOOP_END,        /* pop one loop frame                             */
 

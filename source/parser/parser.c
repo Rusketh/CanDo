@@ -150,6 +150,46 @@ static void emit_loop(CandoParser *p, u32 loop_start)
     cando_chunk_emit_loop(cur(p), loop_start, emit_line(p));
 }
 
+/* ---- loop-mark helpers -------------------------------------------------
+ * OP_LOOP_MARK carries two operands (OPFMT_A_B, 5 bytes):
+ *   A = break_fwd  -- forward offset from (ip after instruction) to break target
+ *   B = packed     -- bits[13:0]=cont_back (backward offset to continue target)
+ *                     bits[15:14]=loop_type (CANDO_LOOP_*)
+ *
+ * emit_loop_mark: emits the instruction with a placeholder break_fwd (to be
+ *   patched later) and the known cont_back computed from loop_start.
+ *   Returns the patch position of the break_fwd operand.
+ *
+ * patch_loop_mark_break: patches break_fwd so ip+break_fwd lands at the
+ *   current code position (the instruction after the loop).
+ * ----------------------------------------------------------------------- */
+static u32 emit_loop_mark(CandoParser *p, u32 loop_start, u8 loop_type)
+{
+    /* OP_LOOP_MARK is 5 bytes: [op][A_lo][A_hi][B_lo][B_hi]
+     * After executing the instruction, ip = code_len + 5.
+     * cont_back = ip_after - loop_start.                         */
+    u32 mark_pos  = cur(p)->code_len;
+    u32 ip_after  = mark_pos + 5;
+    u16 cont_back = (u16)(ip_after - loop_start);
+    u16 b_packed  = (cont_back & 0x3FFF) | ((u16)loop_type << 14);
+    /* Emit with placeholder 0 for break_fwd; we'll patch it later. */
+    emit_op_ab(p, OP_LOOP_MARK, 0, b_packed);
+    /* The A operand (break_fwd) sits at mark_pos + 1. */
+    return mark_pos + 1;
+}
+
+static void patch_loop_mark_break(CandoParser *p, u32 patch_at)
+{
+    /* break_fwd is relative to ip *after* the full 5-byte instruction.
+     * The A operand is at patch_at; the instruction ends at patch_at + 4
+     * (2 bytes for A + 2 bytes for B already emitted).
+     * ip_after_instr = patch_at - 1 + 5 = patch_at + 4.
+     * break_fwd = code_len - (patch_at + 4).                    */
+    u32 ip_after = patch_at + 4; /* patch_at is 1 past the opcode byte */
+    i16 off      = (i16)((i32)cur(p)->code_len - (i32)ip_after);
+    cando_write_u16(&cur(p)->code[patch_at], (u16)off);
+}
+
 /* ---- constant helpers -------------------------------------------------- */
 
 /* Intern a string constant; returns pool index. */
@@ -1093,6 +1133,11 @@ static const ParseRule *get_rule(CandoTokenType t)
 
 static void parse_precedence(CandoParser *p, Precedence min_prec)
 {
+    /* Each expression parse starts with a clean call-flag so that flags from
+     * a prior expression (e.g. the FOR-OVER iterable) do not leak into the
+     * body and cause spurious OP_TRUNCATE_RET inside comparisons.           */
+    p->last_expr_was_call = false;
+
     advance(p);
     ParseFn prefix = get_rule(p->previous.type)->prefix;
     if (!prefix) {
@@ -1260,64 +1305,152 @@ static void parse_while(CandoParser *p)
     u32 exit_jump = emit_jump(p, OP_JUMP_IF_FALSE);
     emit_op(p, OP_POP);
 
+    /* OP_LOOP_MARK: records break/continue targets and stack depth.
+     * cont_ip  = loop_start (re-evaluate the condition on CONTINUE).
+     * break_ip = patched below to point past the final OP_POP.        */
+    u32 mark_patch = emit_loop_mark(p, loop_start, CANDO_LOOP_WHILE);
+
     scope_begin(p);
     parse_block(p);
     scope_end(p);
 
+    emit_op(p, OP_LOOP_END);
     emit_loop(p, loop_start);
     patch_jump(p, exit_jump);
     emit_op(p, OP_POP);
+    /* break_ip lands here — after the OP_POP that clears the condition. */
+    patch_loop_mark_break(p, mark_patch);
 }
 
 /* --- FOR loop -----------------------------------------------------------
- * Syntax:  FOR ident IN expr { block }   -- iterate keys / indices
- *          FOR ident OF expr { block }   -- iterate values / elements
+ * Syntax:  FOR ident [, ident]* IN expr { block }   -- iterate keys / indices
+ *          FOR ident [, ident]* OF expr { block }   -- iterate values / elements
+ *          FOR ident [, ident]* OVER expr [, expr]* { block } -- Lua-style iterator
  *
- * Uses OP_FOR_INIT / OP_FOR_NEXT for proper iterator protocol.
- * The loop variable is bound as a local inside the loop scope.
+ * Uses OP_FOR_INIT / OP_FOR_NEXT (for IN/OF) or OP_FOR_OVER_INIT / OP_FOR_OVER_NEXT
+ * (for OVER) for proper iterator protocol.
+ * The loop variables are bound as locals inside the loop scope.
  */
 static void parse_for(CandoParser *p)
 {
-    consume(p, TOK_IDENT, "expected loop variable name");
-    const char *var_name = p->previous.start;
-    u32         var_len  = p->previous.length;
+#define MAX_FOR_VARS 16
+    struct { const char *name; u32 len; } vars[MAX_FOR_VARS];
+    int var_count = 0;
 
+    do {
+        consume(p, TOK_IDENT, "expected loop variable name");
+        if (var_count < MAX_FOR_VARS) {
+            vars[var_count].name = p->previous.start;
+            vars[var_count].len  = p->previous.length;
+            var_count++;
+        } else {
+            error(p, "too many loop variables");
+        }
+    } while (match(p, TOK_COMMA));
+
+    bool is_over = false;
     bool keys_mode = false;
     if (match(p, TOK_IN)) {
         keys_mode = true;
-    } else if (!match(p, TOK_OF) && !match(p, TOK_OVER)) {
-        error_current(p, "expected IN, OF, or OVER after loop variable");
+    } else if (match(p, TOK_OF)) {
+        keys_mode = false;
+    } else if (match(p, TOK_OVER)) {
+        is_over = true;
+    } else {
+        error_current(p, "expected IN, OF, or OVER after loop variable(s)");
         return;
     }
 
-    parse_expression(p);   /* iterable — now on stack */
-    consume(p, TOK_LBRACE, "expected '{' after FOR iterable");
-
-    /* If the iterable is a range (->/<-), it produces an array of values.
-     * FOR IN over a range should iterate those values, not indices, so
-     * override to OF mode (values) regardless of IN/OF keyword. */
-    if (keys_mode && cur(p)->code_len > 0) {
-        u8 last_op = cur(p)->code[cur(p)->code_len - 1];
-        if (last_op == (u8)OP_RANGE_ASC || last_op == (u8)OP_RANGE_DESC)
-            keys_mode = false;
+    if (!is_over && var_count > 1) {
+        error(p, "only 'over' loops support multiple loop variables");
     }
 
-    /* OP_FOR_INIT mode: 1 = keys (IN), 0 = values (OF/OVER) */
-    emit_op_a(p, OP_FOR_INIT, keys_mode ? 1 : 0);
+    /* For 'over' loops, the expression should be able to return multiple values (triplet). */
+    bool last_was_call = false;
+    u32  expr_count = 0;
+    if (is_over) {
+        p->call_depth++;
+        do {
+            p->last_expr_was_call = false;
+            p->last_multi_push    = 1;
+            parse_expression(p);
+            last_was_call = p->last_expr_was_call;
+            if (last_was_call) emit_op(p, OP_SPREAD_RET);
+            expr_count += p->last_multi_push;
+            if (expr_count >= 3) break;
+        } while (match(p, TOK_COMMA));
+        p->call_depth--;
+    } else {
+        parse_expression(p);   /* iterable — now on stack */
+    }
 
-    u32 loop_start = cur(p)->code_len;
-    u32 exit_jump  = emit_jump(p, OP_FOR_NEXT);   /* jumps when exhausted */
+    consume(p, TOK_LBRACE, "expected '{' after FOR iterable");
 
-    scope_begin(p);
-    /* OP_FOR_NEXT pushed the next element; bind it as a local.          */
-    u32 slot = declare_local(p, var_name, var_len, false);
-    emit_op_a(p, OP_DEF_LOCAL, (u16)slot);
+    if (is_over) {
+        /* OP_FOR_OVER_INIT: A = number of variables to bind,
+         * B = count of values pushed (top bit set if last expr was a call). */
+        u16 b_val = (u16)(expr_count & 0x7FFF);
+        if (last_was_call) b_val |= 0x8000;
+        emit_op_ab(p, OP_FOR_OVER_INIT, (u16)var_count, b_val);
 
-    parse_block(p);
-    scope_end(p);
+        u32 loop_start = cur(p)->code_len;
+        u32 exit_jump  = emit_jump(p, OP_FOR_OVER_NEXT);   /* jumps when exhausted */
 
-    emit_loop(p, loop_start);
-    patch_jump(p, exit_jump);
+        scope_begin(p);
+        /* OP_FOR_OVER_NEXT pushes variables. Bind them in reverse order
+         * (NEXT pushes var1..varN; DEF_LOCAL pops from top = varN first). */
+        for (int i = var_count - 1; i >= 0; i--) {
+            u32 slot = declare_local(p, vars[i].name, vars[i].len, false);
+            emit_op_a(p, OP_DEF_LOCAL, (u16)slot);
+        }
+
+        /* LOOP_MARK: cont_ip = loop_start (re-run NEXT), break cleans up
+         * the 4-item iterator triplet via CANDO_LOOP_FOR_OVER handler.   */
+        u32 mark_patch = emit_loop_mark(p, loop_start, CANDO_LOOP_FOR_OVER);
+
+        parse_block(p);
+        scope_end(p);
+
+        emit_op(p, OP_LOOP_END);
+        emit_loop(p, loop_start);
+        patch_jump(p, exit_jump);
+        /* break_ip lands here — after the loop. */
+        patch_loop_mark_break(p, mark_patch);
+    } else {
+        /* If the iterable is a range (->/<-), it produces an array of values.
+         * FOR IN over a range should iterate those values, not indices, so
+         * override to OF mode (values) regardless of IN/OF keyword. */
+        if (keys_mode && cur(p)->code_len > 0) {
+            u8 last_op = cur(p)->code[cur(p)->code_len - 1];
+            if (last_op == (u8)OP_RANGE_ASC || last_op == (u8)OP_RANGE_DESC)
+                keys_mode = false;
+        }
+
+        /* OP_FOR_INIT mode: 1 = keys (IN), 0 = values (OF) */
+        emit_op_a(p, OP_FOR_INIT, keys_mode ? 1 : 0);
+
+        u32 loop_start = cur(p)->code_len;
+        u32 exit_jump  = emit_jump(p, OP_FOR_NEXT);   /* jumps when exhausted */
+
+        scope_begin(p);
+        /* OP_FOR_NEXT pushed the next element; bind it as a local.          */
+        u32 slot = declare_local(p, vars[0].name, vars[0].len, false);
+        emit_op_a(p, OP_DEF_LOCAL, (u16)slot);
+
+        /* LOOP_MARK: cont_ip = loop_start (re-run FOR_NEXT), break unwinds
+         * the FOR state ([val0..valN, count, index]) via CANDO_LOOP_FOR.  */
+        u32 mark_patch = emit_loop_mark(p, loop_start, CANDO_LOOP_FOR);
+
+        parse_block(p);
+        scope_end(p);
+
+        emit_op(p, OP_LOOP_END);
+        emit_loop(p, loop_start);
+        patch_jump(p, exit_jump);
+        /* break_ip lands here — after the loop. */
+        patch_loop_mark_break(p, mark_patch);
+    }
+#undef MAX_FOR_VARS
 }
 
 /* --- TRY / CATCH / FINALY -----------------------------------------------
@@ -1420,17 +1553,29 @@ static void parse_function_expr(CandoParser *p, bool can_assign)
     u32 skip_body = emit_jump(p, OP_JUMP);
     u32 fn_start  = cur(p)->code_len;
 
-    scope_begin(p);
-    /* Slot 0 is the function value in the call frame; reserve it with a
-     * sentinel local so scope_end cleans up the slot numbering correctly. */
+    /* Save outer scope state to reset for function body (flat chunk model). */
+    CandoLocal saved_locals[CANDO_LOCAL_MAX];
+    u32        saved_count = p->local_count;
+    int        saved_depth = p->scope_depth;
+    memcpy(saved_locals, p->locals, sizeof(CandoLocal) * saved_count);
+
+    p->local_count = 0;
+    p->scope_depth = 1;
+
+    /* Slot 0 is the function value in the call frame. */
     declare_local(p, "", 0, false);
     for (u16 i = 0; i < arity; i++)
         declare_local(p, param_names[i], param_lens[i], false);
+
     parse_block(p);
-    scope_end(p);
 
     emit_op(p, OP_NULL);
     emit_op_a(p, OP_RETURN, 1);
+
+    /* Restore outer scope state. */
+    p->local_count = saved_count;
+    p->scope_depth = saved_depth;
+    memcpy(p->locals, saved_locals, sizeof(CandoLocal) * saved_count);
 
     patch_jump(p, skip_body);
 
@@ -1441,11 +1586,6 @@ static void parse_function_expr(CandoParser *p, bool can_assign)
 
 /* --- FUNCTION declaration -----------------------------------------------
  * Syntax:  FUNCTION name(params) { block }
- *
- * Emits a jump over the body, then the body ending with OP_RETURN.
- * The function's start PC is stored as a number constant and defined
- * as a global variable.  Parameters are tracked but not yet bound to
- * local slots in this flat-chunk model.
  */
 static void parse_function(CandoParser *p)
 {
@@ -1475,20 +1615,30 @@ static void parse_function(CandoParser *p)
 
     /* Jump over the body at definition time. */
     u32 skip_body = emit_jump(p, OP_JUMP);
-
     u32 fn_start = cur(p)->code_len;
 
-    scope_begin(p);
-    /* Slot 0 is the function value in the call frame; reserve it with a
-     * sentinel local so scope_end cleans up the slot numbering correctly. */
-    declare_local(p, "", 0, false);
+    /* Save and reset scope for function body. */
+    CandoLocal saved_locals[CANDO_LOCAL_MAX];
+    u32        saved_count = p->local_count;
+    int        saved_depth = p->scope_depth;
+    memcpy(saved_locals, p->locals, sizeof(CandoLocal) * saved_count);
+
+    p->local_count = 0;
+    p->scope_depth = 1;
+
+    declare_local(p, "", 0, false); /* slot 0 */
     for (u16 i = 0; i < arity; i++)
         declare_local(p, param_names[i], param_lens[i], false);
+
     parse_block(p);
-    scope_end(p);
 
     emit_op(p, OP_NULL);          /* implicit return null */
     emit_op_a(p, OP_RETURN, 1);
+
+    /* Restore outer scope state. */
+    p->local_count = saved_count;
+    p->scope_depth = saved_depth;
+    memcpy(p->locals, saved_locals, sizeof(CandoLocal) * saved_count);
 
     patch_jump(p, skip_body);
 

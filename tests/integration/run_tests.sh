@@ -73,6 +73,9 @@ run_test "while" "$SCRIPTS/while.cdo" \
 run_test "for_loops" "$SCRIPTS/for_loops.cdo" \
     "$(printf '1\n2\n3\n4\n3\n2\n1\n100\n200\n300\n15\n11\n12\n21\n22\n1\n4\n9')"
 
+run_test "for_over" "$SCRIPTS/for_over.cdo" \
+    "$(printf -- '--- Array iteration ---\n0 10\n1 20\n2 30\n--- Triple variable iteration ---\n0 10 20\n1 20 40\n2 30 60\n--- Short variables (padding with null) ---\n0\n1\n2\n--- Extra variables (filling with null) ---\n0 10 null\n1 20 null\n2 30 null\n--- Single return iterator ---\n10\n20\n30\n--- Many return values (16 limit) ---\n1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16\n--- Multi-return padding ---\nonly_one null null\nDONE')"
+
 run_test "functions" "$SCRIPTS/functions.cdo" \
     "$(printf 'hello from function\n7\n30\n0\n1\n8\n3\n7\n12\n5\n8')"
 
@@ -126,6 +129,9 @@ run_test "lib_sys" "$SCRIPTS/lib_sys.cdo" \
 
 run_test "lib_enhance" "$SCRIPTS/lib_enhance.cdo" \
     "$(printf "math.log10(100):  2\nmath.exp(0):  1\nstartsWith('hello'):  true\nendsWith('world'):  true\nreplace('world', 'cando'): hello cando\nformat: Hello Alice, age 30")"
+
+run_test "break_continue" "$SCRIPTS/break_continue.cdo" \
+    "$(printf '0\n1\n2\n1\n2\n4\n5\n10\n20\n10\n20\n40\n50\n0\n1\n0\n1\n2\n0\n1\n3\n4\n0\n10\n20\ndone')"
 
 run_smoke "test_array"    "$SCRIPTS/test_array.cdo"
 run_smoke "test_crypto"   "$SCRIPTS/test_crypto.cdo"

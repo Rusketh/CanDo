@@ -1,0 +1,69 @@
+/* break_continue.cdo -- BREAK and CONTINUE in WHILE, FOR IN/OF, FOR OVER */
+
+/* --- WHILE BREAK --- */
+VAR i = 0;
+WHILE i < 10 {
+    IF (i == 3) { BREAK; }
+    print(i);
+    i = i + 1;
+}
+
+/* --- WHILE CONTINUE --- */
+VAR j = 0;
+WHILE j < 5 {
+    j = j + 1;
+    IF (j == 3) { CONTINUE; }
+    print(j);
+}
+
+/* --- FOR OF BREAK --- */
+VAR arr = [10, 20, 30, 40, 50];
+FOR v OF arr {
+    IF (v == 30) { BREAK; }
+    print(v);
+}
+
+/* --- FOR OF CONTINUE --- */
+FOR v OF arr {
+    IF (v == 30) { CONTINUE; }
+    print(v);
+}
+
+/* --- FOR IN BREAK --- */
+FOR k IN arr {
+    IF (k == 2) { BREAK; }
+    print(k);
+}
+
+/* --- FOR OVER BREAK --- */
+FUNCTION counter(n) {
+    RETURN FUNCTION(s, c) {
+        IF (c >= s) { RETURN NULL; }
+        RETURN c + 1, c;
+    }, n, 0;
+}
+
+FOR v OVER counter(5) {
+    IF (v == 3) { BREAK; }
+    print(v);
+}
+
+/* --- FOR OVER CONTINUE --- */
+FOR v OVER counter(5) {
+    IF (v == 2) { CONTINUE; }
+    print(v);
+}
+
+/* --- Nested BREAK (inner only) --- */
+VAR outer = 0;
+WHILE outer < 3 {
+    VAR inner = 0;
+    WHILE inner < 3 {
+        IF (inner == 1) { BREAK; }
+        print(outer * 10 + inner);
+        inner = inner + 1;
+    }
+    outer = outer + 1;
+}
+
+print("done");
