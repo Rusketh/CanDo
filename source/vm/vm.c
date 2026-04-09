@@ -72,6 +72,7 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     vm->error_msg[0]    = '\0';
     vm->last_ret_count  = 0;
     vm->spread_extra    = 0;
+    vm->array_extra     = 0;
     vm->eval_stop_frame = ~0u;
     vm->eval_results     = NULL;
     vm->eval_result_count = 0;
@@ -125,6 +126,7 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
     child->error_msg[0]    = '\0';
     child->last_ret_count  = 0;
     child->spread_extra    = 0;
+    child->array_extra     = 0;
     child->eval_stop_frame = ~0u;
     child->eval_results     = NULL;
     child->eval_result_count = 0;
@@ -1175,6 +1177,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         [OP_MASK_SKIP]        = &&lbl_OP_MASK_SKIP,
         [OP_MASK_APPLY]       = &&lbl_OP_MASK_APPLY,
         [OP_SPREAD_RET]       = &&lbl_OP_SPREAD_RET,
+        [OP_ARRAY_SPREAD]     = &&lbl_OP_ARRAY_SPREAD,
         [OP_TRUNCATE_RET]     = &&lbl_OP_TRUNCATE_RET,
         [OP_EQ_SPREAD]        = &&lbl_OP_EQ_SPREAD,
         [OP_NEQ_SPREAD]       = &&lbl_OP_NEQ_SPREAD,
@@ -1800,13 +1803,18 @@ static CandoVMResult vm_run(CandoVM *vm) {
             DISPATCH();
         }
         OP_CASE(OP_NEW_ARRAY): {
-            u16 n = READ_U16();
+            u16 static_n = READ_U16();
+            /* array_extra accumulates extra elements from ...spread and
+             * masked multi-return calls inside the array literal.        */
+            int _arr_total = (int)static_n + vm->array_extra;
+            u32 n = _arr_total < 0 ? 0u : (u32)_arr_total;
+            vm->array_extra = 0;
             CandoValue arr_val = cando_bridge_new_array(vm);
             if (n > 0) {
                 CdoObject *arr = cando_bridge_resolve(vm, arr_val.as.handle);
                 /* Items are on the stack: stack_top-n .. stack_top-1 */
                 CandoValue *base = vm->stack_top - n;
-                for (u16 i = 0; i < n; i++) {
+                for (u32 i = 0; i < n; i++) {
                     CdoValue item = cando_bridge_to_cdo(vm, base[i]);
                     cdo_array_push(arr, item);
                     cando_value_release(base[i]);
@@ -2143,8 +2151,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
         OP_CASE(OP_CALL): {
             u16 static_argc = READ_U16();
-            /* Apply accumulated spread_extra from multi-return arguments. */
-            u32 arg_count = (u32)static_argc + (u32)(vm->spread_extra > 0 ? vm->spread_extra : 0);
+            /* Apply accumulated spread_extra from multi-return arguments.
+             * spread_extra can be negative when a masked call keeps fewer
+             * values than its compile-time slot count; clamp to zero so
+             * arg_count never underflows.                                */
+            int _total = (int)static_argc + vm->spread_extra;
+            u32 arg_count = _total < 0 ? 0u : (u32)_total;
             vm->spread_extra = 0;
             /* The function value sits just below the arguments. */
             CandoValue callee = *(vm->stack_top - arg_count - 1);
@@ -2176,14 +2188,17 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     callee_slot[i] = ret_src[i];
                 /* Normalize: ensure at least 1 value on the stack so that
                  * expression-statement OP_POP always finds something to pop.
-                 * A void native call evaluates to null in expression context. */
+                 * A void native call evaluates to null in expression context.
+                 * Set last_ret_count = 1 in this case so OP_SPREAD_RET does
+                 * not produce a negative spread_extra for void callee args.  */
                 if (ret_count == 0) {
                     callee_slot[0] = cando_null();
                     vm->stack_top = callee_slot + 1;
+                    vm->last_ret_count = 1;
                 } else {
                     vm->stack_top = callee_slot + ret_count;
+                    vm->last_ret_count = ret_count;
                 }
-                vm->last_ret_count = ret_count;
                 DISPATCH();
             }
 
@@ -2576,7 +2591,9 @@ static CandoVMResult vm_run(CandoVM *vm) {
             DISPATCH();
         }
         OP_CASE(OP_UNPACK): {
-            /* Pop top value. If array, push all elements. Else push it.  */
+            /* Pop top value. If array, push all elements. Else push it.
+             * Sets last_ret_count to the number of values pushed so that
+             * a following OP_ARRAY_SPREAD can accumulate the extra count. */
             CandoValue v = POP();
             if (cando_is_object(v)) {
                 CdoObject *obj = cando_bridge_resolve(vm, (HandleIndex)v.as.handle);
@@ -2588,11 +2605,14 @@ static CandoVMResult vm_run(CandoVM *vm) {
                         PUSH(cando_bridge_to_cando(vm, cv));
                     }
                     cando_value_release(v);
+                    vm->last_ret_count = (int)len;
                 } else {
                     PUSH(v);
+                    vm->last_ret_count = 1;
                 }
             } else {
                 PUSH(v);
+                vm->last_ret_count = 1;
             }
             DISPATCH();
         }
@@ -3172,28 +3192,43 @@ static CandoVMResult vm_run(CandoVM *vm) {
             DISPATCH();
         }
         OP_CASE(OP_MASK_APPLY): {
-            /* Apply a bitmask to the top `count` stack values from a
-             * multi-return function call.  bit i=1 → keep, bit i=0 → skip.
-             * Values are indexed from the bottom of the window (bit 0 = the
-             * value that was pushed first / sits deepest).               */
-            u16 count   = READ_U16();
+            /* Apply a bitmask to the return values from the last function
+             * call.  n_bits is the number of explicit mask positions; the
+             * actual value count comes from last_ret_count so mismatched
+             * arities never read garbage off the stack.
+             *   bit i=1 → keep,  bit i=0 → skip.
+             *   Values at positions >= n_bits are always skipped.
+             * last_ret_count is updated to the kept count so a following
+             * OP_SPREAD_RET propagates the real number to OP_CALL.       */
+            u16 n_bits  = READ_U16();
             u16 bitmask = READ_U16();
+            int count   = vm->last_ret_count;
             CandoValue *base = vm->stack_top - count;
             int out = 0;
-            for (int i = 0; i < (int)count; i++) {
-                if ((bitmask >> i) & 1) {
+            for (int i = 0; i < count; i++) {
+                bool keep = (i < (int)n_bits) && ((bitmask >> i) & 1);
+                if (keep) {
                     base[out++] = base[i]; /* keep: compact in place */
                 } else {
                     cando_value_release(base[i]); /* skip: release */
                 }
             }
             vm->stack_top = base + out;
+            vm->last_ret_count = out;
             DISPATCH();
         }
 
         /* ── Band 18: Multi-return spreading ────────────────────────── */
         OP_CASE(OP_SPREAD_RET): {
             vm->spread_extra += vm->last_ret_count - 1;
+            DISPATCH();
+        }
+        OP_CASE(OP_ARRAY_SPREAD): {
+            /* Like OP_SPREAD_RET but accumulates into array_extra, which
+             * is consumed by OP_NEW_ARRAY.  This keeps array spread counts
+             * separate from function-call spread counts so OP_CALL inside
+             * an array literal does not consume the array's extra count.  */
+            vm->array_extra += vm->last_ret_count - 1;
             DISPATCH();
         }
 
