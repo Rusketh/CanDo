@@ -192,6 +192,7 @@ typedef enum {
 
     /* ===== Band 18: Multi-return spreading ============================== */
     OP_SPREAD_RET,      /* adjust spread_extra by last_ret_count - 1      */
+    OP_ARRAY_SPREAD,    /* adjust array_extra by last_ret_count - 1       */
 
     /* ===== Band 19: Call-result comparison ============================== */
     /* OP_TRUNCATE_RET: pop all but the first return value from the last

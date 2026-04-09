@@ -257,6 +257,7 @@ struct CandoVM {
     /* Multi-return spreading ------------------------------------------- */
     int            last_ret_count; /* actual return count from last call  */
     int            spread_extra;   /* accumulated extra args from spreading */
+    int            array_extra;    /* accumulated extra elements for arrays */
 
     /* Eval re-entrancy ------------------------------------------------- */
     u32            eval_stop_frame;   /* frame_count at which OP_RETURN stops */

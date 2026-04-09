@@ -134,6 +134,7 @@ static const char *const s_opcode_names[OP_COUNT] = {
     [OP_MASK_APPLY]       = "OP_MASK_APPLY",
     /* Band 18: multi-return spreading */
     [OP_SPREAD_RET]       = "OP_SPREAD_RET",
+    [OP_ARRAY_SPREAD]     = "OP_ARRAY_SPREAD",
     /* Band 19: call-result comparison */
     [OP_TRUNCATE_RET]     = "OP_TRUNCATE_RET",
     [OP_EQ_SPREAD]        = "OP_EQ_SPREAD",
@@ -275,6 +276,7 @@ static const CandoOpFmt s_opcode_fmts[OP_COUNT] = {
     [OP_MASK_APPLY]       = OPFMT_A_B,
     /* Band 18: multi-return spreading */
     [OP_SPREAD_RET]       = OPFMT_NONE,
+    [OP_ARRAY_SPREAD]     = OPFMT_NONE,
     /* Band 19: call-result comparison */
     [OP_TRUNCATE_RET]     = OPFMT_NONE,
     [OP_EQ_SPREAD]        = OPFMT_NONE,

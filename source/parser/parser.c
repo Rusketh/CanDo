@@ -432,9 +432,28 @@ static void parse_array_literal(CandoParser *p, bool can_assign)
         p->call_depth++;
         do {
             if (check(p, TOK_RBRACKET)) break;
+            p->last_multi_push      = 1;
+            p->last_expr_was_call   = false;
+            p->last_expr_was_unpack = false;
             parse_expression(p);
-            if (count == 0xFFFF) { error(p, "too many array elements"); break; }
-            count++;
+            if (p->last_expr_was_unpack) {
+                /* ...arr spread: OP_UNPACK expands the array onto the stack
+                 * and sets last_ret_count; OP_ARRAY_SPREAD accumulates the
+                 * extra elements in array_extra (separate from spread_extra
+                 * so subsequent function calls do not consume it).       */
+                emit_op(p, OP_UNPACK);
+                emit_op(p, OP_ARRAY_SPREAD);
+                if (count == 0xFFFF) { error(p, "too many array elements"); break; }
+                count++;
+            } else {
+                /* Literal, masked list, function call, or other expression.
+                 * For masks: last_multi_push = compile-time pass count.
+                 * For calls: last_multi_push = 1 (single slot; multi-return
+                 * function calls in arrays keep existing behaviour).     */
+                u16 add = (u16)p->last_multi_push;
+                if ((u32)count + add > 0xFFFF) { error(p, "too many array elements"); break; }
+                count += add;
+            }
         } while (match(p, TOK_COMMA));
         p->call_depth--;
     }
@@ -491,7 +510,9 @@ static void parse_unpack(CandoParser *p, bool can_assign)
 {
     (void)can_assign;
     parse_precedence(p, PREC_UNARY);
-    p->last_expr_was_unpack = p->last_expr_was_call;
+    /* Mark as unpack regardless of whether the operand was a call so that
+     * ...variable spread works in array literals as well as ...func().  */
+    p->last_expr_was_unpack = true;
 }
 
 /* =========================================================================
@@ -710,10 +731,22 @@ static void parse_call(CandoParser *p, bool can_assign)
             if (check(p, TOK_RPAREN)) break;
             p->last_expr_was_call   = false;
             p->last_expr_was_unpack = false;
+            p->last_multi_push      = 1;
             parse_expression(p);
-            if (p->last_expr_was_call) emit_op(p, OP_SPREAD_RET);
-            if (argc == 0xFFFF) { error(p, "too many arguments"); break; }
-            argc++;
+            if (p->last_expr_was_call) {
+                /* Function call (including single-call masked calls): spread
+                 * all return values; OP_SPREAD_RET + runtime spread_extra
+                 * communicates the actual count to OP_CALL.              */
+                emit_op(p, OP_SPREAD_RET);
+                if (argc == 0xFFFF) { error(p, "too many arguments"); break; }
+                argc++;
+            } else {
+                /* Non-call expression (literal, masked list, etc.): use the
+                 * compile-time push count set by parse_mask_emit.        */
+                u16 add = (u16)p->last_multi_push;
+                if ((u32)argc + add > 0xFFFF) { error(p, "too many arguments"); break; }
+                argc += add;
+            }
         } while (match(p, TOK_COMMA));
         p->call_depth--;
     }
@@ -803,20 +836,33 @@ static void parse_mask_emit(CandoParser *p, bool *bits, u32 n)
     }
 
     u32 pass_count = 0;
+    /* Save the outer list depth before we enter our own sub-expression
+     * context.  If outer_depth > 0 (inside an array literal, a function
+     * call's argument list, etc.) any comma that follows the first
+     * expression belongs to the outer list, not to the mask.  In that
+     * situation the mask must always be treated as a single-expression
+     * mask rather than a comma-separated value list.                     */
+    u32 outer_depth = p->call_depth;
     p->call_depth++;
 
     /* Parse the first expression and detect whether it is a sole function
      * call that spreads multiple return values onto the stack.  In that
-     * case there will be no comma following the call, and we emit a single
-     * OP_MASK_APPLY rather than per-value PASS/SKIP ops.                 */
+     * case there will be no comma following the call (or we are inside an
+     * outer list where the comma belongs to the outer list), and we emit
+     * a single OP_MASK_APPLY rather than per-value PASS/SKIP ops.        */
     p->last_expr_was_call = false;
     parse_precedence(p, PREC_ASSIGN);
-    bool single_call = p->last_expr_was_call && !check(p, TOK_COMMA);
+    /* In an outer list context a trailing comma is the list separator —
+     * not a mask value separator — so treat the mask as single-expression. */
+    bool no_list_comma = (outer_depth > 0) || !check(p, TOK_COMMA);
+    bool single_call   = p->last_expr_was_call && no_list_comma;
 
     if (single_call) {
-        /* The function already pushed `n` return values onto the stack.
+        /* The function already pushed its return values onto the stack.
          * Build a bitmask (bit i=1 → keep, 0 → skip) and emit one
-         * OP_MASK_APPLY instruction to filter them at runtime.           */
+         * OP_MASK_APPLY instruction to filter them at runtime.
+         * n is the number of mask bits; the VM will use last_ret_count
+         * as the actual value count so mismatched arities don't crash.  */
         u16 bitmask = 0;
         for (u32 i = 0; i < n; i++) {
             if (bits[i]) {
@@ -825,7 +871,21 @@ static void parse_mask_emit(CandoParser *p, bool *bits, u32 n)
             }
         }
         emit_op_ab(p, OP_MASK_APPLY, (u16)n, bitmask);
-        p->last_expr_was_call   = false; /* mask consumed the spread */
+        /* Keep last_expr_was_call = true so callers (parse_call) emit
+         * OP_SPREAD_RET, letting the VM propagate the actual kept count
+         * through spread_extra at runtime.                               */
+        p->last_expr_was_unpack = false;
+    } else if (!check(p, TOK_COMMA)) {
+        /* Single non-call expression with no comma: apply only bit[0].
+         * This handles cases like  (...) 1->10  where the expression is
+         * a single value rather than a comma-separated list.             */
+        if (bits[0]) {
+            emit_op(p, OP_MASK_PASS);
+            pass_count++;
+        } else {
+            emit_op(p, OP_MASK_SKIP);
+        }
+        p->last_expr_was_call   = false;
         p->last_expr_was_unpack = false;
     } else {
         /* Original comma-separated path: one expression per mask bit.    */
@@ -865,6 +925,8 @@ static void parse_mask_emit(CandoParser *p, bool *bits, u32 n)
                 }
             }
         }
+        p->last_expr_was_call   = false;
+        p->last_expr_was_unpack = false;
     }
 
     p->call_depth--;
