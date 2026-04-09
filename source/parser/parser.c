@@ -321,7 +321,13 @@ static void parse_grouping(CandoParser *p, bool can_assign)
         return;
     }
 
+    /* Explicit parens allow multi-comparison (e.g. (i == 1, 3, 5)) even
+     * inside comma-separated contexts like function arguments.  Zero
+     * call_depth so MULTI_CMP can consume the comma list, then restore. */
+    u32 saved_depth = p->call_depth;
+    p->call_depth = 0;
     parse_expression(p);
+    p->call_depth = saved_depth;
     consume(p, TOK_RPAREN, "expected ')' after expression");
 }
 

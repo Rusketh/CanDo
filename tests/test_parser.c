@@ -336,6 +336,19 @@ TEST(test_comparison_operators)
     }
 }
 
+TEST(test_grouped_multi_eq)
+{
+    /* (x == 1, 3, 5) inside a function arg must emit OP_EQ_STACK, not error */
+    CandoChunk *c = compile_ok("foo((x == 1, 3, 5));");
+    EXPECT_TRUE(find_op(c, OP_EQ_STACK) >= 0);
+    cando_chunk_free(c);
+
+    /* Same pattern at top level should also work */
+    c = compile_ok("(x == 2, 4, 6);");
+    EXPECT_TRUE(find_op(c, OP_EQ_STACK) >= 0);
+    cando_chunk_free(c);
+}
+
 TEST(test_logical_and)
 {
     /* AND uses OP_AND_JUMP for short-circuit */
@@ -790,6 +803,7 @@ int main(void)
 
     printf("\n-- comparison / logical --\n");
     run_test("comparison operators",           test_comparison_operators);
+    run_test("grouped multi-equality (==)",    test_grouped_multi_eq);
     run_test("logical AND short-circuit",      test_logical_and);
     run_test("logical OR short-circuit",       test_logical_or);
 
