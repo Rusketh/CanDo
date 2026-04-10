@@ -17,3 +17,4 @@ tests/test_vm
 .DS_Store
 Thumbs.db
 *.patch
+cando_tsan
