@@ -94,6 +94,7 @@ CANDO_SRCS = \
     source/lib/os.c           \
     source/lib/datetime.c     \
     source/lib/array.c        \
+    source/lib/object.c       \
     source/lib/crypto.c       \
     source/lib/process.c      \
     source/lib/net.c          \

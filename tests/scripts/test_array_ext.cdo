@@ -1,0 +1,68 @@
+/* test_array_ext.cdo -- Tests for extended array library functions.
+ *
+ * Tests: splice, remove, copy, and index-based push.
+ * Uses assertions (throws on failure) so run_smoke can verify exit code.
+ */
+
+function assert(cond, msg) {
+    if !cond {
+        throw msg;
+    }
+}
+
+/* ----- array.push with index ---------------------------------------------- */
+var a = [10, 30];
+a:push(1, 20);   /* insert 20 at index 1 → [10, 20, 30] */
+assert(a:length() == 3, "push(idx): length");
+assert(a[0] == 10, "push(idx): a[0]");
+assert(a[1] == 20, "push(idx): a[1]");
+assert(a[2] == 30, "push(idx): a[2]");
+
+/* Append at end (original behaviour). */
+a:push(40);
+assert(a:length() == 4, "push(append): length");
+assert(a[3] == 40, "push(append): a[3]");
+
+/* ----- array.splice ------------------------------------------------------- */
+var b = [1, 2, 3, 4, 5];
+var removed = b:splice(1, 2);   /* remove 2 elements starting at index 1 */
+assert(b:length() == 3, "splice: remaining length");
+assert(b[0] == 1, "splice: b[0]");
+assert(b[1] == 4, "splice: b[1]");
+assert(b[2] == 5, "splice: b[2]");
+assert(removed:length() == 2, "splice: removed length");
+assert(removed[0] == 2, "splice: removed[0]");
+assert(removed[1] == 3, "splice: removed[1]");
+
+/* Splice to end (no len argument). */
+var c = [10, 20, 30, 40];
+var tail = c:splice(2);   /* remove from index 2 to end */
+assert(c:length() == 2, "splice(no len): remaining length");
+assert(tail:length() == 2, "splice(no len): tail length");
+assert(tail[0] == 30, "splice(no len): tail[0]");
+assert(tail[1] == 40, "splice(no len): tail[1]");
+
+/* ----- array.remove ------------------------------------------------------- */
+var d = [100, 200, 300];
+var v = d:remove(1);
+assert(v == 200, "remove: returned value");
+assert(d:length() == 2, "remove: remaining length");
+assert(d[0] == 100, "remove: d[0]");
+assert(d[1] == 300, "remove: d[1]");
+
+/* Remove out of bounds returns null. */
+var oob = d:remove(99);
+assert(oob == null, "remove oob: null");
+assert(d:length() == 2, "remove oob: length unchanged");
+
+/* ----- array.copy --------------------------------------------------------- */
+var e = [1, 2, 3];
+var f = e:copy();
+f[0] = 99;
+assert(e[0] == 1, "copy: src unchanged");
+assert(f[0] == 99, "copy: dst modified");
+assert(f:length() == 3, "copy: length");
+assert(f[1] == 2, "copy: f[1]");
+assert(f[2] == 3, "copy: f[2]");
+
+print("test_array_ext: all assertions passed");

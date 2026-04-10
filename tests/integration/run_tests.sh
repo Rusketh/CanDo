@@ -121,6 +121,9 @@ run_test "lib_datetime" "$SCRIPTS/lib_datetime.cdo" \
 run_test "lib_array" "$SCRIPTS/lib_array.cdo" \
     "$(printf '3\n4\n4\n3\n2\n4\n6\n4\n6\n6')"
 
+run_test "lib_object" "$SCRIPTS/lib_object.cdo" \
+    "$(printf '1\n99\n2\n1\n2\n3\n10\n99\n30\n20\nalice\nbob\nhello\nc\na\nb\n3\n1\n2\nfalse\ntrue\nfalse')"
+
 run_test "lib_crypto" "$SCRIPTS/lib_crypto.cdo" \
     "$(printf 'md5_ok\nsha256_ok\naGVsbG8gd29ybGQA\nhello world')"
 
@@ -133,7 +136,9 @@ run_test "lib_enhance" "$SCRIPTS/lib_enhance.cdo" \
 run_test "break_continue" "$SCRIPTS/break_continue.cdo" \
     "$(printf '0\n1\n2\n1\n2\n4\n5\n10\n20\n10\n20\n40\n50\n0\n1\n0\n1\n2\n0\n1\n3\n4\n0\n10\n20\ndone')"
 
-run_smoke "test_array"    "$SCRIPTS/test_array.cdo"
+run_smoke "test_array"          "$SCRIPTS/test_array.cdo"
+run_smoke "test_array_ext"      "$SCRIPTS/test_array_ext.cdo"
+run_smoke "test_race_conditions" "$SCRIPTS/test_race_conditions.cdo"
 run_smoke "test_crypto"   "$SCRIPTS/test_crypto.cdo"
 run_smoke "test_datetime" "$SCRIPTS/test_datetime.cdo"
 run_smoke "test_enhance"  "$SCRIPTS/test_enhance.cdo"

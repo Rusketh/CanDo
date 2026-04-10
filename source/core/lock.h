@@ -41,9 +41,9 @@ u64 cando_thread_id(void);
  * pointer to the object can be cast to CandoLockHeader*.
  * --------------------------------------------------------------------- */
 typedef struct CandoLockHeader {
-    _Atomic(u64) lock_id;   /* exclusive writer's thread ID, or 0         */
-    _Atomic(u32) readers;   /* number of active shared-read holders        */
-    _Atomic(u32) _pad;      /* alignment padding to 16 bytes               */
+    _Atomic(u64) lock_id;     /* exclusive writer's thread ID, or 0       */
+    _Atomic(u32) readers;     /* number of active shared-read holders      */
+    _Atomic(u32) write_depth; /* re-entrancy depth: 0 = unlocked, 1+ held */
 } CandoLockHeader;
 
 CANDO_STATIC_ASSERT(sizeof(CandoLockHeader) == 16,
@@ -110,9 +110,9 @@ void cando_lock_write_release(CandoLockHeader *hdr);
  * cando_lock_init -- zero-initialize a lock header (unlocked state).
  */
 CANDO_INLINE void cando_lock_init(CandoLockHeader *hdr) {
-    atomic_store(&hdr->lock_id, 0);
-    atomic_store(&hdr->readers, 0);
-    atomic_store(&hdr->_pad,    0);
+    atomic_store(&hdr->lock_id,     0);
+    atomic_store(&hdr->readers,     0);
+    atomic_store(&hdr->write_depth, 0);
 }
 
 /*

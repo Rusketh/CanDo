@@ -605,6 +605,119 @@ TEST(test_array_length) {
 }
 
 /* -----------------------------------------------------------------------
+ * Array insert / remove tests
+ * --------------------------------------------------------------------- */
+TEST(test_array_insert_middle) {
+    CdoObject *arr = cdo_array_new();
+    cdo_array_push(arr, cdo_number(1.0));
+    cdo_array_push(arr, cdo_number(3.0));
+
+    /* Insert 2 at index 1 → [1, 2, 3] */
+    EXPECT_TRUE(cdo_array_insert(arr, 1, cdo_number(2.0)));
+    EXPECT_EQ(cdo_array_len(arr), 3u);
+
+    CdoValue v;
+    cdo_array_rawget_idx(arr, 0, &v); EXPECT_EQ(v.as.number, 1.0);
+    cdo_array_rawget_idx(arr, 1, &v); EXPECT_EQ(v.as.number, 2.0);
+    cdo_array_rawget_idx(arr, 2, &v); EXPECT_EQ(v.as.number, 3.0);
+
+    cdo_object_destroy(arr);
+}
+
+TEST(test_array_insert_end) {
+    CdoObject *arr = cdo_array_new();
+    cdo_array_push(arr, cdo_number(10.0));
+
+    /* Insert at len == append. */
+    EXPECT_TRUE(cdo_array_insert(arr, 1, cdo_number(20.0)));
+    EXPECT_EQ(cdo_array_len(arr), 2u);
+
+    CdoValue v;
+    cdo_array_rawget_idx(arr, 1, &v);
+    EXPECT_EQ(v.as.number, 20.0);
+
+    cdo_object_destroy(arr);
+}
+
+TEST(test_array_insert_beyond_len) {
+    CdoObject *arr = cdo_array_new();
+    cdo_array_push(arr, cdo_number(5.0));
+
+    /* Index beyond len is clamped to len (append). */
+    EXPECT_TRUE(cdo_array_insert(arr, 100, cdo_number(6.0)));
+    EXPECT_EQ(cdo_array_len(arr), 2u);
+
+    CdoValue v;
+    cdo_array_rawget_idx(arr, 1, &v);
+    EXPECT_EQ(v.as.number, 6.0);
+
+    cdo_object_destroy(arr);
+}
+
+TEST(test_array_remove_middle) {
+    CdoObject *arr = cdo_array_new();
+    cdo_array_push(arr, cdo_number(10.0));
+    cdo_array_push(arr, cdo_number(20.0));
+    cdo_array_push(arr, cdo_number(30.0));
+
+    CdoValue removed;
+    EXPECT_TRUE(cdo_array_remove(arr, 1, &removed));
+    EXPECT_EQ(removed.as.number, 20.0);
+    cdo_value_release(removed);
+
+    EXPECT_EQ(cdo_array_len(arr), 2u);
+
+    CdoValue v;
+    cdo_array_rawget_idx(arr, 0, &v); EXPECT_EQ(v.as.number, 10.0);
+    cdo_array_rawget_idx(arr, 1, &v); EXPECT_EQ(v.as.number, 30.0);
+
+    cdo_object_destroy(arr);
+}
+
+TEST(test_array_remove_first) {
+    CdoObject *arr = cdo_array_new();
+    cdo_array_push(arr, cdo_number(1.0));
+    cdo_array_push(arr, cdo_number(2.0));
+
+    CdoValue removed;
+    EXPECT_TRUE(cdo_array_remove(arr, 0, &removed));
+    EXPECT_EQ(removed.as.number, 1.0);
+    cdo_value_release(removed);
+
+    EXPECT_EQ(cdo_array_len(arr), 1u);
+
+    CdoValue v;
+    cdo_array_rawget_idx(arr, 0, &v);
+    EXPECT_EQ(v.as.number, 2.0);
+
+    cdo_object_destroy(arr);
+}
+
+TEST(test_array_remove_oob) {
+    CdoObject *arr = cdo_array_new();
+    cdo_array_push(arr, cdo_number(1.0));
+
+    /* Index 5 is out of bounds. */
+    CdoValue removed;
+    EXPECT_FALSE(cdo_array_remove(arr, 5, &removed));
+    EXPECT_EQ(cdo_array_len(arr), 1u);
+
+    cdo_object_destroy(arr);
+}
+
+TEST(test_array_remove_readonly) {
+    CdoObject *arr = cdo_array_new();
+    cdo_array_push(arr, cdo_number(1.0));
+    cdo_object_set_readonly(arr, true);
+
+    CdoValue removed;
+    EXPECT_FALSE(cdo_array_remove(arr, 0, &removed));
+    EXPECT_EQ(cdo_array_len(arr), 1u);
+
+    cdo_object_destroy(arr);
+}
+
+/* -----------------------------------------------------------------------
  * Thread-safety smoke test: concurrent reads/writes on shared object
  * --------------------------------------------------------------------- */
 #define MT_THREADS 4
@@ -706,6 +819,15 @@ int main(void) {
     run_test("array push/get",            test_array_push_get);
     run_test("array set by index",        test_array_set_idx);
     run_test("array readonly",            test_array_readonly);
+
+    printf("\n-- Array (extended) --\n");
+    run_test("insert middle",             test_array_insert_middle);
+    run_test("insert at end",             test_array_insert_end);
+    run_test("insert beyond len (clamp)", test_array_insert_beyond_len);
+    run_test("remove middle",             test_array_remove_middle);
+    run_test("remove first",              test_array_remove_first);
+    run_test("remove out-of-bounds",      test_array_remove_oob);
+    run_test("remove readonly",           test_array_remove_readonly);
 
     printf("\n-- Function / Native --\n");
     run_test("function new",              test_function_new);

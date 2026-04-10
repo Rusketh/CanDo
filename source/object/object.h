@@ -104,6 +104,12 @@ struct CdoObject {
     u32             items_len;     /* number of items in use              */
     u32             items_cap;     /* allocated capacity                  */
 
+    /* User-level mutex for object.lock / object.unlock.
+     * Separate from the internal RW `lock` above so that script-held locks
+     * never interact with internal VM field reads/writes.                */
+    _Atomic(u64)    user_lock_id;    /* owning thread ID, 0 = free       */
+    _Atomic(u32)    user_lock_depth; /* re-entrancy depth counter        */
+
     /* Function-specific data                                             */
     union {
         struct {                   /* OBJ_FUNCTION: script closure        */

@@ -23,6 +23,8 @@ Cando is a C-style scripting language with a clean syntax for general-purpose pr
     - [math](#math-module)
     - [string](#string-module)
     - [file](#file-module)
+    - [array](#array-module)
+    - [object](#object-module)
     - [eval](#eval)
 17. [Threading](#threading)
     - [thread expression](#thread-expression)
@@ -863,6 +865,113 @@ file.write("output.txt", "hello from cando\n");
 |----------------------------|-------------------------------------|
 | `file.read(path)`          | Read file at `path`, return string  |
 | `file.write(path, content)`| Write `content` string to `path`   |
+
+---
+
+### Array Module
+
+All array values automatically use the `array` module as their prototype, so methods can be called with the colon syntax (`a:method()`). You can also call them as plain functions (`array.method(a)`).
+
+```cando
+var a = [1, 2, 3];
+print(a:length());        // 3
+a:push(4);                // append → [1, 2, 3, 4]
+a:push(1, 10);            // insert 10 at index 1 → [1, 10, 2, 3, 4]
+print(a:pop());           // 4  (removes last)
+
+var removed = a:splice(1, 2);  // remove 2 elements from index 1
+// a → [1, 3],  removed → [10, 2]
+print(removed[0]);        // 10
+print(removed[1]);        // 2
+
+var v = a:remove(0);      // remove element at index 0, returns it
+print(v);                 // 1
+
+var b = a:copy();         // shallow copy
+b[0] = 99;
+print(a[0]);              // 3  (a unchanged)
+
+var doubled = a:map(function(x) { return x * 2; });
+var evens   = a:filter(function(x) { return x % 2 == 0; });
+var sum     = a:reduce(function(acc, x) { return acc + x; }, 0);
+```
+
+| Function                         | Description                                                  |
+|----------------------------------|--------------------------------------------------------------|
+| `array.length(a)`                | Number of elements                                           |
+| `array.push(a, v)`               | Append `v` to the end; returns `true` on success            |
+| `array.push(a, index, v)`        | Insert `v` at `index`, shifting elements right              |
+| `array.pop(a)`                   | Remove and return the last element (or `null` if empty)      |
+| `array.splice(a, start, len?)`   | Remove `len` elements from `start`; returns removed as array |
+| `array.remove(a, index)`         | Remove element at `index`; returns removed value or `null`   |
+| `array.copy(a)`                  | Shallow copy of `a`                                          |
+| `array.map(a, f)`                | New array with `f(element)` applied to each element         |
+| `array.filter(a, f)`             | New array with elements for which `f(element)` is truthy    |
+| `array.reduce(a, f, init?)`      | Fold `a` left using `f(acc, element)`, starting from `init` |
+
+---
+
+### Object Module
+
+The `object` module provides utilities for plain key-value objects, including thread-safe locking, merging, raw field access, and prototype manipulation.
+
+```cando
+var a = { x: 1, y: 2 };
+
+// Shallow copy
+var b = object.copy(a);
+b.x = 99;
+print(a.x);   // 1  (a unchanged)
+
+// Merge sources into a (mutates a)
+object.assign(a, { z: 3 });
+print(a.z);   // 3
+
+// Non-destructive merge → new object
+var merged = object.apply(a, { y: 20 });
+print(merged.y);   // 20
+print(a.y);        // 2  (a unchanged)
+
+// Raw field access (bypasses __index / __newindex meta methods)
+object.set(a, "hidden", 42);
+print(object.get(a, "hidden"));   // 42
+
+// Prototype chain
+var proto = { greet: function() { return "hi"; } };
+object.setPrototype(a, proto);
+var p = object.getPrototype(a);
+print(p.greet());   // hi
+
+// Keys and values (insertion order)
+var obj = { c: 3, a: 1, b: 2 };
+print(object.keys(obj)[0]);     // c
+print(object.values(obj)[0]);   // 3
+
+// Thread-safe explicit locking
+var shared = { counter: 0 };
+var t = thread {
+    object.lock(shared);
+    shared.counter = shared.counter + 1;
+    object.unlock(shared);
+};
+await t;
+print(shared.counter);   // 1
+```
+
+| Function                           | Description                                                         |
+|------------------------------------|---------------------------------------------------------------------|
+| `object.lock(o)`                   | Acquire exclusive write lock on `o` (re-entrant per thread)         |
+| `object.locked(o)`                 | `true` if `o` is currently write-locked by any thread               |
+| `object.unlock(o)`                 | Release one level of the write lock                                 |
+| `object.copy(o)`                   | Shallow copy of all own fields                                      |
+| `object.assign(o, ...sources)`     | Copy fields from each source into `o`; returns `o`                  |
+| `object.apply(o, ...sources)`      | New object with `o`'s fields plus each source merged in             |
+| `object.get(o, key)`               | Read field `key` directly (bypasses `__index`)                      |
+| `object.set(o, key, value)`        | Write field `key` directly (bypasses `__newindex`); returns `bool`  |
+| `object.setPrototype(o, proto)`    | Set `o.__index = proto` (pass `null` to remove)                     |
+| `object.getPrototype(o)`           | Return `o.__index` (the prototype), or `null` if none               |
+| `object.keys(o)`                   | Array of own field names in insertion order                         |
+| `object.values(o)`                 | Array of own field values in insertion order                        |
 
 ---
 
