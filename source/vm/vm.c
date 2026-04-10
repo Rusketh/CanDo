@@ -158,7 +158,11 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
     for (u32 i = 0; i < parent->native_count; i++)
         child->native_fns[i] = parent->native_fns[i];
 
-    cdo_object_init(); /* idempotent — ensures meta-keys are ready */
+    /* NOTE: cdo_object_init() is intentionally NOT called here.
+     * The parent VM's cando_vm_init() already initialized the global
+     * object subsystem (intern table + meta-key globals) before any
+     * child threads were spawned.  Calling it again from child threads
+     * would race on the g_meta_* globals and the string retain counts. */
 }
 
 void cando_vm_destroy(CandoVM *vm) {

@@ -20,13 +20,18 @@
  *
  * Equal interned strings share the same pointer, enabling O(1) equality
  * checks when used as object field keys.
+ *
+ * Thread-safety: ref_count and hash are _Atomic(u32) so that concurrent
+ * retain/release and hash computation from multiple threads is safe without
+ * external locks.  Intern-table traversal and insertion is protected by a
+ * separate exclusive spinlock inside string.c.
  * --------------------------------------------------------------------- */
 typedef struct CdoString {
-    u32  ref_count;   /* managed by cdo_string_retain / cdo_string_release */
-    u32  length;      /* byte length, excluding NUL                        */
-    u32  hash;        /* FNV-1a hash; 0 = not yet computed                 */
-    bool interned;    /* true when owned by the intern table               */
-    char data[];      /* flexible array, NUL-terminated                    */
+    _Atomic(u32) ref_count;   /* managed atomically by retain / release    */
+    u32          length;      /* byte length, excluding NUL                */
+    _Atomic(u32) hash;        /* FNV-1a hash; 0 = not yet computed         */
+    bool         interned;    /* true when owned by the intern table       */
+    char         data[];      /* flexible array, NUL-terminated            */
 } CdoString;
 
 /* -----------------------------------------------------------------------

@@ -93,6 +93,8 @@ void cdo_object_destroy_globals(void) {
 CdoObject *cdo_obj_alloc(ObjectKind kind) {
     CdoObject *obj       = cando_alloc(sizeof(CdoObject));
     cando_lock_init(&obj->lock);
+    atomic_store(&obj->user_lock_id, (u64)0);
+    atomic_store(&obj->user_lock_depth, (u32)0);
     obj->kind            = (u8)kind;
     obj->readonly        = false;
     obj->slots           = NULL;

@@ -1,0 +1,64 @@
+/* lib_object.cdo -- Integration tests for the object standard library.
+ *
+ * Each test prints a labelled result to stdout.  Expected output is
+ * registered in tests/integration/run_tests.sh.
+ */
+
+/* ----- object.copy -------------------------------------------------------- */
+var src = { a: 1, b: 2, c: 3 };
+var dst = object.copy(src);
+dst.a = 99;
+print(src.a);        /* expected: 1  (src unchanged) */
+print(dst.a);        /* expected: 99 */
+print(dst.b);        /* expected: 2  */
+
+/* ----- object.assign ------------------------------------------------------ */
+var base = { x: 1 };
+var extra = { y: 2, z: 3 };
+object.assign(base, extra);
+print(base.x);       /* expected: 1  */
+print(base.y);       /* expected: 2  */
+print(base.z);       /* expected: 3  */
+
+/* ----- object.apply ------------------------------------------------------- */
+var o1 = { a: 10, b: 20 };
+var o2 = { b: 99, c: 30 };
+var merged = object.apply(o1, o2);
+print(merged.a);     /* expected: 10 */
+print(merged.b);     /* expected: 99 */
+print(merged.c);     /* expected: 30 */
+print(o1.b);         /* expected: 20 (o1 unchanged) */
+
+/* ----- object.get / object.set ------------------------------------------- */
+var obj = { name: "alice" };
+print(object.get(obj, "name"));   /* expected: alice */
+object.set(obj, "name", "bob");
+print(object.get(obj, "name"));   /* expected: bob */
+
+/* ----- object.setPrototype / object.getPrototype -------------------------- */
+var proto = { greet: "hello" };
+var child = { own: "yes" };
+object.setPrototype(child, proto);
+var got_proto = object.getPrototype(child);
+print(got_proto.greet);   /* expected: hello */
+
+/* ----- object.keys -------------------------------------------------------- */
+var kobj = { c: 3, a: 1, b: 2 };
+var keys = object.keys(kobj);
+print(keys[0]);   /* expected: c  (insertion order) */
+print(keys[1]);   /* expected: a  */
+print(keys[2]);   /* expected: b  */
+
+/* ----- object.values ------------------------------------------------------ */
+var vals = object.values(kobj);
+print(vals[0]);   /* expected: 3  */
+print(vals[1]);   /* expected: 1  */
+print(vals[2]);   /* expected: 2  */
+
+/* ----- object.lock / object.locked / object.unlock ----------------------- */
+var shared = { v: 0 };
+print(object.locked(shared));   /* expected: false */
+object.lock(shared);
+print(object.locked(shared));   /* expected: true  */
+object.unlock(shared);
+print(object.locked(shared));   /* expected: false */

@@ -1,0 +1,153 @@
+/* test_race_conditions.cdo -- In-script race condition tests.
+ *
+ * Tests concurrent access to shared arrays, objects, and variables from
+ * multiple threads.  Verifies that locking prevents data corruption.
+ *
+ * Note: range `a -> b` is inclusive on both ends (a, a+1, ..., b).
+ * To spawn N threads use `for i of 1 -> N`.
+ *
+ * All tests use run_smoke (output is not fully deterministic due to
+ * thread scheduling), but each prints a final "PASS" line if the
+ * invariant held, or throws an error which causes a non-zero exit.
+ */
+
+/* Thread / iteration counts. */
+const N_THREADS = 4;   /* number of threads per test */
+const ITERS     = 50;  /* operations per thread      */
+const EXPECTED  = N_THREADS * ITERS;
+
+/* -----------------------------------------------------------------------
+ * Test 1: Concurrent array push from N threads.
+ * Each thread pushes ITERS values; final length must equal N * ITERS.
+ * --------------------------------------------------------------------- */
+var arr1 = [];
+
+var threads1 = [];
+for i of 1 -> N_THREADS {
+    threads1:push(thread {
+        for j of 1 -> ITERS {
+            arr1:push(j);
+        }
+    });
+}
+for t of threads1 { await t; }
+
+var len1 = arr1:length();
+if len1 != EXPECTED {
+    throw "test1 FAIL: length " + len1 + " expected " + EXPECTED;
+}
+print("test1 PASS: concurrent array push");
+
+/* -----------------------------------------------------------------------
+ * Test 2: Concurrent object field writes.
+ * N threads simultaneously write a shared field; after joining the field
+ * must still be a valid number (no corruption / type corruption).
+ * --------------------------------------------------------------------- */
+var obj2 = { counter: 0 };
+
+var threads2 = [];
+for i of 1 -> N_THREADS {
+    threads2:push(thread {
+        for j of 1 -> ITERS {
+            obj2.counter = obj2.counter + 1;
+        }
+    });
+}
+for t of threads2 { await t; }
+
+if type(obj2.counter) != "number" {
+    throw "test2 FAIL: obj2.counter is not a number";
+}
+print("test2 PASS: concurrent object writes (no corruption)");
+
+/* -----------------------------------------------------------------------
+ * Test 3: Explicit object.lock / object.unlock for atomic multi-step.
+ * A shared object holds two fields that must always be equal.
+ * Threads increment both under the lock; after joining both must match.
+ * --------------------------------------------------------------------- */
+var obj3 = { a: 0, b: 0 };
+
+var threads3 = [];
+for i of 1 -> N_THREADS {
+    threads3:push(thread {
+        for j of 1 -> ITERS {
+            object.lock(obj3);
+            obj3.a = obj3.a + 1;
+            obj3.b = obj3.b + 1;
+            object.unlock(obj3);
+        }
+    });
+}
+for t of threads3 { await t; }
+
+if obj3.a != obj3.b {
+    throw "test3 FAIL: a=" + obj3.a + " b=" + obj3.b + " (should be equal)";
+}
+if obj3.a != EXPECTED {
+    throw "test3 FAIL: a=" + obj3.a + " expected " + EXPECTED;
+}
+print("test3 PASS: explicit lock keeps a==b");
+
+/* -----------------------------------------------------------------------
+ * Test 4: Concurrent splice and push on shared array.
+ * One thread splices from the front while others push to the back.
+ * We only verify there is no crash and all elements are numbers.
+ * --------------------------------------------------------------------- */
+var arr4 = [];
+for i of 1 -> 20 { arr4:push(i); }
+
+var splice_t = thread {
+    for i of 1 -> 40 {
+        if arr4:length() > 0 {
+            arr4:splice(0, 1);
+        }
+    }
+};
+
+var push_threads4 = [];
+for i of 1 -> 3 {
+    push_threads4:push(thread {
+        for j of 1 -> 20 {
+            arr4:push(j);
+        }
+    });
+}
+await splice_t;
+for t of push_threads4 { await t; }
+
+var ok4 = true;
+for v of arr4 {
+    if type(v) != "number" {
+        ok4 = false;
+    }
+}
+if !ok4 {
+    throw "test4 FAIL: non-number element in array after concurrent splice/push";
+}
+print("test4 PASS: concurrent splice/push (no corruption)");
+
+/* -----------------------------------------------------------------------
+ * Test 5: Shared variable counter incremented by N threads using a lock
+ *         object as a mutex.
+ * --------------------------------------------------------------------- */
+var mutex = {};
+var counter5 = 0;
+
+var threads5 = [];
+for i of 1 -> N_THREADS {
+    threads5:push(thread {
+        for j of 1 -> ITERS {
+            object.lock(mutex);
+            counter5 = counter5 + 1;
+            object.unlock(mutex);
+        }
+    });
+}
+for t of threads5 { await t; }
+
+if counter5 != EXPECTED {
+    throw "test5 FAIL: counter5=" + counter5 + " expected " + EXPECTED;
+}
+print("test5 PASS: shared variable counter with object mutex");
+
+print("All race condition tests passed.");

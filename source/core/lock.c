@@ -60,6 +60,7 @@ u64 cando_thread_id(void) {
  * --------------------------------------------------------------------- */
 void cando_lock_read_acquire(CandoLockHeader *hdr) {
     CANDO_ASSERT(hdr != NULL);
+
     int spins = 0;
     for (;;) {
         /* Wait until no exclusive writer is active. */
@@ -90,9 +91,11 @@ void cando_lock_write_acquire(CandoLockHeader *hdr) {
     CANDO_ASSERT(hdr != NULL);
     u64 me = cando_thread_id();
 
-    /* Re-entrance check: if we already hold the lock, no-op. */
-    if (atomic_load_explicit(&hdr->lock_id, memory_order_acquire) == me)
+    /* Re-entrance: same thread already holds -- just increment depth. */
+    if (atomic_load_explicit(&hdr->lock_id, memory_order_acquire) == me) {
+        atomic_fetch_add_explicit(&hdr->write_depth, 1, memory_order_relaxed);
         return;
+    }
 
     int spins = 0;
     u64 expected;
@@ -111,11 +114,20 @@ void cando_lock_write_acquire(CandoLockHeader *hdr) {
     while (atomic_load_explicit(&hdr->readers, memory_order_acquire) != 0) {
         if (++spins >= SPIN_COUNT) { spins = 0; cando_yield(); }
     }
+
+    /* Outermost acquisition: depth starts at 1. */
+    atomic_store_explicit(&hdr->write_depth, 1, memory_order_relaxed);
 }
 
 void cando_lock_write_release(CandoLockHeader *hdr) {
     CANDO_ASSERT(hdr != NULL);
     CANDO_ASSERT_MSG(cando_lock_is_write_held_by_me(hdr),
                      "write_release called by non-owner thread");
-    atomic_store_explicit(&hdr->lock_id, 0, memory_order_release);
+
+    /* Decrement depth; only fully release when depth reaches zero. */
+    u32 prev = atomic_fetch_sub_explicit(&hdr->write_depth, 1,
+                                         memory_order_acq_rel);
+    if (prev == 1) {
+        atomic_store_explicit(&hdr->lock_id, 0, memory_order_release);
+    }
 }
