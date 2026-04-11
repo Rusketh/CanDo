@@ -16,6 +16,6 @@
 
 #include "../vm/vm.h"
 
-void cando_lib_crypto_register(CandoVM *vm);
+CANDO_API void cando_lib_crypto_register(CandoVM *vm);
 
 #endif /* CANDO_LIB_CRYPTO_H */

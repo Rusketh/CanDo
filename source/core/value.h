@@ -44,9 +44,9 @@ typedef struct CandoString {
     char  data[];      /* Flexible array member; NUL-terminated           */
 } CandoString;
 
-CandoString *cando_string_new(const char *src, u32 length);
-CandoString *cando_string_retain(CandoString *s);
-void         cando_string_release(CandoString *s);
+CANDO_API CandoString *cando_string_new(const char *src, u32 length);
+CANDO_API CandoString *cando_string_retain(CandoString *s);
+CANDO_API void         cando_string_release(CandoString *s);
 
 /* -----------------------------------------------------------------------
  * CandoValue -- the core tagged union
@@ -108,24 +108,24 @@ CANDO_INLINE bool cando_is_object(CandoValue v) { return v.tag == TYPE_OBJECT; }
  * --------------------------------------------------------------------- */
 
 /* Returns a human-readable type name string (static lifetime). */
-const char *cando_value_type_name(TypeTag tag);
+CANDO_API const char *cando_value_type_name(TypeTag tag);
 
 /* Equality check (structural for primitives, identity for objects). */
-bool cando_value_equal(CandoValue a, CandoValue b);
+CANDO_API bool cando_value_equal(CandoValue a, CandoValue b);
 
 /* Returns a heap-allocated string representation; caller must free. */
-char *cando_value_tostring(CandoValue v);
+CANDO_API char *cando_value_tostring(CandoValue v);
 
 /*
  * Deep copy: for TYPE_STRING increments ref_count; for TYPE_OBJECT the
  * same HandleIndex is copied (the object itself is not cloned).
  */
-CandoValue cando_value_copy(CandoValue v);
+CANDO_API CandoValue cando_value_copy(CandoValue v);
 
 /*
  * Release resources held by a value (decrements string ref_count, etc.).
  * Safe to call on any tag.
  */
-void cando_value_release(CandoValue v);
+CANDO_API void cando_value_release(CandoValue v);
 
 #endif /* CANDO_VALUE_H */

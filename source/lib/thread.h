@@ -26,6 +26,6 @@
  * cando_lib_thread_register -- register the thread library as a global
  * object named "thread" in the given VM.
  */
-void cando_lib_thread_register(CandoVM *vm);
+CANDO_API void cando_lib_thread_register(CandoVM *vm);
 
 #endif /* CANDO_LIB_THREAD_H */

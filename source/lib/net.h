@@ -13,6 +13,6 @@
 
 #include "../vm/vm.h"
 
-void cando_lib_net_register(CandoVM *vm);
+CANDO_API void cando_lib_net_register(CandoVM *vm);
 
 #endif /* CANDO_LIB_NET_H */

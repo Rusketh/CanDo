@@ -15,6 +15,6 @@
 
 #include "../vm/vm.h"
 
-void cando_lib_datetime_register(CandoVM *vm);
+CANDO_API void cando_lib_datetime_register(CandoVM *vm);
 
 #endif /* CANDO_LIB_DATETIME_H */

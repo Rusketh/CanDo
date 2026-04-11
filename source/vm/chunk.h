@@ -53,27 +53,27 @@ typedef struct CandoChunk {
 
 /* cando_chunk_new -- allocate and zero-initialise a fresh chunk.
  * `name` is stored by pointer (caller must ensure lifetime). */
-CandoChunk *cando_chunk_new(const char *name, u32 arity, bool has_vararg);
+CANDO_API CandoChunk *cando_chunk_new(const char *name, u32 arity, bool has_vararg);
 
 /* cando_chunk_free -- release all internal storage and the chunk itself. */
-void cando_chunk_free(CandoChunk *chunk);
+CANDO_API void cando_chunk_free(CandoChunk *chunk);
 
 /* -------------------------------------------------------------------------
  * Emitting instructions
  * ---------------------------------------------------------------------- */
 
 /* cando_chunk_emit_byte -- append a single byte at `line`. */
-void cando_chunk_emit_byte(CandoChunk *chunk, u8 byte, u32 line);
+CANDO_API void cando_chunk_emit_byte(CandoChunk *chunk, u8 byte, u32 line);
 
 /* cando_chunk_emit_op -- emit an opcode (no operand). */
-void cando_chunk_emit_op(CandoChunk *chunk, CandoOpcode op, u32 line);
+CANDO_API void cando_chunk_emit_op(CandoChunk *chunk, CandoOpcode op, u32 line);
 
 /* cando_chunk_emit_op_a -- emit opcode + 2-byte little-endian operand A. */
-void cando_chunk_emit_op_a(CandoChunk *chunk, CandoOpcode op,
+CANDO_API void cando_chunk_emit_op_a(CandoChunk *chunk, CandoOpcode op,
                             u16 a, u32 line);
 
 /* cando_chunk_emit_op_ab -- emit opcode + operands A and B (4 extra bytes). */
-void cando_chunk_emit_op_ab(CandoChunk *chunk, CandoOpcode op,
+CANDO_API void cando_chunk_emit_op_ab(CandoChunk *chunk, CandoOpcode op,
                              u16 a, u16 b, u32 line);
 
 /* -------------------------------------------------------------------------
@@ -87,18 +87,18 @@ void cando_chunk_emit_op_ab(CandoChunk *chunk, CandoOpcode op,
 
 /* cando_chunk_emit_jump -- emit a jump instruction with a placeholder
  * offset.  Returns the byte offset of the placeholder (for patching).   */
-u32 cando_chunk_emit_jump(CandoChunk *chunk, CandoOpcode op, u32 line);
+CANDO_API u32 cando_chunk_emit_jump(CandoChunk *chunk, CandoOpcode op, u32 line);
 
 /* cando_chunk_patch_jump -- rewrite the placeholder at `patch_offset`
  * so the jump lands at the current end of the chunk.                    */
-void cando_chunk_patch_jump(CandoChunk *chunk, u32 patch_offset);
+CANDO_API void cando_chunk_patch_jump(CandoChunk *chunk, u32 patch_offset);
 
 /* cando_chunk_patch_jump_to -- rewrite placeholder to jump to `target`. */
-void cando_chunk_patch_jump_to(CandoChunk *chunk, u32 patch_offset,
+CANDO_API void cando_chunk_patch_jump_to(CandoChunk *chunk, u32 patch_offset,
                                 u32 target);
 
 /* cando_chunk_emit_loop -- emit OP_LOOP that jumps back to `loop_start`. */
-void cando_chunk_emit_loop(CandoChunk *chunk, u32 loop_start, u32 line);
+CANDO_API void cando_chunk_emit_loop(CandoChunk *chunk, u32 loop_start, u32 line);
 
 /* -------------------------------------------------------------------------
  * Constant pool
@@ -106,10 +106,10 @@ void cando_chunk_emit_loop(CandoChunk *chunk, u32 loop_start, u32 line);
 
 /* cando_chunk_add_const -- intern a constant; returns its pool index.
  * Duplicate numbers and strings may share an index.                     */
-u16 cando_chunk_add_const(CandoChunk *chunk, CandoValue val);
+CANDO_API u16 cando_chunk_add_const(CandoChunk *chunk, CandoValue val);
 
 /* cando_chunk_add_string_const -- convenience: intern a C string.       */
-u16 cando_chunk_add_string_const(CandoChunk *chunk, const char *str,
+CANDO_API u16 cando_chunk_add_string_const(CandoChunk *chunk, const char *str,
                                   u32 len);
 
 #endif /* CANDO_CHUNK_H */

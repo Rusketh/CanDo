@@ -293,7 +293,7 @@ struct CandoVM {
  * ===================================================================== */
 
 /* cando_vm_init -- initialise all fields; mem may be NULL. */
-void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem);
+CANDO_API void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem);
 
 /*
  * cando_vm_init_child -- initialise a child VM for use in a spawned thread.
@@ -304,20 +304,20 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem);
  *
  * The caller must eventually call cando_vm_destroy() on the child.
  */
-void cando_vm_init_child(CandoVM *child, const CandoVM *parent);
+CANDO_API void cando_vm_init_child(CandoVM *child, const CandoVM *parent);
 
 /* cando_vm_destroy -- release all VM-owned resources. */
-void cando_vm_destroy(CandoVM *vm);
+CANDO_API void cando_vm_destroy(CandoVM *vm);
 
 /* =========================================================================
  * Closure helpers
  * ===================================================================== */
 
 /* cando_closure_new -- allocate a closure around a chunk. */
-CandoClosure *cando_closure_new(CandoChunk *chunk);
+CANDO_API CandoClosure *cando_closure_new(CandoChunk *chunk);
 
 /* cando_closure_free -- release a closure (does NOT free the chunk). */
-void cando_closure_free(CandoClosure *closure);
+CANDO_API void cando_closure_free(CandoClosure *closure);
 
 /* =========================================================================
  * Execution
@@ -333,7 +333,7 @@ void cando_closure_free(CandoClosure *closure);
  * Returns VM_OK, VM_HALT, or VM_RUNTIME_ERR.  On VM_RUNTIME_ERR the
  * error description is in vm->error_msg.
  */
-CandoVMResult cando_vm_exec(CandoVM *vm, CandoChunk *chunk);
+CANDO_API CandoVMResult cando_vm_exec(CandoVM *vm, CandoChunk *chunk);
 
 /*
  * cando_vm_exec_eval -- execute a chunk compiled in eval mode (eval_mode=true).
@@ -345,7 +345,7 @@ CandoVMResult cando_vm_exec(CandoVM *vm, CandoChunk *chunk);
  * On VM_RUNTIME_ERR: vm->error_msg is set; *result_out is unchanged.
  * The chunk must outlive this call; the caller is responsible for freeing it.
  */
-CandoVMResult cando_vm_exec_eval(CandoVM *vm, CandoChunk *chunk,
+CANDO_API CandoVMResult cando_vm_exec_eval(CandoVM *vm, CandoChunk *chunk,
                                   CandoValue **results_out, u32 *count_out);
 
 /*
@@ -357,7 +357,7 @@ CandoVMResult cando_vm_exec_eval(CandoVM *vm, CandoChunk *chunk,
  *
  * Returns VM_OK/VM_HALT on success, VM_RUNTIME_ERR on error.
  */
-CandoVMResult cando_vm_exec_closure(CandoVM *vm, CandoClosure *closure,
+CANDO_API CandoVMResult cando_vm_exec_closure(CandoVM *vm, CandoClosure *closure,
                                      u32 fn_pc);
 
 /*
@@ -372,7 +372,7 @@ CandoVMResult cando_vm_exec_closure(CandoVM *vm, CandoClosure *closure,
  * call cando_closure_free, typically via CandoModuleEntry in vm_destroy).
  * On error: *closure_out is set to NULL.
  */
-CandoVMResult cando_vm_exec_eval_module(CandoVM *vm, CandoChunk *chunk,
+CANDO_API CandoVMResult cando_vm_exec_eval_module(CandoVM *vm, CandoChunk *chunk,
                                          CandoValue **results_out, u32 *count_out,
                                          CandoClosure **closure_out);
 
@@ -390,20 +390,20 @@ CandoVMResult cando_vm_exec_eval_module(CandoVM *vm, CandoChunk *chunk,
  * Call this instead of setting vm->has_error and vm->error_msg directly.
  * After calling this, return -1 from your CandoNativeFn.
  */
-void cando_vm_error(CandoVM *vm, const char *fmt, ...);
+CANDO_API void cando_vm_error(CandoVM *vm, const char *fmt, ...);
 
 /* cando_vm_push -- push a value; aborts on stack overflow. */
-void cando_vm_push(CandoVM *vm, CandoValue val);
+CANDO_API void cando_vm_push(CandoVM *vm, CandoValue val);
 
 /* cando_vm_pop -- pop and return the top value; aborts on underflow. */
-CandoValue cando_vm_pop(CandoVM *vm);
+CANDO_API CandoValue cando_vm_pop(CandoVM *vm);
 
 /* cando_vm_peek -- return the value at distance `dist` from the top
  * without removing it (0 = top). */
-CandoValue cando_vm_peek(const CandoVM *vm, u32 dist);
+CANDO_API CandoValue cando_vm_peek(const CandoVM *vm, u32 dist);
 
 /* cando_vm_stack_depth -- number of values currently on the stack. */
-u32 cando_vm_stack_depth(const CandoVM *vm);
+CANDO_API u32 cando_vm_stack_depth(const CandoVM *vm);
 
 /* =========================================================================
  * Native function API
@@ -418,7 +418,7 @@ u32 cando_vm_stack_depth(const CandoVM *vm);
  *
  * Returns true on success, false if CANDO_NATIVE_MAX is exceeded.
  */
-bool cando_vm_register_native(CandoVM *vm, const char *name,
+CANDO_API bool cando_vm_register_native(CandoVM *vm, const char *name,
                                CandoNativeFn fn);
 
 /*
@@ -426,7 +426,7 @@ bool cando_vm_register_native(CandoVM *vm, const char *name,
  * Returns the sentinel CandoValue that represents this function.
  * Returns cando_null() if CANDO_NATIVE_MAX is exceeded.
  */
-CandoValue cando_vm_add_native(CandoVM *vm, CandoNativeFn fn);
+CANDO_API CandoValue cando_vm_add_native(CandoVM *vm, CandoNativeFn fn);
 
 /* =========================================================================
  * Global variable API
@@ -434,11 +434,11 @@ CandoValue cando_vm_add_native(CandoVM *vm, CandoNativeFn fn);
 
 /* cando_vm_set_global -- define or overwrite a global variable.
  * If `is_const` is true the variable is write-protected after this call. */
-bool cando_vm_set_global(CandoVM *vm, const char *name, CandoValue val,
+CANDO_API bool cando_vm_set_global(CandoVM *vm, const char *name, CandoValue val,
                           bool is_const);
 
 /* cando_vm_get_global -- look up a global; returns false if not found. */
-bool cando_vm_get_global(const CandoVM *vm, const char *name,
+CANDO_API bool cando_vm_get_global(const CandoVM *vm, const char *name,
                           CandoValue *out);
 
 /* =========================================================================
@@ -459,7 +459,7 @@ bool cando_vm_get_global(const CandoVM *vm, const char *name,
  * meta_key is a CdoString* (object-layer interned string pointer).
  */
 struct CdoString;  /* forward declaration; full type is in object/string.h */
-bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
+CANDO_API bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
                          struct CdoString *meta_key,
                          CandoValue *args, u32 argc);
 
@@ -474,7 +474,7 @@ bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
  * Implemented via thread-local storage; valid from any OS thread.
  */
 struct CdoThread; /* forward — full type in object/thread.h */
-struct CdoThread *cando_current_thread(void);
+CANDO_API struct CdoThread *cando_current_thread(void);
 
 /*
  * cando_vm_wait_all_threads -- block until all threads spawned from this VM
@@ -484,7 +484,7 @@ struct CdoThread *cando_current_thread(void);
  * while spawned threads are still running.  Has no effect if no threads were
  * ever spawned.
  */
-void cando_vm_wait_all_threads(CandoVM *vm);
+CANDO_API void cando_vm_wait_all_threads(CandoVM *vm);
 
 /*
  * cando_vm_call_value -- call a Cando function value with argc arguments.
@@ -496,7 +496,7 @@ void cando_vm_wait_all_threads(CandoVM *vm);
  * Safe to call from within a native function (re-entrant via vm_run).
  * Returns 0 if fn_val is not callable or the call stack overflows.
  */
-int cando_vm_call_value(CandoVM *vm, CandoValue fn_val,
+CANDO_API int cando_vm_call_value(CandoVM *vm, CandoValue fn_val,
                          CandoValue *args, u32 argc);
 
 #endif /* CANDO_VM_H */

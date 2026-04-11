@@ -39,16 +39,16 @@ typedef struct CdoString {
  * --------------------------------------------------------------------- */
 
 /* Allocate a new CdoString (ref_count = 1, not interned). */
-CdoString *cdo_string_new(const char *src, u32 length);
+CANDO_API CdoString *cdo_string_new(const char *src, u32 length);
 
 /* Increment ref_count; returns s for chaining. */
-CdoString *cdo_string_retain(CdoString *s);
+CANDO_API CdoString *cdo_string_retain(CdoString *s);
 
 /* Decrement ref_count; frees when it reaches 0. Safe on NULL. */
-void cdo_string_release(CdoString *s);
+CANDO_API void cdo_string_release(CdoString *s);
 
 /* Return (and lazily compute) the FNV-1a hash of s. */
-u32 cdo_string_hash(CdoString *s);
+CANDO_API u32 cdo_string_hash(CdoString *s);
 
 /* -----------------------------------------------------------------------
  * Intern table
@@ -63,8 +63,8 @@ u32 cdo_string_hash(CdoString *s);
  * cdo_intern_init() / cdo_intern_destroy() manage the global table
  * lifetime.  They are called by the object layer's init/destroy.
  * --------------------------------------------------------------------- */
-void       cdo_intern_init(void);
-void       cdo_intern_destroy(void);
-CdoString *cdo_string_intern(const char *src, u32 length);
+CANDO_API void       cdo_intern_init(void);
+CANDO_API void       cdo_intern_destroy(void);
+CANDO_API CdoString *cdo_string_intern(const char *src, u32 length);
 
 #endif /* CDO_STRING_H */

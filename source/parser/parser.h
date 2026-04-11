@@ -82,13 +82,13 @@ typedef struct {
 
 /* Initialise parser; `chunk` receives all emitted bytecode.
  * The chunk must already be allocated via cando_chunk_new().             */
-void cando_parser_init(CandoParser *p, const char *source, usize len,
+CANDO_API void cando_parser_init(CandoParser *p, const char *source, usize len,
                        CandoChunk *chunk);
 
 /* Compile full source.  Returns true on success. */
-bool cando_parse(CandoParser *p);
+CANDO_API bool cando_parse(CandoParser *p);
 
 /* Last error string, or NULL if no error. */
-const char *cando_parser_error(const CandoParser *p);
+CANDO_API const char *cando_parser_error(const CandoParser *p);
 
 #endif /* CANDO_PARSER_H */
