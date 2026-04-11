@@ -45,8 +45,11 @@ jobs:
       - name: Build cando.exe
         run: make cando.exe
 
-      - name: Upload binary
+      - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: cando-windows-x86_64
-          path: cando.exe
+          path: |
+            cando.exe
+            libcando.dll
+            libcando.lib
