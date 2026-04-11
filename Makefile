@@ -261,7 +261,7 @@ CFLAGS_WIN  = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0
               -Iinclude
 
 CFLAGS_EXE_WIN = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0600 \
-                 -iquote source/core -Iinclude
+                 -iquote source -iquote source/core -Iinclude
 
 LDFLAGS_WIN = -lm -lws2_32
 
@@ -270,7 +270,7 @@ libcando.dll: $(CANDO_LIB_SRCS) $(CANDO_WIN_EXTRA)
 	    -Wl,--out-implib,libcando.lib
 
 icon.res: source/icon.rc assets/icon.ico
-	$(WINDRES) source/icon.rc -O coff -o icon.res
+	cd source && $(WINDRES) icon.rc -O coff -o ../icon.res
 
 cando.exe: source/main.c libcando.dll icon.res
 	$(MINGW_CC) $(CFLAGS_EXE_WIN) source/main.c icon.res \
