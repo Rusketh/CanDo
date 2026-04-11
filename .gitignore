@@ -13,6 +13,16 @@ tests/test_parser
 tests/test_thread
 tests/test_vm
 
+# Library build artifacts (CMake and Makefile)
+build/
+libcando.so
+libcando.so.*
+libcando.a
+libcando.dll
+libcando.lib
+icon.res
+.libobjs/
+
 # Common OS junk
 .DS_Store
 Thumbs.db
