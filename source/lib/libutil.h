@@ -95,13 +95,13 @@ static inline f64 libutil_arg_num_at(CandoValue *args, int argc,
  * libutil_push_str -- create a new CandoString from data[0..len) and push
  * it onto the VM stack.
  */
-void libutil_push_str(CandoVM *vm, const char *data, u32 len);
+CANDO_API void libutil_push_str(CandoVM *vm, const char *data, u32 len);
 
 /*
  * libutil_push_cstr -- create a new CandoString from a NUL-terminated C
  * string and push it onto the VM stack.
  */
-void libutil_push_cstr(CandoVM *vm, const char *str);
+CANDO_API void libutil_push_cstr(CandoVM *vm, const char *str);
 
 /* =========================================================================
  * Object method registration
@@ -114,7 +114,7 @@ void libutil_push_cstr(CandoVM *vm, const char *str);
  * This is the standard pattern used by file.c, string.c, and every other
  * module that builds a method-table object.
  */
-void libutil_set_method(CandoVM *vm, CdoObject *obj,
+CANDO_API void libutil_set_method(CandoVM *vm, CdoObject *obj,
                         const char *name, CandoNativeFn fn);
 
 #endif /* CANDO_LIB_LIBUTIL_H */

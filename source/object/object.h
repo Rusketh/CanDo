@@ -140,14 +140,14 @@ CdoObject *cdo_obj_alloc(ObjectKind kind);
  * module.  cdo_object_destroy_globals() tears down the intern table and
  * cached meta-key pointers.
  * --------------------------------------------------------------------- */
-void cdo_object_init(void);
-void cdo_object_destroy_globals(void);
+CANDO_API void cdo_object_init(void);
+CANDO_API void cdo_object_destroy_globals(void);
 
 /* -----------------------------------------------------------------------
  * Object creation
  * --------------------------------------------------------------------- */
-CdoObject *cdo_object_new(void);
-void       cdo_object_destroy(CdoObject *obj);
+CANDO_API CdoObject *cdo_object_new(void);
+CANDO_API void       cdo_object_destroy(CdoObject *obj);
 
 /* -----------------------------------------------------------------------
  * Raw field access (no meta-method dispatch, no prototype chain)
@@ -160,21 +160,21 @@ void       cdo_object_destroy(CdoObject *obj);
  * cdo_object_rawget -- look up key in obj's own fields.
  * Returns true and writes *out if found.  Acquires read lock.
  */
-bool cdo_object_rawget(const CdoObject *obj, CdoString *key, CdoValue *out);
+CANDO_API bool cdo_object_rawget(const CdoObject *obj, CdoString *key, CdoValue *out);
 
 /*
  * cdo_object_rawset -- insert or update a field.
  * Returns false if: obj is readonly, key is FIELD_STATIC and already set,
  * or key is NULL.  Acquires write lock.
  */
-bool cdo_object_rawset(CdoObject *obj, CdoString *key, CdoValue val, u8 flags);
+CANDO_API bool cdo_object_rawset(CdoObject *obj, CdoString *key, CdoValue val, u8 flags);
 
 /*
  * cdo_object_rawdelete -- remove a field by key.
  * Returns false if not found, obj is readonly, or field is FIELD_STATIC.
  * Acquires write lock.
  */
-bool cdo_object_rawdelete(CdoObject *obj, CdoString *key);
+CANDO_API bool cdo_object_rawdelete(CdoObject *obj, CdoString *key);
 
 /* -----------------------------------------------------------------------
  * Prototype-chain lookup (__index traversal)
@@ -184,13 +184,13 @@ bool cdo_object_rawdelete(CdoObject *obj, CdoString *key);
  * --------------------------------------------------------------------- */
 #define CANDO_PROTO_DEPTH_MAX 32
 
-bool cdo_object_get(CdoObject *obj, CdoString *key, CdoValue *out);
+CANDO_API bool cdo_object_get(CdoObject *obj, CdoString *key, CdoValue *out);
 
 /* -----------------------------------------------------------------------
  * Readonly flag
  * --------------------------------------------------------------------- */
-void cdo_object_set_readonly(CdoObject *obj, bool ro);
-bool cdo_object_is_readonly(const CdoObject *obj);
+CANDO_API void cdo_object_set_readonly(CdoObject *obj, bool ro);
+CANDO_API bool cdo_object_is_readonly(const CdoObject *obj);
 
 /* -----------------------------------------------------------------------
  * FIFO iteration (insertion order)
@@ -199,7 +199,7 @@ bool cdo_object_is_readonly(const CdoObject *obj);
  * Stops early if fn returns false.
  * --------------------------------------------------------------------- */
 typedef bool (*CdoIterFn)(CdoString *key, CdoValue *val, u8 flags, void *ud);
-void cdo_object_foreach(const CdoObject *obj, CdoIterFn fn, void *ud);
+CANDO_API void cdo_object_foreach(const CdoObject *obj, CdoIterFn fn, void *ud);
 
 /* -----------------------------------------------------------------------
  * Object length
@@ -208,7 +208,7 @@ void cdo_object_foreach(const CdoObject *obj, CdoIterFn fn, void *ud);
  * For plain objects: field_count.
  * (__len meta-method dispatch is handled by the VM layer.)
  * --------------------------------------------------------------------- */
-u32 cdo_object_length(const CdoObject *obj);
+CANDO_API u32 cdo_object_length(const CdoObject *obj);
 
 /* -----------------------------------------------------------------------
  * Cached interned meta-key pointers (valid after cdo_object_init())

@@ -35,6 +35,6 @@
  * cando_lib_include_register -- register include() as a global function
  * in the given VM.
  */
-void cando_lib_include_register(CandoVM *vm);
+CANDO_API void cando_lib_include_register(CandoVM *vm);
 
 #endif /* CANDO_LIB_INCLUDE_H */

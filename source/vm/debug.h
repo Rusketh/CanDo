@@ -24,7 +24,7 @@
  *   0000 line  1  OP_CONST       0    '42'
  *   0003 line  1  OP_RETURN      1
  * ---------------------------------------------------------------------- */
-void cando_chunk_disasm(const CandoChunk *chunk, FILE *out);
+CANDO_API void cando_chunk_disasm(const CandoChunk *chunk, FILE *out);
 
 /* -------------------------------------------------------------------------
  * cando_instr_disasm -- disassemble the single instruction at byte offset
@@ -32,17 +32,17 @@ void cando_chunk_disasm(const CandoChunk *chunk, FILE *out);
  *
  * Returns the byte offset of the NEXT instruction (caller can iterate).
  * ---------------------------------------------------------------------- */
-u32 cando_instr_disasm(const CandoChunk *chunk, u32 offset, FILE *out);
+CANDO_API u32 cando_instr_disasm(const CandoChunk *chunk, u32 offset, FILE *out);
 
 /* -------------------------------------------------------------------------
  * cando_vm_dump_stack -- print the current VM value stack to `out`.
  * Useful for step-by-step debugging.
  * ---------------------------------------------------------------------- */
-void cando_vm_dump_stack(const CandoVM *vm, FILE *out);
+CANDO_API void cando_vm_dump_stack(const CandoVM *vm, FILE *out);
 
 /* -------------------------------------------------------------------------
  * cando_vm_dump_globals -- print all global variable names and values.
  * ---------------------------------------------------------------------- */
-void cando_vm_dump_globals(const CandoVM *vm, FILE *out);
+CANDO_API void cando_vm_dump_globals(const CandoVM *vm, FILE *out);
 
 #endif /* CANDO_DEBUG_H */

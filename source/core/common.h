@@ -52,6 +52,32 @@
 #endif
 
 /* -----------------------------------------------------------------------
+ * Symbol visibility / DLL import-export  (CANDO_API)
+ *
+ * Defined early so all subsequent declarations in this header and in every
+ * header that includes common.h can use it.
+ *
+ * When building libcando itself  : define CANDO_BUILDING_LIB
+ * When linking a shared DLL/so   : define CANDO_SHARED
+ * When linking the static library: define neither
+ * --------------------------------------------------------------------- */
+#if defined(CANDO_PLATFORM_WINDOWS)
+#  ifdef CANDO_BUILDING_LIB
+#    define CANDO_API __declspec(dllexport)
+#  elif defined(CANDO_SHARED)
+#    define CANDO_API __declspec(dllimport)
+#  else
+#    define CANDO_API
+#  endif
+#else
+#  ifdef CANDO_BUILDING_LIB
+#    define CANDO_API __attribute__((visibility("default")))
+#  else
+#    define CANDO_API
+#  endif
+#endif
+
+/* -----------------------------------------------------------------------
  * Fixed-width integer typedefs (convenience aliases)
  * --------------------------------------------------------------------- */
 typedef uint8_t   u8;
@@ -106,18 +132,18 @@ typedef size_t    usize;
 /*
  * cando_alloc -- allocate `size` bytes.  Aborts on OOM.
  */
-void *cando_alloc(usize size);
+CANDO_API void *cando_alloc(usize size);
 
 /*
  * cando_realloc -- resize a previous allocation.  Aborts on OOM.
  */
-void *cando_realloc(void *ptr, usize new_size);
+CANDO_API void *cando_realloc(void *ptr, usize new_size);
 
 /*
  * cando_free -- release memory previously obtained via cando_alloc /
  *              cando_realloc.  Safe to call with NULL.
  */
-void cando_free(void *ptr);
+CANDO_API void cando_free(void *ptr);
 
 /* -----------------------------------------------------------------------
  * Utility macros

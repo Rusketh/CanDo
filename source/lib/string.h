@@ -15,6 +15,6 @@
 
 #include "../vm/vm.h"
 
-void cando_lib_string_register(CandoVM *vm);
+CANDO_API void cando_lib_string_register(CandoVM *vm);
 
 #endif /* CANDO_LIB_STRING_H */

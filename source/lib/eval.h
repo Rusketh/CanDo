@@ -8,6 +8,6 @@
 #include "../vm/vm.h"
 
 /* Register the global eval() native function. */
-void cando_lib_eval_register(CandoVM *vm);
+CANDO_API void cando_lib_eval_register(CandoVM *vm);
 
 #endif /* CANDO_LIB_EVAL_H */

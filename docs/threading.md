@@ -433,7 +433,23 @@ print(total);  // 15
 
 ## Implementation notes
 
-This section is for contributors and embedders.
+This section is for contributors and embedders using the library API.
+
+### Embedding and thread safety
+
+**One `CandoVM*` = one calling thread at a time.**  Do not call VM API
+functions from multiple OS threads on the same VM.
+
+You may:
+- Use `thread`/`await` freely in CanDo scripts — the runtime handles child
+  thread VMs internally with appropriate locking.
+- Create multiple `CandoVM*` instances (each used by a single thread) —
+  see [embedding.md](embedding.md).
+- Call `cando_vm_wait_all_threads(vm)` after `cando_vm_exec` returns to
+  ensure all script-spawned threads have finished before `cando_close`.
+
+The global string intern table is protected by a mutex and safe for
+concurrent calls from separate `CandoVM*` instances.
 
 ### Child VM pattern
 

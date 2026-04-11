@@ -1,0 +1,43 @@
+// icon.rc -- Windows resource file for cando.exe and libcando.dll
+//
+// Embeds the CanDo circuit-board cube icon and version information into the
+// compiled Windows binaries.  The ICO file is generated from assets/icon.png
+// by running:   python3 assets/gen_icon.py
+//
+// This file is only compiled on Windows (via CMake's WIN32 check or the
+// MINGW cross-compile target in the Makefile).
+
+#include <windows.h>
+
+// Application icon (multi-resolution ICO)
+IDI_ICON1 ICON "../assets/icon.ico"
+
+// Version resource — shown in Properties → Details in Windows Explorer
+1 VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "CanDo Project\0"
+            VALUE "FileDescription",  "CanDo Script Interpreter\0"
+            VALUE "FileVersion",      "1.0.0.0\0"
+            VALUE "InternalName",     "cando\0"
+            VALUE "LegalCopyright",   "2026\0"
+            VALUE "OriginalFilename", "cando.exe\0"
+            VALUE "ProductName",      "CanDo\0"
+            VALUE "ProductVersion",   "1.0.0\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
