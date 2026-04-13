@@ -263,7 +263,7 @@ CFLAGS_WIN  = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0
 CFLAGS_EXE_WIN = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0600 \
                  -iquote source -iquote source/core -Iinclude
 
-LDFLAGS_WIN = -lm -lws2_32
+LDFLAGS_WIN = -lm -lws2_32 -static-libgcc
 
 libcando.dll: $(CANDO_LIB_SRCS) $(CANDO_WIN_EXTRA)
 	$(MINGW_CC) $(CFLAGS_WIN) -shared $^ -o $@ $(LDFLAGS_WIN) \

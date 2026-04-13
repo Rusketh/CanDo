@@ -150,6 +150,10 @@ target_include_directories(libcando
 
 target_link_libraries(libcando PUBLIC Threads::Threads ${PLATFORM_LIBS})
 
+if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_link_options(libcando PRIVATE -static-libgcc)
+endif()
+
 # ----------------------------------------------------------------------------
 # Static library: libcando.a
 # ----------------------------------------------------------------------------
@@ -194,6 +198,10 @@ target_include_directories(cando PRIVATE
 )
 
 target_link_libraries(cando PRIVATE libcando)
+
+if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_link_options(cando PRIVATE -static-libgcc)
+endif()
 
 # ----------------------------------------------------------------------------
 # Install targets
