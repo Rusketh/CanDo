@@ -51,6 +51,8 @@
 #include "lib/crypto.h"
 #include "lib/process.h"
 #include "lib/net.h"
+#include "lib/http.h"
+#include "lib/https.h"
 
 /* cando.h error codes and CANDO_API */
 #include "../include/cando.h"
@@ -166,6 +168,10 @@ CANDO_API void cando_openlibs(CandoVM *vm)
     cando_lib_crypto_register(vm);
     cando_lib_process_register(vm);
     cando_lib_net_register(vm);
+    /* http/https must register after json so res.json(value) can look up
+     * the json.stringify method on the child VM's shared globals. */
+    cando_lib_http_register(vm);
+    cando_lib_https_register(vm);
 }
 
 CANDO_API void cando_open_mathlib(CandoVM *vm)     { cando_lib_math_register(vm);     }
@@ -183,6 +189,8 @@ CANDO_API void cando_open_processlib(CandoVM *vm)  { cando_lib_process_register(
 CANDO_API void cando_open_netlib(CandoVM *vm)      { cando_lib_net_register(vm);      }
 CANDO_API void cando_open_evallib(CandoVM *vm)     { cando_lib_eval_register(vm);     }
 CANDO_API void cando_open_includelib(CandoVM *vm)  { cando_lib_include_register(vm);  }
+CANDO_API void cando_open_httplib(CandoVM *vm)     { cando_lib_http_register(vm);     }
+CANDO_API void cando_open_httpslib(CandoVM *vm)    { cando_lib_https_register(vm);    }
 
 /* =========================================================================
  * Internal: compile source into a chunk

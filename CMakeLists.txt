@@ -25,6 +25,9 @@ endif()
 # Threading
 find_package(Threads REQUIRED)
 
+# OpenSSL (hard dependency for the http/https standard library)
+find_package(OpenSSL REQUIRED)
+
 # ----------------------------------------------------------------------------
 # Source groups
 # ----------------------------------------------------------------------------
@@ -78,6 +81,9 @@ set(LIB_SRCS
     source/lib/process.c
     source/lib/net.c
     source/lib/object.c
+    source/lib/httputil.c
+    source/lib/http.c
+    source/lib/https.c
 )
 
 # Windows compatibility shim (POSIX regex replacement)
@@ -148,7 +154,7 @@ target_include_directories(libcando
         $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(libcando PUBLIC Threads::Threads ${PLATFORM_LIBS})
+target_link_libraries(libcando PUBLIC Threads::Threads OpenSSL::SSL OpenSSL::Crypto ${PLATFORM_LIBS})
 
 if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     target_link_options(libcando PRIVATE -static-libgcc)
@@ -173,7 +179,7 @@ target_include_directories(libcando_static
         $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(libcando_static PUBLIC Threads::Threads ${PLATFORM_LIBS})
+target_link_libraries(libcando_static PUBLIC Threads::Threads OpenSSL::SSL OpenSSL::Crypto ${PLATFORM_LIBS})
 
 # ----------------------------------------------------------------------------
 # Executable: cando / cando.exe
