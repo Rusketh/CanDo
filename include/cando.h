@@ -91,6 +91,8 @@
 #include "lib/crypto.h"
 #include "lib/process.h"
 #include "lib/net.h"
+#include "lib/http.h"
+#include "lib/https.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -152,6 +154,8 @@ CANDO_API void cando_open_processlib(CandoVM *vm);   /**< process.*         */
 CANDO_API void cando_open_netlib(CandoVM *vm);       /**< net.*             */
 CANDO_API void cando_open_evallib(CandoVM *vm);      /**< eval()            */
 CANDO_API void cando_open_includelib(CandoVM *vm);   /**< include()         */
+CANDO_API void cando_open_httplib(CandoVM *vm);      /**< http.* + fetch()  */
+CANDO_API void cando_open_httpslib(CandoVM *vm);     /**< https.*           */
 
 /* =========================================================================
  * Load and execute
