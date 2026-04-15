@@ -79,6 +79,9 @@ run_test "for_over" "$SCRIPTS/for_over.cdo" \
 run_test "functions" "$SCRIPTS/functions.cdo" \
     "$(printf 'hello from function\n7\n30\n0\n1\n8\n3\n7\n12\n5\n8')"
 
+run_test "inline_functions" "$SCRIPTS/inline_functions.cdo" \
+    "$(printf '42\n3\n42\n42\n43\n42\n43\n43 44 45')"
+
 run_test "strings" "$SCRIPTS/strings.cdo" \
     "$(printf 'hello world\n5\nstring\nnumber\nbool\nnull\n42\n3.1400000000000001\ntrue\ntrue\nfalse\ntrue\n5\nworld\nhello world\nHELLO WORLD\nhi\nabc\ndef\nababab\n6\na\nb\nc\ncount: 99')"
 

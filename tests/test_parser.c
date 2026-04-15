@@ -737,6 +737,72 @@ TEST(test_call_no_spread_literal)
     cando_chunk_free(c);
 }
 
+/* Regression: Issue #17 -- an anonymous function expression used as an inline
+ * argument must not be treated as a call.  Previously, if the body's last
+ * emitted expression happened to be a call (e.g. `function() { return o.m(); }`)
+ * the parser would leave last_expr_was_call=true after OP_CLOSURE and the
+ * surrounding parse_call would spuriously emit OP_SPREAD_RET, corrupting
+ * argc at runtime (often crashing).  The fix clears that flag after
+ * OP_CLOSURE.                                                              */
+TEST(test_inline_function_no_spread_from_body)
+{
+    /* Body contains a dot-form call -- stresses the original crash case.
+     * Neither the outer call nor the inner return should spread: the
+     * closure is a plain value, and `return <call>` emits OP_RETURN
+     * directly without a preceding OP_SPREAD_RET.                         */
+    CandoChunk *c = compile_ok("f(function() { return o.m(); });");
+    EXPECT_EQ(count_op(c, OP_SPREAD_RET), 0);
+    /* Find the *outer* OP_CALL (the last one); its argc must be 1. */
+    int call_pos = -1;
+    u32 i = 0;
+    while (i < c->code_len) {
+        CandoOpcode cur = (CandoOpcode)c->code[i];
+        if (cur == OP_CALL) call_pos = (int)i;
+        u32 sz = cando_opcode_size(cur);
+        i += (sz > 0) ? sz : 1;
+    }
+    EXPECT_TRUE(call_pos >= 0);
+    EXPECT_EQ(c->code[call_pos + 1], 1u);
+    cando_chunk_free(c);
+}
+
+TEST(test_inline_function_body_with_method_call)
+{
+    /* Body contains a colon-form method call. */
+    CandoChunk *c = compile_ok("f(function() { return arr:length(); });");
+    /* Outer f(...) has exactly 1 argument slot (the closure). */
+    int call_pos = -1;
+    u32 i = 0;
+    while (i < c->code_len) {
+        CandoOpcode cur = (CandoOpcode)c->code[i];
+        if (cur == OP_CALL) call_pos = (int)i;
+        u32 sz = cando_opcode_size(cur);
+        i += (sz > 0) ? sz : 1;
+    }
+    EXPECT_TRUE(call_pos >= 0);
+    EXPECT_EQ(c->code[call_pos + 1], 1u);
+    cando_chunk_free(c);
+}
+
+TEST(test_inline_function_no_trailing_spread_empty_body)
+{
+    /* function(){} as an inline argument must never emit OP_SPREAD_RET
+     * around the outer call (the closure is a plain value).               */
+    CandoChunk *c = compile_ok("f(function() {});");
+    EXPECT_EQ(count_op(c, OP_SPREAD_RET), 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_inline_function_variable_form_equivalent)
+{
+    /* Variable-bound form -- used to be the only working form -- must also
+     * produce no spurious OP_SPREAD_RET around the outer call.             */
+    CandoChunk *c = compile_ok(
+        "VAR fn = function() { return o.m(); }; f(fn);");
+    EXPECT_EQ(count_op(c, OP_SPREAD_RET), 0);
+    cando_chunk_free(c);
+}
+
 /* -------------------------------------------------------------------------
  * Tests: multi-variable declaration
  * ------------------------------------------------------------------------ */
@@ -860,6 +926,14 @@ int main(void)
     run_test("single return unchanged",        test_single_return_unchanged);
     run_test("call with spread (SPREAD_RET)",  test_call_with_spread);
     run_test("call no spread (literal args)",  test_call_no_spread_literal);
+    run_test("inline fn arg: body call no spread (#17)",
+                                               test_inline_function_no_spread_from_body);
+    run_test("inline fn arg: method call body (#17)",
+                                               test_inline_function_body_with_method_call);
+    run_test("inline fn arg: empty body no spread (#17)",
+                                               test_inline_function_no_trailing_spread_empty_body);
+    run_test("inline fn arg: variable form equiv (#17)",
+                                               test_inline_function_variable_form_equivalent);
 
     printf("\n-- multi-variable declaration --\n");
     run_test("multi-var global decl",          test_multi_var_decl);

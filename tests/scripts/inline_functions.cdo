@@ -1,0 +1,43 @@
+/* inline_functions.cdo -- Regression for issue #17.
+ *
+ * An anonymous function used as an inline argument whose body ends with a
+ * call (x.method() or x:method()) used to corrupt the outer call's argc
+ * because parse_function_expr left last_expr_was_call=true after emitting
+ * OP_CLOSURE.  This script covers the known-broken patterns along with
+ * the variable-bound form that always worked, so we confirm both emit the
+ * same results.                                                            */
+
+FUNCTION call_cb(cb)       { RETURN cb();  }
+FUNCTION call_cb_with(cb, x) { RETURN cb(x); }
+
+VAR obj = { g: FUNCTION() { RETURN 42; } };
+VAR arr = [1, 2, 3];
+
+/* 1. Dot-form call as the body's final expression (the original crash). */
+print(call_cb(FUNCTION() { RETURN obj.g(); }));
+
+/* 2. Colon-form method call in body. */
+print(call_cb(FUNCTION() { RETURN arr:length(); }));
+
+/* 3. Variable-bound equivalent -- used to be the only working form. */
+VAR fn = FUNCTION() { RETURN obj.g(); };
+print(call_cb(fn));
+
+/* 4. Multiple calls in body. */
+print(call_cb(FUNCTION() { obj.g(); obj.g(); RETURN obj.g(); }));
+
+/* 5. Inline function with an argument of its own. */
+print(call_cb_with(FUNCTION(n) { RETURN n + obj.g(); }, 1));
+
+/* 6. Nested inline function expressions. */
+print(call_cb(FUNCTION() {
+    RETURN call_cb(FUNCTION() { RETURN obj.g(); });
+}));
+
+/* 7. Inline function passed as the second argument (body ends in call). */
+FUNCTION pair(a, cb) { RETURN a + cb(); }
+print(pair(1, FUNCTION() { RETURN obj.g(); }));
+
+/* 8. Inline callback to a library method (map). */
+VAR doubled = arr:map(FUNCTION(x) { RETURN x + obj.g(); });
+print(doubled);
