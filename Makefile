@@ -49,9 +49,9 @@ CFLAGS_EXE = -std=c11 -Wall -Wextra -pthread -D_GNU_SOURCE \
 
 # OS detection for LDFLAGS
 ifeq ($(OS),Windows_NT)
-    LDFLAGS = -lm -lws2_32
+    LDFLAGS = -lm -lws2_32 -lssl -lcrypto
 else
-    LDFLAGS = -lm -ldl
+    LDFLAGS = -lm -ldl -lssl -lcrypto
 endif
 
 # ---------------------------------------------------------------------------
@@ -126,6 +126,9 @@ CANDO_LIB_SRCS = \
     source/lib/crypto.c           \
     source/lib/process.c          \
     source/lib/net.c              \
+    source/lib/httputil.c         \
+    source/lib/http.c             \
+    source/lib/https.c            \
     source/cando_lib.c
 
 # Windows compatibility shim added on Windows
@@ -263,7 +266,7 @@ CFLAGS_WIN  = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0
 CFLAGS_EXE_WIN = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0600 \
                  -iquote source -iquote source/core -Iinclude
 
-LDFLAGS_WIN = -lm -lws2_32 -static-libgcc
+LDFLAGS_WIN = -lm -lws2_32 -lssl -lcrypto -static-libgcc
 
 libcando.dll: $(CANDO_LIB_SRCS) $(CANDO_WIN_EXTRA)
 	$(MINGW_CC) $(CFLAGS_WIN) -shared $^ -o $@ $(LDFLAGS_WIN) \
