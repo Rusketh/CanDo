@@ -1649,6 +1649,14 @@ static void parse_function_expr(CandoParser *p, bool can_assign)
 
     u16 pc_idx = cando_chunk_add_const(cur(p), cando_number((f64)fn_start));
     emit_op_a(p, OP_CLOSURE, pc_idx);
+
+    /* The function *expression* evaluates to a closure value — it is not a
+     * call.  Clear last_expr_was_call / last_expr_was_unpack so callers such
+     * as parse_call don't mistakenly emit OP_SPREAD_RET based on whatever
+     * the final expression inside the function body happened to be.       */
+    p->last_expr_was_call   = false;
+    p->last_expr_was_unpack = false;
+    p->last_multi_push      = 1;
 #undef MAX_PARAMS
 }
 
