@@ -10,6 +10,7 @@ compiled to bytecode for a stack-based VM.
 | Document | What's in it |
 |---|---|
 | [getting-started.md](getting-started.md) | Build the interpreter and run your first script |
+| [user-guide.md](user-guide.md) | Hands-on tutorial: learn CanDo by example |
 | [language-reference.md](language-reference.md) | Complete syntax: types, expressions, statements, functions, classes |
 | [standard-library.md](standard-library.md) | Every built-in library module, function-by-function |
 | [threading.md](threading.md) | `thread` / `await`, the `thread` library, shared state |
