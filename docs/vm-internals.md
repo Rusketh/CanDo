@@ -1,79 +1,80 @@
 # VM Internals
 
-## CandoVM struct  (`source/vm/vm.h`)
+## CandoVM (`source/vm/vm.h`)
 
 ```c
 struct CandoVM {
-    // Value stack
-    CandoValue  stack[2048];
-    CandoValue *stack_top;       // one past the last pushed value
+    CandoValue      stack[CANDO_STACK_MAX];      // 2048
+    CandoValue     *stack_top;
 
-    // Call frames
-    CandoCallFrame frames[256];
-    u32            frame_count;
+    CandoCallFrame  frames[CANDO_FRAMES_MAX];    // 256
+    u32             frame_count;
 
-    // Try/catch stack
-    CandoTryFrame  try_stack[64];
-    u32            try_depth;
+    CandoTryFrame   try_stack[CANDO_TRY_MAX];   // 64
+    u32             try_depth;
 
-    // Loop stack
-    CandoLoopFrame loop_stack[64];
-    u32            loop_depth;
+    CandoLoopFrame  loop_stack[CANDO_LOOP_MAX];  // 64
+    u32             loop_depth;
 
-    // Open upvalue linked list
-    CandoUpvalue  *open_upvalues;
+    CandoUpvalue   *open_upvalues;
 
-    // Global variables
-    CandoGlobalEnv globals;          // open-addressed hash table
+    CandoGlobalEnv *globals;          // shared pointer; children use parent's
+    CandoGlobalEnv *globals_owned;    // heap-allocated; NULL for child VMs
 
-    // Native function table
-    CandoNativeFn  native_fns[64];
-    u32            native_count;
+    CandoNativeFn   native_fns[CANDO_NATIVE_MAX]; // 128
+    u32             native_count;
 
-    // Memory controller (may be NULL)
-    CandoMemCtrl  *mem;
+    CandoMemCtrl   *mem;
 
-    // Handle table (CdoObject* lookup by index)
-    CandoHandleTable handles;
+    CandoHandleTable *handles;        // shared pointer; children use parent's
+    CandoHandleTable *handles_owned;
 
-    // Error state
-    CandoValue     error_vals[8];   // thrown values (error_vals[0] = first arg)
-    u32            error_val_count; // number of values in the current throw
-    bool           has_error;
-    char           error_msg[512];  // formatted string of error_vals[0]
+    CandoValue      error_vals[CANDO_MAX_THROW_ARGS]; // 32
+    u32             error_val_count;
+    bool            has_error;
+    char            error_msg[512];
 
-    // Multi-return state
-    int            last_ret_count;
-    int            spread_extra;
+    int             last_ret_count;
+    int             spread_extra;
+    int             array_extra;
 
-    // Eval re-entrancy
-    u32            eval_stop_frame;
-    CandoValue     eval_result;
+    u32             eval_stop_frame;
+    CandoValue     *eval_results;
+    u32             eval_result_count;
+    u32             eval_result_cap;
 
-    // Built-in type prototypes
-    CandoValue     string_proto;     // string method table (or null)
+    u32             thread_stop_frame;
+    CandoValue      thread_results[CANDO_MAX_THROW_ARGS];
+    u32             thread_result_count;
+
+    CandoValue      string_proto;
+    CandoValue      array_proto;
+
+    CandoModuleEntry *module_cache;
+    u32               module_cache_count;
+    u32               module_cache_cap;
+
+    CandoThreadRegistry *thread_registry;
+    CandoThreadRegistry *thread_registry_owned;
 };
 ```
 
----
-
-## CandoCallFrame
+## Call frames
 
 ```c
 typedef struct CandoCallFrame {
-    CandoClosure *closure;  // function being executed
-    u8           *ip;       // instruction pointer into closure->chunk
-    CandoValue   *slots;    // base of this frame's window in vm->stack
-    u32           ret_count; // expected return-value count (0 = any)
+    CandoClosure *closure;
+    u8           *ip;
+    CandoValue   *slots;      // base of frame's window in vm->stack
+    u32           ret_count;
+    bool          is_fluent;   // return receiver instead of result
 } CandoCallFrame;
 ```
 
-`slots` points directly into `vm->stack`.  Local variable 0 is `slots[0]`,
-local 1 is `slots[1]`, and so on.  The frame's operands live above its locals.
+`slots` points into `vm->stack`. Local 0 is `slots[0]`, local 1 is
+`slots[1]`, and so on. Operands live above the locals.
 
----
-
-## CandoClosure
+## Closures
 
 ```c
 typedef struct CandoClosure {
@@ -83,62 +84,88 @@ typedef struct CandoClosure {
 } CandoClosure;
 ```
 
-A closure wraps a `CandoChunk*` (shared; chunks are NOT owned by closures)
-and an optional array of captured upvalue pointers.
-
----
+Wraps a shared `CandoChunk*` (not owned by the closure) and an array of
+captured upvalue pointers.
 
 ## Upvalues
 
 ```c
 typedef struct CandoUpvalue {
-    CandoValue        *location;  // points into the stack while frame is live
-    CandoValue         closed;    // heap copy after OP_CLOSE_UPVAL
-    struct CandoUpvalue *next;    // intrusive linked list of open upvalues
+    CandoLockHeader    lock;
+    CandoValue        *location;
+    CandoValue         closed;
+    struct CandoUpvalue *next;
 } CandoUpvalue;
 ```
 
 - **Open**: `location` points into `vm->stack`.
 - **Closed**: `OP_CLOSE_UPVAL` copies the value to `closed` and redirects
-  `location` to `&upvalue->closed`.
+  `location` to `&closed`.
+- `lock` provides thread-safe access when the upvalue is shared between
+  parent and child threads.
 
----
+## Try frames
+
+```c
+typedef struct CandoTryFrame {
+    u8  *catch_ip;
+    u8  *finally_ip;
+    u32  stack_save;
+    u32  frame_save;
+    u32  loop_save;
+} CandoTryFrame;
+```
+
+On error the VM restores `stack_top`, `frame_count`, and `loop_depth`
+from the saved values, then jumps to `catch_ip`.
+
+## Loop frames
+
+```c
+typedef struct CandoLoopFrame {
+    u8  *break_ip;
+    u8  *cont_ip;
+    u32  stack_save;
+    u8   loop_type;   // CANDO_LOOP_WHILE=0, CANDO_LOOP_FOR=1, CANDO_LOOP_FOR_OVER=2
+} CandoLoopFrame;
+```
+
+`OP_BREAK`/`OP_CONTINUE` walk the loop stack A levels up and jump to
+`break_ip` or `cont_ip`.
 
 ## Execution lifecycle
 
 ```c
-// Initialise (mem may be NULL for tests)
-void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem);
-
-// Run a top-level chunk; returns VM_OK / VM_HALT / VM_RUNTIME_ERR
+void          cando_vm_init(CandoVM *vm, CandoMemCtrl *mem);
 CandoVMResult cando_vm_exec(CandoVM *vm, CandoChunk *chunk);
-
-// Run an eval-mode chunk inside a running VM (re-entrant)
 CandoVMResult cando_vm_exec_eval(CandoVM *vm, CandoChunk *chunk,
-                                  CandoValue *result_out);
-
-// Release all VM-owned resources
-void cando_vm_destroy(CandoVM *vm);
+                                  CandoValue **results_out, u32 *count_out);
+void          cando_vm_destroy(CandoVM *vm);
 ```
 
-`cando_vm_exec` wraps the chunk in a `CandoClosure`, pushes `frames[0]`, and
-calls the internal `vm_run()` dispatch loop.
+`cando_vm_exec` wraps the chunk in a `CandoClosure`, pushes `frames[0]`,
+and enters the dispatch loop. Returns `VM_OK`, `VM_HALT`, or
+`VM_RUNTIME_ERR`.
 
----
+```c
+typedef enum {
+    VM_OK,
+    VM_RUNTIME_ERR,
+    VM_HALT,
+    VM_EVAL_DONE,
+} CandoVMResult;
+```
 
-## The dispatch loop
+## Dispatch loop
 
-The VM uses **GCC computed gotos** (`&&label`, `goto *dispatch_table[op]`) for
-maximum branch-prediction friendliness.  The loop structure is:
+The VM uses GCC computed gotos (`&&label`, `goto *dispatch_table[op]`):
 
 ```c
 static CandoVMResult vm_run(CandoVM *vm) {
-    // Build a dispatch table indexed by CandoOpcode
     static void *dispatch_table[OP_COUNT] = { &&do_OP_CONST, ... };
-
     #define DISPATCH() goto *dispatch_table[(CandoOpcode)(*ip++)]
 
-    DISPATCH();  // first instruction
+    DISPATCH();
 
     do_OP_CONST: { ... DISPATCH(); }
     do_OP_ADD:   { ... DISPATCH(); }
@@ -146,15 +173,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
 }
 ```
 
-This compiles to an indirect jump per instruction — equivalent to a
-`switch` but without the bounds check or jump table limitations.
-
----
+Each instruction is one indirect jump with no bounds check.
 
 ## Instruction encoding
 
-Every instruction is one byte (`CandoOpcode`).  Instructions with operands
-are followed by 2-byte little-endian `u16` values:
+Every instruction is one byte (`CandoOpcode`). Operands follow as
+little-endian `u16` values:
 
 | Format | Bytes | Description |
 |---|---|---|
@@ -162,21 +186,17 @@ are followed by 2-byte little-endian `u16` values:
 | `OPFMT_A` | 3 | opcode + u16 A |
 | `OPFMT_A_B` | 5 | opcode + u16 A + u16 B |
 
-Helpers in `opcodes.h`:
-
 ```c
 CandoOpFmt cando_opcode_fmt(CandoOpcode op);
-u32        cando_opcode_size(CandoOpcode op);  // 1, 3, or 5
+u32        cando_opcode_size(CandoOpcode op);   // 1, 3, or 5
 u16        cando_read_u16(const u8 *ip);
-i16        cando_read_i16(const u8 *ip);       // signed jump offsets
+i16        cando_read_i16(const u8 *ip);
 void       cando_write_u16(u8 *ip, u16 val);
 ```
 
----
-
 ## Opcode reference
 
-### Literals
+### Band 0 — Literals
 
 | Opcode | Operand | Effect |
 |---|---|---|
@@ -185,7 +205,7 @@ void       cando_write_u16(u8 *ip, u16 val);
 | `OP_TRUE` | — | push true |
 | `OP_FALSE` | — | push false |
 
-### Stack
+### Band 1 — Stack
 
 | Opcode | Operand | Effect |
 |---|---|---|
@@ -193,20 +213,25 @@ void       cando_write_u16(u8 *ip, u16 val);
 | `OP_POP_N` | A | discard top A values |
 | `OP_DUP` | — | duplicate top |
 
-### Variables
+### Band 2 — Locals
 
 | Opcode | Operand | Effect |
 |---|---|---|
 | `OP_LOAD_LOCAL` | A | push `slots[A]` |
 | `OP_STORE_LOCAL` | A | `slots[A] = peek` (no pop) |
-| `OP_DEF_LOCAL` | A | pop → `slots[A]`; resets `spread_extra` |
-| `OP_DEF_CONST_LOCAL` | A | same; marks slot constant |
-| `OP_LOAD_GLOBAL` | A | push global named `constants[A]` |
-| `OP_STORE_GLOBAL` | A | write global `constants[A]` = peek |
-| `OP_DEF_GLOBAL` | A | pop → new global `constants[A]`; resets `spread_extra` |
-| `OP_DEF_CONST_GLOBAL` | A | same; write-protected |
+| `OP_DEF_LOCAL` | A | pop → `slots[A]` |
+| `OP_DEF_CONST_LOCAL` | A | pop → const `slots[A]` |
 
-### Upvalues
+### Band 3 — Globals
+
+| Opcode | Operand | Effect |
+|---|---|---|
+| `OP_LOAD_GLOBAL` | A | push global named by `constants[A]` |
+| `OP_STORE_GLOBAL` | A | `global[constants[A]] = peek` |
+| `OP_DEF_GLOBAL` | A | pop → new global `constants[A]` |
+| `OP_DEF_CONST_GLOBAL` | A | pop → write-protected global |
+
+### Band 4 — Upvalues
 
 | Opcode | Operand | Effect |
 |---|---|---|
@@ -214,17 +239,34 @@ void       cando_write_u16(u8 *ip, u16 val);
 | `OP_STORE_UPVAL` | A | `upvalues[A] = peek` |
 | `OP_CLOSE_UPVAL` | A | close upvalue at stack slot A to heap |
 
-### Arithmetic / comparison / bitwise / logical
+### Band 5 — Arithmetic
 
-Standard one-or-two-operand opcodes: `OP_ADD`, `OP_SUB`, `OP_MUL`, `OP_DIV`,
-`OP_MOD`, `OP_POW`, `OP_NEG`, `OP_POS`, `OP_INCR`, `OP_DECR`,
-`OP_EQ`, `OP_NEQ`, `OP_LT`, `OP_GT`, `OP_LEQ`, `OP_GEQ`,
-`OP_EQ_STACK`, `OP_NEQ_STACK`, `OP_LT_STACK`, …, `OP_RANGE_CHECK`,
-`OP_BIT_AND`, `OP_BIT_OR`, `OP_BIT_XOR`, `OP_BIT_NOT`, `OP_LSHIFT`, `OP_RSHIFT`,
-`OP_NOT`, `OP_AND_JUMP` (A = forward byte offset if falsy, peek not popped),
-`OP_OR_JUMP` (A = forward byte offset if truthy).
+`OP_ADD`, `OP_SUB`, `OP_MUL`, `OP_DIV`, `OP_MOD`, `OP_POW` — pop two,
+push result. `OP_NEG`, `OP_POS` — pop one, push result. `OP_INCR`,
+`OP_DECR` — modify top in place.
 
-### Objects
+### Band 6 — Comparison
+
+`OP_EQ`, `OP_NEQ`, `OP_LT`, `OP_GT`, `OP_LEQ`, `OP_GEQ` — pop two,
+push bool.
+
+Multi-value comparison (`_STACK` variants, operand A = count): pop A
+right-hand values, pop one left operand, push bool. `EQ_STACK`/`NEQ_STACK`
+use any/none semantics; ordering variants require the relation against all.
+
+`OP_RANGE_CHECK` — pop max, val, min; A encodes inclusive flags.
+
+### Band 7 — Bitwise
+
+`OP_BIT_AND`, `OP_BIT_OR`, `OP_BIT_XOR`, `OP_LSHIFT`, `OP_RSHIFT` — pop
+two, push result. `OP_BIT_NOT` — pop one, push result.
+
+### Band 8 — Logical
+
+`OP_NOT` — pop, push `!v`. `OP_AND_JUMP` / `OP_OR_JUMP` — short-circuit:
+peek top; if falsy/truthy jump forward A bytes without popping.
+
+### Band 9 — Objects
 
 | Opcode | Operand | Effect |
 |---|---|---|
@@ -233,104 +275,133 @@ Standard one-or-two-operand opcodes: `OP_ADD`, `OP_SUB`, `OP_MUL`, `OP_DIV`,
 | `OP_GET_FIELD` | A | obj=pop; push `obj[constants[A]]` |
 | `OP_SET_FIELD` | A | val=pop, obj=peek; `obj[constants[A]] = val` |
 | `OP_GET_INDEX` | — | idx=pop, obj=pop; push `obj[idx]` |
-| `OP_SET_INDEX` | — | val=pop, idx=pop, obj=peek; `obj[idx] = val` |
+| `OP_SET_INDEX` | — | val=pop, idx=pop, obj=peek; `obj[idx]=val` |
 | `OP_LEN` | — | pop; push length |
+| `OP_KEYS_OF` | — | pop; push stack of keys (FOR IN) |
+| `OP_VALS_OF` | — | pop; push stack of values (FOR OF) |
 
-### Functions and calls
+### Band 10 — Control flow
 
 | Opcode | Operand | Effect |
 |---|---|---|
-| `OP_CLOSURE` | A | build `CandoClosure` from `constants[A]` chunk prototype |
-| `OP_CALL` | A | call TOS with A args (pushed before the function) |
-| `OP_METHOD_CALL` | A, B | `obj:constants[A](...)`; B = arg count |
-| `OP_FLUENT_CALL` | A, B | same but returns `obj` instead of method result |
-| `OP_RETURN` | A | return top A values; pop frame |
-| `OP_TAIL_CALL` | A | tail-recursive call optimisation |
+| `OP_JUMP` | A | unconditional; A = signed i16 offset |
+| `OP_JUMP_IF_FALSE` | A | pop; jump if falsy |
+| `OP_JUMP_IF_TRUE` | A | pop; jump if truthy |
+| `OP_LOOP` | A | unconditional backward; A = unsigned back bytes |
+| `OP_BREAK` | A | break from loop depth A (0 = innermost) |
+| `OP_CONTINUE` | A | continue at loop depth A |
+| `OP_LOOP_MARK` | A, B | record break/continue targets; B packs cont offset + loop type |
+| `OP_LOOP_END` | — | pop one loop frame |
 
-### Call convention
+### Band 11 — Functions
 
-For `OP_CALL A`:
-- Stack before: `[... callee, arg0, arg1, ..., argA-1]`
-- `callee` is at `stack_top - A - 1`.
-- A new `CandoCallFrame` is pushed with `slots = &callee`.
-- On `OP_RETURN N`, the top N values replace the callee slot range.
-
-### Multi-return and spreading
-
-`OP_RETURN A` leaves A values above `frame->slots`.  The caller sees them via
-`vm->last_ret_count`.
-
-`OP_SPREAD_RET` adjusts `vm->spread_extra` by `last_ret_count - 1` to account
-for functions that return more values than the single "slot" the call
-expression normally occupies.  All four variable-defining opcodes reset
-`spread_extra` to 0 after consuming it.
-
-### Control flow
-
-`OP_JUMP`, `OP_JUMP_IF_FALSE`, `OP_JUMP_IF_TRUE`: A is a signed i16 byte
-offset relative to the byte *after* the operand bytes.
-
-`OP_LOOP`: unconditional backward jump; A = unsigned backward byte count.
-
-`OP_BREAK` / `OP_CONTINUE`: A = loop depth (0 = innermost).  The VM walks
-the `loop_stack` A levels up and jumps to `break_ip` or `cont_ip`.
-
-### Try / catch / finally
-
-```
-OP_TRY_BEGIN   A   push CandoTryFrame; A = signed offset to catch block
-  <try body>
-OP_TRY_END         normal exit; pop try frame
-OP_JUMP        A   skip catch block on normal path
-  <catch block>
-OP_CATCH_BEGIN A   push A values from vm->error_vals[] (padding null for missing);
-               A   top of stack = error_vals[0] (first thrown arg)
-  <catch body>    (each param bound by successive OP_DEF_LOCAL instructions)
-OP_FINALLY_BEGIN A begin finally; A = signed offset past finally block
-  <finally body>
-OP_THROW       A   pop A values in order, store in error_vals[0..A-1], throw
-OP_RERAISE         re-throw current exception
-```
-
-**Multi-argument throw/catch:**
-
-| Thrown count | Catch params | Result |
+| Opcode | Operand | Effect |
 |---|---|---|
-| N == P | P params | all params bound |
-| N < P | P params | first N bound; remaining params = `null` |
-| N > P | P params | first P bound; extra thrown values dropped |
+| `OP_CLOSURE` | A | build closure from chunk `constants[A]` |
+| `OP_CALL` | A | call TOS with A args |
+| `OP_METHOD_CALL` | A, B | `obj:constants[A](...)` with B args |
+| `OP_FLUENT_CALL` | A, B | same but returns `obj` |
+| `OP_RETURN` | A | return top A values |
+| `OP_TAIL_CALL` | A | tail-recursive call with A args |
 
-`error_vals[0]` is always the first argument and is also stringified into
-`error_msg` for display purposes.
+### Band 12 — Varargs
 
-On error, the VM restores `stack_top`, `frame_count`, and `loop_depth` from
-the saved `CandoTryFrame`, then jumps to `catch_ip`.  `OP_CATCH_BEGIN` then
-pushes the bound values, clearing `error_vals`.
+`OP_LOAD_VARARG` (A) — push vararg slot A (`UINT16_MAX` = push all).
+`OP_VARARG_LEN` — push count. `OP_UNPACK` — pop array/object, push all
+values.
 
-**Error state fields:**
+### Band 13 — Iteration
 
-| Field | Set by | Description |
+`OP_RANGE_ASC` / `OP_RANGE_DESC` — pop two, push ascending/descending
+range. `OP_FOR_INIT` (A) / `OP_FOR_NEXT` (A) — for-each init and advance.
+`OP_FOR_OVER_INIT` / `OP_FOR_OVER_NEXT` (A) — generic iterator (Lua-style
+triplet). `OP_PIPE_INIT` (A) / `OP_PIPE_NEXT` (A) / `OP_FILTER_NEXT` (A)
+/ `OP_PIPE_END` / `OP_PIPE_COLLECT` / `OP_FILTER_COLLECT` — pipe (`~>`)
+and filter (`~!>`) operators.
+
+### Band 14 — Error handling
+
+| Opcode | Operand | Effect |
 |---|---|---|
-| `error_vals[0..7]` | `OP_THROW`, `cando_vm_error()`, `vm_runtime_error()` | thrown values |
-| `error_val_count` | same | how many values are in the current throw |
-| `has_error` | same | true while an error is propagating |
-| `error_msg` | same | string form of `error_vals[0]`, used for display |
+| `OP_TRY_BEGIN` | A | push try frame; A = offset to catch |
+| `OP_TRY_END` | — | normal exit from try |
+| `OP_CATCH_BEGIN` | A | push A values from `error_vals[]` |
+| `OP_FINALLY_BEGIN` | A | A = offset past finally block |
+| `OP_THROW` | A | pop A values, store in `error_vals`, throw |
+| `OP_RERAISE` | — | re-throw current exception |
 
-### Eval stop (`VM_EVAL_DONE`)
+### Band 15 — Threads
 
-When `cando_vm_exec_eval` runs an eval chunk, it sets `vm->eval_stop_frame` =
-current `frame_count`.  When `OP_RETURN` decrements `frame_count` to equal
-`eval_stop_frame`, the VM stores the return value in `vm->eval_result` and
-returns `VM_EVAL_DONE` instead of continuing.  The outer `vm_run` call then
-sees `VM_EVAL_DONE` and resumes normally.
+`OP_THREAD` — pop closure, spawn OS thread, push thread handle.
+`OP_AWAIT` — pop thread handle, block until done, push return values.
+`OP_ASYNC` / `OP_YIELD` — reserved, unused.
 
----
+### Band 16 — Classes
+
+`OP_NEW_CLASS` (A) — create class object named `constants[A]`.
+`OP_BIND_METHOD` (A) — bind method `constants[A]` to class on TOS.
+`OP_INHERIT` — set `__index` on child to parent.
+
+### Band 17 — Masks
+
+`OP_MASK_PASS` — keep top (no-op). `OP_MASK_SKIP` — pop and discard top.
+`OP_MASK_APPLY` (A, B) — apply bitmask B to top A values.
+
+### Band 18 — Spreading
+
+`OP_SPREAD_RET` — adjust `spread_extra` by `last_ret_count - 1`.
+`OP_ARRAY_SPREAD` — adjust `array_extra` by `last_ret_count - 1`.
+
+### Band 19 — Call-result comparison
+
+`OP_TRUNCATE_RET` — keep only the first return value. `OP_EQ_SPREAD`,
+`OP_NEQ_SPREAD`, `OP_LT_SPREAD`, `OP_GT_SPREAD`, `OP_LEQ_SPREAD`,
+`OP_GEQ_SPREAD` — compare left operand against all return values from
+the last call.
+
+### Sentinels
+
+`OP_NOP` — no operation. `OP_HALT` — stop VM (top-level script end).
+
+## Call convention
+
+For `OP_CALL A`: stack before is `[... callee, arg0, ..., argA-1]`. A new
+`CandoCallFrame` is pushed with `slots = &callee`. On `OP_RETURN N`, the
+top N values replace the callee slot range. `vm->last_ret_count` is set
+to N.
+
+## Multi-return spreading
+
+`OP_SPREAD_RET` adjusts `spread_extra` by `last_ret_count - 1` to account
+for functions returning more values than the single slot the call
+expression normally occupies. All variable-defining opcodes
+(`OP_DEF_LOCAL`, `OP_DEF_CONST_LOCAL`, `OP_DEF_GLOBAL`,
+`OP_DEF_CONST_GLOBAL`) reset `spread_extra` to 0 after consuming it.
+
+## Try/catch unwinding
+
+On error, the VM restores `stack_top`, `frame_count`, and `loop_depth`
+from `CandoTryFrame`, jumps to `catch_ip`. `OP_CATCH_BEGIN` pushes bound
+values from `error_vals[]`.
+
+Multi-argument throw/catch: `OP_THROW A` pops A values into
+`error_vals[0..A-1]`. Catch binds up to its parameter count; excess values
+are dropped, missing ones arrive as null.
+
+## Eval re-entrancy
+
+`cando_vm_exec_eval` sets `eval_stop_frame = frame_count`. When
+`OP_RETURN` decrements `frame_count` to match, the VM captures results
+and returns `VM_EVAL_DONE` instead of continuing.
 
 ## Stack helpers
 
 ```c
 void       cando_vm_push(CandoVM *vm, CandoValue val);
 CandoValue cando_vm_pop(CandoVM *vm);
-CandoValue cando_vm_peek(const CandoVM *vm, u32 dist); // 0 = top
+CandoValue cando_vm_peek(const CandoVM *vm, u32 dist);  // 0 = top
 u32        cando_vm_stack_depth(const CandoVM *vm);
 ```
+
+See [value-types.md](value-types.md) for `CandoValue`/`CdoValue`.
+See [object-system.md](object-system.md) for how the VM uses objects.

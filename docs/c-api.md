@@ -1,375 +1,141 @@
-# CanDo C API Reference
+# C API Reference
 
-Complete reference for `include/cando.h` and the supporting headers it
-re-exports.  Compile with `-Iinclude` and link with `-lcando`.
+Reference for every symbol exported by `cando.h` and its transitively
+included headers.  For task-oriented examples see
+[embedding.md](embedding.md) and [writing-extensions.md](writing-extensions.md).
 
----
+All public functions are declared `CANDO_API`, which expands to the
+right visibility attribute for the platform.  Every function listed
+here is safe to call from the thread that owns the VM; see
+[threading.md](threading.md) for the rules around child VMs.
 
-## Table of Contents
-
-1. [Version macros](#version-macros)
-2. [Error codes](#error-codes)
-3. [High-level API (`cando.h`)](#high-level-api)
-   - [State lifecycle](#state-lifecycle)
-   - [Load and execute](#load-and-execute)
-   - [Error inspection](#error-inspection)
-   - [Standard library openers](#standard-library-openers)
-   - [Version queries](#version-queries)
-4. [VM API (`vm/vm.h`)](#vm-api)
-   - [Types](#types)
-   - [VM lifecycle](#vm-lifecycle)
-   - [Execution](#execution)
-   - [Stack helpers](#stack-helpers)
-   - [Native function API](#native-function-api)
-   - [Global variable API](#global-variable-api)
-   - [Threading helpers](#threading-helpers)
-5. [Value API (`core/value.h`)](#value-api)
-6. [Bridge API (`vm/bridge.h`)](#bridge-api)
-7. [Chunk API (`vm/chunk.h`)](#chunk-api)
-
----
-
-## Version macros
-
-Defined in `cando.h`.
-
-| Macro | Value | Description |
-|---|---|---|
-| `CANDO_VERSION_MAJOR` | `1` | Major version number |
-| `CANDO_VERSION_MINOR` | `0` | Minor version number |
-| `CANDO_VERSION_PATCH` | `0` | Patch version number |
-| `CANDO_VERSION` | `"1.0.0"` | Version string |
-| `CANDO_VERSION_NUM` | `10000` | Numeric: `major*10000 + minor*100 + patch` |
-
-Use `CANDO_VERSION_NUM` in `#if` guards:
+## Version
 
 ```c
-#if CANDO_VERSION_NUM >= 10000
-  /* CanDo 1.0.0 or later */
-#endif
-```
+#define CANDO_VERSION_MAJOR  1
+#define CANDO_VERSION_MINOR  0
+#define CANDO_VERSION_PATCH  0
+#define CANDO_VERSION        "1.0.0"
+#define CANDO_VERSION_NUM    10000        /* major*10000 + minor*100 + patch */
 
----
+const char *cando_version(void);          /* returns CANDO_VERSION      */
+int         cando_version_num(void);      /* returns CANDO_VERSION_NUM  */
+```
 
 ## Error codes
 
-| Constant | Value | Meaning |
-|---|---|---|
-| `CANDO_OK` | 0 | Success |
-| `CANDO_ERR_FILE` | 1 | File could not be opened or read |
-| `CANDO_ERR_PARSE` | 2 | Syntax or compilation error |
-| `CANDO_ERR_RUNTIME` | 3 | Unhandled runtime error |
+```c
+#define CANDO_OK           0
+#define CANDO_ERR_FILE     1
+#define CANDO_ERR_PARSE    2
+#define CANDO_ERR_RUNTIME  3
+```
 
----
+Returned by `cando_dofile`, `cando_dostring`, and `cando_loadstring`.
 
-## High-level API
+## VM lifecycle
 
-Declared in `include/cando.h`.  These functions are the primary interface for
-embedders.
+### `CandoVM *cando_open(void);`
 
-### State lifecycle
+Create and initialise a new VM.  Registers the three core natives
+(`print`, `type`, `toString`) but no standard libraries.  Returns
+`NULL` only if the allocation fails.  Each call must be balanced by
+exactly one `cando_close`.
+
+### `void cando_close(CandoVM *vm);`
+
+Wait for all spawned threads, free all VM-owned resources, and —
+if this was the last live VM — destroy the global string intern
+table and meta-key cache.  Passing `NULL` is a no-op.
+
+## Standard library registration
 
 ```c
-CandoVM *cando_open(void);
+void cando_openlibs(CandoVM *vm);                 /* all below             */
+void cando_open_mathlib(CandoVM *vm);             /* math.*                */
+void cando_open_filelib(CandoVM *vm);             /* file.*                */
+void cando_open_stringlib(CandoVM *vm);           /* string prototype      */
+void cando_open_arraylib(CandoVM *vm);            /* array prototype       */
+void cando_open_objectlib(CandoVM *vm);           /* object.*              */
+void cando_open_jsonlib(CandoVM *vm);             /* json.*                */
+void cando_open_csvlib(CandoVM *vm);              /* csv.*                 */
+void cando_open_threadlib(CandoVM *vm);           /* thread.*              */
+void cando_open_oslib(CandoVM *vm);               /* os.*                  */
+void cando_open_datetimelib(CandoVM *vm);         /* datetime.*            */
+void cando_open_cryptolib(CandoVM *vm);           /* crypto.*              */
+void cando_open_processlib(CandoVM *vm);          /* process.*             */
+void cando_open_netlib(CandoVM *vm);              /* net.*                 */
+void cando_open_evallib(CandoVM *vm);             /* eval()                */
+void cando_open_includelib(CandoVM *vm);          /* include()             */
+void cando_open_httplib(CandoVM *vm);             /* http.* + fetch()      */
+void cando_open_httpslib(CandoVM *vm);            /* https.*               */
 ```
-Allocate and initialise a new CanDo VM.  Registers core native functions
-(`print`, `type`, `toString`).  Manages a process-global reference counter
-so the first call initialises the shared string intern table and the last
-`cando_close` tears it down.
 
-Returns a pointer to the new VM, or `NULL` on allocation failure.  Every
-call must be paired with exactly one `cando_close`.
+Each opener is idempotent.  `cando_openlibs` registers the libraries
+in the order that satisfies internal dependencies — for example,
+`http/https` is registered after `json` so that `response:json()` can
+resolve `json.parse`.
 
----
+## Load and execute
 
-```c
-void cando_close(CandoVM *vm);
-```
-Destroy a VM.  Waits for any threads spawned by the VM to finish, releases
-all VM-owned memory, and decrements the global reference count.
+### `int cando_dofile(CandoVM *vm, const char *path);`
 
-The pointer is invalid after this call.
+Read, compile, and execute a `.cdo` script.  The path is canonicalised
+so that `include()` calls inside the script resolve relative to the
+script's directory.
 
----
-
-### Load and execute
-
-```c
-int cando_dofile(CandoVM *vm, const char *path);
-```
-Read the file at `path`, compile it, and execute it.
-
-The script's canonical path (via `realpath` / `_fullpath`) is used as the
-base for relative `include()` calls inside the script.
-
-Returns `CANDO_OK` or one of `CANDO_ERR_FILE`, `CANDO_ERR_PARSE`,
+Returns `CANDO_OK`, `CANDO_ERR_FILE`, `CANDO_ERR_PARSE`, or
 `CANDO_ERR_RUNTIME`.
 
----
+### `int cando_dostring(CandoVM *vm, const char *src, const char *name);`
 
-```c
-int cando_dostring(CandoVM *vm, const char *src, const char *name);
-```
-Compile and execute the NUL-terminated source string `src`.  `name` is used
-in error messages (pass `NULL` to default to `"<string>"`).
+Compile and execute a NUL-terminated source string.  `name` appears
+in error messages; `NULL` becomes `"<string>"`.
 
 Returns `CANDO_OK`, `CANDO_ERR_PARSE`, or `CANDO_ERR_RUNTIME`.
 
----
+### `int cando_loadstring(CandoVM *vm, const char *src, const char *name, CandoChunk **chunk_out);`
 
-```c
-int cando_loadstring(CandoVM *vm, const char *src, const char *name,
-                     CandoChunk **chunk_out);
-```
-Compile `src` without executing it.  On success stores the compiled
-`CandoChunk*` in `*chunk_out` and returns `CANDO_OK`.  The caller owns the
-chunk and must free it with `cando_chunk_free`.
+Compile without executing.  On success `*chunk_out` receives the
+compiled `CandoChunk*`; the caller is responsible for freeing it with
+`cando_chunk_free`.  Run the chunk with `cando_vm_exec`.
 
-On failure returns `CANDO_ERR_PARSE` and sets `*chunk_out = NULL`.
+### `const char *cando_errmsg(const CandoVM *vm);`
 
-Use `cando_vm_exec(vm, chunk)` to run the compiled chunk.
+Return the most recent error message.  Never returns `NULL`; returns
+`""` when no error is set.  The string is valid until the next VM
+call that overwrites it.
 
----
+## Value types
 
-### Error inspection
-
-```c
-const char *cando_errmsg(const CandoVM *vm);
-```
-Return the most recent error message.  Valid after any load/exec call that
-returned non-zero.  The string is owned by the VM; it is valid until the
-next call that modifies `vm->error_msg`.  Never returns `NULL` (returns `""`
-when no error is set).
-
----
-
-### Standard library openers
-
-```c
-void cando_openlibs(CandoVM *vm);
-```
-Open all standard library modules.  Equivalent to calling each individual
-opener below.
-
-Individual openers (call any subset for sandboxing):
-
-| Function | Globals exposed |
-|---|---|
-| `cando_open_mathlib(vm)` | `math.*` |
-| `cando_open_filelib(vm)` | `file.*` |
-| `cando_open_stringlib(vm)` | String prototype methods |
-| `cando_open_arraylib(vm)` | Array prototype methods |
-| `cando_open_objectlib(vm)` | `object.*` |
-| `cando_open_jsonlib(vm)` | `json.*` |
-| `cando_open_csvlib(vm)` | `csv.*` |
-| `cando_open_threadlib(vm)` | `thread.*` |
-| `cando_open_oslib(vm)` | `os.*` |
-| `cando_open_datetimelib(vm)` | `datetime.*` |
-| `cando_open_cryptolib(vm)` | `crypto.*` |
-| `cando_open_processlib(vm)` | `process.*` |
-| `cando_open_netlib(vm)` | `net.*` |
-| `cando_open_evallib(vm)` | `eval()` |
-| `cando_open_includelib(vm)` | `include()` |
-
----
-
-### Version queries
-
-```c
-const char *cando_version(void);   /* returns e.g. "1.0.0" */
-int         cando_version_num(void); /* returns CANDO_VERSION_NUM */
-```
-
----
-
-## VM API
-
-Declared in `source/vm/vm.h` (included transitively by `cando.h`).
-
-### Types
-
-```c
-typedef struct CandoVM CandoVM;        /* interpreter state */
-
-typedef enum {
-    VM_OK,           /* execution completed normally */
-    VM_RUNTIME_ERR,  /* unhandled runtime error */
-    VM_HALT,         /* OP_HALT reached */
-    VM_EVAL_DONE,    /* eval chunk returned (internal) */
-} CandoVMResult;
-
-typedef int (*CandoNativeFn)(CandoVM *vm, int argc, CandoValue *args);
-```
-
-### VM lifecycle
-
-```c
-void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem);
-```
-Initialise all fields of an already-allocated `CandoVM`.  `mem` may be
-`NULL` (uses default allocator).  Prefer `cando_open()` for normal use.
-
----
-
-```c
-void cando_vm_init_child(CandoVM *child, const CandoVM *parent);
-```
-Initialise a child VM for a spawned thread.  The child shares the parent's
-handle table and global environment (no new heap allocation).  Native
-functions are copied by value.
-
----
-
-```c
-void cando_vm_destroy(CandoVM *vm);
-```
-Release all VM-owned resources.  Does not free the `CandoVM*` itself.
-
----
-
-```c
-CandoClosure *cando_closure_new(CandoChunk *chunk);
-void          cando_closure_free(CandoClosure *closure);
-```
-Manually create/free a closure around a chunk.  Used internally; prefer
-`cando_vm_exec` which handles this automatically.
-
----
-
-### Execution
-
-```c
-CandoVMResult cando_vm_exec(CandoVM *vm, CandoChunk *chunk);
-```
-Execute a top-level chunk.  Wraps it in a closure, pushes the first call
-frame, and runs the dispatch loop until `OP_HALT`, `OP_RETURN` at frame 0,
-or an unhandled error.
-
-Returns `VM_OK`, `VM_HALT`, or `VM_RUNTIME_ERR`.
-
----
-
-```c
-CandoVMResult cando_vm_exec_eval(CandoVM *vm, CandoChunk *chunk,
-                                  CandoValue **results_out, u32 *count_out);
-```
-Execute a chunk compiled with `eval_mode = true`.  Re-entrant: safe to call
-from inside a native function.  On success, `*results_out` points to an
-array of `*count_out` result values.
-
----
-
-```c
-int cando_vm_call_value(CandoVM *vm, CandoValue fn_val,
-                        CandoValue *args, u32 argc);
-```
-Call a CanDo function value with `argc` arguments from `args[]`.  Return
-values are pushed onto `vm->stack`; the return count is returned.  Returns
-`0` if `fn_val` is not callable.  Safe to call from inside a native function.
-
----
-
-### Stack helpers
-
-```c
-void       cando_vm_push(CandoVM *vm, CandoValue val);
-CandoValue cando_vm_pop(CandoVM *vm);
-CandoValue cando_vm_peek(const CandoVM *vm, u32 dist);  /* 0 = top */
-u32        cando_vm_stack_depth(const CandoVM *vm);
-```
-
----
-
-### Native function API
-
-```c
-bool cando_vm_register_native(CandoVM *vm, const char *name, CandoNativeFn fn);
-```
-Register a C function as a named global callable in the VM.  Returns `false`
-if `CANDO_NATIVE_MAX` (128) is exceeded.
-
----
-
-```c
-CandoValue cando_vm_add_native(CandoVM *vm, CandoNativeFn fn);
-```
-Register a native without exposing it as a global; returns the sentinel
-`CandoValue` representing the function.  Returns `cando_null()` on overflow.
-
----
-
-```c
-void cando_vm_error(CandoVM *vm, const char *fmt, ...);
-```
-Report an error from a native function.  Sets `vm->has_error`, formats
-`vm->error_msg`, and populates `vm->error_vals[0]` so the error is catchable
-by a `TRY/CATCH` block.  After calling this, return `-1` from your native.
-
----
-
-### Global variable API
-
-```c
-bool cando_vm_set_global(CandoVM *vm, const char *name, CandoValue val,
-                         bool is_const);
-```
-Define or overwrite a global variable.  If `is_const` is `true`, the
-variable is write-protected for scripts (but can still be overwritten from C).
-
----
-
-```c
-bool cando_vm_get_global(const CandoVM *vm, const char *name, CandoValue *out);
-```
-Look up a global by name.  Stores the value in `*out` and returns `true` on
-success; returns `false` (without modifying `*out`) if not found.
-
----
-
-### Threading helpers
-
-```c
-void cando_vm_wait_all_threads(CandoVM *vm);
-```
-Block until all threads spawned from this VM have finished.  Call after
-`cando_vm_exec` returns if the script may have spawned threads.
-
----
-
-```c
-struct CdoThread *cando_current_thread(void);
-```
-Return the `CdoThread*` for the currently executing CanDo thread, or `NULL`
-on the main thread.  Implemented via thread-local storage.
-
----
-
-## Value API
-
-Declared in `source/core/value.h` (included by `cando.h`).
-
-### Type tags
+From `core/value.h`:
 
 ```c
 typedef enum {
-    TYPE_NULL,
-    TYPE_NUMBER,   /* double-precision float */
-    TYPE_BOOL,
-    TYPE_STRING,   /* pointer to CandoString (ref-counted) */
-    TYPE_OBJECT,   /* handle into the handle table → CdoObject* */
+    TYPE_NULL   = 0,
+    TYPE_BOOL   = 1,
+    TYPE_NUMBER = 2,
+    TYPE_STRING = 3,
+    TYPE_OBJECT = 4,
 } TypeTag;
-```
 
-### CandoValue struct
+typedef u32 HandleIndex;
+#define CANDO_INVALID_HANDLE ((HandleIndex)UINT32_MAX)
 
-```c
+typedef struct CandoString {
+    u32   ref_count;
+    u32   length;
+    u32   hash;
+    char  data[];            /* NUL-terminated */
+} CandoString;
+
 typedef struct CandoValue {
-    TypeTag type;
+    u8 tag;
     union {
-        double       number;
         bool         boolean;
+        f64          number;
         CandoString *string;
-        HandleIndex  handle;   /* for TYPE_OBJECT */
+        HandleIndex  handle;
     } as;
 } CandoValue;
 ```
@@ -378,113 +144,213 @@ typedef struct CandoValue {
 
 ```c
 CandoValue cando_null(void);
-CandoValue cando_number(double n);
-CandoValue cando_bool(bool b);
-CandoValue cando_string_new(const char *data);   /* heap-allocated, retained */
+CandoValue cando_bool(bool v);
+CandoValue cando_number(f64 v);
+CandoValue cando_string_value(CandoString *s);      /* takes ownership    */
+CandoValue cando_object_value(HandleIndex h);
 ```
 
-### Type predicates
+### Predicates
 
 ```c
 bool cando_is_null(CandoValue v);
-bool cando_is_number(CandoValue v);
 bool cando_is_bool(CandoValue v);
+bool cando_is_number(CandoValue v);
 bool cando_is_string(CandoValue v);
 bool cando_is_object(CandoValue v);
 ```
 
-### Accessors
+### Operations
 
 ```c
-/* Convenient aliases — undefined behaviour if type is wrong */
-double       cando_as_number(CandoValue v);   /* v.as.number   */
-bool         cando_as_bool(CandoValue v);     /* v.as.boolean  */
-CandoString *cando_as_string(CandoValue v);   /* v.as.string   */
+const char *cando_value_type_name(TypeTag tag);
+bool        cando_value_equal(CandoValue a, CandoValue b);
+char       *cando_value_tostring(CandoValue v);     /* caller frees       */
+CandoValue  cando_value_copy(CandoValue v);         /* retains strings    */
+void        cando_value_release(CandoValue v);
 ```
 
-### Reference counting
+### Strings
 
 ```c
-CandoValue cando_value_copy(CandoValue v);    /* retain string/object; returns v */
-void       cando_value_release(CandoValue v); /* release string/object           */
+CandoString *cando_string_new(const char *src, u32 length);
+CandoString *cando_string_retain(CandoString *s);
+void         cando_string_release(CandoString *s);
 ```
 
-### Utilities
+## VM stack and natives
+
+### Native function type
 
 ```c
-const char *cando_value_type_name(CandoValue v);         /* "null", "number", etc. */
-bool        cando_value_equal(CandoValue a, CandoValue b); /* structural equality */
-CandoString *cando_value_tostring(CandoValue v);           /* format as string    */
+typedef int (*CandoNativeFn)(CandoVM *vm, int argc, CandoValue *args);
 ```
 
----
+- Arguments are in `args[0..argc-1]`.
+- Push return values onto the stack with `cando_vm_push`.
+- Return the number of values pushed, or `-1` for an error
+  (call `cando_vm_error` first).
 
-## Bridge API
-
-Declared in `source/vm/bridge.h` (included by `cando.h`).
-
-The bridge converts between the VM value layer (`CandoValue`) and the object
-layer (`CdoValue` / `CdoObject*`).
+### Registration
 
 ```c
-CdoObject *cando_bridge_resolve(CandoVM *vm, HandleIndex h);
+bool       cando_vm_register_native(CandoVM *vm, const char *name, CandoNativeFn fn);
+CandoValue cando_vm_add_native     (CandoVM *vm, CandoNativeFn fn);
 ```
-Resolve a `HandleIndex` (from `CandoValue.as.handle`) to a `CdoObject*`.
-Asserts that the handle is valid and live.
 
----
+`cando_vm_register_native` exposes the function as a global named
+`name`.  `cando_vm_add_native` just assigns it a sentinel value; use
+this when attaching the function as a method on an object (as
+`libutil_set_method` does).
+
+Maximum of `CANDO_NATIVE_MAX` (128) registered natives per VM.
+
+### Stack helpers
 
 ```c
-CandoValue cando_bridge_new_object(CandoVM *vm);
+void       cando_vm_push(CandoVM *vm, CandoValue val);
+CandoValue cando_vm_pop(CandoVM *vm);
+CandoValue cando_vm_peek(const CandoVM *vm, u32 dist);     /* 0 = top    */
+u32        cando_vm_stack_depth(const CandoVM *vm);
 ```
-Allocate a plain `CdoObject`, register it in the VM's handle table, and
-return a `CandoValue` of `TYPE_OBJECT`.
 
----
+### Error reporting
 
 ```c
-CandoValue cando_bridge_new_array(CandoVM *vm);
+void cando_vm_error(CandoVM *vm, const char *fmt, ...);
 ```
-Allocate a `CdoObject` array, register it, and return a `CandoValue`.
 
----
+Formats `fmt` into `vm->error_msg`, sets `vm->has_error`, and stages
+the message as a catchable thrown value.  Your native function should
+`return -1` immediately afterwards.
+
+## Globals
 
 ```c
-CdoString *cando_bridge_intern_key(CandoString *cs);
+bool cando_vm_set_global(CandoVM *vm, const char *name, CandoValue val, bool is_const);
+bool cando_vm_get_global(const CandoVM *vm, const char *name, CandoValue *out);
 ```
-Intern a `CandoString`'s data as a `CdoString` suitable for use as an
-object field key.  Returns a retained `CdoString*`; caller must call
-`cdo_string_release`.
 
----
+`is_const = true` prevents reassignment from scripts (attempts raise a
+runtime error).
+
+## Calling scripts from C
+
+### `int cando_vm_call_value(CandoVM *vm, CandoValue fn_val, CandoValue *args, u32 argc);`
+
+Call an `OBJ_FUNCTION` value with `argc` arguments.  Return values end
+up on top of `vm->stack`; the function's return count is the return
+value.  Returns 0 if `fn_val` is not callable.
+
+### `CandoVMResult cando_vm_exec(CandoVM *vm, CandoChunk *chunk);`
+
+Execute a top-level chunk (usually from `cando_loadstring`).  Returns
+`VM_OK`, `VM_HALT`, or `VM_RUNTIME_ERR`.
 
 ```c
-CandoValue cando_bridge_to_cando(CandoVM *vm, CdoValue v);
-CdoValue   cando_bridge_to_cdo(CandoVM *vm, CandoValue v);
+typedef enum {
+    VM_OK,
+    VM_RUNTIME_ERR,
+    VM_HALT,
+    VM_EVAL_DONE,
+} CandoVMResult;
 ```
-Convert between the two value representations.  For object types a new
-handle is allocated (to-cando) or the handle is resolved to a pointer
-(to-cdo).
 
----
+### `CandoVMResult cando_vm_exec_eval(CandoVM *vm, CandoChunk *chunk, CandoValue **results_out, u32 *count_out);`
 
-## Chunk API
+Execute a chunk compiled in eval mode.  On `VM_EVAL_DONE` the expression's
+value is written to `*results_out[0]` (or a multi-value array) and
+`*count_out` is set.  Safe to call re-entrantly from a native function.
 
-Declared in `source/vm/chunk.h` (included by `cando.h`).
+### `int cando_vm_register_native(CandoVM *vm, const char *name, CandoNativeFn fn);`
+
+See *VM stack and natives* above.
+
+## Bridge layer
+
+From `vm/bridge.h`.  Use these when you need to manipulate objects
+directly from C.
 
 ```c
-CandoChunk *cando_chunk_new(const char *name, u32 arity, bool eval_mode);
+CdoObject  *cando_bridge_resolve(CandoVM *vm, HandleIndex h);
+CandoValue  cando_bridge_new_object(CandoVM *vm);
+CandoValue  cando_bridge_new_array(CandoVM *vm);
+CdoString  *cando_bridge_intern_key(CandoString *cs);
+CandoValue  cando_bridge_to_cando(CandoVM *vm, CdoValue v);
+CdoValue    cando_bridge_to_cdo  (CandoVM *vm, CandoValue v);
+```
+
+`cando_bridge_new_object` allocates a `CdoObject`, adds it to the VM's
+handle table, and returns a `CandoValue` of type `TYPE_OBJECT`.  Use
+`cando_bridge_resolve` to get the `CdoObject *` for manipulation.
+
+## Chunks
+
+From `vm/chunk.h`.  Used by `cando_loadstring` and the parser.
+
+```c
+CandoChunk *cando_chunk_new(const char *name, u32 arity, bool has_vararg);
 void        cando_chunk_free(CandoChunk *chunk);
-```
-Allocate and free a compiled bytecode chunk.  Normally you use
-`cando_loadstring` rather than creating chunks manually.
 
----
+void cando_chunk_emit_byte(CandoChunk *c, u8 byte, u32 line);
+void cando_chunk_emit_op  (CandoChunk *c, CandoOpcode op, u32 line);
+void cando_chunk_emit_op_a (CandoChunk *c, CandoOpcode op, u16 a, u32 line);
+void cando_chunk_emit_op_ab(CandoChunk *c, CandoOpcode op, u16 a, u16 b, u32 line);
+
+u32  cando_chunk_emit_jump     (CandoChunk *c, CandoOpcode op, u32 line);
+void cando_chunk_patch_jump    (CandoChunk *c, u32 patch_offset);
+void cando_chunk_patch_jump_to (CandoChunk *c, u32 patch_offset, u32 target);
+void cando_chunk_emit_loop     (CandoChunk *c, u32 loop_start, u32 line);
+
+u16  cando_chunk_add_const        (CandoChunk *c, CandoValue val);
+u16  cando_chunk_add_string_const (CandoChunk *c, const char *str, u32 len);
+```
+
+## Disassembly
+
+From `vm/debug.h`.  Used by the `cando … --disasm` CLI.
 
 ```c
-void cando_chunk_disasm(const CandoChunk *chunk, FILE *out);
+void cando_chunk_disasm(CandoChunk *chunk, FILE *out);
 ```
-Print a human-readable disassembly of the chunk's bytecode to `out`
-(typically `stderr`).  Also disassembles nested function chunks recursively.
 
-Used by the `--disasm` CLI flag.
+## Limits
+
+From `vm/vm.h`:
+
+```c
+#define CANDO_STACK_MAX        2048     /* value stack                    */
+#define CANDO_FRAMES_MAX       256      /* call depth                     */
+#define CANDO_TRY_MAX          64       /* try/catch nesting              */
+#define CANDO_LOOP_MAX         64       /* loop nesting                   */
+#define CANDO_NATIVE_MAX       128      /* registered native functions    */
+#define CANDO_MAX_THROW_ARGS   32       /* values per THROW               */
+#define CANDO_PROTO_DEPTH_MAX  32       /* prototype chain depth          */
+```
+
+## Thread utilities
+
+```c
+struct CdoThread *cando_current_thread(void);     /* NULL on main thread  */
+void              cando_vm_wait_all_threads(CandoVM *vm);
+```
+
+`cando_current_thread` is implemented via thread-local storage; it
+returns the `OBJ_THREAD` handle for the thread this native call is
+running on, or `NULL` when called from the main thread.
+
+`cando_vm_wait_all_threads` blocks until every thread that the VM has
+spawned has finished.  `cando_close` calls this internally — you only
+need it if you want to join before shutdown.
+
+## Child VMs (thread internals)
+
+```c
+void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem);
+void cando_vm_init_child(CandoVM *child, const CandoVM *parent);
+void cando_vm_destroy(CandoVM *vm);
+```
+
+Host code rarely calls these directly.  They are used by the thread
+trampoline to set up a spawned thread's VM sharing the parent's
+handles and globals.

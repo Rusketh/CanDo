@@ -1,106 +1,88 @@
 # Object System
 
-## CdoObject  (`source/object/object.h`)
+## CdoObject (`source/object/object.h`)
 
-`CdoObject` is the heap object type shared by plain objects, arrays, functions,
-and native wrappers.
+`CdoObject` is the single heap-allocated type backing plain objects, arrays,
+script closures, native function wrappers, and thread handles.
 
 ```c
 struct CdoObject {
-    CandoLockHeader lock;      // thread-safety header — MUST be offset 0
+    CandoLockHeader lock;      // MUST be offset 0
     u8              kind;      // ObjectKind
     bool            readonly;
 
-    // Hash table (open addressing, linear probing)
-    ObjSlot        *slots;
+    ObjSlot        *slots;     // open-addressed hash table, linear probing
     u32             slot_cap;
     u32             field_count;
     u32             tombstone_count;
 
-    // FIFO insertion-order linked list through slots[] indices
-    u32             fifo_head;
+    u32             fifo_head; // FIFO insertion-order linked list through slots[]
     u32             fifo_tail;
 
-    // Dense array storage (valid when kind == OBJ_ARRAY)
-    CdoValue       *items;
+    CdoValue       *items;    // dense array storage (OBJ_ARRAY)
     u32             items_len;
     u32             items_cap;
 
-    // Function data (OBJ_FUNCTION or OBJ_NATIVE)
-    union { ... } fn;
+    union { ... } fn;         // function data (OBJ_FUNCTION / OBJ_NATIVE)
 };
 ```
 
 ### ObjectKind
 
-| Constant | Description |
-|---|---|
-| `OBJ_OBJECT` | plain key-value object |
-| `OBJ_ARRAY` | numeric-indexed array (dense `items[]` storage) |
-| `OBJ_FUNCTION` | script closure |
-| `OBJ_NATIVE` | native C function wrapper |
-
----
+`OBJ_OBJECT` -- plain key-value object.
+`OBJ_ARRAY` -- dense `items[]` storage plus hash table for string-keyed properties.
+`OBJ_FUNCTION` -- script closure.
+`OBJ_NATIVE` -- C function wrapper.
+`OBJ_THREAD` -- thread handle.
 
 ## Global initialisation
 
-The object layer maintains a global intern table for `CdoString` keys and
-pre-interns all meta-key strings at startup.
-
 ```c
-void cdo_object_init(void);            // call once before any object code
-void cdo_object_destroy_globals(void); // call at shutdown
+void cdo_object_init(void);
+void cdo_object_destroy_globals(void);
 ```
 
-These are called in `main.c` around the VM execution.
-
----
+`cdo_object_init()` creates the process-global intern table and pre-interns
+every meta-key string. `cdo_object_destroy_globals()` tears it down at
+shutdown. `cando_open()` manages both calls through an atomic refcount, so
+embedders do not call these directly.
 
 ## Field flags
 
 ```c
-#define FIELD_NONE    0x00  // normal mutable field
-#define FIELD_STATIC  0x01  // immutable after first assignment
-#define FIELD_PRIVATE 0x02  // hidden from outside class scope
+#define FIELD_NONE    0x00   // normal mutable field
+#define FIELD_STATIC  0x01   // immutable after first assignment
+#define FIELD_PRIVATE 0x02   // hidden from outside class scope
 ```
-
-Pass these to `cdo_object_rawset()` when creating library objects or class
-method tables.
-
----
 
 ## Raw field access
 
 ```c
-// Look up key in obj's own hash table only (no prototype chain).
-// Returns true and writes *out if found.
 bool cdo_object_rawget(const CdoObject *obj, CdoString *key, CdoValue *out);
-
-// Insert or update a field.
-// Returns false on: readonly obj, FIELD_STATIC already-set key, or NULL key.
 bool cdo_object_rawset(CdoObject *obj, CdoString *key, CdoValue val, u8 flags);
-
-// Delete a field (returns false if not found, readonly, or FIELD_STATIC).
 bool cdo_object_rawdelete(CdoObject *obj, CdoString *key);
 ```
 
-Keys **must** be interned `CdoString*` values (pointer equality is used for
-lookup).  Call `cdo_string_intern(data, length)` before using a string as a
-key.
+All three operate on the object's own hash table only -- no prototype chain.
+Keys **must** be interned `CdoString*` values; lookup uses pointer equality.
 
----
+`rawget` returns `true` and writes `*out` when the field exists.
+
+`rawset` returns `false` when: the object is readonly, the key is `NULL`, or
+the field already exists with `FIELD_STATIC`.
+
+`rawdelete` returns `false` when: the field is not found, the object is
+readonly, or the field has `FIELD_STATIC`.
 
 ## Prototype-chain lookup
 
 ```c
-// Looks up key in obj; if not found traverses __index up to 32 levels.
 bool cdo_object_get(CdoObject *obj, CdoString *key, CdoValue *out);
 ```
 
-Use `cdo_object_get` (not `rawget`) when implementing dot-access lookups that
-should respect inheritance.  The chain limit is `CANDO_PROTO_DEPTH_MAX = 32`.
-
----
+Looks up `key` in the object's own fields first, then follows the `__index`
+chain. Stops after `CANDO_PROTO_DEPTH_MAX` (32) levels. Use this instead of
+`rawget` whenever dot-access should respect inheritance.
 
 ## Readonly objects
 
@@ -109,10 +91,8 @@ void cdo_object_set_readonly(CdoObject *obj, bool ro);
 bool cdo_object_is_readonly(const CdoObject *obj);
 ```
 
-A readonly object rejects all `rawset` and `rawdelete` calls.  Useful for
-constant library tables that are safe to share across threads without locking.
-
----
+A readonly object rejects all `rawset` and `rawdelete` calls. Useful for
+constant library tables shared across threads without locking.
 
 ## FIFO iteration
 
@@ -121,96 +101,91 @@ typedef bool (*CdoIterFn)(CdoString *key, CdoValue *val, u8 flags, void *ud);
 void cdo_object_foreach(const CdoObject *obj, CdoIterFn fn, void *ud);
 ```
 
-Objects preserve insertion order.  Iteration calls `fn` for each live field in
-the order keys were first inserted.  Return `false` from `fn` to stop early.
-
----
+Fields are visited in insertion order. Return `false` from the callback to
+stop early.
 
 ## Meta-keys
 
-Pre-interned `CdoString*` globals are available after `cdo_object_init()`:
+Pre-interned `CdoString*` globals, available after `cdo_object_init()`:
 
-| Global | String | Purpose |
+| Global | Key | Purpose |
 |---|---|---|
 | `g_meta_index` | `__index` | prototype chain / property lookup |
 | `g_meta_call` | `__call` | make an object callable |
 | `g_meta_type` | `__type` | string type name |
 | `g_meta_tostring` | `__tostring` | custom string representation |
-| `g_meta_equal` | `__equal` | `==` operator override |
-| `g_meta_greater` | `__greater` | `>` operator override |
-| `g_meta_is` | `__is` | `is` type-check operator |
-| `g_meta_negate` | `__negate` | unary `-` override |
-| `g_meta_not` | `__not` | unary `!` override |
-| `g_meta_add` | `__add` | `+` operator override |
-| `g_meta_len` | `__len` | `#` length operator |
+| `g_meta_equal` | `__equal` | `==` override |
+| `g_meta_greater` | `__greater` | `>` override |
+| `g_meta_is` | `__is` | type-check |
+| `g_meta_negate` | `__negate` | unary `-` |
+| `g_meta_not` | `__not` | unary `!` |
+| `g_meta_add` | `__add` | `+` override |
+| `g_meta_len` | `__len` | `#` length |
 | `g_meta_newindex` | `__newindex` | assignment intercept |
 
-Do NOT call `cdo_string_release()` on these pointers — they are owned by the
-intern table.
+These are owned by the intern table. Never call `cdo_string_release()` on them.
 
----
+## String and array prototypes
 
-## String prototype  (`vm->string_proto`)
-
-The string module (`source/lib/string.c`) sets `vm->string_proto` to a
-read-only `CandoValue` (TYPE_OBJECT) that holds all string methods.  This
-enables colon-syntax method calls on string literals:
+`source/lib/string.c` sets `vm->string_proto` to a readonly `CandoValue`
+(`TYPE_OBJECT`) containing all string methods. This enables colon-syntax on
+string literals:
 
 ```
-"hello":toLower()      -- becomes string.toLower("hello")
-"hello":sub(1, 3)      -- becomes string.sub("hello", 1, 3)
+"hello":toUpper()
 ```
 
-### How it works
-
-`OP_METHOD_CALL` and `OP_FLUENT_CALL` with a string receiver:
+When `OP_METHOD_CALL` or `OP_FLUENT_CALL` receives a string receiver, the VM:
 
 1. Checks `cando_is_string(receiver)`.
 2. Resolves `vm->string_proto` as a `CdoObject*`.
-3. Looks up the method name in the prototype (full `cdo_object_get` chain).
-4. Shifts the stack up to make the receiver the first argument (slot 1) and the method the callee (slot 0).
-5. Calls the method. If it's a fluent call (`::`), the receiver is returned instead of the method's result.
+3. Looks up the method name via `cdo_object_get` (full prototype chain).
+4. Shifts the stack so the receiver becomes `arg[0]` and the method becomes the callee at slot 0.
+5. Dispatches. For fluent calls (`::`) the receiver is returned instead of the method result.
 
-`OP_GET_FIELD` with a string receiver:
+The same pattern applies to `vm->array_proto` for arrays.
 
-1. Resolves the field from `vm->string_proto`.
-2. Returns the raw method value (the native sentinel) without self-binding.
-
-### Setting the prototype in a module
-
-```c
-// In your registration function:
-CandoValue proto_val = cando_bridge_new_object(vm); // create the table
-// ... add methods via cdo_object_rawset ...
-cdo_object_set_readonly(cando_bridge_resolve(vm, proto_val.as.handle), true);
-cando_vm_set_global(vm, "string", proto_val, true); // expose as "string"
-vm->string_proto = proto_val;                        // enable : syntax
-```
-
----
-
-## Arrays  (`source/object/array.h`)
+## Arrays (`source/object/array.h`)
 
 ```c
 CdoObject *cdo_array_new(void);
-void       cdo_array_push(CdoObject *arr, CdoValue val);
-CdoValue   cdo_array_get(const CdoObject *arr, u32 index);
-void       cdo_array_set(CdoObject *arr, u32 index, CdoValue val);
-u32        cdo_array_length(const CdoObject *arr);
+bool       cdo_array_push(CdoObject *arr, CdoValue val);
+bool       cdo_array_rawget_idx(const CdoObject *arr, u32 idx, CdoValue *out);
+bool       cdo_array_rawset_idx(CdoObject *arr, u32 idx, CdoValue val);
+u32        cdo_array_len(const CdoObject *arr);
+bool       cdo_array_insert(CdoObject *arr, u32 idx, CdoValue val);
+bool       cdo_array_remove(CdoObject *arr, u32 idx, CdoValue *out);
 ```
 
-Arrays use dense `items[]` storage for integer-indexed access.  They also have
-a hash table for string-keyed properties (like methods or meta-keys).
+Dense `items[]` storage for integer-indexed access. String-keyed properties
+(methods, meta-keys) go through the normal hash table on the same `CdoObject`.
 
----
-
-## Classes  (`source/object/class.h`)
+## Classes (`source/object/class.h`)
 
 ```c
 CdoObject *cdo_class_new(const char *type_name, u32 name_len);
 ```
 
-Creates a plain `CdoObject` with `__type` pre-set to the given name.  The
-`OP_NEW_CLASS` opcode uses this.  The `__call` meta-method acts as the
-constructor and is expected to return a new instance with `__index` pointing
-to the class object.
+Creates a `CdoObject` with `__type` pre-set to the given name. Used by the
+`OP_NEW_CLASS` opcode. The `__call` meta-method serves as the constructor and
+is expected to return a new instance whose `__index` points back to the class
+object.
+
+## CdoString (`source/object/string.h`)
+
+```c
+CdoString *cdo_string_new(const char *src, u32 length);
+CdoString *cdo_string_retain(CdoString *s);
+void       cdo_string_release(CdoString *s);
+u32        cdo_string_hash(CdoString *s);
+CdoString *cdo_string_intern(const char *src, u32 length);
+```
+
+`cdo_string_intern` returns the canonical `CdoString*` from the process-global
+intern table. All object field keys must be interned so that lookups reduce to
+pointer equality.
+
+---
+
+See `value-types.md` for `CandoValue`/`CdoValue` conversion and `vm-internals.md`
+for how the VM uses objects at runtime.

@@ -1,199 +1,99 @@
-# Getting Started with CanDo
+# Getting Started
 
-This guide walks you through building CanDo from source, running your first
-script, and linking the library into a host program.
+This guide takes you from a clean checkout to a running script in a few
+minutes.
 
----
+## Requirements
 
-## Prerequisites
+- A C11 compiler (gcc 7+, clang 6+, MSVC 2019+)
+- CMake 3.16+ **or** GNU Make
+- pthreads (POSIX) / Win32 threads (Windows)
+- OpenSSL development headers (for the `https` / TLS client)
 
-| Tool | Minimum version | Notes |
-|---|---|---|
-| GCC or Clang | GCC 7 / Clang 5 | Must support C11 and `_Atomic` |
-| CMake | 3.16 | Recommended build system |
-| GNU Make | any | Alternative; `Makefile` ships in the repo |
-| pthreads | POSIX | Included on Linux/macOS; `winpthreads` on Windows |
-| Python 3 | 3.7+ | Optional — only needed to regenerate the icon |
-
-On Ubuntu / Debian:
-```bash
-sudo apt install build-essential cmake
-```
-
-On macOS:
-```bash
-xcode-select --install
-brew install cmake
-```
-
----
-
-## Building from source
+## Build
 
 ### CMake (recommended)
 
 ```bash
-git clone https://github.com/rusketh/cando
-cd cando
 cmake -B build
-cmake --build build -j$(nproc)
+cmake --build build
 ```
 
-Build outputs in `build/`:
+Artifacts appear in `build/`:
 
-| File | Description |
-|---|---|
-| `libcando.so` (Linux) / `libcando.dylib` (macOS) | Shared library |
-| `libcando.a` | Static library |
-| `cando` | CLI interpreter |
-| `test_core`, `test_vm`, … | Unit test binaries |
+- `cando` — the CLI interpreter
+- `libcando.so` (`.dll` on Windows, `.dylib` on macOS) — shared library
+- `libcando_static.a` — static library
 
-Run the tests:
-```bash
-cd build && ctest --output-on-failure
-```
-
-### GNU Make (alternative)
+### GNU Make
 
 ```bash
-make            # builds libcando.so, libcando.a, cando, and all unit tests
-make cando      # builds only the executable
-make test       # builds and runs unit + integration tests
-make clean      # removes all build artifacts
+make            # builds libcando.so, libcando.a, cando, and all tests
+make cando      # just the interpreter
+make test       # runs the unit + script tests
 ```
 
-### Windows cross-compile
-
-From Linux with `mingw-w64` installed:
-```bash
-sudo apt install mingw-w64
-make cando.exe libcando.dll
-```
-
----
-
-## Installing
-
-### System-wide (Linux)
-
-```bash
-cmake --build build --target install   # installs to /usr/local by default
-```
-
-Or with a custom prefix:
-```bash
-cmake -B build -DCMAKE_INSTALL_PREFIX=$HOME/.local
-cmake --build build --target install
-```
-
-This installs:
-- `$PREFIX/bin/cando`
-- `$PREFIX/lib/libcando.so`
-- `$PREFIX/lib/libcando.a`
-- `$PREFIX/include/cando.h`
-
----
-
-## Running your first script
+## Run your first script
 
 Create `hello.cdo`:
+
 ```cando
-print("Hello, CanDo!");
+print("hello, world");
 ```
 
 Run it:
+
 ```bash
 ./build/cando hello.cdo
 ```
 
-Output:
-```
-Hello, CanDo!
-```
+Every script run via the `cando` CLI gets all 17 standard libraries
+pre-loaded.  When embedding CanDo yourself you decide which libraries
+to open — see [embedding.md](embedding.md).
 
----
-
-## CLI usage
-
-```
-cando <file.cdo>           Execute a script
-cando <file.cdo> --disasm  Disassemble bytecode to stderr, then execute
-```
-
-`--disasm` is useful during development to see what bytecode the compiler
-generates for a piece of code:
+### See the bytecode
 
 ```bash
-./cando hello.cdo --disasm
+./build/cando hello.cdo --disasm
 ```
 
----
+The disassembler dumps the compiled chunk before execution.  Output
+includes line numbers, opcodes, and constant-pool references.  Useful
+for understanding what an expression compiles to.
 
-## Writing a CanDo script
-
-Full syntax reference: [language-reference.md](language-reference.md).
-
-Quick example covering common features:
+## A slightly larger example
 
 ```cando
-// Variables and constants
-VAR name = "World";
-CONST PI = 3.14159;
+/* Pythagorean triples up to N. */
 
-// Functions
-FUNCTION greet(who) {
-    RETURN "Hello, " + who + "!";
-}
-print(greet(name));
-
-// Arrays and objects
-VAR nums = [1, 2, 3, 4, 5];
-VAR person = { name: "Alice", age: 30 };
-
-// Loops
-FOR VAR i = 0; i < nums.length; i++ {
-    print(nums[i]);
+FUNCTION hypot(a, b) {
+    RETURN math.sqrt(a * a + b * b);
 }
 
-FOR VAR item OVER nums {
-    print(item);
-}
-
-// Error handling
-TRY {
-    VAR data = json.parse(file.read("config.json"));
-    print(data.version);
-} CATCH (err) {
-    print("config error: " + err);
+VAR N = 10;
+FOR a IN 1 -> N {
+    FOR b IN a -> N {
+        VAR c = hypot(a, b);
+        IF c == math.floor(c) {
+            print(a, b, c);
+        }
+    }
 }
 ```
 
----
+Things to notice:
 
-## Embedding CanDo in a C program
+- Keywords (`VAR`, `FOR`, `IN`, `IF`, `FUNCTION`, `RETURN`) are
+  upper-case.  Identifiers are case-sensitive.
+- Ranges are inclusive at both ends: `1 -> N` iterates `1, 2, … N`.
+- Blocks are always braced.  Statements end with `;`; statements *inside*
+  a braced block may omit the trailing semicolon before `}`.
+- `math.sqrt` comes from the standard library; `print` is a core native
+  always registered by `cando_open()`.
 
-Add `include/` to your include path and link against `libcando`:
+## Where to go next
 
-```c
-#include <cando.h>
-#include <stdio.h>
-
-int main(void) {
-    CandoVM *vm = cando_open();
-    cando_openlibs(vm);
-
-    if (cando_dofile(vm, "scripts/main.cdo") != CANDO_OK)
-        fprintf(stderr, "error: %s\n", cando_errmsg(vm));
-
-    cando_close(vm);
-    return 0;
-}
-```
-
-Compile:
-```bash
-gcc -o myapp myapp.c -Ipath/to/cando/include -Lpath/to/cando/build -lcando \
-    -Wl,-rpath,path/to/cando/build
-```
-
-For the full embedding guide see [embedding.md](embedding.md).
+- [language-reference.md](language-reference.md) — the full syntax
+- [standard-library.md](standard-library.md) — what's in `math`, `string`, `array`, `file`, `json`, `thread`, …
+- [embedding.md](embedding.md) — run CanDo from your own C program
+- [threading.md](threading.md) — `thread { … }` and `await`
