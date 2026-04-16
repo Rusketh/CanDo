@@ -1,496 +1,274 @@
-# Embedding CanDo in a C Application
+# Embedding CanDo
 
-CanDo is designed to be embedded in host applications the same way Lua is:
-compile the library, include one header, and your application can load and
-execute CanDo scripts, expose C functions to scripts, and exchange data
-across the language boundary.
+This guide shows how to use `libcando` from a C program — loading
+scripts, exchanging values with your host, registering natives, and
+handling errors.  The formal reference for every `cando_*` symbol is
+in [c-api.md](c-api.md); the same information but grouped by task
+is here.
 
----
+## Linking
 
-## Table of Contents
+A single header:
 
-1. [Minimal example](#minimal-example)
-2. [Building and linking](#building-and-linking)
-3. [VM lifecycle](#vm-lifecycle)
-4. [Loading and executing scripts](#loading-and-executing-scripts)
-5. [Error handling](#error-handling)
-6. [Selecting standard libraries](#selecting-standard-libraries)
-7. [Registering native functions](#registering-native-functions)
-8. [Exchanging data](#exchanging-data)
-9. [Calling CanDo functions from C](#calling-cando-functions-from-c)
-10. [Creating objects and arrays from C](#creating-objects-and-arrays-from-c)
-11. [Thread safety](#thread-safety)
-12. [Multiple VMs in one process](#multiple-vms-in-one-process)
+```c
+#include <cando.h>
+```
 
----
+Link with either the shared library (`-lcando`) or the static library
+(`-lcando_static`).  Scripts pull in pthreads and OpenSSL through the
+library, so your host does not need to link them directly unless it
+uses them itself.
 
-## Minimal example
+```
+gcc myapp.c -lcando -Iinclude -o myapp
+```
+
+## VM lifecycle
+
+```c
+CandoVM *vm = cando_open();        // allocate + initialise
+cando_openlibs(vm);                // register all 17 standard libraries
+// … run scripts …
+cando_close(vm);                   // tear down and free
+```
+
+`cando_open` returns `NULL` only if the process is out of memory.  The
+call does **not** register standard libraries; call `cando_openlibs` or
+one of the `cando_open_*lib` functions after it.
+
+`cando_close` blocks until every thread spawned by scripts running on
+`vm` has finished, then frees every VM-owned resource.
+
+Multiple VMs can coexist in the same process.  The library uses an
+internal refcount so the global string intern table lives for as long
+as *any* VM is open.
+
+## Selective library loading
+
+```c
+cando_open_mathlib(vm);            // just math
+cando_open_stringlib(vm);          // just the string prototype
+cando_open_jsonlib(vm);
+// skip file, os, process, net, http, https, …
+```
+
+Opening a library is idempotent — the second call is a no-op.
+Available openers, each corresponding to a global:
+
+```
+math      string     array       object       thread
+os        datetime   crypto      process      net
+file      json       csv         include      eval
+http      https
+```
+
+`include`, `eval`, and the `http`/`https` server mean you usually want
+a full `cando_openlibs` for trusted scripts and a curated set for
+untrusted input.
+
+## Running scripts
+
+### From a file
+
+```c
+int rc = cando_dofile(vm, "game/main.cdo");
+if (rc != CANDO_OK) {
+    fprintf(stderr, "%s\n", cando_errmsg(vm));
+}
+```
+
+`cando_dofile` canonicalises the path with `realpath()` so that
+relative `include()` calls from within the script resolve relative to
+the script's directory, not the process CWD.
+
+### From a string
+
+```c
+int rc = cando_dostring(vm, "print('hello')", "inline");
+```
+
+The `name` argument appears in error messages.  Pass `NULL` for
+`"<string>"`.
+
+### Compile now, execute later
+
+```c
+CandoChunk *chunk = NULL;
+if (cando_loadstring(vm, src, "config", &chunk) != CANDO_OK) {
+    fprintf(stderr, "%s\n", cando_errmsg(vm));
+    return;
+}
+
+cando_vm_exec(vm, chunk);          // execute
+// optionally run it again, or inspect chunk->code
+cando_chunk_free(chunk);
+```
+
+## Error handling
+
+Every load-or-run function returns one of:
+
+| Code | Meaning |
+|---|---|
+| `CANDO_OK` (0) | Success |
+| `CANDO_ERR_FILE` (1) | File could not be opened or read |
+| `CANDO_ERR_PARSE` (2) | Syntax / compile error |
+| `CANDO_ERR_RUNTIME` (3) | Uncaught runtime error |
+
+On any non-zero result, `cando_errmsg(vm)` returns a human-readable
+message.  The pointer is owned by the VM and valid until the next call
+that writes `vm->error_msg`.
+
+```c
+int rc = cando_dofile(vm, path);
+switch (rc) {
+    case CANDO_OK:          break;
+    case CANDO_ERR_FILE:    report("cannot read %s", path); return 1;
+    case CANDO_ERR_PARSE:   report("syntax: %s", cando_errmsg(vm)); return 1;
+    case CANDO_ERR_RUNTIME: report("runtime: %s", cando_errmsg(vm)); return 1;
+}
+```
+
+You usually want to **open a fresh VM per script run** if you care
+about isolating globals.  Alternatively, save and restore globals
+yourself.
+
+## Global variables from C
+
+Set a global before a script runs:
+
+```c
+cando_vm_set_global(vm, "DEBUG",   cando_bool(true),    /*is_const=*/false);
+cando_vm_set_global(vm, "VERSION", cando_number(1.2),   /*is_const=*/true);
+```
+
+Read a global after:
+
+```c
+CandoValue score;
+if (cando_vm_get_global(vm, "score", &score) && cando_is_number(score)) {
+    printf("score = %g\n", score.as.number);
+}
+```
+
+`cando_vm_set_global` with `is_const = true` prevents the script from
+reassigning the binding.
+
+## Creating objects for scripts
+
+Use the bridge layer to build objects, arrays, and strings in C and
+expose them as globals:
+
+```c
+#include "vm/bridge.h"
+
+CandoValue cfg_val   = cando_bridge_new_object(vm);
+CdoObject *cfg       = cando_bridge_resolve(vm, cfg_val.as.handle);
+
+/* Fields via the raw object API. */
+CdoString *k = cdo_string_intern("width", 5);
+cdo_object_rawset(cfg, k, cdo_number(1920.0), FIELD_NONE);
+cdo_string_release(k);
+
+cando_vm_set_global(vm, "config", cfg_val, true);
+```
+
+Arrays work the same way via `cando_bridge_new_array` plus
+`cdo_array_push`.
+
+## Registering native functions
+
+Native functions have the prototype:
+
+```c
+int my_fn(CandoVM *vm, int argc, CandoValue *args);
+```
+
+The return value is the number of values pushed onto the VM stack, or
+`-1` to signal an error (after calling `cando_vm_error`).
+
+```c
+static int native_add(CandoVM *vm, int argc, CandoValue *args) {
+    double a = argc > 0 && cando_is_number(args[0]) ? args[0].as.number : 0;
+    double b = argc > 1 && cando_is_number(args[1]) ? args[1].as.number : 0;
+    cando_vm_push(vm, cando_number(a + b));
+    return 1;
+}
+
+cando_vm_register_native(vm, "add", native_add);
+```
+
+A full walkthrough — including multi-value returns, errors, and
+packaging as a reusable library module — is in
+[writing-extensions.md](writing-extensions.md).
+
+## Calling script functions from C
+
+```c
+CandoValue fn;
+if (cando_vm_get_global(vm, "on_event", &fn)) {
+    CandoValue args[2] = {
+        cando_string_value(cando_string_new("click", 5)),
+        cando_number(3.14),
+    };
+    int n = cando_vm_call_value(vm, fn, args, 2);
+    // n return values sit on top of vm->stack.
+    for (int i = n - 1; i >= 0; i--) {
+        CandoValue v = cando_vm_pop(vm);
+        // … consume v …
+    }
+}
+```
+
+`cando_vm_call_value` is safe to invoke from inside a native function
+(it re-enters the dispatch loop).  It returns 0 if the value is not
+callable.
+
+## Thread safety
+
+One `CandoVM` is owned by one OS thread at a time — the main thread.
+The spawned threads created by `thread { … }` get their own child
+`CandoVM` wired up to the parent's globals and handle table with
+proper reader-writer locking.  You do not need to serialise access
+from C unless you deliberately share a VM pointer between threads.
+
+If you want cross-process isolation, run multiple `CandoVM`s —
+either in the same thread (round-robin) or one per worker thread.
+
+## Cleaning up
+
+Resources cleaned up by `cando_close`:
+
+- The value stack, call frames, upvalue list
+- The global environment
+- The module cache (including any `dlopen` handles)
+- The thread registry (after all threads have joined)
+- The VM's handle table
+
+When the last live VM closes, the global string intern table and
+cached meta-key strings are also destroyed.
+
+## Minimal complete example
 
 ```c
 #include <cando.h>
 #include <stdio.h>
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc < 2) { fprintf(stderr, "usage: %s FILE\n", argv[0]); return 2; }
+
     CandoVM *vm = cando_open();
     cando_openlibs(vm);
 
-    if (cando_dofile(vm, "script.cdo") != CANDO_OK)
-        fprintf(stderr, "error: %s\n", cando_errmsg(vm));
-
-    cando_close(vm);
-    return 0;
-}
-```
-
-Compile and link:
-
-```bash
-# Shared library (recommended)
-gcc -o myapp myapp.c -Iinclude -Lbuild -lcando -Wl,-rpath,build
-
-# Static library (no runtime dependency)
-gcc -o myapp myapp.c -Iinclude build/libcando.a -lm -ldl -lpthread
-```
-
----
-
-## Building and linking
-
-### Using pkg-config (after `make install`)
-
-```bash
-gcc -o myapp myapp.c $(pkg-config --cflags --libs cando)
-```
-
-### CMake project
-
-```cmake
-find_package(cando REQUIRED)
-target_link_libraries(myapp PRIVATE cando::cando)
-```
-
-Or, if you include CanDo as a subdirectory:
-
-```cmake
-add_subdirectory(vendor/cando)
-target_link_libraries(myapp PRIVATE libcando)
-target_include_directories(myapp PRIVATE vendor/cando/include)
-```
-
-### Manual compile flags
-
-```bash
-# include path (single header)
--I/path/to/cando/include
-
-# link flags (shared)
--L/path/to/cando/build -lcando -Wl,-rpath,/path/to/cando/build
-
-# link flags (static — must also link cando's deps)
-/path/to/cando/build/libcando.a -lm -ldl -lpthread
-```
-
----
-
-## VM lifecycle
-
-```c
-// Create a new VM instance
-CandoVM *vm = cando_open();
-if (!vm) { /* out of memory */ }
-
-// ... use the VM ...
-
-// Destroy the VM (also waits for any spawned threads to finish)
-cando_close(vm);
-```
-
-**Important**: `cando_open` / `cando_close` are reference-counted. The first
-`cando_open` call in the process initialises the global string intern table.
-The last `cando_close` tears it down.  You may create as many VMs as you need;
-each is fully independent.
-
-```c
-// Two independent VMs in the same process — perfectly valid
-CandoVM *vm1 = cando_open();
-CandoVM *vm2 = cando_open();
-cando_openlibs(vm1);
-cando_openlibs(vm2);
-cando_dofile(vm1, "a.cdo");
-cando_dofile(vm2, "b.cdo");
-cando_close(vm1);
-cando_close(vm2);
-```
-
----
-
-## Loading and executing scripts
-
-### From a file
-
-```c
-int rc = cando_dofile(vm, "scripts/game.cdo");
-if (rc == CANDO_ERR_FILE)    { /* file not found or unreadable */ }
-if (rc == CANDO_ERR_PARSE)   { /* syntax error */ }
-if (rc == CANDO_ERR_RUNTIME) { /* runtime error */ }
-```
-
-The script's directory is used as the base for relative `include()` calls
-inside the script.
-
-### From a string
-
-```c
-const char *src = "print('hello from C!')";
-int rc = cando_dostring(vm, src, "my_snippet");  // name appears in errors
-```
-
-### Compile only (no execution)
-
-```c
-CandoChunk *chunk = NULL;
-int rc = cando_loadstring(vm, src, "my_snippet", &chunk);
-if (rc == CANDO_OK) {
-    // Inspect, cache, or execute later:
-    CandoVMResult result = cando_vm_exec(vm, chunk);
-    cando_chunk_free(chunk);
-}
-```
-
-Compiling once and executing many times avoids re-parsing:
-
-```c
-// Compile once at startup
-CandoChunk *chunk = NULL;
-cando_loadstring(vm, long_script, "config", &chunk);
-
-// Execute many times (e.g., once per game frame)
-for (int frame = 0; frame < 1000; frame++) {
-    cando_vm_exec(vm, chunk);
-}
-cando_chunk_free(chunk);
-```
-
----
-
-## Error handling
-
-All execution functions return `CANDO_OK` (0) on success:
-
-| Constant | Value | Meaning |
-|---|---|---|
-| `CANDO_OK` | 0 | Success |
-| `CANDO_ERR_FILE` | 1 | File could not be opened or read |
-| `CANDO_ERR_PARSE` | 2 | Syntax or compilation error |
-| `CANDO_ERR_RUNTIME` | 3 | Unhandled runtime error |
-
-After a non-zero return, `cando_errmsg(vm)` returns the human-readable error
-string including source file, line number, and description.
-
-```c
-if (cando_dofile(vm, "game.cdo") != CANDO_OK) {
-    fprintf(stderr, "CanDo error: %s\n", cando_errmsg(vm));
-    // e.g. "game.cdo:42: undefined variable 'playe'"
-}
-```
-
-The error message is valid until the next call that modifies `vm->error_msg`.
-Copy it if you need to retain it longer:
-
-```c
-char saved_error[512];
-snprintf(saved_error, sizeof(saved_error), "%s", cando_errmsg(vm));
-```
-
----
-
-## Selecting standard libraries
-
-`cando_openlibs` opens all 15 standard library modules at once.  For security
-or size reasons you may want to open only specific modules:
-
-```c
-CandoVM *vm = cando_open();
-
-// Open only safe, sandboxed libraries
-cando_open_mathlib(vm);
-cando_open_stringlib(vm);
-cando_open_arraylib(vm);
-cando_open_objectlib(vm);
-cando_open_jsonlib(vm);
-// Note: NOT opening filelib, processlib, netlib for untrusted scripts
-```
-
-Individual opener functions:
-
-| Function | Module | Globals exposed |
-|---|---|---|
-| `cando_open_mathlib(vm)` | math | `math.*` |
-| `cando_open_filelib(vm)` | file | `file.*` |
-| `cando_open_stringlib(vm)` | string | String prototype methods |
-| `cando_open_arraylib(vm)` | array | Array prototype methods |
-| `cando_open_objectlib(vm)` | object | `object.*` |
-| `cando_open_jsonlib(vm)` | json | `json.*` |
-| `cando_open_csvlib(vm)` | csv | `csv.*` |
-| `cando_open_threadlib(vm)` | thread | `thread.*` |
-| `cando_open_oslib(vm)` | os | `os.*` |
-| `cando_open_datetimelib(vm)` | datetime | `datetime.*` |
-| `cando_open_cryptolib(vm)` | crypto | `crypto.*` |
-| `cando_open_processlib(vm)` | process | `process.*` |
-| `cando_open_netlib(vm)` | net | `net.*` |
-| `cando_open_evallib(vm)` | eval | `eval()` |
-| `cando_open_includelib(vm)` | include | `include()` |
-
----
-
-## Registering native functions
-
-Native functions let CanDo scripts call C code.  The signature is:
-
-```c
-typedef int (*CandoNativeFn)(CandoVM *vm, int argc, CandoValue *args);
-```
-
-- `argc` — number of arguments passed from the script
-- `args[0]..args[argc-1]` — argument values
-- **Return value**: the number of values pushed onto the stack, or `-1` on error
-
-### Simple example
-
-```c
-// C function exposed to CanDo
-static int native_add(CandoVM *vm, int argc, CandoValue *args) {
-    if (argc < 2 || !cando_is_number(args[0]) || !cando_is_number(args[1])) {
-        cando_vm_error(vm, "add: expected two numbers");
-        return -1;
+    int rc = cando_dofile(vm, argv[1]);
+    if (rc != CANDO_OK) {
+        fprintf(stderr, "%s\n", cando_errmsg(vm));
     }
-    double result = args[0].as.number + args[1].as.number;
-    cando_vm_push(vm, cando_number(result));
-    return 1;  // pushed 1 value
-}
 
-// Register before running scripts
-cando_vm_register_native(vm, "add", native_add);
-```
-
-In CanDo:
-```cando
-VAR sum = add(3, 4);  // calls native_add
-print(sum);           // 7
-```
-
-### Type checking helpers
-
-```c
-cando_is_null(v)      // v.type == TYPE_NULL
-cando_is_number(v)    // v.type == TYPE_NUMBER
-cando_is_bool(v)      // v.type == TYPE_BOOL
-cando_is_string(v)    // v.type == TYPE_STRING
-cando_is_object(v)    // v.type == TYPE_OBJECT
-
-cando_as_number(v)    // v.as.number  (double)
-cando_as_bool(v)      // v.as.boolean (bool)
-```
-
-### Returning multiple values
-
-Push each value and return the total count:
-
-```c
-static int native_minmax(CandoVM *vm, int argc, CandoValue *args) {
-    double a = args[0].as.number, b = args[1].as.number;
-    cando_vm_push(vm, cando_number(a < b ? a : b));  // min
-    cando_vm_push(vm, cando_number(a > b ? a : b));  // max
-    return 2;
-}
-```
-
-In CanDo:
-```cando
-VAR lo, hi = minmax(7, 3);  // lo=3, hi=7
-```
-
-### Namespaced library pattern
-
-Group related functions under a single global object:
-
-```c
-static int native_vec_length(CandoVM *vm, int argc, CandoValue *args) {
-    // ... implementation ...
-}
-
-static int native_vec_dot(CandoVM *vm, int argc, CandoValue *args) {
-    // ... implementation ...
-}
-
-void register_vec_library(CandoVM *vm) {
-    // Create a global "vec" object with these functions
-    cando_vm_register_native(vm, "vec.length", native_vec_length);
-    cando_vm_register_native(vm, "vec.dot",    native_vec_dot);
-}
-```
-
-In CanDo:
-```cando
-VAR v = { x: 3, y: 4 };
-print(vec.length(v));  // 5.0
-```
-
----
-
-## Exchanging data
-
-### Reading and writing global variables
-
-```c
-// Set a global (last arg: is_const — true makes it read-only)
-cando_vm_set_global(vm, "playerHealth", cando_number(100.0), false);
-cando_vm_set_global(vm, "playerName",   cando_string_new("Alice"), false);
-
-// Read a global (returns false if the variable is not defined)
-CandoValue health;
-if (cando_vm_get_global(vm, "playerHealth", &health))
-    printf("health = %g\n", health.as.number);
-```
-
-### Value constructors
-
-```c
-CandoValue v_null   = cando_null();
-CandoValue v_num    = cando_number(3.14);
-CandoValue v_true   = cando_bool(true);
-CandoValue v_false  = cando_bool(false);
-CandoValue v_str    = cando_string_new("hello");  // heap-allocated, retained
-```
-
-String values must be released when no longer needed if you hold them across
-call boundaries:
-
-```c
-CandoValue s = cando_string_new("hello");
-// ... use s ...
-cando_value_release(s);  // decrements refcount; frees if zero
-```
-
-Values returned by `cando_vm_get_global` are snapshots — they do not need
-explicit release unless you retain them with `cando_value_copy`.
-
----
-
-## Calling CanDo functions from C
-
-```c
-// Retrieve a function defined in a script
-CandoValue fn;
-if (!cando_vm_get_global(vm, "onUpdate", &fn))
-    return;  /* variable not defined */
-
-// Build argument array
-CandoValue args[2] = { cando_number(delta_time), cando_number(frame_count) };
-
-// Call it — returns number of return values pushed onto the stack
-int nret = cando_vm_call_value(vm, fn, args, 2);
-if (nret < 0) {
-    fprintf(stderr, "script error: %s\n", cando_errmsg(vm));
-}
-
-// Retrieve return values from the stack
-for (int i = 0; i < nret; i++) {
-    CandoValue ret = cando_vm_pop(vm);
-    // ...
-}
-```
-
-> See [c-api.md](c-api.md) for the full `cando_vm_call_value` signature.
-
----
-
-## Creating objects and arrays from C
-
-Use the bridge API to create CanDo objects from C:
-
-```c
-#include "vm/bridge.h"
-
-// Create an empty object
-CandoValue obj = cando_bridge_new_object(vm);
-
-// Resolve to CdoObject* so you can set fields
-CdoObject *o = cando_bridge_resolve(vm, obj.as.handle);
-CdoString *key = cando_bridge_intern_key(cando_string_new("x"));
-cdo_object_set(o, key, (CdoValue){ .type = CDO_NUMBER, .as.number = 42.0 });
-cdo_string_release(key);
-
-// Pass to a script function or set as a global
-cando_vm_set_global(vm, "myObj", obj);
-```
-
-In CanDo:
-```cando
-print(myObj.x);  // 42
-```
-
-Similarly for arrays:
-```c
-CandoValue arr = cando_bridge_new_array(vm);
-CdoObject *a = cando_bridge_resolve(vm, arr.as.handle);
-// Use cdo_array_* functions to populate it
-```
-
----
-
-## Thread safety
-
-**One VM = one thread at a time.**  Do not call VM functions from multiple
-OS threads simultaneously on the same `CandoVM*`.
-
-You may:
-- Create multiple `CandoVM*` instances, each used from a single thread.
-- Use `thread`/`await` in CanDo scripts — the VM manages its own child threads
-  internally with appropriate locking.
-
-```c
-// Thread-per-VM pattern — fully safe
-void *worker(void *arg) {
-    CandoVM *vm = cando_open();
-    cando_openlibs(vm);
-    cando_dofile(vm, (const char *)arg);
     cando_close(vm);
-    return NULL;
+    return rc == CANDO_OK ? 0 : 1;
 }
-
-// In main thread:
-pthread_t t1, t2;
-pthread_create(&t1, NULL, worker, "worker1.cdo");
-pthread_create(&t2, NULL, worker, "worker2.cdo");
-pthread_join(t1, NULL);
-pthread_join(t2, NULL);
 ```
 
----
-
-## Multiple VMs in one process
-
-Multiple `CandoVM` instances coexist safely.  They share the global string
-intern table (protected by a mutex) but are otherwise independent — each has
-its own value stack, global table, call-frame stack, and native function
-registry.
-
-```c
-// Separate VMs for different subsystems
-CandoVM *game_vm   = cando_open();  // loads game mods
-CandoVM *ui_vm     = cando_open();  // loads UI scripts
-CandoVM *config_vm = cando_open();  // loads config files
-
-cando_open_mathlib(game_vm);
-cando_open_mathlib(ui_vm);
-// config_vm gets no stdlib — it only parses data
-
-cando_dofile(game_vm,   "mods/quest.cdo");
-cando_dofile(ui_vm,     "ui/hud.cdo");
-cando_dofile(config_vm, "config/settings.cdo");
-
-cando_close(config_vm);
-cando_close(ui_vm);
-cando_close(game_vm);
-```
+That is, verbatim, the job done by `source/main.c` — the `cando` CLI
+itself is just this plus a `--disasm` option.

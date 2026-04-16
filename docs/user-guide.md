@@ -1,370 +1,208 @@
-# Cando Language User Guide
+# User Guide
 
-Cando is a C-style scripting language with a clean syntax for general-purpose programming. Scripts use the `.cdo` file extension.
+A hands-on introduction to CanDo.  Work through the sections in order —
+each one builds on the previous.  For lookup tables covering every
+function and operator see [language-reference.md](language-reference.md)
+and [standard-library.md](standard-library.md).
 
-## Table of Contents
+## Running a script
 
-1. [Running Scripts](#running-scripts)
-2. [Comments](#comments)
-3. [Types & Literals](#types--literals)
-4. [Variables & Constants](#variables--constants)
-5. [Operators](#operators)
-6. [Strings](#strings)
-7. [Arrays](#arrays)
-8. [Objects](#objects)
-9. [Control Flow](#control-flow)
-10. [Loops](#loops)
-11. [Functions](#functions)
-12. [Error Handling](#error-handling)
-13. [Pipe & Filter](#pipe--filter)
-14. [Mask Syntax](#mask-syntax)
-15. [Built-in Functions](#built-in-functions)
-16. [Standard Library](#standard-library)
-    - [math](#math-module)
-    - [string](#string-module)
-    - [file](#file-module)
-    - [array](#array-module)
-    - [object](#object-module)
-    - [eval](#eval)
-17. [Threading](#threading)
-    - [thread expression](#thread-expression)
-    - [await expression](#await-expression)
-    - [thread library](#thread-library)
-
----
-
-## Running Scripts
+Save a file with the `.cdo` extension and pass it to `cando`:
 
 ```bash
-./cando script.cdo          # Run a script
-./cando script.cdo --disasm # Run and print disassembled bytecode
+cando hello.cdo
 ```
-
----
-
-## Comments
 
 ```cando
-// Single-line comment
-
-/* Multi-line
-   comment */
+// hello.cdo
+print("hello, world!");
 ```
 
----
+Keywords are case-insensitive (`VAR`, `var`, and `Var` all work), but the
+convention is uppercase.  This guide uses uppercase throughout.
 
-## Types & Literals
+## Values and types
 
-| Type    | Examples                        |
-|---------|---------------------------------|
-| Number  | `42`, `3.14`, `-5`, `0`         |
-| String  | `"hello"`, `'multiline'`, `` `interpolated` `` |
-| Boolean | `TRUE`, `FALSE`                 |
-| Null    | `NULL`                          |
-| Array   | `[1, 2, 3]`, `[]`               |
-| Object  | `{ x: 1, y: 2 }`, `{}`         |
+CanDo has five types:
 
-### String Literals
-
-Cando has three kinds of string literals:
-
-**Double-quoted** — standard single-line strings with escape sequences:
 ```cando
-VAR s = "hello\nworld";
+print(type(NULL));       // "null"
+print(type(TRUE));       // "bool"
+print(type(42));         // "number"
+print(type("hi"));       // "string"
+print(type({}));         // "object"
 ```
 
-**Single-quoted** — multiline strings, whitespace is preserved as-is:
-```cando
-VAR s = 'line one
-line two
-line three';
-```
+Numbers are always 64-bit doubles.  There is no integer type.
 
-**Backtick** — interpolated strings; embed any expression with `${...}`:
+## Variables
+
+`VAR` declares a mutable variable.  `CONST` declares one that cannot be
+reassigned.
+
 ```cando
 VAR name = "Alice";
-VAR greeting = `Hello, ${name}! You are ${20 + 5} years old.`;
+CONST MAX = 100;
+
+name = "Bob";           // fine
+// MAX = 200;           // runtime error: assignment to const
 ```
 
----
-
-## Variables & Constants
-
-Declare mutable variables with `VAR` and immutable constants with `CONST`:
+You can declare and assign several variables at once:
 
 ```cando
-VAR x = 10;
-CONST PI = 3.14159;
-
-x = 99;    // ok
-// PI = 1; // error — constants cannot be reassigned
+VAR x, y, z = 1, 2, 3;
+print(x, y, z);         // 1 2 3
 ```
 
-### Multiple Assignment
-
-Declare or assign multiple variables in one statement using a comma-separated list:
+Variables are block-scoped:
 
 ```cando
-VAR a, b = 1, 2;
+IF TRUE {
+    VAR secret = 42;
+    print(secret);       // 42
+}
+// `secret` does not exist here
 ```
 
-Variables are block-scoped: a variable declared inside `{ }` is not visible outside it.
-
----
-
-## Operators
-
-### Arithmetic
-
-| Operator | Description        | Example      |
-|----------|--------------------|--------------|
-| `+`      | Addition           | `1 + 2` → `3` |
-| `-`      | Subtraction        | `5 - 3` → `2` |
-| `*`      | Multiplication     | `4 * 5` → `20` |
-| `/`      | Division           | `15 / 3` → `5` |
-| `%`      | Modulo (remainder) | `10 % 3` → `1` |
-| `^`      | Power / XOR        | `2 ^ 8` → `256` (when used as power) |
-
-`+` also concatenates strings: `"hello" + " world"`.
-
-### Comparison
-
-| Operator | Description              |
-|----------|--------------------------|
-| `==`     | Equal                    |
-| `!=`     | Not equal                |
-| `<`      | Less than                |
-| `>`      | Greater than             |
-| `<=`     | Less than or equal       |
-| `>=`     | Greater than or equal    |
-
-### Logical
-
-| Operator | Description |
-|----------|-------------|
-| `&&`     | Logical AND |
-| `\|\|`   | Logical OR  |
-| `!`      | Logical NOT |
-
-Both `&&` and `||` short-circuit — the right side is not evaluated if the result is already determined by the left.
-
-### Bitwise
-
-| Operator | Description   |
-|----------|---------------|
-| `&`      | Bitwise AND   |
-| `\|`     | Bitwise OR    |
-| `^`      | Bitwise XOR   |
-| `~`      | Bitwise NOT   |
-| `<<`     | Left shift    |
-| `>>`     | Right shift   |
-
-### Assignment
-
-```cando
-x = 5;    // assign
-x += 2;   // x = x + 2
-x -= 2;   // x = x - 2
-x *= 2;   // x = x * 2
-x /= 2;   // x = x / 2
-x %= 2;   // x = x % 2
-x ^= 2;   // x = x ^ 2
-x++;      // x = x + 1  (postfix)
-x--;      // x = x - 1  (postfix)
-```
-
-### Unary
-
-| Operator | Description              | Example       |
-|----------|--------------------------|---------------|
-| `-`      | Negate                   | `-x`          |
-| `!`      | Logical NOT              | `!TRUE`       |
-| `#`      | Length of string/array   | `#"hello"` → `5` |
-
-### Operator Precedence
-
-Standard mathematical precedence applies. Use parentheses to override:
-
-```cando
-print(2 + 3 * 4);    // 14  (multiplication first)
-print((2 + 3) * 4);  // 20  (parentheses first)
-```
-
----
+Assigning to an undeclared name creates a global.  Inside functions,
+always use `VAR` to keep things local.
 
 ## Strings
 
-Strings are immutable. Use `+` to concatenate and `#` to get the length:
+Three quote styles, each with different powers:
 
 ```cando
-VAR s = "hello" + " " + "world";
-print(#s);    // 11
+VAR a = "hello\n";          // double-quoted: escape sequences, single line
+VAR b = 'raw
+multiline';                  // single-quoted: no escapes, multiline
+VAR c = `2 + 2 = ${2+2}`;   // backtick: escapes, multiline, interpolation
 ```
 
-Convert other types to string with `toString()`:
+Strings are immutable.  Methods that "transform" return new strings.
 
 ```cando
-VAR msg = "count: " + toString(42);
-print(msg);   // count: 42
+VAR s = "Hello, World!";
+
+print(#s);                   // 13 (byte length)
+print(s:toUpper());          // HELLO, WORLD!
+print(s:toLower());          // hello, world!
+print(s:sub(0, 5));          // Hello
+print(s:find("World"));      // 7
+print(s:replace("World", "CanDo"));  // Hello, CanDo!
+print(s:split(", "));        // ["Hello", "World!"]
+print(s:startsWith("Hello"));// TRUE
 ```
 
-### Method Syntax
+The `:` syntax calls a method on the value.  `s:toUpper()` is the same as
+`string.toUpper(s)`.
 
-Functions from the `string` module can be called as methods using the colon (`:`) operator:
+String concatenation uses `+`:
 
 ```cando
-"hello":toUpper();       // "HELLO"
-"  hi  ":trim();         // "hi"
+print("score: " + toString(100));  // score: 100
 ```
 
-See the [string module](#string-module) for the full list of available functions.
+## Numbers and math
 
----
+```cando
+print(1 + 2);           // 3
+print(10 / 3);          // 3.3333...
+print(10 % 3);          // 1
+print(2 ^ 10);          // 1024 (power, not xor)
+
+print(math.sqrt(9));    // 3
+print(math.floor(3.7)); // 3
+print(math.ceil(3.2));  // 4
+print(math.abs(-5));    // 5
+print(math.pi);         // 3.14159...
+print(math.random());   // random number in [0, 1)
+```
 
 ## Arrays
 
-Arrays are ordered lists of values. Elements are accessed with zero-based indexing.
-
-```cando
-VAR nums = [10, 20, 30];
-print(nums[0]);   // 10
-print(#nums);     // 3  (length)
-
-nums[1] = 99;     // update element
-print(nums[1]);   // 99
-```
-
-Arrays can be nested:
-
-```cando
-VAR matrix = [[1, 2], [3, 4]];
-print(matrix[0][1]);  // 2
-```
-
-Build arrays incrementally:
-
-```cando
-VAR result = [];
-FOR i OF 1 -> 5 {
-    result[#result] = i * i;
-}
-```
-
-Iterate indices with `FOR IN`, values with `FOR OF`. For custom iteration, see [FOR OVER](#for-over-loops).
+Arrays are 0-indexed.
 
 ```cando
 VAR fruits = ["apple", "banana", "cherry"];
 
-FOR i IN fruits { print(i); }   // 0  1  2
-FOR v OF fruits { print(v); }   // apple  banana  cherry
+print(fruits[0]);        // apple
+print(#fruits);          // 3
+
+fruits[1] = "blueberry";
+print(fruits[1]);        // blueberry
 ```
 
----
+### Array methods
+
+```cando
+VAR a = [1, 2, 3];
+
+a:push(4);               // [1, 2, 3, 4]
+VAR last = a:pop();      // last = 4, a = [1, 2, 3]
+
+VAR doubled = a:map(FUNCTION(x) { RETURN x * 2; });
+print(doubled);          // [2, 4, 6]
+
+VAR evens = [1,2,3,4,5]:filter(FUNCTION(x) { RETURN x % 2 == 0; });
+print(evens);            // [2, 4]
+
+VAR sum = [1,2,3,4]:reduce(FUNCTION(acc, x) { RETURN acc + x; }, 0);
+print(sum);              // 10
+```
 
 ## Objects
 
-Objects are key-value stores. Keys are identifiers; values can be any type.
+Objects are key-value maps.  Fields are accessed with `.` or `["key"]`.
 
 ```cando
-VAR obj = { name: "Alice", age: 30 };
-print(obj.name);   // Alice
-print(obj.age);    // 30
+VAR person = { name: "Alice", age: 30 };
+
+print(person.name);      // Alice
+print(person["age"]);    // 30
+
+person.city = "NYC";     // add a new field
+print(person.city);      // NYC
 ```
 
-Add or update fields by assignment:
+Objects preserve insertion order when iterated.
+
+### Nested objects
 
 ```cando
-obj.city = "NYC";  // new field
-obj.age  = 31;     // update existing field
-```
-
-Objects can be nested:
-
-```cando
-VAR person = {
-    name: "Bob",
-    addr: { street: "Main St", zip: 12345 }
+VAR config = {
+    server: { host: "localhost", port: 8080 },
+    debug: TRUE
 };
-print(person.addr.street);  // Main St
+
+print(config.server.host);   // localhost
+print(config.server.port);   // 8080
 ```
 
-Objects are passed by reference — mutating an object inside a function affects the original.
+## Control flow
 
-Iterate field names with `FOR IN`, field values with `FOR OF`:
-
-```cando
-VAR point = { x: 10, y: 20 };
-
-FOR k IN point { print(k); }   // x  y
-FOR v OF point { print(v); }   // 10  20
-```
-
----
-
-## Control Flow
-
-### IF / ELSE IF / ELSE
-
-Braces are required. The condition does not need parentheses.
+### IF / ELSE
 
 ```cando
-IF x > 0 {
-    print("positive");
-} ELSE IF x < 0 {
-    print("negative");
+VAR age = 25;
+
+IF age >= 18 {
+    print("adult");
+} ELSE IF age >= 13 {
+    print("teenager");
 } ELSE {
-    print("zero");
+    print("child");
 }
 ```
 
-### Multi-Comparison
-
-A single comparison operator can be tested against multiple right-hand values. The condition passes only if the comparison holds against **all** of them (or, for `==`, against **any** of them):
+Multi-comparison — check one value against several alternatives:
 
 ```cando
-VAR x = 5;
-IF x > 1, 2, 3 { print("pass"); }  // x > 1 AND x > 2 AND x > 3
-IF x > 1, 10   { print("fail"); }  // x is not > 10
-IF x == 3, 5   { print("pass"); }  // x equals 5 (any match)
-IF x != 3, 5   { print("fail"); }  // x equals 5, so not != all
+VAR code = 200;
+IF code == 200, 201, 204 {
+    print("success");
+}
 ```
-
-#### Function calls in comparisons
-
-A bare function call on the right-hand side only contributes its **first** return value:
-
-```cando
-FUNCTION bounds() { RETURN 3, 100; }
-
-VAR x = 5;
-IF x > bounds() { print("pass"); }  // only checks x > 3; 100 is discarded
-```
-
-To compare against **all** return values, prefix the call with the unpack operator `...`:
-
-```cando
-IF x > ...bounds() { print("fail"); }  // x > 3 AND x > 100 — fails
-```
-
-To compare against a **selected subset** of return values, use a mask:
-
-```cando
-FUNCTION triple() { RETURN 1, 999, 2; }
-
-// (~.~) keeps 1st and 3rd, discards 2nd
-IF x > (~.~) triple() { print("pass"); }  // x > 1 AND x > 2 — passes
-IF x > (~~~) triple() { print("fail"); }  // x > 1 AND x > 999 AND x > 2 — fails
-```
-
-In a comma list, each call is individually truncated to its first return:
-
-```cando
-IF x > bounds(), 4 { print("pass"); }  // x > 3 AND x > 4
-```
-
----
-
-## Loops
 
 ### WHILE
 
@@ -372,103 +210,70 @@ IF x > bounds(), 4 { print("pass"); }  // x > 3 AND x > 4
 VAR i = 0;
 WHILE i < 5 {
     print(i);
-    i++;
+    i = i + 1;
 }
 ```
 
-### FOR IN and FOR OF
-
-`FOR IN` yields **keys**: array indices (numbers) or object field names (strings).  
-`FOR OF` yields **values**: array elements or object field values.
+### FOR loops
 
 ```cando
-VAR arr = ["a", "b", "c"];
-FOR i IN arr { print(i); }   // 0  1  2      (indices)
-FOR v OF arr { print(v); }   // a  b  c      (values)
-
-VAR obj = { x: 1, y: 2 };
-FOR k IN obj { print(k); }   // x  y         (keys)
-FOR v OF obj { print(v); }   // 1  2         (values)
-```
-
-### FOR OVER Loops
-
-`FOR OVER` implements a Lua-style iterator protocol. It expects the expression to evaluate to a triplet: `(iterator_function, state, initial_control_value)`.
-
-The loop calls the `iterator_function(state, control)` at each step.
-1. The **first** return value becomes the new control value for the next iteration.
-2. **Subsequent** return values are assigned to the loop variables.
-3. The loop terminates when the **first** return value is `NULL`.
-
-```cando
-FUNCTION myPairs(t) {
-    RETURN FUNCTION(s, c) {
-        IF (c >= #s) { RETURN NULL; }
-        VAR next_c = c + 1;
-        RETURN next_c, c, s[c]; // (next_control, loop_var1, loop_var2)
-    }, t, 0;
+// Range (inclusive both ends)
+FOR i IN 1 -> 5 {
+    print(i);            // 1 2 3 4 5
 }
 
-VAR arr = [10, 20, 30];
-FOR k, v OVER myPairs(arr) {
-    print(k, v); // 0 10, 1 20, 2 30
-}
-```
-
-Multiple loop variables (up to 16) are supported. If the iterator returns fewer values than requested, the extra variables are padded with `NULL`.
-
-### FOR with Ranges
-
-The `->` operator creates an **ascending** inclusive range; `<-` creates a **descending** inclusive range. Use `OF` (or `IN`) — both produce the numeric values.
-
-```cando
-FOR i OF 1 -> 5 {
-    print(i);   // 1 2 3 4 5
+// Descending range
+FOR i IN 5 <- 1 {
+    print(i);            // 5 4 3 2 1
 }
 
-FOR i OF 5 <- 1 {
-    print(i);   // 5 4 3 2 1
+// Iterate array values
+FOR fruit OF ["apple", "banana", "cherry"] {
+    print(fruit);
+}
+
+// Iterate object keys
+VAR obj = { a: 1, b: 2, c: 3 };
+FOR key IN obj {
+    print(key);          // a b c
 }
 ```
 
 ### BREAK and CONTINUE
 
 ```cando
-WHILE TRUE {
-    IF done  { BREAK; }     // exit loop
-    IF skip  { CONTINUE; }  // jump to next iteration
-    // ... body ...
+FOR i IN 1 -> 10 {
+    IF i == 5 { BREAK; }
+    IF i % 2 == 0 { CONTINUE; }
+    print(i);            // 1 3
 }
 ```
 
-Both work inside `FOR IN` and `FOR OF` loops as well.
-
----
+`BREAK 2` exits two levels of nesting.
 
 ## Functions
 
-### Declaring and Calling
-
 ```cando
 FUNCTION greet(name) {
-    print("Hello, " + name + "!");
+    print(`hello, ${name}!`);
 }
 
-greet("Alice");
+greet("world");          // hello, world!
 ```
 
-### Returning Values
+### Return values
 
 ```cando
 FUNCTION add(a, b) {
     RETURN a + b;
 }
-VAR result = add(3, 4);  // 7
+
+print(add(3, 4));        // 7
 ```
 
-### Multiple Return Values
+### Multiple return values
 
-A function can return a comma-separated list of values:
+Functions can return several values at once:
 
 ```cando
 FUNCTION minmax(a, b) {
@@ -477,8 +282,44 @@ FUNCTION minmax(a, b) {
 }
 
 VAR lo, hi = minmax(7, 3);
-print(lo);  // 3
-print(hi);  // 7
+print(lo, hi);           // 3 7
+```
+
+### Anonymous functions
+
+```cando
+VAR square = FUNCTION(x) { RETURN x * x; };
+print(square(5));        // 25
+
+// Useful as callbacks
+[1,2,3]:map(FUNCTION(x) { RETURN x * 10; });
+```
+
+### Closures
+
+Inner functions capture variables from their enclosing scope:
+
+```cando
+FUNCTION make_counter() {
+    VAR n = 0;
+    RETURN FUNCTION() {
+        n = n + 1;
+        RETURN n;
+    };
+}
+
+VAR c = make_counter();
+print(c(), c(), c());   // 1 2 3
+```
+
+### Varargs
+
+```cando
+FUNCTION log(tag, ...rest) {
+    print(tag, ...rest);
+}
+
+log("INFO", "server started on port", 8080);
 ```
 
 ### Recursion
@@ -488,646 +329,440 @@ FUNCTION fib(n) {
     IF n <= 1 { RETURN n; }
     RETURN fib(n - 1) + fib(n - 2);
 }
-print(fib(10));  // 55
+
+print(fib(10));          // 55
 ```
 
-### Anonymous Functions
+## Method calls
 
-Functions are first-class values and can be stored in variables:
+The `:` operator calls a method, passing the left-hand side as the first
+argument:
 
 ```cando
-VAR square = FUNCTION(x) { RETURN x * x; };
-print(square(5));  // 25
+VAR obj = { value: 10 };
+
+obj.double = FUNCTION(self) {
+    RETURN self.value * 2;
+};
+
+print(obj:double());     // 20
 ```
 
-### Closures
-
-Nested functions close over variables from the enclosing scope:
+The `::` operator does the same but returns the receiver, enabling fluent
+chains:
 
 ```cando
-FUNCTION make_counter() {
-    VAR count = 0;
-    RETURN FUNCTION() {
-        count++;
-        RETURN count;
-    };
-}
+VAR builder = { parts: [] };
 
-VAR counter = make_counter();
-print(counter());  // 1
-print(counter());  // 2
-print(counter());  // 3
+builder.add = FUNCTION(self, part) {
+    self.parts:push(part);
+};
+
+builder::add("header")::add("body")::add("footer");
+print(#builder.parts);   // 3
 ```
 
-### Colon (Method) Call Syntax
-
-Calling a function with `:` passes the left-hand value as the first argument:
-
-```cando
-// These two calls are equivalent:
-string.toUpper("hello");
-"hello":toUpper();
-```
-
-This works with any function stored on an object:
-
-```cando
-VAR dog = { name: "Rex" };
-
-FUNCTION bark(self) {
-    print(self.name + " says woof!");
-}
-
-dog.bark = bark;
-dog:bark();   // Rex says woof!
-```
-
----
-
-## Error Handling
+## Error handling
 
 ### TRY / CATCH / FINALY
 
 ```cando
 TRY {
-    // code that may fail
-} CATCH (e) {
-    print("caught: " + e);
+    VAR result = risky_operation();
+} CATCH (err) {
+    print("error:", err);
 } FINALY {
-    print("always runs");
+    print("cleanup done");
 }
 ```
 
-`FINALY` is optional. It always executes regardless of whether an error was thrown.
+> `FINALY` is spelled with one L.
 
 ### THROW
 
-`THROW` raises an error with one or more values:
-
-```cando
-THROW "something went wrong";
-THROW 404, "not found";
-```
-
-### Catching Multiple Values
-
-Match the number of variables in `CATCH` to the number of values thrown. Extra catch variables are `NULL`; extra thrown values are dropped:
+Throw one or more values:
 
 ```cando
 TRY {
     THROW 404, "not found";
 } CATCH (code, msg) {
-    print(code);  // 404
-    print(msg);   // not found
+    print(code, msg);    // 404 not found
 }
 ```
 
-### Runtime Errors
-
-Runtime errors (e.g. division by zero) are catchable the same way:
+Runtime errors (division by zero, calling a non-function) are also
+catchable:
 
 ```cando
 TRY {
-    VAR bad = 1 / 0;
+    VAR x = 1 / 0;
 } CATCH (msg) {
-    print("caught: " + msg);
+    print("caught:", msg);
 }
 ```
 
-### Rethrowing
+## Pipe and filter
 
-Inside a `CATCH` block, `THROW` re-raises to the next handler:
-
-```cando
-TRY {
-    TRY {
-        THROW "inner error";
-    } CATCH (e) {
-        THROW "rethrown: " + e;
-    }
-} CATCH (e) {
-    print(e);  // rethrown: inner error
-}
-```
-
----
-
-## Pipe & Filter
-
-The pipe (`~>`) and filter (`~!>`) operators apply a transformation to every element of an array and return a new array.
-
-Inside the pipe/filter body, `pipe` is a special keyword that refers to the current element.
-
-### Pipe (Map)
-
-`~>` with an expression:
+The `~>` operator maps over an array.  The special variable `pipe` holds
+each element:
 
 ```cando
 VAR nums = [1, 2, 3, 4, 5];
+
 VAR tens = nums ~> pipe * 10;
-print(tens[0]);  // 10
-print(tens[4]);  // 50
+print(tens);             // [10, 20, 30, 40, 50]
+
+VAR labels = nums ~> `item_${pipe}`;
+print(labels);           // ["item_1", "item_2", ...]
 ```
 
-`~>` with a block:
-
-```cando
-VAR doubled = nums ~> {
-    RETURN pipe * 2;
-};
-```
-
-### Filter
-
-`~!>` keeps only elements for which the body returns a non-`NULL` value:
+The `~!>` operator filters — return a value to keep, or `NULL` to skip:
 
 ```cando
 VAR evens = nums ~!> {
     IF pipe % 2 == 0 { RETURN pipe; }
-    RETURN NULL;
 };
-// evens == [2, 4]
+print(evens);            // [2, 4]
 ```
 
-If the body has no explicit `RETURN NULL`, elements that don't match are simply dropped:
+## Classes
+
+`CLASS` creates a prototype-based object:
 
 ```cando
-VAR big = nums ~!> {
-    IF pipe > 3 { RETURN pipe; }
-};
-// big == [4, 5]
-```
-
----
-
-## Mask Syntax
-
-The mask syntax selects specific values from a multi-value expression. A mask is written as a parenthesised pattern of `~` (pass/consume) and `.` (skip) bits placed before the value list. Wrapping the pattern in `()` keeps it distinct from the unpack operator `...`.
-
-### Mixed Mask
-
-Each position in the mask corresponds to a value. `~` passes that value to a variable; `.` discards it:
-
-```cando
-// Select 1st and 3rd values; discard 2nd
-VAR a, b = (~.~) 1, 3, 5;
-print(a);  // 1
-print(b);  // 5
-```
-
-### Pure `~` Mask
-
-Consume the first N values; extras are skipped:
-
-```cando
-VAR c = (~) 1, 2;        // c = 1; 2 is ignored
-VAR d, e = (~~) 1, 2, 3; // d = 1, e = 2; 3 is ignored
-```
-
-### Pure `.` Mask
-
-Skip the first N values; extras are passed through:
-
-```cando
-VAR f = (.) 1, 2;        // skip 1; f = 2
-VAR g = (..) 1, 2, 3;    // skip 1, skip 2; g = 3
-```
-
----
-
-## Built-in Functions
-
-These functions are available globally without any import.
-
-### `print(...)`
-
-Prints all arguments to stdout, space-separated, followed by a newline:
-
-```cando
-print("hello");           // hello
-print(1, 2, 3);           // 1 2 3
-print("x =", x);
-```
-
-### `type(value)`
-
-Returns the type name of a value as a string:
-
-```cando
-print(type("hi"));    // string
-print(type(42));      // number
-print(type(TRUE));    // bool
-print(type(NULL));    // null
-print(type([]));      // array
-print(type({}));      // object
-```
-
-### `toString(value)`
-
-Converts a value to its string representation:
-
-```cando
-print(toString(42));      // 42
-print(toString(3.14));    // 3.14
-print(toString(TRUE));    // true
-```
-
----
-
-## Standard Library
-
-### Include
-
-The `include(path)` function loads and executes a Cando script or binary extension module.
-
-```cando
-VAR mymod = include("utils.cdo");
-```
-
-#### Multiple Return Values
-
-If the included script returns multiple values, `include()` returns all of them.
-
-```cando
-// module.cdo
-RETURN 1, 2, 3;
-
-// main.cdo
-VAR x, y, z = include("module.cdo");
-```
-
-#### Caching
-
-Modules are cached by their absolute canonical path. Subsequent calls to `include()` with the same path will return the cached values without re-executing the script. All return values are correctly cached and restored.
-
----
-
-### Math Module
-
-Access via `math.`:
-
-```cando
-print(math.abs(-7));         // 7
-print(math.floor(3.9));      // 3
-print(math.ceil(3.1));       // 4
-print(math.round(2.5));      // 3
-print(math.sqrt(25));        // 5
-print(math.pow(2, 10));      // 1024
-print(math.log(1));          // 0
-print(math.min(5, 3, 8, 1)); // 1
-print(math.max(5, 3, 8, 1)); // 8
-print(math.clamp(15, 0, 10));// 10
-print(math.clamp(-5, 0, 10));// 0
-print(math.clamp( 5, 0, 10));// 5
-```
-
-**Constants:**
-
-```cando
-math.pi  // 3.14159...
-math.e   // 2.71828...
-```
-
-| Function                    | Description                         |
-|-----------------------------|-------------------------------------|
-| `math.abs(x)`               | Absolute value                      |
-| `math.floor(x)`             | Round down                          |
-| `math.ceil(x)`              | Round up                            |
-| `math.round(x)`             | Round to nearest integer            |
-| `math.sqrt(x)`              | Square root                         |
-| `math.pow(x, y)`            | `x` raised to the power `y`         |
-| `math.log(x)`               | Natural logarithm                   |
-| `math.min(a, b, ...)`       | Smallest of all arguments           |
-| `math.max(a, b, ...)`       | Largest of all arguments            |
-| `math.clamp(x, min, max)`   | Clamp `x` to `[min, max]`           |
-| `math.pi`                   | π ≈ 3.14159                         |
-| `math.e`                    | e ≈ 2.71828                         |
-
----
-
-### String Module
-
-Access via `string.` or using the colon method syntax on any string value:
-
-```cando
-print(string.length("hello"));            // 5
-print(string.sub("hello world", 6, 11));  // world
-print(string.toLower("HELLO"));           // hello
-print(string.toUpper("hello"));           // HELLO
-print(string.trim("  hi  "));             // hi
-print(string.left("abcdef", 3));          // abc
-print(string.right("abcdef", 3));         // def
-print(string.repeat("ab", 3));            // ababab
-print(string.find("hello world", "world")); // 6
-VAR parts = string.split("a,b,c", ",");
-print(parts[0]);  // a
-print(parts[1]);  // b
-print(parts[2]);  // c
-```
-
-| Function                        | Description                                    |
-|---------------------------------|------------------------------------------------|
-| `string.length(s)`              | Number of characters                           |
-| `string.sub(s, start, end)`     | Substring from `start` to `end` (1-based)     |
-| `string.toLower(s)`             | Convert to lowercase                           |
-| `string.toUpper(s)`             | Convert to uppercase                           |
-| `string.trim(s)`                | Remove leading and trailing whitespace         |
-| `string.left(s, n)`             | First `n` characters                           |
-| `string.right(s, n)`            | Last `n` characters                            |
-| `string.repeat(s, n)`           | Repeat `s` exactly `n` times                  |
-| `string.find(s, sub)`           | Index of first occurrence of `sub` in `s`     |
-| `string.split(s, sep)`          | Split `s` by separator; returns an array       |
-
-All functions are also available as methods:
-
-```cando
-"Hello World":toLower()      // hello world
-"  spaces  ":trim()          // spaces
-"abc":repeat(3)              // abcabcabc
-```
-
----
-
-### File Module
-
-Read and write files using `file.read` and `file.write`:
-
-```cando
-// Read entire file contents as a string
-VAR contents = file.read("data.txt");
-print(contents);
-
-// Write a string to a file (overwrites existing content)
-file.write("output.txt", "hello from cando\n");
-```
-
-| Function                   | Description                         |
-|----------------------------|-------------------------------------|
-| `file.read(path)`          | Read file at `path`, return string  |
-| `file.write(path, content)`| Write `content` string to `path`   |
-
----
-
-### Array Module
-
-All array values automatically use the `array` module as their prototype, so methods can be called with the colon syntax (`a:method()`). You can also call them as plain functions (`array.method(a)`).
-
-```cando
-var a = [1, 2, 3];
-print(a:length());        // 3
-a:push(4);                // append → [1, 2, 3, 4]
-a:push(1, 10);            // insert 10 at index 1 → [1, 10, 2, 3, 4]
-print(a:pop());           // 4  (removes last)
-
-var removed = a:splice(1, 2);  // remove 2 elements from index 1
-// a → [1, 3],  removed → [10, 2]
-print(removed[0]);        // 10
-print(removed[1]);        // 2
-
-var v = a:remove(0);      // remove element at index 0, returns it
-print(v);                 // 1
-
-var b = a:copy();         // shallow copy
-b[0] = 99;
-print(a[0]);              // 3  (a unchanged)
-
-var doubled = a:map(function(x) { return x * 2; });
-var evens   = a:filter(function(x) { return x % 2 == 0; });
-var sum     = a:reduce(function(acc, x) { return acc + x; }, 0);
-```
-
-| Function                         | Description                                                  |
-|----------------------------------|--------------------------------------------------------------|
-| `array.length(a)`                | Number of elements                                           |
-| `array.push(a, v)`               | Append `v` to the end; returns `true` on success            |
-| `array.push(a, index, v)`        | Insert `v` at `index`, shifting elements right              |
-| `array.pop(a)`                   | Remove and return the last element (or `null` if empty)      |
-| `array.splice(a, start, len?)`   | Remove `len` elements from `start`; returns removed as array |
-| `array.remove(a, index)`         | Remove element at `index`; returns removed value or `null`   |
-| `array.copy(a)`                  | Shallow copy of `a`                                          |
-| `array.map(a, f)`                | New array with `f(element)` applied to each element         |
-| `array.filter(a, f)`             | New array with elements for which `f(element)` is truthy    |
-| `array.reduce(a, f, init?)`      | Fold `a` left using `f(acc, element)`, starting from `init` |
-
----
-
-### Object Module
-
-The `object` module provides utilities for plain key-value objects, including thread-safe locking, merging, raw field access, and prototype manipulation.
-
-```cando
-var a = { x: 1, y: 2 };
-
-// Shallow copy
-var b = object.copy(a);
-b.x = 99;
-print(a.x);   // 1  (a unchanged)
-
-// Merge sources into a (mutates a)
-object.assign(a, { z: 3 });
-print(a.z);   // 3
-
-// Non-destructive merge → new object
-var merged = object.apply(a, { y: 20 });
-print(merged.y);   // 20
-print(a.y);        // 2  (a unchanged)
-
-// Raw field access (bypasses __index / __newindex meta methods)
-object.set(a, "hidden", 42);
-print(object.get(a, "hidden"));   // 42
-
-// Prototype chain
-var proto = { greet: function() { return "hi"; } };
-object.setPrototype(a, proto);
-var p = object.getPrototype(a);
-print(p.greet());   // hi
-
-// Keys and values (insertion order)
-var obj = { c: 3, a: 1, b: 2 };
-print(object.keys(obj)[0]);     // c
-print(object.values(obj)[0]);   // 3
-
-// Thread-safe explicit locking
-var shared = { counter: 0 };
-var t = thread {
-    object.lock(shared);
-    shared.counter = shared.counter + 1;
-    object.unlock(shared);
-};
-await t;
-print(shared.counter);   // 1
-```
-
-| Function                           | Description                                                         |
-|------------------------------------|---------------------------------------------------------------------|
-| `object.lock(o)`                   | Acquire exclusive write lock on `o` (re-entrant per thread)         |
-| `object.locked(o)`                 | `true` if `o` is currently write-locked by any thread               |
-| `object.unlock(o)`                 | Release one level of the write lock                                 |
-| `object.copy(o)`                   | Shallow copy of all own fields                                      |
-| `object.assign(o, ...sources)`     | Copy fields from each source into `o`; returns `o`                  |
-| `object.apply(o, ...sources)`      | New object with `o`'s fields plus each source merged in             |
-| `object.get(o, key)`               | Read field `key` directly (bypasses `__index`)                      |
-| `object.set(o, key, value)`        | Write field `key` directly (bypasses `__newindex`); returns `bool`  |
-| `object.setPrototype(o, proto)`    | Set `o.__index = proto` (pass `null` to remove)                     |
-| `object.getPrototype(o)`           | Return `o.__index` (the prototype), or `null` if none               |
-| `object.keys(o)`                   | Array of own field names in insertion order                         |
-| `object.values(o)`                 | Array of own field values in insertion order                        |
-
----
-
-### Eval
-
-`eval` compiles and executes a string of Cando source code at runtime, returning the result of the last expression (or `null` for statement-only code):
-
-```cando
-VAR result = eval("1 + 2 + 3");
-print(result);  // 6
-
-eval("print('dynamic code!')");
-```
-
-An optional second argument is an options table:
-
-| Option      | Type   | Default      | Description                                              |
-|-------------|--------|--------------|----------------------------------------------------------|
-| `name`      | string | `"<eval>"`   | Script name shown in error messages and stack traces     |
-| `sandbox`   | bool   | `false`      | Run in an isolated global environment (see below)        |
-
-```cando
-// Custom name appears in runtime error messages
-eval("1 / 0", { name: "my_script" });
-// runtime error: division by zero [my_script line 1]
-
-// Sandbox mode: outer globals are hidden; new VAR declarations are discarded
-VAR secret = 42;
-TRY {
-    eval("secret", { sandbox: true });  // throws: undefined variable 'secret'
-} CATCH (e) {
-    print("isolated");  // outer globals not visible in sandbox
+CLASS Point {
+    FUNCTION make(x, y) {
+        RETURN { x: x, y: y };
+    }
+
+    FUNCTION dist(self) {
+        RETURN math.sqrt(self.x ^ 2 + self.y ^ 2);
+    }
+
+    FUNCTION add(self, other) {
+        RETURN Point.make(self.x + other.x, self.y + other.y);
+    }
 }
 
-eval("VAR tmp = 99", { sandbox: true });
-// tmp is not defined here — it was discarded when the sandbox exited
-
-// Native functions (print, math, eval, etc.) remain accessible in sandbox mode
-eval("print('hello from sandbox')", { sandbox: true });
+VAR a = Point.make(3, 0);
+VAR b = Point.make(0, 4);
+VAR c = a:add(b);
+print(c:dist());         // 5
+print(c.x, c.y);        // 3 4
 ```
 
-| Function               | Description                                                    |
-|------------------------|----------------------------------------------------------------|
-| `eval(code)`           | Execute `code` string; return all results from the last expression |
-| `eval(code, options)`  | Same, with `name` and/or `sandbox` options                     |
+Methods called with `:` receive the object as the first argument (`self`
+by convention).
 
-#### Multiple Return Values in Eval
+## Threads
 
-`eval` can return multiple values if the evaluated code ends with a `RETURN` statement containing multiple values or an expression that produces multiple results.
+CanDo threads are real OS threads.
 
 ```cando
-VAR a, b = eval("RETURN 10, 20");
-print(a); // 10
-print(b); // 20
-```
-
----
-
-## Threading
-
-Cando supports true OS-level concurrency via the `thread` and `await` keywords and the built-in `thread` management object.
-
-### Thread expression
-
-`thread` is a unary prefix that wraps any expression or block as an anonymous closure and immediately spawns it as a new OS thread. It returns a thread handle.
-
-```cando
-// Spawn a block
-var t = thread {
-    return 42;
-};
-
-// Spawn a single expression (function call, arithmetic, etc.)
-var t2 = thread file.read("data.txt");
-var t3 = thread add(3, 4);
-```
-
-The spawned code has full access to variables in scope at the point of the `thread` expression, plus all globals — the same access it would have if called normally. Shared variables and objects are automatically protected by read/write locks.
-
-### Await expression
-
-`await` blocks the current thread until the given thread handle finishes and unpacks its return values.
-
-```cando
-var result = await t;       // single return value
-var a, b   = await t2;      // multi-return
-```
-
-If the thread returned no values, `await` produces `null`.
-
-**await is not parallel with `~>`** — the pipe operator (`~>`) is always sequential. Use explicit `thread`/`await` for parallel work:
-
-```cando
-// Sequential (one at a time):
-var results = items ~> complexFn(pipe);
-
-// Parallel (all at once):
-var handles = items ~> thread complexFn(pipe);
-var done    = handles ~> await pipe;
-```
-
-### Thread library
-
-The global `thread` object provides thread management utilities:
-
-| Method                | Description                                                        |
-|-----------------------|--------------------------------------------------------------------|
-| `thread.sleep(ms)`    | Sleep the calling thread for `ms` milliseconds                     |
-| `thread.id()`         | Return the calling thread's numeric ID (non-zero)                  |
-| `thread.done(t)`      | Return `true` if thread `t` has finished (non-blocking poll)       |
-| `thread.join(t)`      | Block until `t` finishes; return its result values (same as `await`) |
-| `thread.cancel(t)`    | Request cancellation of `t`; returns `true` if state changed       |
-| `thread.state(t)`     | Return state string: `"pending"`, `"running"`, `"done"`, `"error"`, `"cancelled"` |
-| `thread.error(t)`     | Return the error value if state is `"error"`, else `null`          |
-| `thread.current()`    | Return the current thread's handle, or `null` on the main thread   |
-| `thread.then(t, fn)`  | Register `fn` as a success callback; fires with return values      |
-| `thread.catch(t, fn)` | Register `fn` as an error callback; fires with the error value     |
-
-```cando
-// Poll state without blocking
-var t = thread { thread.sleep(100); return 42; };
-while thread.state(t) == "running" {
-    print("still running...");
+// Spawn a thread
+VAR t = thread {
     thread.sleep(10);
-}
-var result = await t;
-
-// Read error after failure
-var t2 = thread { throw "bad input"; };
-await t2;
-if thread.state(t2) == "error" {
-    print(thread.error(t2));  // bad input
-}
-
-// Get the current thread from inside a thread body
-var t3 = thread {
-    var me = thread.current();
-    print(thread.state(me));  // running
-    return 1;
+    RETURN "done";
 };
-await t3;
 
-// Cancel a slow thread
-var slow = thread { thread.sleep(60000); return 0; };
-thread.cancel(slow);   // returns true if the cancel was accepted
-
-// Promise-style callbacks
-var t4 = thread { return 99; };
-thread.then(t4,  function(r)   { print("done: "  + r); });
-thread.catch(t4, function(err) { print("error: " + err); });
-await t4;
-
-// Identify threads
-var t5 = thread { print("child id: " + thread.id()); };
-print("parent id: " + thread.id());
-await t5;
+// Wait for the result
+VAR result = await t;
+print(result);           // done
 ```
 
-> For a deeper look at the threading runtime, locking model, and multi-thread design patterns, see [docs/threading.md](threading.md).
+### Multiple concurrent threads
+
+```cando
+FUNCTION compute(n) {
+    VAR sum = 0;
+    FOR i IN 1 -> n { sum = sum + i; }
+    RETURN sum;
+}
+
+VAR t1 = thread compute(1000);
+VAR t2 = thread compute(2000);
+VAR t3 = thread compute(3000);
+
+print(await t1);         // 500500
+print(await t2);         // 2001000
+print(await t3);         // 4501500
+```
+
+### Thread callbacks
+
+```cando
+VAR t = thread { RETURN 42; };
+
+thread.then(t, FUNCTION(result) {
+    print("success:", result);
+});
+
+thread.catch(t, FUNCTION(err) {
+    print("error:", err);
+});
+```
+
+### Shared state and locking
+
+Threads share global variables and heap objects.  For read-modify-write
+patterns, use explicit locking:
+
+```cando
+VAR counter = { n: 0 };
+
+VAR workers = [];
+FOR i IN 1 -> 10 {
+    workers:push(thread {
+        FOR j IN 1 -> 100 {
+            object.lock(counter);
+            counter.n = counter.n + 1;
+            object.unlock(counter);
+        }
+    });
+}
+
+FOR w OF workers { await w; }
+print(counter.n);        // 1000
+```
+
+See [threading.md](threading.md) for the full treatment.
+
+## Modules
+
+Use `include()` to load another script.  The module's `RETURN` value is
+cached by path:
+
+```cando
+// mathutil.cdo
+VAR util = {};
+util.clamp = FUNCTION(v, lo, hi) {
+    IF v < lo { RETURN lo; }
+    IF v > hi { RETURN hi; }
+    RETURN v;
+};
+RETURN util;
+```
+
+```cando
+// main.cdo
+VAR mu = include("./mathutil.cdo");
+print(mu.clamp(15, 0, 10));  // 10
+```
+
+Calling `include()` with the same path again returns the cached value
+without re-executing the file.
+
+## File I/O
+
+```cando
+// Write a file
+file.write("output.txt", "hello from CanDo\n");
+
+// Read it back
+VAR content = file.read("output.txt");
+print(content);
+
+// Read as lines
+VAR lines = file.lines("output.txt");
+FOR line OF lines { print(line); }
+
+// Check existence
+print(file.exists("output.txt"));  // TRUE
+
+// List a directory
+VAR entries = file.list(".");
+FOR name OF entries { print(name); }
+```
+
+## JSON
+
+```cando
+VAR data = { name: "Alice", scores: [95, 87, 92] };
+
+// Encode
+VAR text = json.stringify(data);
+print(text);             // {"name":"Alice","scores":[95,87,92]}
+
+// Decode
+VAR parsed = json.parse(text);
+print(parsed.name);      // Alice
+print(parsed.scores[0]); // 95
+```
+
+## HTTP client
+
+The `fetch` global picks HTTP or HTTPS from the URL:
+
+```cando
+VAR res = fetch("https://httpbin.org/get");
+print(res.status);       // 200
+print(res.body);         // response body as string
+
+// Parse JSON response
+VAR data = res:json();
+print(data.url);
+
+// POST with options
+VAR res2 = fetch("https://httpbin.org/post", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: json.stringify({ key: "value" })
+});
+```
+
+## HTTP server
+
+```cando
+VAR server = http.createServer(FUNCTION(req, res) {
+    res.status = 200;
+    res.headers["Content-Type"] = "text/plain";
+    res.body = `Hello! You requested ${req.path}`;
+});
+
+server:listen(8080);
+print("listening on :8080");
+```
+
+Each request runs on its own thread.  Call `server:close()` to shut down.
+
+## Crypto
+
+```cando
+print(crypto.sha256("hello"));
+// 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+
+print(crypto.base64Encode("hello world"));
+// aGVsbG8gd29ybGQ=
+
+print(crypto.base64Decode("aGVsbG8gd29ybGQ="));
+// hello world
+```
+
+## Date and time
+
+```cando
+VAR now = datetime.now();
+print(datetime.format(now));
+// 2026-04-16 14:30:00  (example)
+
+print(datetime.format(now, "%Y/%m/%d"));
+// 2026/04/16
+```
+
+## OS interaction
+
+```cando
+print(os.getenv("HOME"));       // /home/user
+print(os.time());               // Unix timestamp
+
+VAR output = os.execute("ls -la");
+print(output);
+
+print(process.pid());           // current process ID
+```
+
+## eval
+
+Compile and execute a string as CanDo code at runtime:
+
+```cando
+VAR result = eval("2 + 2");
+print(result);           // 4
+
+VAR x = 10;
+print(eval("x * 3"));   // 30 (accesses enclosing globals)
+```
+
+## Mask syntax
+
+Masks select positions from a multi-value expression.  `~` keeps a value,
+`.` skips it:
+
+```cando
+FUNCTION triple() { RETURN 10, 20, 30; }
+
+VAR first, third = (~.~) triple();
+print(first, third);     // 10 30
+
+VAR a, b = (~~) 1, 2, 3;  // keep first two, ignore rest
+print(a, b);             // 1 2
+
+VAR c = (..) 1, 2, 3;     // skip first two, keep rest
+print(c);                // 3
+```
+
+## FOR ... OVER (generic iterators)
+
+`FOR ... OVER` uses a Lua-style iterator protocol — three values:
+an iterator function, a state, and an initial control value:
+
+```cando
+FUNCTION pairs(t) {
+    RETURN FUNCTION(s, c) {
+        IF c >= #s { RETURN NULL; }
+        RETURN c + 1, c, s[c];
+    }, t, 0;
+}
+
+FOR idx, val OVER pairs([10, 20, 30]) {
+    print(idx, val);
+    // 0 10
+    // 1 20
+    // 2 30
+}
+```
+
+Iteration stops when the iterator returns `NULL` as the new control value.
+
+## Putting it together
+
+A small program that reads a CSV file, processes the data, and writes
+a JSON report:
+
+```cando
+// Read and parse a CSV file
+VAR text = file.read("scores.csv");
+IF text == NULL { print("file not found"); os.exit(1); }
+
+VAR rows = csv.parse(text);
+VAR header = rows[0];
+
+// Process data rows (skip header)
+VAR results = [];
+FOR i IN 1 -> #rows - 1 {
+    VAR row = rows[i];
+    VAR name = row[0];
+    VAR score = +row[1];         // +x coerces string to number
+
+    VAR grade = "F";
+    IF score >= 90 { grade = "A"; }
+    ELSE IF score >= 80 { grade = "B"; }
+    ELSE IF score >= 70 { grade = "C"; }
+
+    results:push({ name: name, score: score, grade: grade });
+}
+
+// Sort by score (simple bubble sort)
+FOR i IN 0 -> #results - 2 {
+    FOR j IN 0 -> #results - 2 - i {
+        IF results[j].score < results[j+1].score {
+            VAR tmp = results[j];
+            results[j] = results[j+1];
+            results[j+1] = tmp;
+        }
+    }
+}
+
+// Write JSON report
+file.write("report.json", json.stringify(results));
+print("wrote report.json with", #results, "entries");
+```
+
+## Quick reference
+
+| Topic | Where to look |
+|---|---|
+| Every operator, keyword, and syntax rule | [language-reference.md](language-reference.md) |
+| All library functions | [standard-library.md](standard-library.md) |
+| Threading in depth | [threading.md](threading.md) |
+| Building the interpreter | [getting-started.md](getting-started.md) |

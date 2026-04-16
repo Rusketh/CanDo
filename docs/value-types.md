@@ -1,63 +1,71 @@
 # Value Types
 
-## CandoValue  (`source/core/value.h`)
+CanDo uses a two-layer value system. `CandoValue` is the VM-level representation used on the stack, in call frames, in the globals table, and in `CandoNativeFn` signatures. `CdoValue` is the object-layer mirror used inside the property system. The bridge layer converts between them.
 
-Every script-visible datum is a `CandoValue` — a small tagged union:
+## CandoValue (`source/core/value.h`)
+
+A small tagged union that carries every script-visible datum:
 
 ```c
+typedef enum {
+    TYPE_NULL   = 0,
+    TYPE_BOOL   = 1,
+    TYPE_NUMBER = 2,
+    TYPE_STRING = 3,
+    TYPE_OBJECT = 4,
+} TypeTag;
+
+typedef u32 HandleIndex;
+#define CANDO_INVALID_HANDLE ((HandleIndex)UINT32_MAX)
+
 typedef struct CandoValue {
-    u8 tag;   // TypeTag discriminant
+    u8 tag;
     union {
-        bool         boolean;  // TYPE_BOOL
-        f64          number;   // TYPE_NUMBER
-        CandoString *string;   // TYPE_STRING
-        HandleIndex  handle;   // TYPE_OBJECT
+        bool         boolean;
+        f64          number;
+        CandoString *string;
+        HandleIndex  handle;
     } as;
 } CandoValue;
 ```
 
-### TypeTag
-
-| Constant | Value | Meaning |
-|---|---|---|
-| `TYPE_NULL` | 0 | nil / absent value |
-| `TYPE_BOOL` | 1 | `true` / `false` |
-| `TYPE_NUMBER` | 2 | IEEE 754 `double` |
-| `TYPE_STRING` | 3 | immutable heap string |
-| `TYPE_OBJECT` | 4 | heap object via `HandleIndex` |
+Objects are never raw pointers. `TYPE_OBJECT` stores a `HandleIndex` into `CandoVM.handles`; resolve it through the bridge layer.
 
 ### Constructors
 
 ```c
-CandoValue cando_null()                     // TYPE_NULL
-CandoValue cando_bool(bool v)               // TYPE_BOOL
-CandoValue cando_number(f64 v)              // TYPE_NUMBER
-CandoValue cando_string_value(CandoString*) // TYPE_STRING (takes ownership)
-CandoValue cando_object_value(HandleIndex)  // TYPE_OBJECT
+CandoValue cando_null(void);
+CandoValue cando_bool(bool v);
+CandoValue cando_number(f64 v);
+CandoValue cando_string_value(CandoString *s);   // takes ownership
+CandoValue cando_object_value(HandleIndex h);
 ```
 
-### Type predicates
+### Predicates
 
 ```c
-bool cando_is_null(CandoValue v)
-bool cando_is_bool(CandoValue v)
-bool cando_is_number(CandoValue v)
-bool cando_is_string(CandoValue v)
-bool cando_is_object(CandoValue v)
+bool cando_is_null(CandoValue v);
+bool cando_is_bool(CandoValue v);
+bool cando_is_number(CandoValue v);
+bool cando_is_string(CandoValue v);
+bool cando_is_object(CandoValue v);
 ```
 
-### Value operations
+### Operations
 
 ```c
-bool  cando_value_equal(CandoValue a, CandoValue b); // structural for primitives
-char *cando_value_tostring(CandoValue v);            // heap-alloc; caller must free
-CandoValue cando_value_copy(CandoValue v);           // increments string ref_count
-void  cando_value_release(CandoValue v);             // decrements string ref_count
+const char *cando_value_type_name(TypeTag tag);
+bool        cando_value_equal(CandoValue a, CandoValue b);
+char       *cando_value_tostring(CandoValue v);    // caller frees
+CandoValue  cando_value_copy(CandoValue v);         // retains strings
+void        cando_value_release(CandoValue v);       // releases strings
 ```
 
----
+`cando_value_equal` is structural for primitives. `cando_value_copy` increments `ref_count` on string values; `cando_value_release` decrements it.
 
-## CandoString  (`source/core/value.h`)
+## CandoString (`source/core/value.h`)
+
+Ref-counted, immutable heap string. This is the VM layer string type.
 
 ```c
 typedef struct CandoString {
@@ -68,24 +76,17 @@ typedef struct CandoString {
 } CandoString;
 ```
 
-`CandoString` is a ref-counted, immutable heap string.
-
 ```c
 CandoString *cando_string_new(const char *src, u32 length);
-CandoString *cando_string_retain(CandoString *s);  // increments ref_count
-void         cando_string_release(CandoString *s); // decrements; frees at 0
+CandoString *cando_string_retain(CandoString *s);
+void         cando_string_release(CandoString *s);   // frees at ref_count 0
 ```
 
-`CandoString` lives in the **VM layer**.  It is separate from `CdoString` (the
-object layer's intern-table string).  To use a `CandoString` as a hash key for
-a `CdoObject`, convert it with `cando_bridge_intern_key()`.
-
----
+`CandoString` is separate from `CdoString`, the object layer's intern-table string. To use a `CandoString` as a property key on a `CdoObject`, convert it with `cando_bridge_intern_key()`.
 
 ## Native function sentinels
 
-Native functions are stored as special `TYPE_NUMBER` values with a negative
-number that encodes the function's index:
+Native functions are stored as special `TYPE_NUMBER` values. A negative number encodes the function index:
 
 ```
 native #0 → -1.0
@@ -93,21 +94,16 @@ native #1 → -2.0
 native #N → -(N+1).0
 ```
 
-Two macros expose this convention:
-
 ```c
 #define IS_NATIVE_FN(v)  (cando_is_number(v) && (v).as.number < 0.0)
 #define NATIVE_INDEX(v)  ((u32)(-(v).as.number - 1.0))
 ```
 
-The VM's `OP_CALL` and `OP_METHOD_CALL` handlers check `IS_NATIVE_FN` before
-attempting object-level dispatch.
+`OP_CALL` and `OP_METHOD_CALL` check `IS_NATIVE_FN` before object dispatch.
 
----
+## CdoValue (`source/object/value.h`)
 
-## CdoValue  (`source/object/value.h`)
-
-The object layer has a mirror type `CdoValue` with its own tag enum:
+The object layer's mirror type with its own tag enum:
 
 | Tag | Meaning |
 |---|---|
@@ -115,48 +111,38 @@ The object layer has a mirror type `CdoValue` with its own tag enum:
 | `CDO_BOOL` | boolean |
 | `CDO_NUMBER` | double |
 | `CDO_STRING` | `CdoString*` (interned) |
-| `CDO_OBJECT` | `CdoObject*` (plain object) |
+| `CDO_OBJECT` | `CdoObject*` |
 | `CDO_ARRAY` | `CdoObject*` (array kind) |
 | `CDO_FUNCTION` | `CdoObject*` (function kind) |
 | `CDO_NATIVE` | `CdoObject*` (native kind) |
 
-Constructors follow the same pattern:
+Constructors:
 
 ```c
-CdoValue cdo_null()
-CdoValue cdo_bool(bool v)
-CdoValue cdo_number(f64 v)
-CdoValue cdo_string_value(CdoString *s)
-CdoValue cdo_object_value(CdoObject *obj)
+CdoValue cdo_null(void);
+CdoValue cdo_bool(bool v);
+CdoValue cdo_number(f64 v);
+CdoValue cdo_string_value(CdoString *s);
+CdoValue cdo_object_value(CdoObject *obj);
 ```
 
----
+## Bridge layer (`source/vm/bridge.h`)
 
-## Bridge layer  (`source/vm/bridge.h`)
-
-Cross-layer helpers — always use these when crossing between VM and object code:
+All cross-layer conversions go through these functions:
 
 ```c
-// Retrieve the CdoObject* behind a HandleIndex
 CdoObject *cando_bridge_resolve(CandoVM *vm, HandleIndex h);
-
-// Create a new empty object/array registered in the handle table
 CandoValue cando_bridge_new_object(CandoVM *vm);
 CandoValue cando_bridge_new_array(CandoVM *vm);
-
-// Intern a VM-layer key string into the object-layer intern table
 CdoString *cando_bridge_intern_key(CandoString *cs);
-
-// Convert in either direction
 CandoValue cando_bridge_to_cando(CandoVM *vm, CdoValue v);
-CdoValue   cando_bridge_to_cdo  (CandoVM *vm, CandoValue v);
+CdoValue   cando_bridge_to_cdo(CandoVM *vm, CandoValue v);
 ```
 
-### Ownership notes
+### Ownership rules
 
-- `cando_bridge_to_cando` creates a **new** `CandoString` for string values
-  (ref_count = 1).  The caller is responsible for releasing it when done.
-- `cando_bridge_to_cdo` creates a **new** `CdoString` (not interned) for
-  string values.  Use `cdo_string_intern()` afterwards if you need the
-  interned version for hash-key lookups.
+- `cando_bridge_to_cando` creates a new `CandoString` for string values (`ref_count` = 1). Caller must release.
+- `cando_bridge_to_cdo` creates a new `CdoString` (not interned). Use `cdo_string_intern()` if you need the interned version for hash-key lookups.
 - Object values round-trip cleanly through the handle table with no copies.
+
+See [object-system.md](object-system.md) for `CdoObject` internals. See [vm-internals.md](vm-internals.md) for how the VM uses values at runtime.

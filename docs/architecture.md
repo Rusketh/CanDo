@@ -1,8 +1,8 @@
 # Architecture Overview
 
-CanDo is structured as an embeddable library with a thin CLI wrapper.  The
-core is `libcando.so` / `libcando.a`; the `cando` executable is ~90 lines
-that call into it.
+CanDo is a C11 embeddable scripting language. The core ships as
+`libcando.so` / `libcando.a`; the `cando` executable is a ~90-line CLI
+wrapper that calls into the library API.
 
 ---
 
@@ -10,58 +10,46 @@ that call into it.
 
 ```
 include/
-  cando.h             Public embedding API — the only header embedders need
+  cando.h             Public embedding API
 
 source/
-  cando_lib.c         High-level API: cando_open, cando_close, cando_dofile…
-  natives.c/h         Core globals: print, type, toString, toNumber, …
-  main.c              CLI entry point (links against libcando)
+  cando_lib.c         High-level API: cando_open, cando_close, cando_dofile...
+  natives.c/h         Core globals: print, type, toString
+  main.c              CLI entry point (~90 lines)
 
-  core/               Low-level primitives
-    common.h          Platform detection, CANDO_API macro, typedefs, allocators
-    value.h           CandoValue, CandoString — the VM's value type
-    lock.h            CandoLockHeader — per-object R/W lock
-    handle.h          CandoHandleTable — index → CdoObject*
-    memory.h          CandoMemCtrl — pluggable allocator
+  core/
+    common.h          Platform detection, CANDO_API, typedefs, allocators
+    value.h           CandoValue, CandoString
+    lock.h            CandoLockHeader (per-object R/W lock)
+    handle.h          CandoHandleTable (HandleIndex -> CdoObject*)
+    memory.h          CandoMemCtrl (pluggable allocator)
     thread_platform.h Mutex/cond wrappers (pthreads / Win32)
 
-  object/             Object layer (heap types)
-    string.h/.c       CdoString — refcounted, interned
-    value.h/.c        CdoValue — object-layer value union
-    object.h/.c       CdoObject — hash map of fields; prototype chain; meta-keys
+  object/
+    string.h/.c       CdoString -- refcounted, interned
+    value.h/.c        CdoValue -- object-layer value union
+    object.h/.c       CdoObject -- hash map, prototype chain, meta-keys
     array.h/.c        Array specialisation of CdoObject
     function.h/.c     OBJ_FUNCTION, OBJ_NATIVE
     class.h/.c        Class objects
-    thread.h/.c       OBJ_THREAD — thread handle
+    thread.h/.c       OBJ_THREAD -- thread handle
 
   parser/
-    lexer.h/.c        Tokeniser → CandoToken[]
-    parser.h/.c       Recursive-descent + Pratt → CandoChunk (no AST)
+    lexer.h/.c        Tokeniser -> CandoToken stream
+    parser.h/.c       Recursive-descent + Pratt -> CandoChunk (no AST)
 
   vm/
-    opcodes.h/.c      CandoOpcode enum
-    chunk.h/.c        CandoChunk — flat bytecode + constant table
-    bridge.h/.c       CandoValue ↔ CdoValue conversion
-    vm.h/.c           CandoVM — interpreter, call frames, threading
+    opcodes.h/.c      CandoOpcode enum (~80 opcodes in bands)
+    chunk.h/.c        CandoChunk -- flat bytecode + constant table
+    bridge.h/.c       CandoValue <-> CdoValue conversion
+    vm.h/.c           CandoVM -- interpreter, call frames, threading
     debug.h/.c        cando_chunk_disasm
 
   lib/                17 standard library modules
-    math.c/h          math.*
-    file.c/h          file.*
-    string.c/h        string prototype
-    array.c/h         array prototype
-    object.c/h        object.*
-    json.c/h          json.*
-    csv.c/h           csv.*
-    thread.c/h        thread.*
-    os.c/h            os.*
-    datetime.c/h      datetime.*
-    crypto.c/h        crypto.*
-    process.c/h       process.*
-    net.c/h           net.*
-    eval.c/h          eval()
-    include.c/h       include()
-    libutil.c/h       Internal helpers for library modules
+    math, file, string, array, object, json, csv,
+    thread, os, datetime, crypto, process, net,
+    eval, include, http, https
+    libutil.c/h       Internal helpers
 
   compat/
     win_regex.c       POSIX regex shim for Windows
@@ -69,201 +57,127 @@ source/
 
 ---
 
-## End-to-end execution pipeline
+## Execution pipeline
 
 ```
-┌──────────────┐
-│  Source text │  (from file, string, or eval)
-│   (.cdo)     │
-└──────┬───────┘
-       │
-       ▼
-┌──────────────────────────────────────┐
-│  Lexer  (source/parser/lexer.c)      │
-│  source text → flat token stream     │
-│  CandoToken[]                        │
-└──────┬───────────────────────────────┘
-       │
-       ▼
-┌──────────────────────────────────────┐
-│  Parser / Compiler                   │
-│  (source/parser/parser.c)            │
-│  Recursive-descent + Pratt precedence│
-│  Writes bytecode directly into       │
-│  CandoChunk — no AST                 │
-└──────┬───────────────────────────────┘
-       │
-       ▼
-┌──────────────────────────────────────┐
-│  CandoChunk  (source/vm/chunk.h)     │
-│  Flat u8[] bytecode                  │
-│  + CandoValue[] constant pool        │
-│  + sub-chunks for nested functions   │
-└──────┬───────────────────────────────┘
-       │
-       ▼
-┌──────────────────────────────────────┐
-│  VM  (source/vm/vm.c)                │
-│  Stack-based interpreter             │
-│  cando_vm_exec() wraps chunk in      │
-│  CandoClosure, pushes call frame,    │
-│  dispatches until OP_HALT /          │
-│  OP_RETURN at depth 0 / error        │
-└──────────────────────────────────────┘
+Source text (.cdo)
+       |
+       v
+Lexer  (source/parser/lexer.c)
+  source text -> flat CandoToken stream
+       |
+       v
+Parser/Compiler  (source/parser/parser.c)
+  recursive-descent + Pratt precedence
+  writes bytecode directly -- no AST
+       |
+       v
+CandoChunk  (source/vm/chunk.h)
+  flat u8[] bytecode
+  + CandoValue[] constant pool
+  + sub-chunks for nested functions
+       |
+       v
+VM  (source/vm/vm.c)
+  stack-based interpreter
+  GCC computed gotos for dispatch
+  runs until OP_HALT / OP_RETURN at depth 0 / error
 ```
+
+The parser/compiler is a single pass: it consumes tokens and emits bytecode
+into a `CandoChunk` directly, with no intermediate AST. Nested function
+bodies produce sub-chunks attached to the parent chunk.
+
+See [parser-compiler.md](parser-compiler.md) and
+[vm-internals.md](vm-internals.md) for details.
 
 ---
 
-## The two-layer value system
+## Two-layer value system
 
-CanDo has two parallel value representations.
+CanDo maintains two parallel value representations connected by a bridge
+layer.
 
-### VM / core layer (`source/core/`)
+**VM layer** (`source/core/value.h`): `CandoValue` is a tagged union with a
+`u8` type tag and a union of `bool`, `double`, `CandoString*`, or
+`HandleIndex`. This type appears on the VM stack, in call frames, in the
+globals table, and in all `CandoNativeFn` signatures. Objects are never raw
+pointers at this layer -- they are `HandleIndex` values into a handle table
+owned by `CandoVM.handles`.
 
-```c
-typedef struct CandoValue {
-    TypeTag type;   /* NULL, BOOL, NUMBER, STRING, OBJECT */
-    union {
-        bool         boolean;
-        double       number;
-        CandoString *string;    /* ref-counted heap string */
-        HandleIndex  handle;    /* index into vm->handles  */
-    } as;
-} CandoValue;
-```
+**Object layer** (`source/object/`): `CdoValue` has its own tag enum and
+union. `CdoString` is refcounted with a process-global intern table.
+`CdoObject` is an open-addressed hash map of fields with a prototype chain
+via the `__index` meta-key.
 
-This type is used throughout: the VM stack, call frames, the globals table,
-and all `CandoNativeFn` signatures.
+**Bridge** (`source/vm/bridge.h`): All VM-to-object interaction goes through
+bridge functions so the handle table stays consistent:
 
-Objects are never raw pointers — they are `HandleIndex` values (a `u32`)
-into a handle table owned by `CandoVM.handles`.  This indirection isolates
-the VM from object movement and simplifies lifecycle tracking.
+- `cando_bridge_resolve` -- resolve `HandleIndex` to `CdoObject*`
+- `cando_bridge_new_object` -- allocate a plain object, register in handles
+- `cando_bridge_new_array` -- allocate an array object, register in handles
+- `cando_bridge_to_cando` -- convert `CdoValue` to `CandoValue`
+- `cando_bridge_to_cdo` -- convert `CandoValue` to `CdoValue`
+- `cando_bridge_intern_key` -- intern a string for use as a field key
 
-### Object layer (`source/object/`)
-
-```c
-/* CdoValue — object-layer equivalent */
-typedef struct CdoValue { uint8_t type; union { ... } as; } CdoValue;
-
-/* CdoObject — the actual heap object */
-struct CdoObject {
-    CandoLockHeader  lock;       /* per-object R/W lock             */
-    CdoObjectField  *fields;     /* open-addressed hash map         */
-    u32              field_cap;
-    u32              field_count;
-    CdoObjectKind    kind;       /* OBJ_PLAIN, OBJ_ARRAY, OBJ_FUNCTION… */
-    /* ... */
-};
-```
-
-The object layer has its own string type (`CdoString`) with a process-global
-intern table, its own value tag enum, and its own object representation.
-
-### The bridge (`source/vm/bridge.h`)
-
-```c
-/* Resolve a HandleIndex to a CdoObject* */
-CdoObject *cando_bridge_resolve(CandoVM *vm, HandleIndex h);
-
-/* Allocate new objects and register them in the handle table */
-CandoValue cando_bridge_new_object(CandoVM *vm);
-CandoValue cando_bridge_new_array(CandoVM *vm);
-
-/* Cross-layer value conversion */
-CandoValue cando_bridge_to_cando(CandoVM *vm, CdoValue v);
-CdoValue   cando_bridge_to_cdo  (CandoVM *vm, CandoValue v);
-```
-
-All VM–object interaction goes through these bridge functions so the handle
-table stays consistent.
+See [value-types.md](value-types.md) and
+[object-system.md](object-system.md) for the full type semantics.
 
 ---
 
 ## Handle table
 
-```c
-/* In CandoVM: */
-CandoHandleTable *handles;   /* source/core/handle.h */
-```
-
-`HandleIndex` is a `u32`.  `cando_handle_alloc(table, ptr)` stores a raw
-`CdoObject*` and returns its index.  `cando_handle_get(table, idx)` retrieves
-the pointer.  Handles decouple script values from object addresses.
+`HandleIndex` is a `u32`. It decouples script-visible values from raw object
+addresses. `cando_handle_alloc(table, ptr)` stores a `CdoObject*` and
+returns its index; `cando_handle_get(table, idx)` retrieves the pointer. The
+table is owned by `CandoVM.handles` (defined in `source/core/handle.h`).
 
 ---
 
-## Global singleton — string intern table
+## Global singleton
 
 `cdo_object_init()` initialises a process-global string intern table and a
-set of pre-interned meta-key strings (`__index`, `__newindex`, `__gc`, etc.).
-It must be called exactly once per process before any objects are created.
+set of pre-interned meta-key strings: `__index`, `__call`, `__type`,
+`__tostring`, `__equal`, `__greater`, `__add`, `__len`, `__negate`,
+`__not`, `__newindex`, `__is`.
 
 `cando_open()` manages this automatically with an atomic reference counter:
-the first `cando_open` initialises it, the last `cando_close` tears it down.
+the first `cando_open` call initialises the singleton, the last
+`cando_close` tears it down.
 
 ---
 
 ## Threading model
 
-`thread expr` in CanDo spawns a real OS thread (pthreads / Win32).  The child
-thread gets its own VM (`cando_vm_init_child`) that shares the parent's global
-table and handle table via pointer — reads/writes are protected by their
-respective R/W locks.
+`thread expr` in CanDo spawns a real OS thread (pthreads on POSIX, Win32
+threads on Windows). The child thread gets its own VM via
+`cando_vm_init_child`, which shares the parent's global table and handle
+table via pointer. Reads and writes to shared state are protected by R/W
+locks.
 
 Closures capture upvalues that are accessed under a per-upvalue R/W lock,
 allowing safe sharing between parent and child threads.
 
-`cando_vm_wait_all_threads` blocks until all spawned threads have finished,
+`cando_vm_wait_all_threads` blocks until every spawned thread has finished,
 preventing the process from exiting with live threads.
 
 ---
 
-## High-level API (library mode)
+## High-level API
 
-```
-include/cando.h      ← single public header
-source/cando_lib.c   ← implements the high-level functions:
+All public entry points live in `include/cando.h` and are implemented in
+`source/cando_lib.c`:
 
-  cando_open()        allocate VM, init global singleton (ref-counted)
-  cando_close()       destroy VM, tear down singleton on last close
-  cando_openlibs()    register all 17 standard library modules
-  cando_dofile()      read file + compile + exec (realpath for include())
-  cando_dostring()    compile string + exec
-  cando_loadstring()  compile only → CandoChunk* (caller runs/frees)
-  cando_errmsg()      human-readable error message after failure
-  cando_version()     "1.0.0"
-```
+| Function           | Purpose                                              |
+|--------------------|------------------------------------------------------|
+| `cando_open()`     | Allocate VM, init global singleton (ref-counted)     |
+| `cando_close()`    | Destroy VM, tear down singleton on last close        |
+| `cando_openlibs()` | Register all 17 standard library modules             |
+| `cando_dofile()`   | Read file + compile + execute                        |
+| `cando_dostring()` | Compile string + execute                             |
+| `cando_loadstring()`| Compile only, returns `CandoChunk*`                 |
+| `cando_errmsg()`   | Human-readable error message after failure           |
+| `cando_version()`  | Version string                                       |
 
----
-
-## Module dependency graph
-
-```
-include/cando.h   ← the only header embedders include
-
-source/core/common.h    ← everything (CANDO_API, types, allocators)
-source/core/value.h     ← CandoValue, CandoString
-source/core/lock.h      ← CandoLockHeader
-source/core/handle.h    ← CandoHandleTable
-source/core/memory.h    ← CandoMemCtrl
-
-source/object/string.h  ← CdoString + intern table
-source/object/value.h   ← CdoValue
-source/object/object.h  ← CdoObject, meta-keys
-source/object/array.h   ← array specialisation
-source/object/function.h, class.h, thread.h
-
-source/parser/lexer.h   ← tokeniser
-source/parser/parser.h  ← parser/compiler → CandoChunk
-
-source/vm/opcodes.h     ← CandoOpcode enum
-source/vm/chunk.h       ← CandoChunk
-source/vm/bridge.h      ← CandoValue ↔ CdoValue
-source/vm/vm.h          ← CandoVM, CandoNativeFn, full VM API
-source/vm/debug.h       ← cando_chunk_disasm
-
-source/lib/*.h          ← 17 standard library modules
-source/natives.h        ← core globals table
-source/cando_lib.c      ← cando_open, cando_dofile, cando_openlibs…
-source/main.c           ← CLI: thin wrapper over cando_lib.c API
-```
+See [embedding.md](embedding.md) for usage examples and integration
+guidance.
