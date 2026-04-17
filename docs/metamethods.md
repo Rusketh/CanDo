@@ -15,24 +15,26 @@ All meta-key strings are pre-interned at startup.  The corresponding global
 | Field name    | C global           | When dispatched                          |
 |---            |---                 |---                                       |
 | `__index`     | `g_meta_index`     | Field / method lookup (`obj.field`, `obj:method()`) |
-| `__call`      | `g_meta_call`      | Reserved — not yet dispatched by `OP_CALL` |
+| `__newindex`  | `g_meta_newindex`  | Field assignment when the key is new     |
 | `__type`      | `g_meta_type`      | `type(obj)` returns this string          |
-| `__tostring`  | `g_meta_tostring`  | `toString(obj)` — native callable only   |
-| `__equal`     | `g_meta_equal`     | `obj == other` — native callable only    |
-| `__greater`   | `g_meta_greater`   | `obj > other` (and `<`, `<=`, `>=`) — native callable only |
-| `__is`        | `g_meta_is`        | Truthiness test — native callable only   |
-| `__negate`    | `g_meta_negate`    | Unary `-obj` — native callable only      |
-| `__not`       | `g_meta_not`       | Reserved — not yet dispatched by `OP_NOT` |
-| `__add`       | `g_meta_add`       | Reserved — not yet dispatched by `OP_ADD` |
-| `__len`       | `g_meta_len`       | `#obj` — native callable only            |
-| `__newindex`  | `g_meta_newindex`  | Reserved — not yet dispatched by `OP_SET_FIELD` |
+| `__tostring`  | `g_meta_tostring`  | `toString(obj)` — calls the metamethod   |
+| `__len`       | `g_meta_len`       | `#obj` — custom length                   |
+| `__eq`        | `g_meta_eq`        | `obj == other` and `obj != other`        |
+| `__lt`        | `g_meta_lt`        | `a < b` and `a > b` (swapped args)      |
+| `__le`        | `g_meta_le`        | `a <= b` and `a >= b` (swapped args)    |
+| `__add`       | `g_meta_add`       | `a + b`                                  |
+| `__sub`       | `g_meta_sub`       | `a - b`                                  |
+| `__mul`       | `g_meta_mul`       | `a * b`                                  |
+| `__div`       | `g_meta_div`       | `a / b`                                  |
+| `__mod`       | `g_meta_mod`       | `a % b`                                  |
+| `__pow`       | `g_meta_pow`       | `a ^ b`                                  |
+| `__unm`       | `g_meta_unm`       | Unary `-obj`                             |
+| `__idiv`      | `g_meta_idiv`      | Integer division (reserved)              |
+| `__call`      | `g_meta_call`      | Reserved — not yet dispatched            |
 
-> **Callable limitation.** The VM's metamethod dispatcher (`cando_vm_call_meta`)
-> currently handles only **native** callables (negative-number sentinels and
-> `OBJ_NATIVE` objects).  Script functions assigned as metamethods for
-> operators (`__equal`, `__negate`, `__len`, etc.) will trigger a runtime
-> error.  `__index` and `__type` work unconditionally because they are read
-> as plain fields, not called.
+Metamethods can be **native** C functions, inline **script** functions
+(number PC offsets), or **OBJ_FUNCTION** closures.  The VM dispatcher
+(`cando_vm_call_meta`) handles all three.
 
 ---
 
@@ -44,8 +46,8 @@ another object, and repeats the lookup there.  The chain is followed up to
 `CANDO_PROTO_DEPTH_MAX` (32) levels.
 
 ```cando
-var proto = { x: 10, greet: "hello" };
-var child = { y: 20 };
+VAR proto = { x: 10, greet: "hello" };
+VAR child = { y: 20 };
 object.setPrototype(child, proto);   // sets child.__index = proto
 
 print(child.x);       // 10  — found on proto
@@ -67,6 +69,30 @@ and returns `false` rather than looping forever.
 
 ---
 
+## `__newindex` — intercept field assignment
+
+When assigning a key that does **not** already exist in the object's own
+fields, the VM checks the prototype chain for a `__newindex` metamethod.  If
+found, it is called with `(self, key, value)` instead of performing the raw
+set.  If the key already exists on the object, the assignment proceeds
+directly (no metamethod call).
+
+```cando
+VAR log = [];
+VAR proxy_proto = {
+    __newindex: FUNCTION(self, key, val) {
+        log:push("set:" + key);
+    }
+};
+
+VAR obj = {};
+object.setPrototype(obj, proxy_proto);
+obj.foo = 42;
+print(log[0]);       // set:foo
+```
+
+---
+
 ## `__type` — custom type tag
 
 `type(v)` normally returns `"null"`, `"bool"`, `"number"`, `"string"`, or
@@ -74,7 +100,7 @@ and returns `false` rather than looping forever.
 instead.
 
 ```cando
-var vec = { __type: "Vec3", x: 1, y: 2, z: 3 };
+VAR vec = { __type: "Vec3", x: 1, y: 2, z: 3 };
 print(type(vec));    // Vec3
 ```
 
@@ -105,7 +131,7 @@ CLASS Point {
 
 print(type(Point));           // Point  (__type set by CLASS)
 
-var p = Point.make(3, 4);
+VAR p = Point.make(3, 4);
 print(p:dist());              // 5
 print(p:sum());               // 7
 ```
@@ -131,11 +157,9 @@ The parser emits:
    top of stack).
 3. `OP_DEF_GLOBAL name_idx` — pops the class and stores it as a global.
 
-### Inheritance with `OP_INHERIT`
+### Inheritance
 
-The `OP_INHERIT` opcode sets `child.__index = parent`, connecting two class
-objects.  While the parser does not yet emit `OP_INHERIT` automatically,
-you can replicate two-level inheritance manually:
+Two-level inheritance works via prototype chaining:
 
 ```cando
 CLASS Animal {
@@ -152,7 +176,7 @@ CLASS Dog {
 }
 object.setPrototype(Dog, Animal);    // Dog.__index = Animal
 
-var d = Dog.make("Rex");
+VAR d = Dog.make("Rex");
 print(d:fetch());    // Rex fetches!
 print(d:speak());    // Rex makes a sound  (found on Animal)
 ```
@@ -161,54 +185,126 @@ print(d:speak());    // Rex makes a sound  (found on Animal)
 
 ## `__tostring` — custom string conversion
 
-`toString(obj)` checks for a `__tostring` field.  If present and it is a
-**native** callable, it is invoked with the object as the sole argument and
-must return a string.  If absent, `toString` falls back to the default
-representation.
+`toString(obj)` checks for a `__tostring` metamethod.  If present, it is
+called with the object as the sole argument and should return a string.  If
+absent, `toString` falls back to the default representation.
 
 ```cando
-// Script functions do NOT work as __tostring; native extensions can.
-var plain = { x: 1, y: 2 };
-print(type(toString(plain)));    // string  (default representation)
+CLASS Vec {
+    FUNCTION make(x, y) {
+        VAR v = { x: x, y: y };
+        object.setPrototype(v, Vec);
+        RETURN v;
+    }
+}
+Vec.__tostring = FUNCTION(v) {
+    RETURN "Vec(" + toString(v.x) + "," + toString(v.y) + ")";
+};
+print(toString(Vec.make(3, 4)));   // Vec(3,4)
 ```
 
 ---
 
 ## `__len` — custom length
 
-`#obj` first checks for a `__len` field.  If present and it is a **native**
-callable, it is called with the object and its return value is used.
-Otherwise, `cdo_object_length` is used directly:
+`#obj` first checks for a `__len` metamethod.  If present, it is called
+with the object and its return value is used.  Otherwise,
+`cdo_object_length` is used directly:
 
 - Arrays: `items_len` (number of dense elements).
 - Plain objects: `field_count` (number of live hash-table entries).
 
 ```cando
-var obj = { a: 1, b: 2, c: 3 };
-print(#obj);    // 3
-
-var arr = [10, 20, 30, 40];
-print(#arr);    // 4
+Vec.__len = FUNCTION(v) { RETURN v.x + v.y; };
+VAR v = Vec.make(10, 25);
+print(#v);    // 35
 ```
 
 ---
 
-## Operator metamethods (native only)
+## Comparison metamethods
 
-The following metamethods are dispatched at runtime but require the stored
-value to be a **native** callable (set up from C extensions):
+### `__eq` — equality
 
-| Meta-key    | Trigger         | Receives              | Returns         |
-|---          |---              |---                    |---              |
-| `__equal`   | `a == b`        | `(a, b)`              | bool-like value |
-| `__greater` | `a > b`         | `(a, b)`              | bool-like value |
-| `__is`      | truthiness test | `(obj)`               | bool-like value |
-| `__negate`  | `-obj`          | `(obj)`               | new value       |
-| `__len`     | `#obj`          | `(obj)`               | number          |
-| `__tostring`| `toString(obj)` | `(obj)`               | string          |
+Dispatched for `==` and `!=`.  Receives `(a, b)` and should return a
+boolean.  For `!=`, the VM negates the result.
 
-`__equal` is also used for `!=` (result negated), and `__greater` is composed
-with `__equal` to implement `<`, `<=`, `>=`.
+```cando
+Vec.__eq = FUNCTION(a, b) { RETURN a.x == b.x && a.y == b.y; };
+print(Vec.make(1, 2) == Vec.make(1, 2));   // true
+print(Vec.make(1, 2) != Vec.make(3, 4));   // true
+```
+
+### `__lt` — less than
+
+Dispatched for `<` directly and for `>` with swapped arguments.
+
+```cando
+Vec.__lt = FUNCTION(a, b) {
+    RETURN (a.x*a.x + a.y*a.y) < (b.x*b.x + b.y*b.y);
+};
+VAR small = Vec.make(1, 1);
+VAR big   = Vec.make(3, 4);
+print(small < big);    // true
+print(big > small);    // true  (dispatches __lt(small, big))
+```
+
+### `__le` — less than or equal
+
+Dispatched for `<=` directly and for `>=` with swapped arguments.
+
+```cando
+Vec.__le = FUNCTION(a, b) {
+    RETURN (a.x*a.x + a.y*a.y) <= (b.x*b.x + b.y*b.y);
+};
+print(Vec.make(3,4) <= Vec.make(3,4));   // true
+print(Vec.make(3,4) >= Vec.make(1,1));   // true
+```
+
+---
+
+## Arithmetic metamethods
+
+All binary arithmetic metamethods receive `(a, b)` and should return the
+computed result.  They are dispatched when at least one operand is an object.
+
+| Meta-key | Operator | Example |
+|---|---|---|
+| `__add` | `a + b` | Vector addition |
+| `__sub` | `a - b` | Vector subtraction |
+| `__mul` | `a * b` | Component-wise multiplication |
+| `__div` | `a / b` | Component-wise division |
+| `__mod` | `a % b` | Component-wise modulo |
+| `__pow` | `a ^ b` | Component-wise power |
+
+```cando
+Vec.__add = FUNCTION(a, b) { RETURN Vec.make(a.x + b.x, a.y + b.y); };
+Vec.__sub = FUNCTION(a, b) { RETURN Vec.make(a.x - b.x, a.y - b.y); };
+Vec.__mul = FUNCTION(a, b) { RETURN Vec.make(a.x * b.x, a.y * b.y); };
+Vec.__div = FUNCTION(a, b) { RETURN Vec.make(a.x / b.x, a.y / b.y); };
+Vec.__mod = FUNCTION(a, b) { RETURN Vec.make(a.x % b.x, a.y % b.y); };
+Vec.__pow = FUNCTION(a, b) { RETURN Vec.make(a.x ^ b.x, a.y ^ b.y); };
+
+VAR result = Vec.make(1, 2) + Vec.make(3, 4);
+print(result.x);    // 4
+print(result.y);    // 6
+```
+
+### `__unm` — unary minus
+
+Receives a single argument `(obj)` and returns the negated value.
+
+```cando
+Vec.__unm = FUNCTION(v) { RETURN Vec.make(-v.x, -v.y); };
+VAR neg = -Vec.make(5, -3);
+print(neg.x);       // -5
+print(neg.y);       // 3
+```
+
+### `__idiv` — integer division
+
+The `__idiv` meta-key is defined and interned but no `//` operator exists in
+the language yet.  It is reserved for future use.
 
 ---
 

@@ -467,7 +467,7 @@ bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
     if (!obj || !meta_key) return false;
 
     CdoValue raw;
-    if (!cdo_object_rawget(obj, (CdoString *)meta_key, &raw))
+    if (!cdo_object_get(obj, (CdoString *)meta_key, &raw))
         return false;
 
     CandoValue callee = cando_bridge_to_cando(vm, raw);
@@ -483,11 +483,9 @@ bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
         int ret = vm->native_fns[ni](vm, (int)argc, args);
         if (vm->has_error) return false;
         if (ret <= 0) {
-            /* Ensure at least one result is on the stack. */
             if ((u32)(vm->stack_top - vm->stack) <= stack_before)
                 cando_vm_push(vm, cando_null());
         }
-        /* If multiple returns, keep only the top one. */
         while ((u32)(vm->stack_top - vm->stack) > stack_before + 1) {
             CandoValue extra = cando_vm_pop(vm);
             cando_value_release(extra);
@@ -495,9 +493,59 @@ bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
         return true;
     }
 
-    /* OBJ_NATIVE CdoObject: call via fn.native.fn with CdoValue args. */
+    /* Number: PC-offset inline function in the current chunk. */
+    if (cando_is_number(callee)) {
+        u32 pc = (u32)callee.as.number;
+        CandoCallFrame *cur_frame = &vm->frames[vm->frame_count - 1];
+
+        u32 saved_stop = vm->thread_stop_frame;
+        vm->thread_stop_frame   = vm->frame_count;
+        vm->thread_result_count = 0;
+        for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) {
+            cando_value_release(vm->thread_results[i]);
+            vm->thread_results[i] = cando_null();
+        }
+
+        cando_vm_push(vm, cando_null()); /* slot-0 sentinel */
+
+        if (vm->frame_count >= CANDO_FRAMES_MAX) {
+            cando_vm_pop(vm);
+            vm->thread_stop_frame = saved_stop;
+            vm_runtime_error(vm, "call stack overflow in meta-method");
+            return false;
+        }
+
+        CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
+        new_frame->closure   = cur_frame->closure;
+        new_frame->ip        = cur_frame->closure->chunk->code + pc;
+        new_frame->slots     = vm->stack_top - 1;
+        new_frame->ret_count = 0;
+        new_frame->is_fluent = false;
+
+        for (u32 i = 0; i < argc; i++)
+            cando_vm_push(vm, cando_value_copy(args[i]));
+        u32 np = argc + 1;
+        if (cur_frame->closure->chunk->local_count > np) {
+            for (u32 i = np; i < cur_frame->closure->chunk->local_count; i++)
+                cando_vm_push(vm, cando_null());
+        }
+
+        vm_run(vm);
+        vm->thread_stop_frame = saved_stop;
+        if (vm->has_error) return false;
+
+        if (vm->thread_result_count > 0)
+            cando_vm_push(vm, cando_value_copy(vm->thread_results[0]));
+        else
+            cando_vm_push(vm, cando_null());
+        return true;
+    }
+
+    /* OBJ_NATIVE or OBJ_FUNCTION: dispatch via cando_vm_call_value. */
     if (cando_is_object(callee)) {
         CdoObject *fn_obj = cando_bridge_resolve(vm, callee.as.handle);
+
+        /* OBJ_NATIVE: call via fn.native.fn with CdoValue args. */
         if (fn_obj && fn_obj->kind == OBJ_NATIVE && fn_obj->fn.native.fn) {
             CdoValue *cdo_args = (CdoValue *)cando_alloc(
                                      argc * sizeof(CdoValue));
@@ -512,6 +560,26 @@ bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
             cando_value_release(callee);
             return true;
         }
+
+        /* OBJ_FUNCTION: script closure -- reentrant VM call. */
+        if (fn_obj && fn_obj->kind == OBJ_FUNCTION &&
+            fn_obj->fn.script.bytecode) {
+            int ret = cando_vm_call_value(vm, callee, args, argc);
+            cando_value_release(callee);
+            if (vm->has_error) return false;
+            if (ret > 1) {
+                CandoValue top = cando_vm_pop(vm);
+                for (int i = 1; i < ret; i++) {
+                    CandoValue extra = cando_vm_pop(vm);
+                    cando_value_release(extra);
+                }
+                cando_vm_push(vm, top);
+            } else if (ret == 0) {
+                cando_vm_push(vm, cando_null());
+            }
+            return true;
+        }
+
         cando_value_release(callee);
     }
 
@@ -529,26 +597,12 @@ static bool vm_is_truthy(CandoValue v) {
     return true;
 }
 
-/*
- * vm_is_truthy_meta -- truthiness with __is meta-method dispatch for objects.
- * Sets *ok = false if a meta-method call failed (vm->has_error will be set).
- */
 static bool vm_is_truthy_meta(CandoVM *vm, CandoValue v, bool *ok) {
+    CANDO_UNUSED(vm);
     *ok = true;
-    if (cando_is_null(v))  return false;
-    if (cando_is_bool(v))  return v.as.boolean;
-    if (cando_is_object(v) && g_meta_is) {
-        if (cando_vm_call_meta(vm, v.as.handle,
-                               (struct CdoString *)g_meta_is, &v, 1)) {
-            CandoValue result = cando_vm_pop(vm);
-            bool truthy = vm_is_truthy(result);
-            cando_value_release(result);
-            return truthy;
-        }
-        if (vm->has_error) { *ok = false; return false; }
-    }
-    return true; /* non-null, non-bool, no __is → truthy */
+    return vm_is_truthy(v);
 }
+
 
 /* =========================================================================
  * Error reporting
@@ -1336,6 +1390,24 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 5: Arithmetic ─────────────────────────────────────── */
+
+        /* Try a binary metamethod; dispatches and continues if found. */
+#define TRY_BINARY_META(meta_key, _a, _b)                                   \
+    if ((meta_key) && (cando_is_object(_a) || cando_is_object(_b))) {       \
+        HandleIndex _h = cando_is_object(_a) ? (_a).as.handle               \
+                                              : (_b).as.handle;             \
+        CandoValue _buf[2] = {_a, _b};                                     \
+        if (cando_vm_call_meta(vm, _h,                                      \
+                               (struct CdoString *)(meta_key), _buf, 2)) {  \
+            cando_value_release(_a); cando_value_release(_b);               \
+            DISPATCH();                                                     \
+        }                                                                   \
+        if (vm->has_error) {                                                \
+            cando_value_release(_a); cando_value_release(_b);               \
+            goto handle_error;                                              \
+        }                                                                   \
+    }
+
         OP_CASE(OP_ADD): {
             /* String concatenation or numeric addition. */
             CandoValue b = PEEK(0), a = PEEK(1);
@@ -1353,14 +1425,46 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cando_value_release(b);
                 PUSH(cando_string_value(s));
             } else {
-                BINARY_NUM_OP(+);
+                CandoValue _b2 = POP(), _a2 = POP();
+                TRY_BINARY_META(g_meta_add, _a2, _b2);
+                if (CANDO_UNLIKELY(!cando_is_number(_a2) || !cando_is_number(_b2))) {
+                    cando_value_release(_a2); cando_value_release(_b2);
+                    vm_runtime_error(vm, "operands must be numbers (got %s and %s)",
+                        cando_value_type_name((TypeTag)_a2.tag),
+                        cando_value_type_name((TypeTag)_b2.tag));
+                    goto handle_error;
+                }
+                PUSH(cando_number(_a2.as.number + _b2.as.number));
             }
             DISPATCH();
         }
-        OP_CASE(OP_SUB): BINARY_NUM_OP(-); DISPATCH();
-        OP_CASE(OP_MUL): BINARY_NUM_OP(*); DISPATCH();
+        OP_CASE(OP_SUB): {
+            CandoValue b = POP(), a = POP();
+            TRY_BINARY_META(g_meta_sub, a, b);
+            if (CANDO_UNLIKELY(!cando_is_number(a) || !cando_is_number(b))) {
+                vm_runtime_error(vm, "operands must be numbers (got %s and %s)",
+                    cando_value_type_name((TypeTag)a.tag),
+                    cando_value_type_name((TypeTag)b.tag));
+                goto handle_error;
+            }
+            PUSH(cando_number(a.as.number - b.as.number));
+            DISPATCH();
+        }
+        OP_CASE(OP_MUL): {
+            CandoValue b = POP(), a = POP();
+            TRY_BINARY_META(g_meta_mul, a, b);
+            if (CANDO_UNLIKELY(!cando_is_number(a) || !cando_is_number(b))) {
+                vm_runtime_error(vm, "operands must be numbers (got %s and %s)",
+                    cando_value_type_name((TypeTag)a.tag),
+                    cando_value_type_name((TypeTag)b.tag));
+                goto handle_error;
+            }
+            PUSH(cando_number(a.as.number * b.as.number));
+            DISPATCH();
+        }
         OP_CASE(OP_DIV): {
             CandoValue b = POP(), a = POP();
+            TRY_BINARY_META(g_meta_div, a, b);
             if (!cando_is_number(a) || !cando_is_number(b)) {
                 vm_runtime_error(vm, "operands must be numbers");
                 goto handle_error;
@@ -1374,6 +1478,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
         OP_CASE(OP_MOD): {
             CandoValue b = POP(), a = POP();
+            TRY_BINARY_META(g_meta_mod, a, b);
             if (!cando_is_number(a) || !cando_is_number(b)) {
                 vm_runtime_error(vm, "operands must be numbers");
                 goto handle_error;
@@ -1383,6 +1488,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
         OP_CASE(OP_POW): {
             CandoValue b = POP(), a = POP();
+            TRY_BINARY_META(g_meta_pow, a, b);
             if (!cando_is_number(a) || !cando_is_number(b)) {
                 vm_runtime_error(vm, "operands must be numbers");
                 goto handle_error;
@@ -1390,11 +1496,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
             PUSH(cando_number(pow(a.as.number, b.as.number)));
             DISPATCH();
         }
+#undef TRY_BINARY_META
         OP_CASE(OP_NEG): {
             CandoValue a = POP();
-            if (cando_is_object(a) && g_meta_negate) {
+            if (cando_is_object(a) && g_meta_unm) {
                 if (cando_vm_call_meta(vm, a.as.handle,
-                                       (struct CdoString *)g_meta_negate,
+                                       (struct CdoString *)g_meta_unm,
                                        &a, 1)) {
                     cando_value_release(a);
                     DISPATCH();
@@ -1438,12 +1545,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
         /* ── Band 6: Comparison ─────────────────────────────────────── */
         OP_CASE(OP_EQ): {
             CandoValue b = POP(), a = POP();
-            if (g_meta_equal && (cando_is_object(a) || cando_is_object(b))) {
+            if (g_meta_eq && (cando_is_object(a) || cando_is_object(b))) {
                 HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue eq_args[2] = {a, b};
+                CandoValue buf[2] = {a, b};
                 if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_equal,
-                                       eq_args, 2)) {
+                                       (struct CdoString *)g_meta_eq,
+                                       buf, 2)) {
                     cando_value_release(a); cando_value_release(b);
                     DISPATCH();
                 }
@@ -1458,16 +1565,15 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
         OP_CASE(OP_NEQ): {
             CandoValue b = POP(), a = POP();
-            if (g_meta_equal && (cando_is_object(a) || cando_is_object(b))) {
+            if (g_meta_eq && (cando_is_object(a) || cando_is_object(b))) {
                 HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue eq_args[2] = {a, b};
+                CandoValue buf[2] = {a, b};
                 if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_equal,
-                                       eq_args, 2)) {
-                    /* NEQ = !__equal result */
-                    CandoValue eq_result = cando_vm_pop(vm);
-                    PUSH(cando_bool(!vm_is_truthy(eq_result)));
-                    cando_value_release(eq_result);
+                                       (struct CdoString *)g_meta_eq,
+                                       buf, 2)) {
+                    CandoValue r = cando_vm_pop(vm);
+                    PUSH(cando_bool(!vm_is_truthy(r)));
+                    cando_value_release(r);
                     cando_value_release(a); cando_value_release(b);
                     DISPATCH();
                 }
@@ -1482,32 +1588,19 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
         OP_CASE(OP_LT): {
             CandoValue b = POP(), a = POP();
-            if (g_meta_greater && g_meta_equal &&
-                (cando_is_object(a) || cando_is_object(b))) {
+            if (g_meta_lt && (cando_is_object(a) || cando_is_object(b))) {
                 HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue cmp_args[2] = {a, b};
-                bool gt = false, eq = false;
+                CandoValue buf[2] = {a, b};
                 if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_greater,
-                                       cmp_args, 2)) {
-                    CandoValue r = cando_vm_pop(vm);
-                    gt = vm_is_truthy(r); cando_value_release(r);
-                } else if (vm->has_error) {
+                                       (struct CdoString *)g_meta_lt,
+                                       buf, 2)) {
+                    cando_value_release(a); cando_value_release(b);
+                    DISPATCH();
+                }
+                if (vm->has_error) {
                     cando_value_release(a); cando_value_release(b);
                     goto handle_error;
                 }
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_equal,
-                                       cmp_args, 2)) {
-                    CandoValue r = cando_vm_pop(vm);
-                    eq = vm_is_truthy(r); cando_value_release(r);
-                } else if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-                PUSH(cando_bool(!gt && !eq));
-                cando_value_release(a); cando_value_release(b);
-                DISPATCH();
             }
             if (!cando_is_number(a) || !cando_is_number(b)) {
                 cando_value_release(a); cando_value_release(b);
@@ -1519,13 +1612,14 @@ static CandoVMResult vm_run(CandoVM *vm) {
             DISPATCH();
         }
         OP_CASE(OP_GT): {
+            /* a > b is implemented as __lt(b, a) — swap the arguments. */
             CandoValue b = POP(), a = POP();
-            if (g_meta_greater && (cando_is_object(a) || cando_is_object(b))) {
+            if (g_meta_lt && (cando_is_object(a) || cando_is_object(b))) {
                 HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue cmp_args[2] = {a, b};
+                CandoValue buf[2] = {b, a}; /* swapped for __lt */
                 if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_greater,
-                                       cmp_args, 2)) {
+                                       (struct CdoString *)g_meta_lt,
+                                       buf, 2)) {
                     cando_value_release(a); cando_value_release(b);
                     DISPATCH();
                 }
@@ -1545,23 +1639,19 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
         OP_CASE(OP_LEQ): {
             CandoValue b = POP(), a = POP();
-            if (g_meta_greater && g_meta_equal &&
-                (cando_is_object(a) || cando_is_object(b))) {
+            if (g_meta_le && (cando_is_object(a) || cando_is_object(b))) {
                 HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue cmp_args[2] = {a, b};
-                bool gt = false;
+                CandoValue buf[2] = {a, b};
                 if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_greater,
-                                       cmp_args, 2)) {
-                    CandoValue r = cando_vm_pop(vm);
-                    gt = vm_is_truthy(r); cando_value_release(r);
-                } else if (vm->has_error) {
+                                       (struct CdoString *)g_meta_le,
+                                       buf, 2)) {
+                    cando_value_release(a); cando_value_release(b);
+                    DISPATCH();
+                }
+                if (vm->has_error) {
                     cando_value_release(a); cando_value_release(b);
                     goto handle_error;
                 }
-                PUSH(cando_bool(!gt));
-                cando_value_release(a); cando_value_release(b);
-                DISPATCH();
             }
             if (!cando_is_number(a) || !cando_is_number(b)) {
                 cando_value_release(a); cando_value_release(b);
@@ -1573,33 +1663,21 @@ static CandoVMResult vm_run(CandoVM *vm) {
             DISPATCH();
         }
         OP_CASE(OP_GEQ): {
+            /* a >= b is implemented as __le(b, a) — swap the arguments. */
             CandoValue b = POP(), a = POP();
-            if (g_meta_greater && g_meta_equal &&
-                (cando_is_object(a) || cando_is_object(b))) {
+            if (g_meta_le && (cando_is_object(a) || cando_is_object(b))) {
                 HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue cmp_args[2] = {a, b};
-                bool gt = false, eq = false;
+                CandoValue buf[2] = {b, a}; /* swapped for __le */
                 if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_greater,
-                                       cmp_args, 2)) {
-                    CandoValue r = cando_vm_pop(vm);
-                    gt = vm_is_truthy(r); cando_value_release(r);
-                } else if (vm->has_error) {
+                                       (struct CdoString *)g_meta_le,
+                                       buf, 2)) {
+                    cando_value_release(a); cando_value_release(b);
+                    DISPATCH();
+                }
+                if (vm->has_error) {
                     cando_value_release(a); cando_value_release(b);
                     goto handle_error;
                 }
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_equal,
-                                       cmp_args, 2)) {
-                    CandoValue r = cando_vm_pop(vm);
-                    eq = vm_is_truthy(r); cando_value_release(r);
-                } else if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-                PUSH(cando_bool(gt || eq));
-                cando_value_release(a); cando_value_release(b);
-                DISPATCH();
             }
             if (!cando_is_number(a) || !cando_is_number(b)) {
                 cando_value_release(a); cando_value_release(b);
@@ -1754,17 +1832,6 @@ static CandoVMResult vm_run(CandoVM *vm) {
         /* ── Band 8: Logical ────────────────────────────────────────── */
         OP_CASE(OP_NOT): {
             CandoValue a = POP();
-            /* Check __not meta-method first. */
-            if (cando_is_object(a) && g_meta_not) {
-                if (cando_vm_call_meta(vm, a.as.handle,
-                                       (struct CdoString *)g_meta_not,
-                                       &a, 1)) {
-                    cando_value_release(a);
-                    DISPATCH();
-                }
-                if (vm->has_error) { cando_value_release(a); goto handle_error; }
-            }
-            /* Fall back to __is-aware truthiness. */
             {
                 bool meta_ok;
                 bool truthy = vm_is_truthy_meta(vm, a, &meta_ok);
@@ -1885,7 +1952,27 @@ static CandoVMResult vm_run(CandoVM *vm) {
             CdoObject  *obj = cando_bridge_resolve(vm, obj_val.as.handle);
             CandoString *ks = frame->closure->chunk->constants[ci].as.string;
             CdoString   *key = cando_bridge_intern_key(ks);
-            CdoValue     cdo_val = cando_bridge_to_cdo(vm, val);
+            CdoValue     existing;
+            if (!cdo_object_rawget(obj, key, &existing) && g_meta_newindex) {
+                CandoValue key_cv = cando_string_value(
+                    cando_string_new(key->data, key->length));
+                CandoValue args[3] = { obj_val, key_cv, val };
+                if (cando_vm_call_meta(vm, obj_val.as.handle,
+                                       (struct CdoString *)g_meta_newindex,
+                                       args, 3)) {
+                    cdo_string_release(key);
+                    cando_value_release(key_cv);
+                    cando_value_release(val);
+                    DISPATCH();
+                }
+                cando_value_release(key_cv);
+                if (vm->has_error) {
+                    cdo_string_release(key);
+                    cando_value_release(val);
+                    goto handle_error;
+                }
+            }
+            CdoValue cdo_val = cando_bridge_to_cdo(vm, val);
             cdo_object_rawset(obj, key, cdo_val, FIELD_NONE);
             cdo_string_release(key);
             cando_value_release(val);
@@ -1945,6 +2032,24 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cdo_array_rawset_idx(obj, idx, cdo_val);
             } else if (cando_is_string(idx_val)) {
                 CdoString *key = cando_bridge_intern_key(idx_val.as.string);
+                CdoValue   existing;
+                if (!cdo_object_rawget(obj, key, &existing) && g_meta_newindex) {
+                    CandoValue args[3] = { obj_val, idx_val, val };
+                    if (cando_vm_call_meta(vm, obj_val.as.handle,
+                                           (struct CdoString *)g_meta_newindex,
+                                           args, 3)) {
+                        cdo_string_release(key);
+                        cando_value_release(val);
+                        cando_value_release(idx_val);
+                        DISPATCH();
+                    }
+                    if (vm->has_error) {
+                        cdo_string_release(key);
+                        cando_value_release(val);
+                        cando_value_release(idx_val);
+                        goto handle_error;
+                    }
+                }
                 cdo_object_rawset(obj, key, cdo_val, FIELD_NONE);
                 cdo_string_release(key);
             } else {

@@ -125,7 +125,7 @@ run_test "lib_array" "$SCRIPTS/lib_array.cdo" \
     "$(printf '3\n4\n4\n3\n2\n4\n6\n4\n6\n6')"
 
 run_test "metamethods" "$SCRIPTS/metamethods.cdo" \
-    "$(printf '10\n20\nhello\n99\n10\nfrom_a\nproto\nVec3\nnumber\nstring\nnull\nbool\n3\n4\nstring\nAnimal\nRex says hello\nRex\nPoint\n5\n7\n49\n27\n3\n11\n3\noverridden\nbase greet')"
+    "$(printf '10\n20\nhello\n99\n10\nfrom_a\nproto\nVec3\nnumber\nstring\nnull\nbool\n3\n4\nstring\nAnimal\nRex says hello\nRex\nPoint\n5\n7\n49\n27\n3\n11\n3\noverridden\nbase greet\n4\n6\n7\n15\n6\n20\n5\n5\n1\n1\n8\n9\n-5\n3\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\n35\nVec(7,8)\nset:foo')"
 
 run_test "lib_object" "$SCRIPTS/lib_object.cdo" \
     "$(printf '1\n99\n2\n1\n2\n3\n10\n99\n30\n20\nalice\nbob\nhello\nc\na\nb\n3\n1\n2\nfalse\ntrue\nfalse')"

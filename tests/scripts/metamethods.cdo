@@ -1,57 +1,57 @@
 /* metamethods.cdo -- Integration tests for prototype chains, CLASS, and
- * meta-key fields (__index, __type, __len, __tostring).
+ * meta-method fields (__index, __type, __len, __tostring, __eq, __lt, __le,
+ * __add, __sub, __mul, __div, __unm, __mod, __pow, __newindex).
  *
  * Expected output is registered in tests/integration/run_tests.sh.
  */
 
 /* ----- __index: basic prototype chain ------------------------------------- */
-var proto = { x: 10, greet: "hello" };
-var child = { y: 20 };
+VAR proto = { x: 10, greet: "hello" };
+VAR child = { y: 20 };
 object.setPrototype(child, proto);
-print(child.x);          /* expected: 10  (inherited from proto) */
-print(child.y);          /* expected: 20  (own field) */
-print(child.greet);      /* expected: hello */
+print(child.x);          // 10
+print(child.y);          // 20
+print(child.greet);      // hello
 
-/* Own field shadows prototype field */
 child.x = 99;
-print(child.x);          /* expected: 99  (own) */
-print(proto.x);          /* expected: 10  (proto unchanged) */
+print(child.x);          // 99
+print(proto.x);          // 10
 
 /* ----- __index: 3-level chain --------------------------------------------- */
-var a = { val: "from_a" };
-var b = {};
-var c = {};
+VAR a = { val: "from_a" };
+VAR b = {};
+VAR c = {};
 object.setPrototype(b, a);
 object.setPrototype(c, b);
-print(c.val);            /* expected: from_a */
+print(c.val);            // from_a
 
 /* ----- __index: object.getPrototype --------------------------------------- */
-var pp = { tag: "proto" };
-var cc = {};
+VAR pp = { tag: "proto" };
+VAR cc = {};
 object.setPrototype(cc, pp);
-var got = object.getPrototype(cc);
-print(got.tag);          /* expected: proto */
+VAR got = object.getPrototype(cc);
+print(got.tag);          // proto
 
-/* ----- __type: type() reads __type field ---------------------------------- */
-var typed = { __type: "Vec3" };
-print(type(typed));      /* expected: Vec3 */
-print(type(42));         /* expected: number */
-print(type("hi"));       /* expected: string */
-print(type(null));       /* expected: null */
-print(type(true));       /* expected: bool */
+/* ----- __type ------------------------------------------------------------- */
+VAR typed = { __type: "Vec3" };
+print(type(typed));      // Vec3
+print(type(42));         // number
+print(type("hi"));       // string
+print(type(NULL));       // null
+print(type(TRUE));       // bool
 
-/* ----- __len: default field count / array length -------------------------- */
-var obj3 = { a: 1, b: 2, c: 3 };
-print(#obj3);            /* expected: 3 */
-var arr4 = [10, 20, 30, 40];
-print(#arr4);            /* expected: 4 */
+/* ----- __len (default) ---------------------------------------------------- */
+VAR obj3 = { a: 1, b: 2, c: 3 };
+print(#obj3);            // 3
+VAR arr4 = [10, 20, 30, 40];
+print(#arr4);            // 4
 
-/* ----- __tostring: default falls back to type name ----------------------- */
-var plain = { z: 9 };
-var ts = toString(plain);
-print(type(ts));         /* expected: string */
+/* ----- __tostring --------------------------------------------------------- */
+VAR plain = { z: 9 };
+VAR ts = toString(plain);
+print(type(ts));         // string
 
-/* ----- CLASS: basic declaration and method calls -------------------------- */
+/* ----- CLASS: basic ------------------------------------------------------- */
 CLASS Animal {
     FUNCTION make(name) {
         VAR inst = { name: name };
@@ -66,12 +66,12 @@ CLASS Animal {
     }
 }
 
-print(type(Animal));             /* expected: Animal */
-var dog = Animal.make("Rex");
-print(dog:speak());              /* expected: Rex says hello */
-print(dog:getName());            /* expected: Rex */
+print(type(Animal));         // Animal
+VAR dog = Animal.make("Rex");
+print(dog:speak());          // Rex says hello
+print(dog:getName());        // Rex
 
-/* ----- CLASS: __type propagates to type() --------------------------------- */
+/* ----- CLASS: __type propagation ------------------------------------------ */
 CLASS Point {
     FUNCTION make(x, y) {
         VAR p = { x: x, y: y };
@@ -86,10 +86,10 @@ CLASS Point {
     }
 }
 
-print(type(Point));              /* expected: Point */
-var p = Point.make(3, 4);
-print(p:dist());                 /* expected: 5 */
-print(p:sum());                  /* expected: 7 */
+print(type(Point));          // Point
+VAR p = Point.make(3, 4);
+print(p:dist());             // 5
+print(p:sum());              // 7
 
 /* ----- CLASS: static method ----------------------------------------------- */
 CLASS MathUtil {
@@ -101,10 +101,10 @@ CLASS MathUtil {
     }
 }
 
-print(MathUtil.square(7));       /* expected: 49 */
-print(MathUtil.cube(3));         /* expected: 27 */
+print(MathUtil.square(7));   // 49
+print(MathUtil.cube(3));     // 27
 
-/* ----- CLASS: instance state isolation ------------------------------------ */
+/* ----- CLASS: instance isolation ------------------------------------------ */
 CLASS Counter {
     FUNCTION new(start) {
         VAR inst = { count: start };
@@ -119,28 +119,137 @@ CLASS Counter {
     }
 }
 
-var c1 = Counter.new(0);
+VAR c1 = Counter.new(0);
 c1:increment();
 c1:increment();
 c1:increment();
-print(c1:value());               /* expected: 3 */
+print(c1:value());           // 3
 
-var c2 = Counter.new(10);
+VAR c2 = Counter.new(10);
 c2:increment();
-print(c2:value());               /* expected: 11 */
-print(c1:value());               /* expected: 3  (c1 unchanged) */
+print(c2:value());           // 11
+print(c1:value());           // 3
 
-/* ----- CLASS: method shadowing on instance -------------------------------- */
+/* ----- CLASS: method shadowing -------------------------------------------- */
 CLASS Base {
     FUNCTION greet(self) {
         RETURN "base greet";
     }
 }
-var inst = { greet: function(self) { return "overridden"; } };
+VAR inst = { greet: FUNCTION(self) { RETURN "overridden"; } };
 object.setPrototype(inst, Base);
-print(inst:greet());             /* expected: overridden  (own field wins) */
+print(inst:greet());         // overridden
 
-/* Remove own override; prototype method visible again */
-var inst2 = {};
+VAR inst2 = {};
 object.setPrototype(inst2, Base);
-print(inst2:greet());            /* expected: base greet */
+print(inst2:greet());        // base greet
+
+/* ----- __add -------------------------------------------------------------- */
+CLASS Vec {
+    FUNCTION make(x, y) {
+        VAR v = { x: x, y: y };
+        object.setPrototype(v, Vec);
+        RETURN v;
+    }
+}
+Vec.__add = FUNCTION(a, b) { RETURN Vec.make(a.x + b.x, a.y + b.y); };
+VAR v1 = Vec.make(1, 2);
+VAR v2 = Vec.make(3, 4);
+VAR v3 = v1 + v2;
+print(v3.x);                // 4
+print(v3.y);                // 6
+
+/* ----- __sub -------------------------------------------------------------- */
+Vec.__sub = FUNCTION(a, b) { RETURN Vec.make(a.x - b.x, a.y - b.y); };
+VAR v4 = Vec.make(10, 20);
+VAR v5 = Vec.make(3, 5);
+VAR v6 = v4 - v5;
+print(v6.x);                // 7
+print(v6.y);                // 15
+
+/* ----- __mul -------------------------------------------------------------- */
+Vec.__mul = FUNCTION(a, b) { RETURN Vec.make(a.x * b.x, a.y * b.y); };
+VAR v7 = Vec.make(3, 4);
+VAR v8 = Vec.make(2, 5);
+VAR v9 = v7 * v8;
+print(v9.x);                // 6
+print(v9.y);                // 20
+
+/* ----- __div -------------------------------------------------------------- */
+Vec.__div = FUNCTION(a, b) { RETURN Vec.make(a.x / b.x, a.y / b.y); };
+VAR v10 = Vec.make(10, 20);
+VAR v11 = Vec.make(2, 4);
+VAR v12 = v10 / v11;
+print(v12.x);               // 5
+print(v12.y);               // 5
+
+/* ----- __mod -------------------------------------------------------------- */
+Vec.__mod = FUNCTION(a, b) { RETURN Vec.make(a.x % b.x, a.y % b.y); };
+VAR v13 = Vec.make(10, 7);
+VAR v14 = Vec.make(3, 2);
+VAR v15 = v13 % v14;
+print(v15.x);               // 1
+print(v15.y);               // 1
+
+/* ----- __pow -------------------------------------------------------------- */
+Vec.__pow = FUNCTION(a, b) { RETURN Vec.make(a.x ^ b.x, a.y ^ b.y); };
+VAR v16 = Vec.make(2, 3);
+VAR v17 = Vec.make(3, 2);
+VAR v18 = v16 ^ v17;
+print(v18.x);               // 8
+print(v18.y);               // 9
+
+/* ----- __unm (unary minus) ------------------------------------------------ */
+Vec.__unm = FUNCTION(v) { RETURN Vec.make(-v.x, -v.y); };
+VAR v19 = Vec.make(5, -3);
+VAR v20 = -v19;
+print(v20.x);               // -5
+print(v20.y);               // 3
+
+/* ----- __eq --------------------------------------------------------------- */
+Vec.__eq = FUNCTION(a, b) { RETURN a.x == b.x && a.y == b.y; };
+VAR eq1 = Vec.make(1, 2);
+VAR eq2 = Vec.make(1, 2);
+VAR eq3 = Vec.make(1, 3);
+print(eq1 == eq2);          // true
+print(eq1 == eq3);          // false
+print(eq1 != eq3);          // true
+
+/* ----- __lt --------------------------------------------------------------- */
+Vec.__lt = FUNCTION(a, b) { RETURN (a.x * a.x + a.y * a.y) < (b.x * b.x + b.y * b.y); };
+VAR lt1 = Vec.make(1, 1);
+VAR lt2 = Vec.make(3, 4);
+print(lt1 < lt2);           // true
+print(lt2 < lt1);           // false
+print(lt2 > lt1);           // true
+
+/* ----- __le --------------------------------------------------------------- */
+Vec.__le = FUNCTION(a, b) { RETURN (a.x * a.x + a.y * a.y) <= (b.x * b.x + b.y * b.y); };
+VAR le1 = Vec.make(3, 4);
+VAR le2 = Vec.make(3, 4);
+VAR le3 = Vec.make(1, 1);
+print(le1 <= le2);          // true
+print(le3 <= le1);          // true
+print(le1 >= le3);          // true
+
+/* ----- __len -------------------------------------------------------------- */
+Vec.__len = FUNCTION(v) { RETURN v.x + v.y; };
+VAR vlen = Vec.make(10, 25);
+print(#vlen);                // 35
+
+/* ----- __tostring --------------------------------------------------------- */
+Vec.__tostring = FUNCTION(v) { RETURN "Vec(" + toString(v.x) + "," + toString(v.y) + ")"; };
+VAR vts = Vec.make(7, 8);
+print(toString(vts));        // Vec(7,8)
+
+/* ----- __newindex --------------------------------------------------------- */
+VAR log_obj = {};
+VAR ni_log = [];
+VAR ni_proto = {
+    __newindex: FUNCTION(self, key, val) {
+        ni_log:push("set:" + key);
+    }
+};
+object.setPrototype(log_obj, ni_proto);
+log_obj.foo = 1;
+print(ni_log[0]);            // set:foo

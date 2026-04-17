@@ -37,12 +37,17 @@
 #define META_CALL      "__call"
 #define META_TYPE      "__type"
 #define META_TOSTRING  "__tostring"
-#define META_EQUAL     "__equal"
-#define META_GREATER   "__greater"
-#define META_IS        "__is"
-#define META_NEGATE    "__negate"
-#define META_NOT       "__not"
+#define META_EQ        "__eq"
+#define META_LT        "__lt"
+#define META_LE        "__le"
 #define META_ADD       "__add"
+#define META_SUB       "__sub"
+#define META_MUL       "__mul"
+#define META_DIV       "__div"
+#define META_MOD       "__mod"
+#define META_POW       "__pow"
+#define META_UNM       "__unm"
+#define META_IDIV      "__idiv"
 #define META_LEN       "__len"
 #define META_NEWINDEX  "__newindex"
 
@@ -220,12 +225,17 @@ extern CdoString *g_meta_index;
 extern CdoString *g_meta_call;
 extern CdoString *g_meta_type;
 extern CdoString *g_meta_tostring;
-extern CdoString *g_meta_equal;
-extern CdoString *g_meta_greater;
-extern CdoString *g_meta_is;
-extern CdoString *g_meta_negate;
-extern CdoString *g_meta_not;
+extern CdoString *g_meta_eq;
+extern CdoString *g_meta_lt;
+extern CdoString *g_meta_le;
 extern CdoString *g_meta_add;
+extern CdoString *g_meta_sub;
+extern CdoString *g_meta_mul;
+extern CdoString *g_meta_div;
+extern CdoString *g_meta_mod;
+extern CdoString *g_meta_pow;
+extern CdoString *g_meta_unm;
+extern CdoString *g_meta_idiv;
 extern CdoString *g_meta_len;
 extern CdoString *g_meta_newindex;
 
