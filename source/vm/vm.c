@@ -3172,18 +3172,62 @@ static CandoVMResult vm_run(CandoVM *vm) {
 
         /* ── Band 16: Classes ───────────────────────────────────────── */
         OP_CASE(OP_NEW_CLASS): {
-            u16 ci = READ_U16(); CANDO_UNUSED(ci);
-            vm_runtime_error(vm, "CLASS not yet implemented");
-            goto handle_error;
+            u16 ci = READ_U16();
+            CandoValue name_val = frame->closure->chunk->constants[ci];
+            CANDO_ASSERT(cando_is_string(name_val));
+
+            CandoValue cls_val = cando_bridge_new_object(vm);
+            if (g_meta_type) {
+                CdoObject  *cls     = cando_bridge_resolve(vm, cls_val.as.handle);
+                CdoString  *cdo_key = cando_bridge_intern_key(name_val.as.string);
+                CdoValue    tv      = cdo_string_value(cdo_string_retain(cdo_key));
+                cdo_object_rawset(cls, g_meta_type, tv, FIELD_STATIC);
+                cdo_value_release(tv);
+                cdo_string_release(cdo_key);
+            }
+            PUSH(cls_val);
+            DISPATCH();
         }
         OP_CASE(OP_BIND_METHOD): {
-            u16 ci = READ_U16(); CANDO_UNUSED(ci);
-            vm_runtime_error(vm, "BIND_METHOD not yet implemented");
-            goto handle_error;
+            /* Stack: [..., class_obj, method_val]
+             * Pop method_val, rawset it on the class object (keep class on TOS). */
+            u16 ci = READ_U16();
+            CandoValue method_val = POP();
+            CandoValue cls_val    = PEEK(0);
+            if (!cando_is_object(cls_val)) {
+                cando_value_release(method_val);
+                vm_runtime_error(vm, "BIND_METHOD: expected class object");
+                goto handle_error;
+            }
+            CandoValue name_val = frame->closure->chunk->constants[ci];
+            CANDO_ASSERT(cando_is_string(name_val));
+            CdoObject *cls     = cando_bridge_resolve(vm, cls_val.as.handle);
+            CdoString *cdo_key = cando_bridge_intern_key(name_val.as.string);
+            CdoValue   mv      = cando_bridge_to_cdo(vm, method_val);
+            cdo_object_rawset(cls, cdo_key, mv, FIELD_NONE);
+            cdo_value_release(mv);
+            cdo_string_release(cdo_key);
+            cando_value_release(method_val);
+            DISPATCH();
         }
         OP_CASE(OP_INHERIT): {
-            vm_runtime_error(vm, "INHERIT not yet implemented");
-            goto handle_error;
+            /* Stack: [..., parent_class, child_class]
+             * Set child.__index = parent so instances find methods on both. */
+            CandoValue child_val  = POP();
+            CandoValue parent_val = PEEK(0);
+            if (!cando_is_object(child_val) || !cando_is_object(parent_val)) {
+                cando_value_release(child_val);
+                vm_runtime_error(vm, "INHERIT: expected class objects");
+                goto handle_error;
+            }
+            if (g_meta_index) {
+                CdoObject *child  = cando_bridge_resolve(vm, child_val.as.handle);
+                CdoValue   pv     = cando_bridge_to_cdo(vm, parent_val);
+                cdo_object_rawset(child, g_meta_index, pv, FIELD_NONE);
+                cdo_value_release(pv);
+            }
+            PUSH(child_val);
+            DISPATCH();
         }
 
         /* ── Band 17: Mask / selector ───────────────────────────────── */

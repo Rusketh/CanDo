@@ -31,6 +31,7 @@ compiled to bytecode for a stack-based VM.
 | [architecture.md](architecture.md) | End-to-end pipeline and module layout |
 | [value-types.md](value-types.md) | `CandoValue`, `CdoValue`, handles, the bridge layer |
 | [object-system.md](object-system.md) | `CdoObject`, prototype chains, meta-methods, arrays |
+| [metamethods.md](metamethods.md) | All meta-keys, `CLASS`, prototype-based inheritance, operator overloading |
 | [parser-compiler.md](parser-compiler.md) | Lexer, Pratt parser, scope system, bytecode emission |
 | [vm-internals.md](vm-internals.md) | Dispatch loop, call frames, upvalues, opcode reference |
 

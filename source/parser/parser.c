@@ -1755,12 +1755,22 @@ static void parse_class(CandoParser *p)
             consume(p, TOK_IDENT, "expected method name");
             u16 meth_idx = prev_name_const(p);
 
+#define MAX_METH_PARAMS 64
+            const char *param_names[MAX_METH_PARAMS];
+            u32         param_lens[MAX_METH_PARAMS];
+            u16 arity = 0;
+
             consume(p, TOK_LPAREN, "expected '(' after method name");
             if (!check(p, TOK_RPAREN)) {
                 do {
                     if (check(p, TOK_RPAREN)) break;
                     if (match(p, TOK_VARARG)) break;
                     consume(p, TOK_IDENT, "expected parameter name");
+                    if (arity < MAX_METH_PARAMS) {
+                        param_names[arity] = p->previous.start;
+                        param_lens[arity]  = p->previous.length;
+                        arity++;
+                    }
                 } while (match(p, TOK_COMMA));
             }
             consume(p, TOK_RPAREN, "expected ')' after method parameters");
@@ -1769,13 +1779,32 @@ static void parse_class(CandoParser *p)
             u32 skip = emit_jump(p, OP_JUMP);
             u32 meth_start = cur(p)->code_len;
 
-            scope_begin(p);
+            /* Save and reset scope for method body (mirrors parse_function). */
+            CandoLocal saved_locals[CANDO_LOCAL_MAX];
+            u32        saved_count = p->local_count;
+            int        saved_depth = p->scope_depth;
+            memcpy(saved_locals, p->locals,
+                   sizeof(CandoLocal) * saved_count);
+
+            p->local_count = 0;
+            p->scope_depth = 1;
+
+            declare_local(p, "", 0, false); /* slot 0: call frame sentinel */
+            for (u16 i = 0; i < arity; i++)
+                declare_local(p, param_names[i], param_lens[i], false);
+
             parse_block(p);
-            scope_end(p);
+
+            /* Restore outer scope. */
+            p->local_count = saved_count;
+            p->scope_depth = saved_depth;
+            memcpy(p->locals, saved_locals,
+                   sizeof(CandoLocal) * saved_count);
 
             emit_op(p, OP_NULL);
             emit_op_a(p, OP_RETURN, 1);
             patch_jump(p, skip);
+#undef MAX_METH_PARAMS
 
             /* Push method PC as number, then bind to the class on TOS.  */
             u16 pc_idx = cando_chunk_add_const(cur(p),
@@ -1788,6 +1817,9 @@ static void parse_class(CandoParser *p)
     }
 
     consume(p, TOK_RBRACE, "expected '}' after class body");
+
+    /* Store the class object as a global variable with the class name. */
+    emit_op_a(p, OP_DEF_GLOBAL, name_idx);
 }
 
 /* --- RETURN ------------------------------------------------------------- */
