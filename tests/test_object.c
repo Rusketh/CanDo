@@ -726,12 +726,17 @@ TEST(test_meta_keys_interned) {
     EXPECT_TRUE(g_meta_call     != NULL);
     EXPECT_TRUE(g_meta_type     != NULL);
     EXPECT_TRUE(g_meta_tostring != NULL);
-    EXPECT_TRUE(g_meta_equal    != NULL);
-    EXPECT_TRUE(g_meta_greater  != NULL);
-    EXPECT_TRUE(g_meta_is       != NULL);
-    EXPECT_TRUE(g_meta_negate   != NULL);
-    EXPECT_TRUE(g_meta_not      != NULL);
+    EXPECT_TRUE(g_meta_eq       != NULL);
+    EXPECT_TRUE(g_meta_lt       != NULL);
+    EXPECT_TRUE(g_meta_le       != NULL);
     EXPECT_TRUE(g_meta_add      != NULL);
+    EXPECT_TRUE(g_meta_sub      != NULL);
+    EXPECT_TRUE(g_meta_mul      != NULL);
+    EXPECT_TRUE(g_meta_div      != NULL);
+    EXPECT_TRUE(g_meta_mod      != NULL);
+    EXPECT_TRUE(g_meta_pow      != NULL);
+    EXPECT_TRUE(g_meta_unm      != NULL);
+    EXPECT_TRUE(g_meta_idiv     != NULL);
     EXPECT_TRUE(g_meta_len      != NULL);
     EXPECT_TRUE(g_meta_newindex != NULL);
 }
@@ -741,12 +746,17 @@ TEST(test_meta_keys_content) {
     EXPECT_STR(g_meta_call->data,     "__call");
     EXPECT_STR(g_meta_type->data,     "__type");
     EXPECT_STR(g_meta_tostring->data, "__tostring");
-    EXPECT_STR(g_meta_equal->data,    "__equal");
-    EXPECT_STR(g_meta_greater->data,  "__greater");
-    EXPECT_STR(g_meta_is->data,       "__is");
-    EXPECT_STR(g_meta_negate->data,   "__negate");
-    EXPECT_STR(g_meta_not->data,      "__not");
+    EXPECT_STR(g_meta_eq->data,       "__eq");
+    EXPECT_STR(g_meta_lt->data,       "__lt");
+    EXPECT_STR(g_meta_le->data,       "__le");
     EXPECT_STR(g_meta_add->data,      "__add");
+    EXPECT_STR(g_meta_sub->data,      "__sub");
+    EXPECT_STR(g_meta_mul->data,      "__mul");
+    EXPECT_STR(g_meta_div->data,      "__div");
+    EXPECT_STR(g_meta_mod->data,      "__mod");
+    EXPECT_STR(g_meta_pow->data,      "__pow");
+    EXPECT_STR(g_meta_unm->data,      "__unm");
+    EXPECT_STR(g_meta_idiv->data,     "__idiv");
     EXPECT_STR(g_meta_len->data,      "__len");
     EXPECT_STR(g_meta_newindex->data, "__newindex");
 }
@@ -755,8 +765,10 @@ TEST(test_meta_keys_unique_pointers) {
     /* Every meta-key must be a distinct interned pointer. */
     CdoString *keys[] = {
         g_meta_index, g_meta_call, g_meta_type, g_meta_tostring,
-        g_meta_equal, g_meta_greater, g_meta_is, g_meta_negate,
-        g_meta_not, g_meta_add, g_meta_len, g_meta_newindex
+        g_meta_eq, g_meta_lt, g_meta_le,
+        g_meta_add, g_meta_sub, g_meta_mul, g_meta_div,
+        g_meta_mod, g_meta_pow, g_meta_unm, g_meta_idiv,
+        g_meta_len, g_meta_newindex
     };
     int n = (int)(sizeof(keys) / sizeof(keys[0]));
     bool all_unique = true;
@@ -835,17 +847,116 @@ TEST(test_set_meta_tostring) {
     cdo_object_destroy(obj);
 }
 
-TEST(test_set_meta_equal) {
+TEST(test_set_meta_eq) {
     CdoObject *obj = cdo_object_new();
-    CdoValue   fv  = cdo_number(1.0); /* placeholder: a "callable" marker */
+    CdoValue   fv  = cdo_number(1.0);
 
-    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_equal, fv, FIELD_NONE));
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_eq, fv, FIELD_NONE));
 
     CdoValue out;
-    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_equal, &out));
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_eq, &out));
     EXPECT_TRUE(cdo_is_number(out));
     EXPECT_EQ(out.as.number, 1.0);
 
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_lt) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(1.0);
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_lt, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_lt, &out));
+    EXPECT_TRUE(cdo_is_number(out));
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_le) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(1.0);
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_le, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_le, &out));
+    EXPECT_TRUE(cdo_is_number(out));
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_sub) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(1.0);
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_sub, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_sub, &out));
+    EXPECT_TRUE(cdo_is_number(out));
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_mul) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(1.0);
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_mul, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_mul, &out));
+    EXPECT_TRUE(cdo_is_number(out));
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_div) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(1.0);
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_div, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_div, &out));
+    EXPECT_TRUE(cdo_is_number(out));
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_mod) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(1.0);
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_mod, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_mod, &out));
+    EXPECT_TRUE(cdo_is_number(out));
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_pow) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(1.0);
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_pow, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_pow, &out));
+    EXPECT_TRUE(cdo_is_number(out));
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_unm) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(5.0);
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_unm, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_unm, &out));
+    EXPECT_TRUE(cdo_is_number(out));
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_idiv) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(1.0);
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_idiv, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_idiv, &out));
+    EXPECT_TRUE(cdo_is_number(out));
     cdo_object_destroy(obj);
 }
 
@@ -886,17 +997,6 @@ TEST(test_set_meta_newindex) {
     cdo_object_destroy(obj);
 }
 
-TEST(test_set_meta_negate) {
-    CdoObject *obj = cdo_object_new();
-    CdoValue   fv  = cdo_number(5.0);
-    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_negate, fv, FIELD_NONE));
-
-    CdoValue out;
-    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_negate, &out));
-    EXPECT_TRUE(cdo_is_number(out));
-
-    cdo_object_destroy(obj);
-}
 
 /* -----------------------------------------------------------------------
  * Class construction (cdo_class_new) tests
@@ -1178,11 +1278,19 @@ int main(void) {
     run_test("set __index",               test_set_meta_index);
     run_test("set __type (static)",       test_set_meta_type);
     run_test("set __tostring",            test_set_meta_tostring);
-    run_test("set __equal",               test_set_meta_equal);
+    run_test("set __eq",                  test_set_meta_eq);
+    run_test("set __lt",                  test_set_meta_lt);
+    run_test("set __le",                  test_set_meta_le);
     run_test("set __len",                 test_set_meta_len);
     run_test("set __add",                 test_set_meta_add);
+    run_test("set __sub",                 test_set_meta_sub);
+    run_test("set __mul",                 test_set_meta_mul);
+    run_test("set __div",                 test_set_meta_div);
+    run_test("set __mod",                 test_set_meta_mod);
+    run_test("set __pow",                 test_set_meta_pow);
+    run_test("set __unm",                 test_set_meta_unm);
+    run_test("set __idiv",                test_set_meta_idiv);
     run_test("set __newindex",            test_set_meta_newindex);
-    run_test("set __negate",              test_set_meta_negate);
 
     printf("\n-- Class construction (cdo_class_new) --\n");
     run_test("class_new anonymous",       test_class_new_anonymous);
