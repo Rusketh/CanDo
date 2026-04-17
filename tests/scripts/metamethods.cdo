@@ -1,0 +1,146 @@
+/* metamethods.cdo -- Integration tests for prototype chains, CLASS, and
+ * meta-key fields (__index, __type, __len, __tostring).
+ *
+ * Expected output is registered in tests/integration/run_tests.sh.
+ */
+
+/* ----- __index: basic prototype chain ------------------------------------- */
+var proto = { x: 10, greet: "hello" };
+var child = { y: 20 };
+object.setPrototype(child, proto);
+print(child.x);          /* expected: 10  (inherited from proto) */
+print(child.y);          /* expected: 20  (own field) */
+print(child.greet);      /* expected: hello */
+
+/* Own field shadows prototype field */
+child.x = 99;
+print(child.x);          /* expected: 99  (own) */
+print(proto.x);          /* expected: 10  (proto unchanged) */
+
+/* ----- __index: 3-level chain --------------------------------------------- */
+var a = { val: "from_a" };
+var b = {};
+var c = {};
+object.setPrototype(b, a);
+object.setPrototype(c, b);
+print(c.val);            /* expected: from_a */
+
+/* ----- __index: object.getPrototype --------------------------------------- */
+var pp = { tag: "proto" };
+var cc = {};
+object.setPrototype(cc, pp);
+var got = object.getPrototype(cc);
+print(got.tag);          /* expected: proto */
+
+/* ----- __type: type() reads __type field ---------------------------------- */
+var typed = { __type: "Vec3" };
+print(type(typed));      /* expected: Vec3 */
+print(type(42));         /* expected: number */
+print(type("hi"));       /* expected: string */
+print(type(null));       /* expected: null */
+print(type(true));       /* expected: bool */
+
+/* ----- __len: default field count / array length -------------------------- */
+var obj3 = { a: 1, b: 2, c: 3 };
+print(#obj3);            /* expected: 3 */
+var arr4 = [10, 20, 30, 40];
+print(#arr4);            /* expected: 4 */
+
+/* ----- __tostring: default falls back to type name ----------------------- */
+var plain = { z: 9 };
+var ts = toString(plain);
+print(type(ts));         /* expected: string */
+
+/* ----- CLASS: basic declaration and method calls -------------------------- */
+CLASS Animal {
+    FUNCTION make(name) {
+        VAR inst = { name: name };
+        object.setPrototype(inst, Animal);
+        RETURN inst;
+    }
+    FUNCTION speak(self) {
+        RETURN self.name + " says hello";
+    }
+    FUNCTION getName(self) {
+        RETURN self.name;
+    }
+}
+
+print(type(Animal));             /* expected: Animal */
+var dog = Animal.make("Rex");
+print(dog:speak());              /* expected: Rex says hello */
+print(dog:getName());            /* expected: Rex */
+
+/* ----- CLASS: __type propagates to type() --------------------------------- */
+CLASS Point {
+    FUNCTION make(x, y) {
+        VAR p = { x: x, y: y };
+        object.setPrototype(p, Point);
+        RETURN p;
+    }
+    FUNCTION dist(self) {
+        RETURN math.sqrt(self.x * self.x + self.y * self.y);
+    }
+    FUNCTION sum(self) {
+        RETURN self.x + self.y;
+    }
+}
+
+print(type(Point));              /* expected: Point */
+var p = Point.make(3, 4);
+print(p:dist());                 /* expected: 5 */
+print(p:sum());                  /* expected: 7 */
+
+/* ----- CLASS: static method ----------------------------------------------- */
+CLASS MathUtil {
+    STATIC FUNCTION square(n) {
+        RETURN n * n;
+    }
+    STATIC FUNCTION cube(n) {
+        RETURN n * n * n;
+    }
+}
+
+print(MathUtil.square(7));       /* expected: 49 */
+print(MathUtil.cube(3));         /* expected: 27 */
+
+/* ----- CLASS: instance state isolation ------------------------------------ */
+CLASS Counter {
+    FUNCTION new(start) {
+        VAR inst = { count: start };
+        object.setPrototype(inst, Counter);
+        RETURN inst;
+    }
+    FUNCTION increment(self) {
+        self.count = self.count + 1;
+    }
+    FUNCTION value(self) {
+        RETURN self.count;
+    }
+}
+
+var c1 = Counter.new(0);
+c1:increment();
+c1:increment();
+c1:increment();
+print(c1:value());               /* expected: 3 */
+
+var c2 = Counter.new(10);
+c2:increment();
+print(c2:value());               /* expected: 11 */
+print(c1:value());               /* expected: 3  (c1 unchanged) */
+
+/* ----- CLASS: method shadowing on instance -------------------------------- */
+CLASS Base {
+    FUNCTION greet(self) {
+        RETURN "base greet";
+    }
+}
+var inst = { greet: function(self) { return "overridden"; } };
+object.setPrototype(inst, Base);
+print(inst:greet());             /* expected: overridden  (own field wins) */
+
+/* Remove own override; prototype method visible again */
+var inst2 = {};
+object.setPrototype(inst2, Base);
+print(inst2:greet());            /* expected: base greet */

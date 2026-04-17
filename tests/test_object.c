@@ -718,6 +718,328 @@ TEST(test_array_remove_readonly) {
 }
 
 /* -----------------------------------------------------------------------
+ * Meta-key constants tests
+ * --------------------------------------------------------------------- */
+TEST(test_meta_keys_interned) {
+    /* All g_meta_* pointers must be non-NULL after cdo_object_init(). */
+    EXPECT_TRUE(g_meta_index    != NULL);
+    EXPECT_TRUE(g_meta_call     != NULL);
+    EXPECT_TRUE(g_meta_type     != NULL);
+    EXPECT_TRUE(g_meta_tostring != NULL);
+    EXPECT_TRUE(g_meta_equal    != NULL);
+    EXPECT_TRUE(g_meta_greater  != NULL);
+    EXPECT_TRUE(g_meta_is       != NULL);
+    EXPECT_TRUE(g_meta_negate   != NULL);
+    EXPECT_TRUE(g_meta_not      != NULL);
+    EXPECT_TRUE(g_meta_add      != NULL);
+    EXPECT_TRUE(g_meta_len      != NULL);
+    EXPECT_TRUE(g_meta_newindex != NULL);
+}
+
+TEST(test_meta_keys_content) {
+    EXPECT_STR(g_meta_index->data,    "__index");
+    EXPECT_STR(g_meta_call->data,     "__call");
+    EXPECT_STR(g_meta_type->data,     "__type");
+    EXPECT_STR(g_meta_tostring->data, "__tostring");
+    EXPECT_STR(g_meta_equal->data,    "__equal");
+    EXPECT_STR(g_meta_greater->data,  "__greater");
+    EXPECT_STR(g_meta_is->data,       "__is");
+    EXPECT_STR(g_meta_negate->data,   "__negate");
+    EXPECT_STR(g_meta_not->data,      "__not");
+    EXPECT_STR(g_meta_add->data,      "__add");
+    EXPECT_STR(g_meta_len->data,      "__len");
+    EXPECT_STR(g_meta_newindex->data, "__newindex");
+}
+
+TEST(test_meta_keys_unique_pointers) {
+    /* Every meta-key must be a distinct interned pointer. */
+    CdoString *keys[] = {
+        g_meta_index, g_meta_call, g_meta_type, g_meta_tostring,
+        g_meta_equal, g_meta_greater, g_meta_is, g_meta_negate,
+        g_meta_not, g_meta_add, g_meta_len, g_meta_newindex
+    };
+    int n = (int)(sizeof(keys) / sizeof(keys[0]));
+    bool all_unique = true;
+    for (int i = 0; i < n && all_unique; i++)
+        for (int j = i + 1; j < n && all_unique; j++)
+            if (keys[i] == keys[j]) all_unique = false;
+    EXPECT_TRUE(all_unique);
+}
+
+TEST(test_meta_keys_intern_stable) {
+    /* Re-interning a meta-key name returns the same pointer. */
+    CdoString *idx = cdo_string_intern("__index", 7);
+    EXPECT_EQ(idx, g_meta_index);
+    cdo_string_release(idx);
+
+    CdoString *add = cdo_string_intern("__add", 5);
+    EXPECT_EQ(add, g_meta_add);
+    cdo_string_release(add);
+}
+
+/* -----------------------------------------------------------------------
+ * Setting meta-keys on objects
+ * --------------------------------------------------------------------- */
+TEST(test_set_meta_index) {
+    CdoObject *parent = cdo_object_new();
+    CdoObject *child  = cdo_object_new();
+
+    CdoValue pv = { .tag = CDO_OBJECT, .as = { .object = parent } };
+    EXPECT_TRUE(cdo_object_rawset(child, g_meta_index, pv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(child, g_meta_index, &out));
+    EXPECT_TRUE(cdo_is_any_object(out));
+    EXPECT_EQ(out.as.object, parent);
+
+    cdo_object_destroy(child);
+    cdo_object_destroy(parent);
+}
+
+TEST(test_set_meta_type) {
+    CdoObject *obj  = cdo_object_new();
+    CdoString *name = cdo_string_intern("Widget", 6);
+    CdoValue   tv   = cdo_string_value(cdo_string_retain(name));
+
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_type, tv, FIELD_STATIC));
+    cdo_value_release(tv);
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_type, &out));
+    EXPECT_TRUE(cdo_is_string(out));
+    EXPECT_STR(out.as.string->data, "Widget");
+
+    /* FIELD_STATIC: second write must fail. */
+    CdoValue tv2 = cdo_string_value(cdo_string_retain(name));
+    EXPECT_FALSE(cdo_object_rawset(obj, g_meta_type, tv2, FIELD_NONE));
+    cdo_value_release(tv2);
+
+    cdo_string_release(name);
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_tostring) {
+    CdoObject *obj    = cdo_object_new();
+    CdoString *marker = cdo_string_intern("custom_str", 10);
+    CdoValue   sv     = cdo_string_value(cdo_string_retain(marker));
+
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_tostring, sv, FIELD_NONE));
+    cdo_value_release(sv);
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_tostring, &out));
+    EXPECT_TRUE(cdo_is_string(out));
+    EXPECT_STR(out.as.string->data, "custom_str");
+
+    cdo_string_release(marker);
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_equal) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(1.0); /* placeholder: a "callable" marker */
+
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_equal, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_equal, &out));
+    EXPECT_TRUE(cdo_is_number(out));
+    EXPECT_EQ(out.as.number, 1.0);
+
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_len) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(2.0);
+
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_len, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_len, &out));
+    EXPECT_TRUE(cdo_is_number(out));
+
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_add) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(3.0);
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_add, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_add, &out));
+    EXPECT_TRUE(cdo_is_number(out));
+
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_newindex) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(4.0);
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_newindex, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_newindex, &out));
+    EXPECT_TRUE(cdo_is_number(out));
+
+    cdo_object_destroy(obj);
+}
+
+TEST(test_set_meta_negate) {
+    CdoObject *obj = cdo_object_new();
+    CdoValue   fv  = cdo_number(5.0);
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_negate, fv, FIELD_NONE));
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_rawget(obj, g_meta_negate, &out));
+    EXPECT_TRUE(cdo_is_number(out));
+
+    cdo_object_destroy(obj);
+}
+
+/* -----------------------------------------------------------------------
+ * Class construction (cdo_class_new) tests
+ * --------------------------------------------------------------------- */
+TEST(test_class_new_anonymous) {
+    CdoObject *cls = cdo_class_new(NULL, NULL);
+    EXPECT_TRUE(cls != NULL);
+
+    /* No __type and no __index when both args are NULL. */
+    CdoValue out;
+    EXPECT_FALSE(cdo_object_rawget(cls, g_meta_type, &out));
+    EXPECT_FALSE(cdo_object_rawget(cls, g_meta_index, &out));
+
+    cdo_object_destroy(cls);
+}
+
+TEST(test_class_new_with_type_only) {
+    CdoString *name = cdo_string_intern("Foo", 3);
+    CdoObject *cls  = cdo_class_new(name, NULL);
+
+    CdoValue type_val;
+    EXPECT_TRUE(cdo_object_rawget(cls, g_meta_type, &type_val));
+    EXPECT_STR(type_val.as.string->data, "Foo");
+
+    /* __index must not be set. */
+    CdoValue idx_val;
+    EXPECT_FALSE(cdo_object_rawget(cls, g_meta_index, &idx_val));
+
+    cdo_string_release(name);
+    cdo_object_destroy(cls);
+}
+
+TEST(test_class_new_with_proto) {
+    CdoString *name  = cdo_string_intern("Bar", 3);
+    CdoObject *proto = cdo_object_new();
+    CdoString *mk    = cdo_string_intern("method", 6);
+    cdo_object_rawset(proto, mk, cdo_number(42.0), FIELD_NONE);
+
+    CdoObject *cls = cdo_class_new(name, proto);
+
+    /* __index points to proto. */
+    CdoValue idx_val;
+    EXPECT_TRUE(cdo_object_rawget(cls, g_meta_index, &idx_val));
+    EXPECT_EQ(idx_val.as.object, proto);
+
+    /* Prototype-chain lookup finds the method through __index. */
+    CdoValue found;
+    EXPECT_TRUE(cdo_object_get(cls, mk, &found));
+    EXPECT_EQ(found.as.number, 42.0);
+
+    cdo_string_release(name);
+    cdo_string_release(mk);
+    cdo_object_destroy(cls);
+    cdo_object_destroy(proto);
+}
+
+TEST(test_class_inheritance_two_levels) {
+    /* Simulate: Child extends Parent, instance looks up via two __index hops. */
+    CdoString *parent_name = cdo_string_intern("Parent", 6);
+    CdoString *child_name  = cdo_string_intern("Child", 5);
+    CdoString *mkey        = cdo_string_intern("shared", 6);
+
+    CdoObject *parent_proto = cdo_object_new();
+    cdo_object_rawset(parent_proto, mkey, cdo_number(7.0), FIELD_NONE);
+
+    CdoObject *parent = cdo_class_new(parent_name, parent_proto);
+    CdoObject *child  = cdo_class_new(child_name, parent);
+
+    /* Instance: __index -> child -> parent -> parent_proto */
+    CdoObject *inst = cdo_object_new();
+    CdoValue   iv   = { .tag = CDO_OBJECT, .as = { .object = child } };
+    cdo_object_rawset(inst, g_meta_index, iv, FIELD_NONE);
+
+    CdoValue found;
+    EXPECT_TRUE(cdo_object_get(inst, mkey, &found));
+    EXPECT_EQ(found.as.number, 7.0);
+
+    /* __type of child is "Child". */
+    CdoValue child_type;
+    EXPECT_TRUE(cdo_object_rawget(child, g_meta_type, &child_type));
+    EXPECT_STR(child_type.as.string->data, "Child");
+
+    cdo_string_release(parent_name);
+    cdo_string_release(child_name);
+    cdo_string_release(mkey);
+    cdo_object_destroy(inst);
+    cdo_object_destroy(child);
+    cdo_object_destroy(parent);
+    cdo_object_destroy(parent_proto);
+}
+
+TEST(test_prototype_chain_max_depth) {
+    /* Chain of CANDO_PROTO_DEPTH_MAX objects; key is on the last one.
+     * Lookup should succeed right at the limit. */
+    const int  N   = CANDO_PROTO_DEPTH_MAX - 1; /* 31 links */
+    CdoObject *objs[CANDO_PROTO_DEPTH_MAX];
+    CdoString *k   = cdo_string_intern("deep_key", 8);
+
+    for (int i = 0; i < CANDO_PROTO_DEPTH_MAX; i++)
+        objs[i] = cdo_object_new();
+
+    /* objs[0] is the instance; objs[N] holds the value. */
+    cdo_object_rawset(objs[N], k, cdo_number(99.0), FIELD_NONE);
+    for (int i = 0; i < N; i++) {
+        CdoValue nv = { .tag = CDO_OBJECT, .as = { .object = objs[i+1] } };
+        cdo_object_rawset(objs[i], g_meta_index, nv, FIELD_NONE);
+    }
+
+    CdoValue out;
+    EXPECT_TRUE(cdo_object_get(objs[0], k, &out));
+    EXPECT_EQ(out.as.number, 99.0);
+
+    cdo_string_release(k);
+    for (int i = 0; i < CANDO_PROTO_DEPTH_MAX; i++)
+        cdo_object_destroy(objs[i]);
+}
+
+TEST(test_prototype_chain_beyond_max_depth) {
+    /* Chain of CANDO_PROTO_DEPTH_MAX + 1 objects; the value is beyond the
+     * depth limit so lookup must fail gracefully (no crash). */
+    const int  N    = CANDO_PROTO_DEPTH_MAX + 1;
+    CdoObject **objs = cando_alloc((u32)(sizeof(CdoObject *) * (u32)N));
+    CdoString  *k    = cdo_string_intern("too_deep", 8);
+
+    for (int i = 0; i < N; i++)
+        objs[i] = cdo_object_new();
+
+    cdo_object_rawset(objs[N-1], k, cdo_number(1.0), FIELD_NONE);
+    for (int i = 0; i < N - 1; i++) {
+        CdoValue nv = { .tag = CDO_OBJECT, .as = { .object = objs[i+1] } };
+        cdo_object_rawset(objs[i], g_meta_index, nv, FIELD_NONE);
+    }
+
+    CdoValue out;
+    EXPECT_FALSE(cdo_object_get(objs[0], k, &out));
+
+    cdo_string_release(k);
+    for (int i = 0; i < N; i++)
+        cdo_object_destroy(objs[i]);
+    cando_free(objs);
+}
+
+/* -----------------------------------------------------------------------
  * Thread-safety smoke test: concurrent reads/writes on shared object
  * --------------------------------------------------------------------- */
 #define MT_THREADS 4
@@ -845,6 +1167,30 @@ int main(void) {
     printf("\n-- Length --\n");
     run_test("object length",             test_object_length);
     run_test("array length",              test_array_length);
+
+    printf("\n-- Meta-key constants --\n");
+    run_test("meta-keys interned",        test_meta_keys_interned);
+    run_test("meta-keys content",         test_meta_keys_content);
+    run_test("meta-keys unique pointers", test_meta_keys_unique_pointers);
+    run_test("meta-keys intern stable",   test_meta_keys_intern_stable);
+
+    printf("\n-- Setting meta-keys on objects --\n");
+    run_test("set __index",               test_set_meta_index);
+    run_test("set __type (static)",       test_set_meta_type);
+    run_test("set __tostring",            test_set_meta_tostring);
+    run_test("set __equal",               test_set_meta_equal);
+    run_test("set __len",                 test_set_meta_len);
+    run_test("set __add",                 test_set_meta_add);
+    run_test("set __newindex",            test_set_meta_newindex);
+    run_test("set __negate",              test_set_meta_negate);
+
+    printf("\n-- Class construction (cdo_class_new) --\n");
+    run_test("class_new anonymous",       test_class_new_anonymous);
+    run_test("class_new type only",       test_class_new_with_type_only);
+    run_test("class_new with proto",      test_class_new_with_proto);
+    run_test("class inheritance 2-level", test_class_inheritance_two_levels);
+    run_test("proto chain max depth",     test_prototype_chain_max_depth);
+    run_test("proto chain beyond depth",  test_prototype_chain_beyond_max_depth);
 
     printf("\n-- Thread safety --\n");
     run_test("concurrent read/write",     test_concurrent_read_write);

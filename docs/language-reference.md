@@ -392,14 +392,18 @@ their own `pipe` binding.
 
 ## Classes
 
-`CLASS` defines an object whose methods are bound via the `__index`
-prototype chain.  Method calls with `:` pass the receiver as the first
-argument.
+`CLASS` defines an object whose methods are stored as fields and
+accessible via the `__index` prototype chain.  Method calls with `:`
+pass the receiver as the first argument (`self`).
+
+A factory method should call `object.setPrototype(inst, ClassName)` so
+that instances inherit the class methods:
 
 ```cando
 CLASS Point {
     FUNCTION make(x, y) {
         VAR p = { x: x, y: y };
+        object.setPrototype(p, Point);    // p.__index = Point
         RETURN p;
     }
     FUNCTION dist(self) {
@@ -407,12 +411,16 @@ CLASS Point {
     }
 }
 
+print(type(Point));        // Point  (__type set by CLASS)
 VAR p = Point.make(3, 4);
-print(p:dist());
+print(p:dist());           // 5
 ```
 
+`CLASS` automatically sets `__type` to the class name (immutable).
 Method declarations inside a class body may be preceded by `STATIC`
 and/or `PRIVATE`, which are accepted by the parser as field-flag hints.
+See [metamethods.md](metamethods.md) for the full prototype system and
+all available meta-keys.
 
 ## Threads
 
