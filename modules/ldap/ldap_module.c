@@ -29,15 +29,36 @@
 #include "object/string.h"
 #include "object/value.h"
 #include "lib/libutil.h"
-#include "core/thread_platform.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>     /* strcasecmp */
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdatomic.h>
+
+/* libcando does not export its cando_os_mutex_* helpers (they lack
+ * CANDO_API), so a binary module can't link them in on Windows where
+ * MinGW switches to "explicit exports only" mode the moment any
+ * __declspec(dllexport) appears in the DLL.  Roll our own tiny
+ * CRITICAL_SECTION / pthread_mutex_t wrapper instead. */
+#if defined(_WIN32) || defined(_WIN64)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+   typedef CRITICAL_SECTION ldap_mutex_t;
+#  define LDAP_MUTEX_INIT(m)   InitializeCriticalSection(m)
+#  define LDAP_MUTEX_LOCK(m)   EnterCriticalSection(m)
+#  define LDAP_MUTEX_UNLOCK(m) LeaveCriticalSection(m)
+#else
+#  include <pthread.h>
+#  include <strings.h>     /* strcasecmp */
+   typedef pthread_mutex_t ldap_mutex_t;
+#  define LDAP_MUTEX_INIT(m)   pthread_mutex_init(m, NULL)
+#  define LDAP_MUTEX_LOCK(m)   pthread_mutex_lock(m)
+#  define LDAP_MUTEX_UNLOCK(m) pthread_mutex_unlock(m)
+#endif
 
 #if defined(_WIN32) || defined(_WIN64)
 #  define LDAP_PLATFORM_WINDOWS 1
@@ -82,14 +103,14 @@ typedef struct LdapSlot {
 } LdapSlot;
 
 static LdapSlot      g_ldap_pool[LDAP_MAX_INSTANCES];
-static cando_mutex_t g_ldap_pool_mutex;
+static ldap_mutex_t  g_ldap_pool_mutex;
 static _Atomic(int)  g_ldap_pool_inited = 0;
 
 static void ensure_pool_inited(void)
 {
     int expected = 0;
     if (atomic_compare_exchange_strong(&g_ldap_pool_inited, &expected, 1)) {
-        cando_os_mutex_init(&g_ldap_pool_mutex);
+        LDAP_MUTEX_INIT(&g_ldap_pool_mutex);
         for (int i = 0; i < LDAP_MAX_INSTANCES; i++) {
             g_ldap_pool[i].ld     = NULL;
             g_ldap_pool[i].in_use = false;
@@ -100,7 +121,7 @@ static void ensure_pool_inited(void)
 static int pool_alloc(LDAP *ld)
 {
     ensure_pool_inited();
-    cando_os_mutex_lock(&g_ldap_pool_mutex);
+    LDAP_MUTEX_LOCK(&g_ldap_pool_mutex);
     int idx = -1;
     for (int i = 0; i < LDAP_MAX_INSTANCES; i++) {
         if (!g_ldap_pool[i].in_use) {
@@ -110,7 +131,7 @@ static int pool_alloc(LDAP *ld)
             break;
         }
     }
-    cando_os_mutex_unlock(&g_ldap_pool_mutex);
+    LDAP_MUTEX_UNLOCK(&g_ldap_pool_mutex);
     return idx;
 }
 
@@ -124,10 +145,10 @@ static LDAP *pool_get(int idx)
 static void pool_release(int idx)
 {
     if (idx < 0 || idx >= LDAP_MAX_INSTANCES) return;
-    cando_os_mutex_lock(&g_ldap_pool_mutex);
+    LDAP_MUTEX_LOCK(&g_ldap_pool_mutex);
     g_ldap_pool[idx].ld     = NULL;
     g_ldap_pool[idx].in_use = false;
-    cando_os_mutex_unlock(&g_ldap_pool_mutex);
+    LDAP_MUTEX_UNLOCK(&g_ldap_pool_mutex);
 }
 
 /* Map a numeric LDAP result code to its human-readable message.
