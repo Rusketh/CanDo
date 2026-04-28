@@ -8,7 +8,10 @@
 #include "vm/bridge.h"
 #include "object/array.h"
 
+#include <ctype.h>
+#include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Forward declaration: dispatch a resolved callable CdoValue meta-method.
@@ -32,12 +35,14 @@ CandoNativeFn cando_native_table[CANDO_NATIVE_MAX] = {
     cando_native_print,     /* index 0, sentinel -1.0 */
     cando_native_type,      /* index 1, sentinel -2.0 */
     cando_native_tostring,  /* index 2, sentinel -3.0 */
+    cando_native_inspect,   /* index 3, sentinel -4.0 */
 };
 
 const char *cando_native_names[CANDO_NATIVE_MAX] = {
     "print",
     "type",
     "toString",
+    "inspect",
 };
 
 /* =========================================================================
@@ -146,5 +151,291 @@ int cando_native_tostring(CandoVM *vm, int argc, CandoValue *args)
     CandoString *cs = cando_string_new(s, len);
     free(s);
     cando_vm_push(vm, cando_string_value(cs));
+    return 1;
+}
+
+/* =========================================================================
+ * inspect(val, depth*) -- debug-printer for arrays / objects.
+ *
+ *  depth = 0 (default) means unlimited recursion; cycles are always
+ *  short-circuited with `<circular>`.  depth = N > 0 truncates nested
+ *  arrays / objects beyond that level to `[...]` / `{...}`.
+ * ===================================================================== */
+
+typedef struct {
+    char       *buf;
+    u32         len;
+    u32         cap;
+    bool        oom;
+    int         max_depth;     /* 0 = unlimited */
+    CdoObject **path;          /* visited stack for cycle detection */
+    u32         path_len;
+    u32         path_cap;
+} InspectCtx;
+
+static void inspect_buf_reserve(InspectCtx *ctx, u32 need)
+{
+    if (ctx->oom) return;
+    if (ctx->len + need + 1 <= ctx->cap) return;
+    u32 nc = ctx->cap ? ctx->cap * 2 : 64;
+    while (nc < ctx->len + need + 1) nc *= 2;
+    char *p = (char *)realloc(ctx->buf, nc);
+    if (!p) { ctx->oom = true; return; }
+    ctx->buf = p;
+    ctx->cap = nc;
+}
+
+static void inspect_push(InspectCtx *ctx, const char *s, u32 n)
+{
+    inspect_buf_reserve(ctx, n);
+    if (ctx->oom) return;
+    memcpy(ctx->buf + ctx->len, s, n);
+    ctx->len += n;
+}
+
+static void inspect_push_cstr(InspectCtx *ctx, const char *s)
+{
+    inspect_push(ctx, s, (u32)strlen(s));
+}
+
+static void inspect_push_char(InspectCtx *ctx, char c)
+{
+    inspect_push(ctx, &c, 1);
+}
+
+static bool inspect_path_contains(const InspectCtx *ctx, const CdoObject *o)
+{
+    for (u32 i = 0; i < ctx->path_len; i++)
+        if (ctx->path[i] == o) return true;
+    return false;
+}
+
+static bool inspect_path_push(InspectCtx *ctx, CdoObject *o)
+{
+    if (ctx->path_len == ctx->path_cap) {
+        u32 nc = ctx->path_cap ? ctx->path_cap * 2 : 8;
+        CdoObject **p = (CdoObject **)realloc(ctx->path, nc * sizeof(*p));
+        if (!p) { ctx->oom = true; return false; }
+        ctx->path     = p;
+        ctx->path_cap = nc;
+    }
+    ctx->path[ctx->path_len++] = o;
+    return true;
+}
+
+static void inspect_path_pop(InspectCtx *ctx)
+{
+    if (ctx->path_len > 0) ctx->path_len--;
+}
+
+/* True if name is a non-empty C-style identifier: [A-Za-z_][A-Za-z0-9_]*.
+ * Used to decide whether an object key needs quoting. */
+static bool inspect_key_is_ident(const char *s, u32 len)
+{
+    if (len == 0) return false;
+    unsigned char c0 = (unsigned char)s[0];
+    if (!(isalpha(c0) || c0 == '_')) return false;
+    for (u32 i = 1; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (!(isalnum(c) || c == '_')) return false;
+    }
+    return true;
+}
+
+static void inspect_write_quoted(InspectCtx *ctx, const char *data, u32 len)
+{
+    inspect_push_char(ctx, '"');
+    for (u32 i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)data[i];
+        switch (c) {
+            case '"':  inspect_push(ctx, "\\\"", 2); break;
+            case '\\': inspect_push(ctx, "\\\\", 2); break;
+            case '\n': inspect_push(ctx, "\\n",  2); break;
+            case '\r': inspect_push(ctx, "\\r",  2); break;
+            case '\t': inspect_push(ctx, "\\t",  2); break;
+            default:
+                if (c < 0x20) {
+                    char esc[8];
+                    int  m = snprintf(esc, sizeof(esc), "\\x%02X", c);
+                    if (m > 0) inspect_push(ctx, esc, (u32)m);
+                } else {
+                    inspect_push_char(ctx, (char)c);
+                }
+        }
+    }
+    inspect_push_char(ctx, '"');
+}
+
+static void inspect_write_number(InspectCtx *ctx, f64 n)
+{
+    char buf[64];
+    int  m;
+    if (n == (i64)n)
+        m = snprintf(buf, sizeof(buf), "%" PRId64, (i64)n);
+    else
+        m = snprintf(buf, sizeof(buf), "%.17g", n);
+    if (m > 0) inspect_push(ctx, buf, (u32)m);
+}
+
+static void inspect_cdo(InspectCtx *ctx, CdoValue v, int depth);
+
+static void inspect_array(InspectCtx *ctx, CdoObject *arr, int depth)
+{
+    if (inspect_path_contains(ctx, arr)) {
+        inspect_push_cstr(ctx, "<circular>");
+        return;
+    }
+    if (ctx->max_depth > 0 && depth >= ctx->max_depth) {
+        inspect_push_cstr(ctx, "[...]");
+        return;
+    }
+    if (!inspect_path_push(ctx, arr)) return;
+
+    inspect_push_char(ctx, '[');
+    u32 n = cdo_array_len(arr);
+    for (u32 i = 0; i < n; i++) {
+        if (i > 0) inspect_push(ctx, ", ", 2);
+        CdoValue elem = cdo_null();
+        cdo_array_rawget_idx(arr, i, &elem);
+        inspect_cdo(ctx, elem, depth + 1);
+        if (ctx->oom) break;
+    }
+    inspect_push_char(ctx, ']');
+
+    inspect_path_pop(ctx);
+}
+
+typedef struct { InspectCtx *ctx; int depth; bool first; } InspectIter;
+
+static bool inspect_field_cb(CdoString *key, CdoValue *val, u8 flags, void *ud)
+{
+    (void)flags;
+    InspectIter *it  = (InspectIter *)ud;
+    InspectCtx  *ctx = it->ctx;
+    if (ctx->oom) return false;
+
+    if (!it->first) inspect_push(ctx, ", ", 2);
+    it->first = false;
+
+    if (inspect_key_is_ident(key->data, key->length))
+        inspect_push(ctx, key->data, key->length);
+    else
+        inspect_write_quoted(ctx, key->data, key->length);
+
+    inspect_push(ctx, ": ", 2);
+    inspect_cdo(ctx, *val, it->depth + 1);
+    return !ctx->oom;
+}
+
+static void inspect_object(InspectCtx *ctx, CdoObject *obj, int depth)
+{
+    if (inspect_path_contains(ctx, obj)) {
+        inspect_push_cstr(ctx, "<circular>");
+        return;
+    }
+    if (ctx->max_depth > 0 && depth >= ctx->max_depth) {
+        inspect_push_cstr(ctx, "{...}");
+        return;
+    }
+    if (!inspect_path_push(ctx, obj)) return;
+
+    InspectIter it = { .ctx = ctx, .depth = depth, .first = true };
+    inspect_push(ctx, "{ ", 2);
+    cdo_object_foreach(obj, inspect_field_cb, &it);
+    if (it.first)
+        ctx->len--;          /* drop the trailing space for empty `{ }` */
+    else
+        inspect_push_char(ctx, ' ');
+    inspect_push_char(ctx, '}');
+
+    inspect_path_pop(ctx);
+}
+
+static void inspect_cdo(InspectCtx *ctx, CdoValue v, int depth)
+{
+    if (ctx->oom) return;
+    switch ((CdoTypeTag)v.tag) {
+        case CDO_NULL:
+            inspect_push(ctx, "null", 4); break;
+        case CDO_BOOL:
+            inspect_push_cstr(ctx, v.as.boolean ? "true" : "false"); break;
+        case CDO_NUMBER:
+            inspect_write_number(ctx, v.as.number); break;
+        case CDO_STRING:
+            inspect_write_quoted(ctx, v.as.string->data, v.as.string->length);
+            break;
+        case CDO_ARRAY:
+            inspect_array(ctx, v.as.object, depth); break;
+        case CDO_OBJECT:
+            /* The bridge layer may yield CDO_OBJECT for an array-kind object;
+             * dispatch by kind to be safe. */
+            if (v.as.object->kind == OBJ_ARRAY)
+                inspect_array(ctx, v.as.object, depth);
+            else if (v.as.object->kind == OBJ_THREAD)
+                inspect_push_cstr(ctx, "<thread>");
+            else
+                inspect_object(ctx, v.as.object, depth);
+            break;
+        case CDO_FUNCTION:
+            inspect_push_cstr(ctx, "<function>"); break;
+        case CDO_NATIVE:
+            inspect_push_cstr(ctx, "<native>"); break;
+    }
+}
+
+int cando_native_inspect(CandoVM *vm, int argc, CandoValue *args)
+{
+    InspectCtx ctx = {0};
+    if (argc >= 2 && cando_is_number(args[1])) {
+        int d = (int)args[1].as.number;
+        ctx.max_depth = (d > 0) ? d : 0;
+    }
+
+    if (argc < 1) {
+        inspect_push(&ctx, "null", 4);
+    } else {
+        CandoValue v = args[0];
+        switch ((TypeTag)v.tag) {
+            case TYPE_NULL:
+                inspect_push(&ctx, "null", 4); break;
+            case TYPE_BOOL:
+                inspect_push_cstr(&ctx, v.as.boolean ? "true" : "false"); break;
+            case TYPE_NUMBER:
+                inspect_write_number(&ctx, v.as.number); break;
+            case TYPE_STRING:
+                inspect_write_quoted(&ctx, v.as.string->data,
+                                           v.as.string->length);
+                break;
+            case TYPE_OBJECT: {
+                CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+                if (!obj) {
+                    inspect_push(&ctx, "null", 4);
+                } else if (obj->kind == OBJ_ARRAY) {
+                    inspect_array(&ctx, obj, 0);
+                } else if (obj->kind == OBJ_FUNCTION) {
+                    inspect_push_cstr(&ctx, "<function>");
+                } else if (obj->kind == OBJ_NATIVE) {
+                    inspect_push_cstr(&ctx, "<native>");
+                } else if (obj->kind == OBJ_THREAD) {
+                    inspect_push_cstr(&ctx, "<thread>");
+                } else {
+                    inspect_object(&ctx, obj, 0);
+                }
+                break;
+            }
+        }
+    }
+
+    if (ctx.oom) {
+        free(ctx.buf);
+        free(ctx.path);
+        cando_vm_error(vm, "inspect: out of memory");
+        return -1;
+    }
+
+    CandoString *s = cando_string_new(ctx.buf ? ctx.buf : "", ctx.len);
+    free(ctx.buf);
+    free(ctx.path);
+    cando_vm_push(vm, cando_string_value(s));
     return 1;
 }
