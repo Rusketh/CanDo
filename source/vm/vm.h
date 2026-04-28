@@ -276,6 +276,7 @@ struct CandoVM {
     /* Built-in type prototypes ----------------------------------------- */
     CandoValue     string_proto;    /* string method table (or null)        */
     CandoValue     array_proto;     /* array method table (or null)         */
+    CandoValue     thread_proto;    /* thread instance method table (or null) */
 
     /* Default constructor wrapper ------------------------------------- */
     /* Native sentinel value bound to __call on every CLASS object.       */

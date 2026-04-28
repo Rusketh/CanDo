@@ -16,6 +16,32 @@ print(type(_meta.http_request));          /* expected: http_request  */
 print(type(_meta.http_server));           /* expected: http_server   */
 print(type(_meta.http_client_response));  /* expected: http_client_response */
 
+/* The string / array / object / thread libs are aliased onto `_meta` so
+ * extending either name (`string.foo = ...` or `_meta.string.foo = ...`)
+ * touches the same underlying table. */
+print(type(_meta.string));                /* expected: object */
+print(type(_meta.array));                 /* expected: object */
+print(type(_meta.object));                /* expected: object */
+print(type(_meta.thread));                /* expected: thread */
+
+/* Methods added through `_meta.string` are visible on string receivers,
+ * AND reachable from the `string.*` global name -- both names resolve to
+ * the same underlying table. */
+_meta.string.shout = FUNCTION(self) { RETURN self:toUpper() + "!"; };
+print("hi":shout());                      /* expected: HI! */
+print(string.shout("yes"));               /* expected: YES! */
+
+/* Methods added through `_meta.array` are visible on array receivers. */
+_meta.array.first = FUNCTION(self) { RETURN self[0]; };
+print([10, 20, 30]:first());              /* expected: 10 */
+
+/* Method calls on thread instances dispatch through `_meta.thread`. */
+VAR t = thread { RETURN 42; };
+VAR r = await t;
+print(r);                                  /* expected: 42 */
+print(t:done());                           /* expected: true */
+print(t:state());                          /* expected: done */
+
 /* Users can attach arbitrary methods to a meta table. */
 _meta.http_response.write = FUNCTION(self, data) {
     self.body = self.body + data;

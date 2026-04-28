@@ -131,7 +131,7 @@ run_test "lib_object" "$SCRIPTS/lib_object.cdo" \
     "$(printf '1\n99\n2\n1\n2\n3\n10\n99\n30\n20\nalice\nbob\nhello\nc\na\nb\n3\n1\n2\nfalse\ntrue\nfalse')"
 
 run_test "lib_meta" "$SCRIPTS/lib_meta.cdo" \
-    "$(printf 'object\nhttp_response\nhttp_request\nhttp_server\nhttp_client_response\nobject\ngreeter\nhi, world')"
+    "$(printf 'object\nhttp_response\nhttp_request\nhttp_server\nhttp_client_response\nobject\nobject\nobject\nthread\nHI!\nYES!\n10\n42\ntrue\ndone\nobject\ngreeter\nhi, world')"
 
 run_test "lib_http" "$SCRIPTS/lib_http.cdo" \
     "$(printf '200\nok-1\nbasic\nhello world\ndelayed\nhi alice')"

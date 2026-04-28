@@ -42,6 +42,18 @@ CANDO_API void cando_lib_meta_register(CandoVM *vm);
 CANDO_API CdoObject *cando_lib_meta_table(CandoVM *vm, const char *name);
 
 /*
+ * cando_lib_meta_set -- register an existing CdoObject as the meta table
+ * for `name`.  Used when the table is also exposed elsewhere (e.g. the
+ * `string` global is also published as `_meta.string`) so both names
+ * resolve to the same underlying object.
+ *
+ * Does NOT touch `__type` on `table`; the caller is responsible for that
+ * if desired.  No-op if `_meta` is unregistered.
+ */
+CANDO_API void cando_lib_meta_set(CandoVM *vm, const char *name,
+                                  CdoObject *table);
+
+/*
  * cando_lib_meta_attach -- set instance.__index = _meta.<name>.
  *
  * Convenience helper for native libraries that build instance objects.  No-op
@@ -49,5 +61,25 @@ CANDO_API CdoObject *cando_lib_meta_table(CandoVM *vm, const char *name);
  */
 CANDO_API void cando_lib_meta_attach(CandoVM *vm, CdoObject *instance,
                                      const char *name);
+
+/*
+ * cando_lib_meta_define -- like libutil_set_method, but a no-op if `name`
+ * already has a non-null value on `tbl`.  Lets registration paths that may
+ * be called more than once (e.g. once from `http` and once from `https`)
+ * skip redundant entries instead of inflating the per-VM native table.
+ */
+CANDO_API void cando_lib_meta_define(CandoVM *vm, CdoObject *tbl,
+                                     const char *name, CandoNativeFn fn);
+
+/*
+ * cando_lib_meta_alias -- copy an existing field from `src` onto `dst`
+ * under the new key `dst_name`, reading `src_name` from `src`.  Useful for
+ * exposing the same native-method sentinel under two names without burning
+ * a second slot in the VM's native function table.
+ *
+ * No-op if either object is missing or the source key does not exist.
+ */
+CANDO_API void cando_lib_meta_alias(CdoObject *dst, const char *dst_name,
+                                    const CdoObject *src, const char *src_name);
 
 #endif /* CANDO_LIB_META_H */

@@ -1040,23 +1040,6 @@ static int http_create_server_fn(CandoVM *vm, int argc, CandoValue *args)
  * ===================================================================== */
 
 /*
- * meta_define_method -- like libutil_set_method but a no-op if the slot is
- * already populated.  Keeps http_register_meta_tables idempotent so both http
- * and https registration paths can call it without exhausting the per-VM
- * native function table.
- */
-static void meta_define_method(CandoVM *vm, CdoObject *obj,
-                               const char *name, CandoNativeFn fn)
-{
-    CdoString *key = cdo_string_intern(name, (u32)strlen(name));
-    CdoValue   existing = cdo_null();
-    bool       have     = cdo_object_rawget(obj, key, &existing);
-    cdo_string_release(key);
-    if (have && !cdo_is_null(existing)) return;
-    libutil_set_method(vm, obj, name, fn);
-}
-
-/*
  * http_register_meta_tables -- populate the user-extensible `_meta` tables
  * for HTTP/HTTPS objects with their default native methods.  Idempotent and
  * safe to call from both http and https registration so either library may
@@ -1068,10 +1051,10 @@ void http_register_meta_tables(CandoVM *vm)
 
     CdoObject *res_meta = cando_lib_meta_table(vm, "http_response");
     if (res_meta) {
-        meta_define_method(vm, res_meta, "status",    res_status_fn);
-        meta_define_method(vm, res_meta, "setHeader", res_setHeader_fn);
-        meta_define_method(vm, res_meta, "send",      res_send_fn);
-        meta_define_method(vm, res_meta, "json",      res_json_fn);
+        cando_lib_meta_define(vm, res_meta, "status",    res_status_fn);
+        cando_lib_meta_define(vm, res_meta, "setHeader", res_setHeader_fn);
+        cando_lib_meta_define(vm, res_meta, "send",      res_send_fn);
+        cando_lib_meta_define(vm, res_meta, "json",      res_json_fn);
     }
     /* http_request currently has no native methods.  The table is created
      * eagerly so user code can attach methods reliably at script startup. */
@@ -1080,8 +1063,8 @@ void http_register_meta_tables(CandoVM *vm)
 
     CdoObject *server_meta = cando_lib_meta_table(vm, "http_server");
     if (server_meta) {
-        meta_define_method(vm, server_meta, "listen", server_listen_fn);
-        meta_define_method(vm, server_meta, "close",  server_close_fn);
+        cando_lib_meta_define(vm, server_meta, "listen", server_listen_fn);
+        cando_lib_meta_define(vm, server_meta, "close",  server_close_fn);
     }
 }
 

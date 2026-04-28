@@ -143,10 +143,24 @@ Subtables registered by the standard library:
 
 | Subtable | Used by |
 |---|---|
+| `_meta.string` | Same table as the global `string` and `vm->string_proto` -- the prototype consulted whenever a method is called on a string. |
+| `_meta.array` | Same table as `array` / `vm->array_proto` -- consulted for methods on array receivers. |
+| `_meta.object` | Same table as `object`.  Not auto-applied to plain objects; use `object.setPrototype(o, _meta.object)` to opt in. |
+| `_meta.thread` | Per-instance methods for thread receivers (`t:done()`, `t:join()`, `t:state()`, `t:then(fn)`, …).  Aliased onto the same native sentinels exposed via `thread.<name>`. |
 | `_meta.http_request` | Server-side request objects passed into `http.createServer`'s handler. |
 | `_meta.http_response` | Server-side response objects.  Default methods: `status`, `setHeader`, `send`, `json`. |
 | `_meta.http_server` | Server objects returned by `createServer`.  Default methods: `listen`, `close`. |
 | `_meta.http_client_response` | Response objects returned by `http.get`, `https.get`, `fetch`, etc. |
+
+For `string`, `array`, `object`, and `thread` the meta table is the same
+underlying CdoObject as the like-named global, so writing through either
+name is observable through the other:
+
+```cando
+_meta.string.shout = FUNCTION(self) { RETURN self:toUpper() + "!"; };
+print("hi":shout());        // HI!
+print(string.shout("yes")); // YES!  -- same table, same method
+```
 
 You may also attach your own subtables at runtime (`_meta.foo = { ... }`)
 and use them as prototypes via `object.setPrototype(instance, _meta.foo)`.
@@ -291,6 +305,21 @@ provides:
 | `thread.current()` | Current thread handle, or `NULL` on the main thread. |
 | `thread.then(t, fn)` | Register a success callback; called with `t`'s return values. |
 | `thread.catch(t, fn)` | Register an error callback; called with the thrown value. |
+
+Every per-thread function (`done`, `join`, `cancel`, `state`, `error`,
+`then`, `catch`) is also reachable through the `_meta.thread` prototype as
+a method on the thread receiver itself:
+
+```cando
+VAR t = thread { RETURN 42; };
+print(t:state());   // running | done
+print(await t);     // 42
+print(t:done());    // true
+```
+
+Because `_meta.thread` aliases the same native sentinels as `thread.<name>`,
+both forms call the same underlying implementation -- and overrides applied
+under either name take effect for both.
 
 The language-level `thread { … }` expression and `await` operator are
 described in [language-reference.md](language-reference.md).

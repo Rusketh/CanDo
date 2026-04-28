@@ -84,6 +84,7 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) vm->thread_results[i] = cando_null();
     vm->string_proto    = cando_null();
     vm->array_proto     = cando_null();
+    vm->thread_proto    = cando_null();
     vm->default_class_call = cando_null();
 
     /* Module cache — initially empty. */
@@ -143,6 +144,7 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) child->thread_results[i] = cando_null();
     child->string_proto    = cando_value_copy(parent->string_proto);
     child->array_proto     = cando_value_copy(parent->array_proto);
+    child->thread_proto    = cando_value_copy(parent->thread_proto);
     child->default_class_call = parent->default_class_call;
 
     /* Module cache: child VMs do not cache modules independently. */
@@ -2022,12 +2024,20 @@ static CandoVMResult vm_run(CandoVM *vm) {
             CandoString *ks = frame->closure->chunk->constants[ci].as.string;
             CdoString   *key = cando_bridge_intern_key(ks);
             CdoValue     result;
+            bool         got = false;
             /* Use cdo_object_get for __index prototype-chain traversal. */
             if (cdo_object_get(obj, key, &result)) {
-                PUSH(cando_bridge_to_cando(vm, result));
-            } else {
-                PUSH(cando_null());
+                got = true;
+            } else if (obj->kind == OBJ_THREAD &&
+                       cando_is_object(vm->thread_proto)) {
+                /* Thread instances have no slot table; fall back to the
+                 * cached `_meta.thread` prototype for method lookups. */
+                CdoObject *tproto = cando_bridge_resolve(
+                    vm, vm->thread_proto.as.handle);
+                if (cdo_object_get(tproto, key, &result)) got = true;
             }
+            if (got) PUSH(cando_bridge_to_cando(vm, result));
+            else     PUSH(cando_null());
             cdo_string_release(key);
             cando_value_release(obj_val);
             DISPATCH();
@@ -2546,6 +2556,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
                         CdoObject *aproto = cando_bridge_resolve(vm, vm->array_proto.as.handle);
                         cdo_object_get(aproto, key, &method_cdo);
                     }
+                } else if (robj->kind == OBJ_THREAD && cando_is_object(vm->thread_proto)) {
+                    /* Thread instances have no slot table; methods live on
+                     * the cached `_meta.thread` prototype. */
+                    CdoObject *tproto = cando_bridge_resolve(vm, vm->thread_proto.as.handle);
+                    cdo_object_get(tproto, key, &method_cdo);
                 } else {
                     cdo_object_get(robj, key, &method_cdo);
                 }
