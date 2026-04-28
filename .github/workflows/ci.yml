@@ -54,6 +54,23 @@ jobs:
       - name: Build cando.exe
         run: make cando.exe MINGW_CC=gcc WINDRES=windres
 
+      - name: Verify no MinGW runtime DLL deps
+        run: |
+          set -e
+          echo "=== cando.exe imports ==="
+          objdump -p cando.exe | grep "DLL Name" || true
+          echo "=== libcando.dll imports ==="
+          objdump -p libcando.dll | grep "DLL Name" || true
+          for bin in cando.exe libcando.dll; do
+            for dll in libwinpthread-1.dll libgcc_s_seh-1.dll libstdc++-6.dll libssl-3-x64.dll libcrypto-3-x64.dll; do
+              if objdump -p "$bin" | grep -qi "DLL Name: $dll"; then
+                echo "ERROR: $bin still imports $dll"
+                exit 1
+              fi
+            done
+          done
+          echo "OK: no MinGW runtime DLL dependencies."
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:

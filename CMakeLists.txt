@@ -165,11 +165,14 @@ target_link_libraries(libcando PUBLIC Threads::Threads OpenSSL::SSL OpenSSL::Cry
 
 if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     # Statically link libgcc and libwinpthread so libcando.dll has no runtime
-    # DLL dependencies beyond system libraries.  Without -Bstatic on
-    # winpthread, MinGW pulls in libwinpthread-1.dll dynamically.
+    # DLL dependencies beyond system libraries.  --whole-archive forces every
+    # winpthread symbol to be embedded, and the trailing -Bstatic catches the
+    # implicit -lpthread MinGW's GCC spec appends to satisfy libgcc's
+    # internal pthread references.
     target_link_options(libcando PRIVATE
         -static-libgcc
-        -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
+        -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive,-Bdynamic
+        "LINKER:-Bstatic"
     )
 endif()
 
@@ -221,7 +224,8 @@ target_link_libraries(cando PRIVATE libcando)
 if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     target_link_options(cando PRIVATE
         -static-libgcc
-        -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
+        -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive,-Bdynamic
+        "LINKER:-Bstatic"
     )
 endif()
 
