@@ -160,6 +160,10 @@ int cando_native_tostring(CandoVM *vm, int argc, CandoValue *args)
  *  depth = 0 (default) means unlimited recursion; cycles are always
  *  short-circuited with `<circular>`.  depth = N > 0 truncates nested
  *  arrays / objects beyond that level to `[...]` / `{...}`.
+ *
+ * Output is pretty-printed: empty containers render as `[]` / `{}`, while
+ * non-empty ones break across lines with 2-space indentation per nesting
+ * level.  Truncation markers and circular references stay compact.
  * ===================================================================== */
 
 typedef struct {
@@ -277,6 +281,14 @@ static void inspect_write_number(InspectCtx *ctx, f64 n)
     if (m > 0) inspect_push(ctx, buf, (u32)m);
 }
 
+/* Indentation step is fixed at 2 spaces.  `depth` here counts levels of
+ * nesting, not the user-facing max_depth limit. */
+static void inspect_indent(InspectCtx *ctx, int depth)
+{
+    for (int i = 0; i < depth; i++)
+        inspect_push(ctx, "  ", 2);
+}
+
 static void inspect_cdo(InspectCtx *ctx, CdoValue v, int depth);
 
 static void inspect_array(InspectCtx *ctx, CdoObject *arr, int depth)
@@ -289,17 +301,24 @@ static void inspect_array(InspectCtx *ctx, CdoObject *arr, int depth)
         inspect_push_cstr(ctx, "[...]");
         return;
     }
+    u32 n = cdo_array_len(arr);
+    if (n == 0) {
+        inspect_push(ctx, "[]", 2);
+        return;
+    }
     if (!inspect_path_push(ctx, arr)) return;
 
-    inspect_push_char(ctx, '[');
-    u32 n = cdo_array_len(arr);
+    inspect_push(ctx, "[\n", 2);
     for (u32 i = 0; i < n; i++) {
-        if (i > 0) inspect_push(ctx, ", ", 2);
+        if (i > 0) inspect_push(ctx, ",\n", 2);
+        inspect_indent(ctx, depth + 1);
         CdoValue elem = cdo_null();
         cdo_array_rawget_idx(arr, i, &elem);
         inspect_cdo(ctx, elem, depth + 1);
         if (ctx->oom) break;
     }
+    inspect_push_char(ctx, '\n');
+    inspect_indent(ctx, depth);
     inspect_push_char(ctx, ']');
 
     inspect_path_pop(ctx);
@@ -314,8 +333,10 @@ static bool inspect_field_cb(CdoString *key, CdoValue *val, u8 flags, void *ud)
     InspectCtx  *ctx = it->ctx;
     if (ctx->oom) return false;
 
-    if (!it->first) inspect_push(ctx, ", ", 2);
+    if (!it->first) inspect_push(ctx, ",\n", 2);
     it->first = false;
+
+    inspect_indent(ctx, it->depth + 1);
 
     if (inspect_key_is_ident(key->data, key->length))
         inspect_push(ctx, key->data, key->length);
@@ -325,6 +346,16 @@ static bool inspect_field_cb(CdoString *key, CdoValue *val, u8 flags, void *ud)
     inspect_push(ctx, ": ", 2);
     inspect_cdo(ctx, *val, it->depth + 1);
     return !ctx->oom;
+}
+
+/* Probe to decide whether an object is empty without performing the recursive
+ * write — needed because cdo_object_foreach has no length accessor that
+ * cleanly maps to the iteration order used elsewhere. */
+static bool obj_first_cb(CdoString *k, CdoValue *v, u8 f, void *ud)
+{
+    (void)k; (void)v; (void)f;
+    *(bool *)ud = false;
+    return false;
 }
 
 static void inspect_object(InspectCtx *ctx, CdoObject *obj, int depth)
@@ -337,15 +368,21 @@ static void inspect_object(InspectCtx *ctx, CdoObject *obj, int depth)
         inspect_push_cstr(ctx, "{...}");
         return;
     }
+
+    bool empty = true;
+    cdo_object_foreach(obj, obj_first_cb, &empty);
+    if (empty) {
+        inspect_push(ctx, "{}", 2);
+        return;
+    }
+
     if (!inspect_path_push(ctx, obj)) return;
 
     InspectIter it = { .ctx = ctx, .depth = depth, .first = true };
-    inspect_push(ctx, "{ ", 2);
+    inspect_push(ctx, "{\n", 2);
     cdo_object_foreach(obj, inspect_field_cb, &it);
-    if (it.first)
-        ctx->len--;          /* drop the trailing space for empty `{ }` */
-    else
-        inspect_push_char(ctx, ' ');
+    inspect_push_char(ctx, '\n');
+    inspect_indent(ctx, depth);
     inspect_push_char(ctx, '}');
 
     inspect_path_pop(ctx);

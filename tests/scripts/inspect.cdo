@@ -1,62 +1,62 @@
 /* inspect.cdo -- Integration tests for the inspect built-in.
  *
- * Each test prints a labelled result to stdout.  Expected output is
- * registered in tests/integration/run_tests.sh.
+ * Containers are rendered with multi-line indentation; primitives, empty
+ * containers, depth-truncation markers, and circular references stay
+ * compact.  Expected output is registered in tests/integration/run_tests.sh.
  */
 
 /* ----- primitives -------------------------------------------------------- */
-print(inspect(null));        /* expected: null  */
-print(inspect(true));        /* expected: true  */
-print(inspect(false));       /* expected: false */
-print(inspect(0));           /* expected: 0     */
-print(inspect(42));          /* expected: 42    */
-print(inspect(-7));          /* expected: -7    */
-print(inspect("hi"));        /* expected: "hi"  */
+print(inspect(null));        /* null  */
+print(inspect(true));        /* true  */
+print(inspect(false));       /* false */
+print(inspect(0));           /* 0     */
+print(inspect(42));          /* 42    */
+print(inspect(-7));          /* -7    */
+print(inspect("hi"));        /* "hi"  */
 
 /* ----- string escapes ---------------------------------------------------- */
 var nl = `a
 b`;
-print(inspect(nl));          /* expected: "a\nb"           */
+print(inspect(nl));          /* "a\nb" */
 
 /* ----- arrays ------------------------------------------------------------ */
-print(inspect([]));               /* expected: []                 */
-print(inspect([1, 2, 3]));        /* expected: [1, 2, 3]          */
-print(inspect([1, "two", null])); /* expected: [1, "two", null]   */
+print(inspect([]));          /* []  */
+print(inspect([1, 2, 3]));   /* multi-line list */
+print(inspect([1, "two", null]));
 
 /* ----- objects ----------------------------------------------------------- */
-print(inspect({}));               /* expected: {}                          */
-print(inspect({a: 1}));           /* expected: { a: 1 }                    */
-print(inspect({a: 1, b: 2}));     /* expected: { a: 1, b: 2 }              */
+print(inspect({}));          /* {}  */
+print(inspect({a: 1}));      /* multi-line object */
+print(inspect({a: 1, b: 2}));
 
 /* non-identifier keys must be quoted */
 var o = {};
 o["with space"] = 1;
-print(inspect(o));                /* expected: { "with space": 1 }         */
+print(inspect(o));
 
 /* ----- nesting ----------------------------------------------------------- */
 print(inspect({list: [1, 2, [3, 4]]}));
-/* expected: { list: [1, 2, [3, 4]] } */
 
 /* ----- depth limit ------------------------------------------------------- */
 var deep = {a: {b: {c: 1}}};
-print(inspect(deep));     /* expected: { a: { b: { c: 1 } } }   (unlimited) */
-print(inspect(deep, 1));  /* expected: { a: {...} }                          */
-print(inspect(deep, 2));  /* expected: { a: { b: {...} } }                   */
-print(inspect(deep, 3));  /* expected: { a: { b: { c: 1 } } }                */
+print(inspect(deep));        /* unlimited */
+print(inspect(deep, 1));     /* { a: {...} }      */
+print(inspect(deep, 2));     /* { a: { b: {...} } } */
+print(inspect(deep, 3));     /* fully expanded    */
 
 var deepa = [[[1]]];
-print(inspect(deepa, 1)); /* expected: [[...]]                               */
-print(inspect(deepa, 2)); /* expected: [[[...]]]                             */
+print(inspect(deepa, 1));
+print(inspect(deepa, 2));
 
 /* ----- cycles ------------------------------------------------------------ */
 var ca = [1];
 ca:push(ca);
-print(inspect(ca));               /* expected: [1, <circular>]             */
+print(inspect(ca));
 
 var co = {x: 1};
 co.self = co;
-print(inspect(co));               /* expected: { x: 1, self: <circular> }  */
+print(inspect(co));
 
 /* shared, non-circular references should NOT be reported as cycles */
 var shared = [9];
-print(inspect([shared, shared])); /* expected: [[9], [9]]                  */
+print(inspect([shared, shared]));
