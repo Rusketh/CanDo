@@ -1,0 +1,162 @@
+// modules/ldap/test_ldap.cdo -- Script-level integration test for the
+// LDAP module.
+//
+// Run with:
+//
+//     ./cando modules/ldap/test_ldap.cdo
+//
+// The test verifies the module's public API surface (the methods exposed
+// after include()) and exercises every error path that does not require a
+// running directory server.  Operations that need a live server (search
+// against a real base, add, modify, etc.) are exercised against an
+// intentionally unreachable host so we can verify the error reporter
+// rather than masking failures.
+
+VAR ldap = include("./ldap.so");
+
+VAR pass = 0;
+VAR fail = 0;
+
+FUNCTION expect(name, ok) {
+    IF ok {
+        print(`  PASS  ${name}`);
+        pass = pass + 1;
+    } ELSE {
+        print(`  FAIL  ${name}`);
+        fail = fail + 1;
+    }
+}
+
+print("ldap module integration tests");
+print("-----------------------------");
+
+// ---- API surface: every method we promise must exist as a callable ----
+expect("method: connect",        type(ldap.connect)        == "number");
+expect("method: bind",           type(ldap.bind)           == "number");
+expect("method: bind_anonymous", type(ldap.bind_anonymous) == "number");
+expect("method: unbind",         type(ldap.unbind)         == "number");
+expect("method: start_tls",      type(ldap.start_tls)      == "number");
+expect("method: set_option",     type(ldap.set_option)     == "number");
+expect("method: search",         type(ldap.search)         == "number");
+expect("method: add",            type(ldap.add)            == "number");
+expect("method: modify",         type(ldap.modify)         == "number");
+expect("method: delete",         type(ldap.delete)         == "number");
+expect("method: rename",         type(ldap.rename)         == "number");
+expect("method: move",           type(ldap.move)           == "number");
+expect("method: compare",        type(ldap.compare)        == "number");
+expect("method: last_error",     type(ldap.last_error)     == "number");
+
+// ---- Constants ----
+expect("VERSION is a string",    type(ldap.VERSION)    == "string");
+expect("SCOPE_BASE is a number", type(ldap.SCOPE_BASE) == "number");
+expect("SCOPE_ONE is a number",  type(ldap.SCOPE_ONE)  == "number");
+expect("SCOPE_SUB is a number",  type(ldap.SCOPE_SUB)  == "number");
+
+// ---- connect: invalid input ----
+TRY {
+    ldap.connect();
+    expect("connect: missing arg throws", FALSE);
+} CATCH (e) {
+    expect("connect: missing arg throws", TRUE);
+}
+
+TRY {
+    ldap.connect(42);
+    expect("connect: non-string throws", FALSE);
+} CATCH (e) {
+    expect("connect: non-string throws", TRUE);
+}
+
+// ---- connect to an unreachable URI: succeeds because libldap defers
+//      the network connect until first operation. ----
+VAR conn = ldap.connect("ldap://127.0.0.1:1");  // port 1 = nothing listens
+expect("connect: returns object", type(conn) == "object");
+
+// set_option works without a network round-trip
+VAR ok = ldap.set_option(conn, "protocol_version", 3);
+expect("set_option: protocol_version=3", ok == TRUE);
+
+ok = ldap.set_option(conn, "referrals", FALSE);
+expect("set_option: referrals=false",    ok == TRUE);
+
+ok = ldap.set_option(conn, "sizelimit", 100);
+expect("set_option: sizelimit=100",      ok == TRUE);
+
+TRY {
+    ldap.set_option(conn, "no_such_option", 1);
+    expect("set_option: unknown name throws", FALSE);
+} CATCH (e) {
+    expect("set_option: unknown name throws", TRUE);
+}
+
+// ---- bind / search against an unreachable host should error ----
+TRY {
+    ldap.bind(conn, "cn=admin,dc=ex,dc=com", "secret");
+    expect("bind: unreachable server throws", FALSE);
+} CATCH (e) {
+    expect("bind: unreachable server throws", TRUE);
+}
+
+// last_error must surface a non-null record after a failure
+VAR err = ldap.last_error();
+expect("last_error: object after bind failure", type(err) == "object");
+expect("last_error: has code field",            type(err.code) == "number");
+expect("last_error: has message field",         type(err.message) == "string");
+
+// ---- argument validation on the data-modifying ops ----
+TRY {
+    ldap.add(conn, "cn=foo,dc=x", "not an object");
+    expect("add: non-object attrs throws", FALSE);
+} CATCH (e) {
+    expect("add: non-object attrs throws", TRUE);
+}
+
+TRY {
+    ldap.modify(conn, "cn=foo,dc=x", "not an array");
+    expect("modify: non-array mods throws", FALSE);
+} CATCH (e) {
+    expect("modify: non-array mods throws", TRUE);
+}
+
+TRY {
+    ldap.modify(conn, "cn=foo,dc=x",
+        [ { op: "bogus", attr: "x", values: ["y"] } ]);
+    expect("modify: unknown op throws", FALSE);
+} CATCH (e) {
+    expect("modify: unknown op throws", TRUE);
+}
+
+TRY {
+    ldap.search(conn, { base: "dc=x", scope: "lateral" });
+    expect("search: unknown scope throws", FALSE);
+} CATCH (e) {
+    expect("search: unknown scope throws", TRUE);
+}
+
+TRY {
+    ldap.search(conn, { scope: "sub" });
+    expect("search: missing base throws", FALSE);
+} CATCH (e) {
+    expect("search: missing base throws", TRUE);
+}
+
+// ---- unbind closes the handle; subsequent ops must error ----
+ok = ldap.unbind(conn);
+expect("unbind: returns true",      ok == TRUE);
+
+TRY {
+    ldap.bind(conn, "cn=admin", "x");
+    expect("bind on closed conn throws", FALSE);
+} CATCH (e) {
+    expect("bind on closed conn throws", TRUE);
+}
+
+// double unbind is a no-op
+ok = ldap.unbind(conn);
+expect("unbind: idempotent", ok == TRUE);
+
+print("");
+print(`${pass} passed, ${fail} failed`);
+IF fail > 0 {
+    os.exit(1);
+}

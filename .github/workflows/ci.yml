@@ -18,16 +18,31 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc make libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y gcc make libssl-dev libldap2-dev
 
       - name: Run tests
         run: make test
+
+      - name: Build modules
+        run: make modules
+
+      - name: Test modules (C unit tests)
+        run: make modules-test
+
+      - name: Test modules (script integration)
+        run: ./cando modules/ldap/test_ldap.cdo
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: cando-linux-x86_64
           path: cando
+
+      - name: Upload modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: cando-modules-linux-x86_64
+          path: modules/**/*.so
 
   # ---------------------------------------------------------------------------
   # Windows build (MinGW-w64 via MSYS2, includes OpenSSL)
@@ -54,6 +69,9 @@ jobs:
       - name: Build cando.exe
         run: make cando.exe MINGW_CC=gcc WINDRES=windres
 
+      - name: Build modules (Windows)
+        run: make modules-windows MINGW_CC=gcc
+
       - name: Verify no MinGW runtime DLL deps
         run: |
           set -e
@@ -78,3 +96,9 @@ jobs:
           path: |
             cando.exe
             libcando.dll
+
+      - name: Upload modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: cando-modules-windows-x86_64
+          path: modules/**/*.dll

@@ -24,6 +24,13 @@ libcando.lib
 icon.res
 .libobjs/
 
+# Module build artifacts
+modules/*/test_ldap
+modules/*/*.so
+modules/*/*.dylib
+modules/*/*.dll
+modules/*/*.lib
+
 # Common OS junk
 .DS_Store
 Thumbs.db
