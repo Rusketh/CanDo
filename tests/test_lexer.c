@@ -387,6 +387,16 @@ TEST(test_string_backtick_nested_braces)
     EXPECT_EQ(tok.type, TOK_STRING_BT);
 }
 
+TEST(test_string_backtick_nested_template)
+{
+    /* A backtick string inside ${ } — the inner backticks must round-trip
+     * out as a single TOK_STRING_BT so the whole outer token covers both. */
+    const char *src = "`Bearer ${enc(`${u}:${p}`)}`";
+    CandoToken tok = lex_nth(src, 0);
+    EXPECT_EQ(tok.type, TOK_STRING_BT);
+    EXPECT_EQ(tok.length, (u32)strlen(src));
+}
+
 TEST(test_string_unterminated_dq)
 {
     CandoLexer lex;
@@ -715,6 +725,7 @@ int main(void)
     run_test("single-quoted string",      test_string_single_quote);
     run_test("backtick string",           test_string_backtick);
     run_test("backtick nested braces",    test_string_backtick_nested_braces);
+    run_test("backtick nested template",  test_string_backtick_nested_template);
     run_test("unterminated double-quote", test_string_unterminated_dq);
     run_test("unterminated single-quote", test_string_unterminated_sq);
     run_test("unterminated backtick",     test_string_unterminated_bt);

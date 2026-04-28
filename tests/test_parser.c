@@ -129,6 +129,14 @@ static bool const_is_string(const CandoChunk *c, u32 idx, const char *expected)
            memcmp(s->data, expected, s->length) == 0;
 }
 
+/* True if any string constant in the chunk equals expected. */
+static bool has_string_const(const CandoChunk *c, const char *expected)
+{
+    for (u32 i = 0; i < c->const_count; i++)
+        if (const_is_string(c, i, expected)) return true;
+    return false;
+}
+
 /* -------------------------------------------------------------------------
  * Tests: chunk management
  * ------------------------------------------------------------------------ */
@@ -257,6 +265,130 @@ TEST(test_string_literal)
     CandoChunk *c = compile_ok("\"hello\";");
     EXPECT_EQ(c->code[0], (u8)OP_CONST);
     EXPECT_TRUE(const_is_string(c, 0, "hello"));
+    cando_chunk_free(c);
+}
+
+/* -------------------------------------------------------------------------
+ * Tests: backtick template strings -- `lit${expr}lit`
+ *
+ * Each ${expr} compiles to toString(expr) and concatenates with adjacent
+ * literal segments via OP_ADD.  The bare backtick form (no ${...}) emits
+ * a single OP_CONST with the literal body.
+ * ------------------------------------------------------------------------ */
+TEST(test_template_string_no_interpolation)
+{
+    /* "`hello`;" should behave like a plain string literal.               */
+    CandoChunk *c = compile_ok("`hello`;");
+    EXPECT_EQ(c->code[0], (u8)OP_CONST);
+    EXPECT_TRUE(has_string_const(c, "hello"));
+    /* No concatenation, no toString lookup. */
+    EXPECT_EQ(count_op(c, OP_ADD), 0);
+    EXPECT_FALSE(has_string_const(c, "toString"));
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_empty)
+{
+    /* "``;" should still emit something so the expression statement has
+     * a value to OP_POP.                                                  */
+    CandoChunk *c = compile_ok("``;");
+    EXPECT_EQ(c->code[0], (u8)OP_CONST);
+    EXPECT_TRUE(has_string_const(c, ""));
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_single_interp)
+{
+    /* "`hi ${name}`;" should:
+     *   - emit "hi " as a literal segment
+     *   - load global toString
+     *   - load global name
+     *   - OP_CALL with arity 1
+     *   - OP_ADD to concat literal + result                               */
+    CandoChunk *c = compile_ok("`hi ${name}`;");
+    EXPECT_TRUE(has_string_const(c, "hi "));
+    EXPECT_TRUE(has_string_const(c, "toString"));
+    EXPECT_TRUE(has_string_const(c, "name"));
+    EXPECT_EQ(count_op(c, OP_CALL), 1);
+    EXPECT_EQ(count_op(c, OP_ADD), 1);
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_only_interp)
+{
+    /* "`${42}`;" has no surrounding literal — only the toString call.    */
+    CandoChunk *c = compile_ok("`${42}`;");
+    EXPECT_TRUE(has_string_const(c, "toString"));
+    /* No surrounding literal means no concatenation. */
+    EXPECT_EQ(count_op(c, OP_ADD), 0);
+    EXPECT_EQ(count_op(c, OP_CALL), 1);
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_multiple_interps)
+{
+    /* "`a${x}b${y}c`;" produces 3 literal segments and 2 interpolations.
+     * Concatenation order with OP_ADD merges left-to-right, yielding
+     * 4 OP_ADDs (lit+toStr(x), then +lit, +toStr(y), +lit).              */
+    CandoChunk *c = compile_ok("`a${x}b${y}c`;");
+    EXPECT_TRUE(has_string_const(c, "a"));
+    EXPECT_TRUE(has_string_const(c, "b"));
+    EXPECT_TRUE(has_string_const(c, "c"));
+    EXPECT_TRUE(has_string_const(c, "x"));
+    EXPECT_TRUE(has_string_const(c, "y"));
+    EXPECT_TRUE(has_string_const(c, "toString"));
+    EXPECT_EQ(count_op(c, OP_CALL), 2);
+    EXPECT_EQ(count_op(c, OP_ADD), 4);
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_with_expression)
+{
+    /* "`sum=${1+2}`;" — interpolated expression with its own OP_ADD.
+     * Two OP_ADDs total: one inside ${...} (for 1+2) and one to
+     * concat the literal "sum=" with the result.                         */
+    CandoChunk *c = compile_ok("`sum=${1+2}`;");
+    EXPECT_TRUE(has_string_const(c, "sum="));
+    EXPECT_TRUE(has_string_const(c, "toString"));
+    EXPECT_TRUE(const_is_number(c, 0, 1.0) || const_is_number(c, 1, 1.0) ||
+                const_is_number(c, 2, 1.0) || const_is_number(c, 3, 1.0));
+    EXPECT_EQ(count_op(c, OP_CALL), 1);
+    EXPECT_EQ(count_op(c, OP_ADD), 2);
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_nested)
+{
+    /* "`outer ${ `inner ${x}` }`;" — a template inside a template.       */
+    CandoChunk *c = compile_ok("`outer ${ `inner ${x}` }`;");
+    EXPECT_TRUE(has_string_const(c, "outer "));
+    EXPECT_TRUE(has_string_const(c, "inner "));
+    EXPECT_TRUE(has_string_const(c, "x"));
+    /* Outer toString + inner toString = 2 calls. */
+    EXPECT_EQ(count_op(c, OP_CALL), 2);
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_method_call_inside)
+{
+    /* "`auth=${obj.name}`;" — method/field access inside ${...}.         */
+    CandoChunk *c = compile_ok("`auth=${obj.name}`;");
+    EXPECT_TRUE(has_string_const(c, "auth="));
+    EXPECT_TRUE(has_string_const(c, "toString"));
+    EXPECT_TRUE(has_string_const(c, "obj"));
+    EXPECT_TRUE(has_string_const(c, "name"));
+    EXPECT_TRUE(find_op(c, OP_GET_FIELD) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_empty_interp)
+{
+    /* "`pre ${} post`;" — interpolation with no expression should emit
+     * an empty string for that segment instead of erroring.              */
+    CandoChunk *c = compile_ok("`pre ${} post`;");
+    EXPECT_TRUE(has_string_const(c, "pre "));
+    EXPECT_TRUE(has_string_const(c, " post"));
+    EXPECT_TRUE(has_string_const(c, "toString"));
     cando_chunk_free(c);
 }
 
@@ -901,6 +1033,17 @@ int main(void)
     run_test("null literal",                   test_null_literal);
     run_test("true/false literals",            test_true_false_literals);
     run_test("string literal",                 test_string_literal);
+
+    printf("\n-- template strings --\n");
+    run_test("backtick: no interpolation",     test_template_string_no_interpolation);
+    run_test("backtick: empty",                test_template_string_empty);
+    run_test("backtick: single ${name}",       test_template_string_single_interp);
+    run_test("backtick: only ${expr}",         test_template_string_only_interp);
+    run_test("backtick: multiple interps",     test_template_string_multiple_interps);
+    run_test("backtick: ${1+2} expression",    test_template_string_with_expression);
+    run_test("backtick: nested templates",     test_template_string_nested);
+    run_test("backtick: ${obj.name}",          test_template_string_method_call_inside);
+    run_test("backtick: empty ${} segment",    test_template_string_empty_interp);
 
     printf("\n-- arithmetic --\n");
     run_test("addition",                       test_addition);
