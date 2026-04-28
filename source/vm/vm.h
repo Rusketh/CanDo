@@ -471,6 +471,20 @@ CANDO_API bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
                          struct CdoString *meta_key,
                          CandoValue *args, u32 argc);
 
+/*
+ * cando_vm_dispatch_callable -- invoke an already-resolved callable CdoValue
+ * (function/native/PC sentinel) with the given args.  Pushes one result onto
+ * vm->stack on success.  Used by callers that have located a callable meta
+ * value through their own walk (e.g. cdo_object_index_callable).
+ *
+ * `raw` is passed by const pointer so vm.h does not need the object-layer
+ * value definition; callers must include "object/value.h" before use.
+ */
+struct CdoValue;
+CANDO_API bool cando_vm_dispatch_callable(CandoVM *vm,
+                                           const struct CdoValue *raw,
+                                           CandoValue *args, u32 argc);
+
 /* =========================================================================
  * Threading helpers
  * ===================================================================== */

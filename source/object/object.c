@@ -397,6 +397,11 @@ bool cdo_object_rawdelete(CdoObject *obj, CdoString *key) {
 
 /* -----------------------------------------------------------------------
  * Prototype-chain lookup
+ *
+ * __index can be:
+ *   - a plain object or array (lookup table): traversal continues into it
+ *   - a function/native (callable): traversal stops; the VM layer dispatches
+ *     the callable via cdo_object_index_callable + cando_vm_dispatch_callable
  * --------------------------------------------------------------------- */
 bool cdo_object_get(CdoObject *obj, CdoString *key, CdoValue *out) {
     CdoObject *cur = obj;
@@ -415,7 +420,52 @@ bool cdo_object_get(CdoObject *obj, CdoString *key, CdoValue *out) {
         if (!cdo_object_rawget(cur, meta_index, &idx_val))
             return false;
 
-        if (!cdo_is_any_object(idx_val) || !idx_val.as.object)
+        /* Only plain objects and arrays act as lookup tables; callables
+         * (functions/natives/PC sentinels) terminate the chain. */
+        if (idx_val.tag != CDO_OBJECT && idx_val.tag != CDO_ARRAY)
+            return false;
+        if (!idx_val.as.object)
+            return false;
+
+        CdoObject *next = idx_val.as.object;
+        if (next == cur)
+            return false; /* self-loop guard */
+        cur = next;
+    }
+    return false;
+}
+
+/* -----------------------------------------------------------------------
+ * Callable __index lookup
+ *
+ * Walks the same chain as cdo_object_get, but instead of looking for a
+ * field by `key` it returns the first callable __index encountered.
+ * Used by the VM layer to dispatch __index as a function when a regular
+ * field lookup misses.
+ * --------------------------------------------------------------------- */
+bool cdo_object_index_callable(CdoObject *obj, CdoValue *out) {
+    CdoObject *cur = obj;
+
+    for (int depth = 0; depth < CANDO_PROTO_DEPTH_MAX; depth++) {
+        CdoString *meta_index = g_meta_index
+            ? g_meta_index
+            : cdo_intern_weak(META_INDEX, (u32)(sizeof(META_INDEX) - 1));
+        if (!meta_index)
+            return false;
+
+        CdoValue idx_val;
+        if (!cdo_object_rawget(cur, meta_index, &idx_val))
+            return false;
+
+        if (idx_val.tag == CDO_FUNCTION || idx_val.tag == CDO_NATIVE ||
+            idx_val.tag == CDO_NUMBER) {
+            *out = idx_val;
+            return true;
+        }
+
+        if (idx_val.tag != CDO_OBJECT && idx_val.tag != CDO_ARRAY)
+            return false;
+        if (!idx_val.as.object)
             return false;
 
         CdoObject *next = idx_val.as.object;
