@@ -271,16 +271,26 @@ CFLAGS_EXE_WIN = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=
 # files needed at runtime are cando.exe and libcando.dll (no
 # libcrypto-3-x64.dll, libwinpthread-1.dll, etc.).
 # crypt32 is required by OpenSSL's static libcrypto on Windows.
+#
+# --whole-archive on libwinpthread forces every pthread symbol to be embedded,
+# so any reference (including ones GCC's spec adds implicitly after our flags)
+# resolves to the static archive instead of libwinpthread-1.dll.  The trailing
+# -Wl,-Bstatic catches the implicit -lpthread MinGW's GCC spec appends to
+# satisfy libgcc's internal pthread references.
 LDFLAGS_LIB_WIN = -static-libgcc \
-                  -Wl,-Bstatic -lssl -lcrypto -lwinpthread -Wl,-Bdynamic \
-                  -lws2_32 -lcrypt32 -lm
+                  -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive \
+                  -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic \
+                  -lws2_32 -lcrypt32 -lm \
+                  -Wl,-Bstatic
 
 # The executable links against libcando.dll only — no OpenSSL needed here.
 # winpthread is statically linked defensively in case the toolchain pulls it
-# in for the EXE itself.
+# in for the EXE itself (libgcc's TLS/EH support references pthread symbols
+# even when the user code doesn't).
 LDFLAGS_EXE_WIN = -static-libgcc \
-                  -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic \
-                  -lws2_32 -lm
+                  -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive \
+                  -Wl,-Bdynamic -lws2_32 -lm \
+                  -Wl,-Bstatic
 
 libcando.dll: $(CANDO_LIB_SRCS) $(CANDO_WIN_EXTRA)
 	$(MINGW_CC) $(CFLAGS_WIN) -shared $^ -o $@ \
