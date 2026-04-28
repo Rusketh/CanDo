@@ -206,17 +206,35 @@ static void set_obj_field(CdoObject *obj, const char *name, CdoObject *child)
     cdo_string_release(key);
 }
 
-/* Iterate headers from a CdoObject (user-supplied {"Name": "Value", ...}). */
+/* Iterate headers from a CdoObject (user-supplied {"Name": "Value", ...}).
+ *
+ * Non-string values (numbers, bools, null) are coerced via cdo_value_tostring
+ * so callers can write `{ "X-Count": 42 }` without the field silently dropping.
+ * Internal keys prefixed with `__` are skipped so meta-method machinery does
+ * not bleed into the wire request. */
 typedef struct { HttpBuf *buf; } HeaderAppendUD;
 
 static bool append_header_iter(CdoString *key, CdoValue *val, u8 flags, void *ud)
 {
     (void)flags;
     HeaderAppendUD *a = (HeaderAppendUD *)ud;
-    if (val->tag != CDO_STRING) return true;
+
+    if (key->length == 0) return true;
+    if (key->length >= 2 && key->data[0] == '_' && key->data[1] == '_')
+        return true;
+    if (val->tag == CDO_NULL) return true;
+
     httpbuf_append(a->buf, key->data, key->length);
     httpbuf_append_cstr(a->buf, ": ");
-    httpbuf_append(a->buf, val->as.string->data, val->as.string->length);
+    if (val->tag == CDO_STRING && val->as.string) {
+        httpbuf_append(a->buf, val->as.string->data, val->as.string->length);
+    } else {
+        char *s = cdo_value_tostring(*val);
+        if (s) {
+            httpbuf_append_cstr(a->buf, s);
+            free(s);
+        }
+    }
     httpbuf_append_cstr(a->buf, "\r\n");
     return true;
 }
