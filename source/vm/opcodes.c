@@ -125,9 +125,10 @@ static const char *const s_opcode_names[OP_COUNT] = {
     [OP_YIELD]            = "OP_YIELD",
     [OP_THREAD]           = "OP_THREAD",
     /* Band 16: classes */
-    [OP_NEW_CLASS]        = "OP_NEW_CLASS",
-    [OP_BIND_METHOD]      = "OP_BIND_METHOD",
-    [OP_INHERIT]          = "OP_INHERIT",
+    [OP_NEW_CLASS]         = "OP_NEW_CLASS",
+    [OP_BIND_METHOD]       = "OP_BIND_METHOD",
+    [OP_INHERIT]           = "OP_INHERIT",
+    [OP_BIND_DEFAULT_CALL] = "OP_BIND_DEFAULT_CALL",
     /* Band 17: mask/selector */
     [OP_MASK_PASS]        = "OP_MASK_PASS",
     [OP_MASK_SKIP]        = "OP_MASK_SKIP",
@@ -267,9 +268,10 @@ static const CandoOpFmt s_opcode_fmts[OP_COUNT] = {
     [OP_YIELD]            = OPFMT_NONE,
     [OP_THREAD]           = OPFMT_NONE,
     /* Band 16: classes */
-    [OP_NEW_CLASS]        = OPFMT_A,
-    [OP_BIND_METHOD]      = OPFMT_A,
-    [OP_INHERIT]          = OPFMT_NONE,
+    [OP_NEW_CLASS]         = OPFMT_A,
+    [OP_BIND_METHOD]       = OPFMT_A,
+    [OP_INHERIT]           = OPFMT_NONE,
+    [OP_BIND_DEFAULT_CALL] = OPFMT_NONE,
     /* Band 17: mask/selector */
     [OP_MASK_PASS]        = OPFMT_NONE,
     [OP_MASK_SKIP]        = OPFMT_NONE,

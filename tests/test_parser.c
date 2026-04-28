@@ -630,14 +630,56 @@ TEST(test_range_desc)
  * ------------------------------------------------------------------------ */
 TEST(test_class_declaration)
 {
-    CandoChunk *c = compile_ok("CLASS Dog { FUNCTION bark() { RETURN NULL; } }");
+    /* New class syntax:  the body between '{' and '}' is the constructor
+     * body, methods are added later as field assignments.                 */
+    CandoChunk *c = compile_ok(
+        "CLASS Dog = (self, name) { self.name = name; }");
     EXPECT_TRUE(find_op(c, OP_NEW_CLASS) >= 0);
-    EXPECT_TRUE(find_op(c, OP_BIND_METHOD) >= 0);
-    bool found = false;
+    EXPECT_TRUE(find_op(c, OP_CLOSURE) >= 0);            /* ctor closure   */
+    EXPECT_TRUE(find_op(c, OP_BIND_METHOD) >= 0);        /* __constructor  */
+    EXPECT_TRUE(find_op(c, OP_BIND_DEFAULT_CALL) >= 0);  /* default __call */
+    EXPECT_TRUE(find_op(c, OP_DEF_GLOBAL) >= 0);
+    bool dog_const = false, ctor_const = false;
     for (u32 i = 0; i < c->const_count; i++) {
-        if (const_is_string(c, i, "Dog")) { found = true; break; }
+        if (const_is_string(c, i, "Dog"))           dog_const  = true;
+        if (const_is_string(c, i, "__constructor")) ctor_const = true;
     }
-    EXPECT_TRUE(found);
+    EXPECT_TRUE(dog_const);
+    EXPECT_TRUE(ctor_const);
+    cando_chunk_free(c);
+}
+
+TEST(test_class_extends)
+{
+    CandoChunk *c = compile_ok(
+        "CLASS Animal = (self, name) { self.name = name; }\n"
+        "CLASS Dog EXTENDS Animal = (self, name, breed) {\n"
+        "    Animal.__constructor(self, name);\n"
+        "    self.breed = breed;\n"
+        "}");
+    EXPECT_TRUE(find_op(c, OP_INHERIT) >= 0);
+    EXPECT_TRUE(find_op(c, OP_BIND_DEFAULT_CALL) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_class_expression_form)
+{
+    /* Anonymous class assigned to a variable. */
+    CandoChunk *c = compile_ok(
+        "VAR Counter = class (self) { self.count = 0; };");
+    EXPECT_TRUE(find_op(c, OP_NEW_OBJECT) >= 0);  /* anon -> NEW_OBJECT  */
+    EXPECT_TRUE(find_op(c, OP_BIND_DEFAULT_CALL) >= 0);
+    EXPECT_TRUE(find_op(c, OP_DEF_GLOBAL) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_class_lowercase_keywords)
+{
+    /* The lexer treats pure lowercase keywords identically.              */
+    CandoChunk *c = compile_ok(
+        "class Vec = (self, x, y) { self.x = x; self.y = y; }");
+    EXPECT_TRUE(find_op(c, OP_NEW_CLASS) >= 0);
+    EXPECT_TRUE(find_op(c, OP_BIND_DEFAULT_CALL) >= 0);
     cando_chunk_free(c);
 }
 
@@ -915,6 +957,9 @@ int main(void)
 
     printf("\n-- classes --\n");
     run_test("class declaration",              test_class_declaration);
+    run_test("class extends",                  test_class_extends);
+    run_test("class expression (anon)",        test_class_expression_form);
+    run_test("class lowercase keywords",       test_class_lowercase_keywords);
 
     printf("\n-- compound --\n");
     run_test("nested if/while",                test_nested_if_while);

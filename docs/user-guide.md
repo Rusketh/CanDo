@@ -427,32 +427,33 @@ print(evens);            // [2, 4]
 
 ## Classes
 
-`CLASS` creates a prototype-based object:
+A `CLASS` is a callable table.  Calling it builds a fresh instance whose
+`__index` points back at the class.  The body between the braces is the
+constructor body; methods are added afterwards as field assignments.
 
 ```cando
-CLASS Point {
-    FUNCTION make(x, y) {
-        RETURN { x: x, y: y };
-    }
-
-    FUNCTION dist(self) {
-        RETURN math.sqrt(self.x ^ 2 + self.y ^ 2);
-    }
-
-    FUNCTION add(self, other) {
-        RETURN Point.make(self.x + other.x, self.y + other.y);
-    }
+CLASS Point = (self, x, y) {
+    self.x = x;
+    self.y = y;
 }
 
-VAR a = Point.make(3, 0);
-VAR b = Point.make(0, 4);
+Point.dist = FUNCTION(self) {
+    RETURN math.sqrt(self.x ^ 2 + self.y ^ 2);
+};
+Point.add = FUNCTION(self, other) {
+    RETURN Point(self.x + other.x, self.y + other.y);
+};
+
+VAR a = Point(3, 0);
+VAR b = Point(0, 4);
 VAR c = a:add(b);
 print(c:dist());         // 5
-print(c.x, c.y);        // 3 4
+print(c.x, c.y);         // 3 4
 ```
 
 Methods called with `:` receive the object as the first argument (`self`
-by convention).
+by convention).  See [metamethods.md](metamethods.md) for the full
+desugaring, the `extends` clause, and operator metamethods.
 
 ## Threads
 

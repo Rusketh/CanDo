@@ -58,6 +58,7 @@ static void        parse_precedence(CandoParser *p, Precedence min_prec);
 static void        parse_statement(CandoParser *p);
 static void        parse_block(CandoParser *p);
 static void        parse_function_expr(CandoParser *p, bool can_assign);
+static void        parse_class_expr(CandoParser *p, bool can_assign);
 static const ParseRule *get_rule(CandoTokenType t);
 
 /* ---- chunk shortcut --------------------------------------------------- */
@@ -1139,6 +1140,7 @@ static const ParseRule RULES[TOK_COUNT] = {
     [TOK_LBRACKET]       = { parse_array_literal,  parse_subscript,  PREC_CALL_PREC  },
     [TOK_LBRACE]         = { parse_object_literal, NULL,             PREC_NONE       },
     [TOK_FUNCTION]       = { parse_function_expr,  NULL,             PREC_NONE       },
+    [TOK_CLASS]          = { parse_class_expr,     NULL,             PREC_NONE       },
     [TOK_THREAD]         = { parse_thread_expr,    NULL,             PREC_NONE       },
     [TOK_AWAIT]          = { parse_await_expr,     NULL,             PREC_NONE       },
 
@@ -1726,100 +1728,193 @@ static void parse_function(CandoParser *p)
 #undef MAX_PARAMS
 }
 
-/* --- CLASS declaration --------------------------------------------------
- * Syntax:  CLASS Name { [FUNCTION method(params) { block }]* }
- */
+/* --- CLASS expression body ----------------------------------------------
+ *
+ * Both the statement form (`class Name = (params) { body }`) and the
+ * expression forms (`class [Name] (params) { body }`) share the same body
+ * compilation: a constructor function whose params and body are written
+ * exactly like `function(params) { body }`, plus the bookkeeping that
+ * makes the class callable.
+ *
+ * Preconditions when this helper is invoked:
+ *   - The class object is already on top of the stack (created by either
+ *     OP_NEW_CLASS — for a named class — or OP_NEW_OBJECT — for the
+ *     anonymous expression form).
+ *   - If `extends Parent` was parsed, the parent expression has been
+ *     compiled BEFORE the class object so the stack reads
+ *     [..., parent, class] and a single OP_INHERIT pops the parent and
+ *     records `class.__index = parent`.
+ *
+ * Emits, with the class still on TOS at the end:
+ *   1. (optional) OP_INHERIT
+ *   2. Constructor body compiled inline + OP_CLOSURE pushing the function
+ *      value, then OP_BIND_METHOD __constructor.
+ *   3. OP_BIND_DEFAULT_CALL — wires the class's __call to the VM's
+ *      default constructor wrapper.
+ * ----------------------------------------------------------------------- */
+static void emit_class_body(CandoParser *p, bool has_extends)
+{
+    if (has_extends) {
+        /* Stack: [..., parent, class] -> [..., class] */
+        emit_op(p, OP_INHERIT);
+    }
+
+    /* Parameter list is optional: `class Foo = { }` is shorthand for
+     * `class Foo = () { }` (an empty constructor that ignores any args). */
+#define MAX_PARAMS 64
+    const char *param_names[MAX_PARAMS];
+    u32         param_lens[MAX_PARAMS];
+    u16 arity = 0;
+
+    if (match(p, TOK_LPAREN)) {
+        if (!check(p, TOK_RPAREN)) {
+            do {
+                if (check(p, TOK_RPAREN)) break;
+                if (match(p, TOK_VARARG)) break;
+                consume(p, TOK_IDENT, "expected parameter name");
+                if (arity >= MAX_PARAMS) {
+                    error(p, "too many parameters");
+                    break;
+                }
+                param_names[arity] = p->previous.start;
+                param_lens[arity]  = p->previous.length;
+                arity++;
+            } while (match(p, TOK_COMMA));
+        }
+        consume(p, TOK_RPAREN, "expected ')' after class parameters");
+    }
+    consume(p, TOK_LBRACE, "expected '{' before class body");
+
+    /* Compile the constructor body inline with the same shape as a
+     * `function(params) { ... }` expression so the resulting closure can
+     * be called via cando_vm_call_value() from the default __call native. */
+    u32 skip_body = emit_jump(p, OP_JUMP);
+    u32 fn_start  = cur(p)->code_len;
+
+    CandoLocal saved_locals[CANDO_LOCAL_MAX];
+    u32        saved_count = p->local_count;
+    int        saved_depth = p->scope_depth;
+    memcpy(saved_locals, p->locals, sizeof(CandoLocal) * saved_count);
+
+    p->local_count = 0;
+    p->scope_depth = 1;
+
+    declare_local(p, "", 0, false); /* slot 0: call frame sentinel */
+    for (u16 i = 0; i < arity; i++)
+        declare_local(p, param_names[i], param_lens[i], false);
+
+    parse_block(p);
+
+    emit_op(p, OP_NULL);
+    emit_op_a(p, OP_RETURN, 1);
+
+    p->local_count = saved_count;
+    p->scope_depth = saved_depth;
+    memcpy(p->locals, saved_locals, sizeof(CandoLocal) * saved_count);
+
+    patch_jump(p, skip_body);
+
+    /* Build the constructor closure (an OBJ_FUNCTION) and bind it to
+     * the class as `__constructor`.  Using OP_CLOSURE rather than the
+     * inline-PC trick lets cando_vm_call_value() invoke it from C.       */
+    u16 ctor_pc_idx   = cando_chunk_add_const(cur(p),
+                                              cando_number((f64)fn_start));
+    emit_op_a(p, OP_CLOSURE, ctor_pc_idx);
+    static const char kCtorName[] = "__constructor";
+    u16 ctor_name_idx = str_const(p, kCtorName,
+                                  (u32)(sizeof(kCtorName) - 1));
+    emit_op_a(p, OP_BIND_METHOD, ctor_name_idx);
+
+    /* Make the class callable: class.__call = vm->default_class_call. */
+    emit_op(p, OP_BIND_DEFAULT_CALL);
+#undef MAX_PARAMS
+}
+
+/* Optional `extends Parent` clause.
+ * When present, push the parent expression onto the stack BEFORE the class
+ * object so OP_INHERIT (emitted later by emit_class_body) can pop it.
+ * Returns true if an EXTENDS clause was consumed.
+ * ----------------------------------------------------------------------- */
+static bool parse_class_extends(CandoParser *p)
+{
+    if (!match(p, TOK_EXTENDS)) return false;
+    consume(p, TOK_IDENT, "expected parent class name after EXTENDS");
+    u16 parent_idx = prev_name_const(p);
+    /* Look up the parent at the global scope; classes live in globals. */
+    emit_op_a(p, OP_LOAD_GLOBAL, parent_idx);
+    return true;
+}
+
+/* --- CLASS declaration (statement form) ---------------------------------
+ * Syntax:  class Name [extends Parent] = [(params)] { body }
+ *
+ * Desugars to: var Name = class Name [extends Parent] [(params)] { body }
+ * The class is bound as a global; its __type meta-key is set to Name.
+ * ----------------------------------------------------------------------- */
 static void parse_class(CandoParser *p)
 {
     consume(p, TOK_IDENT, "expected class name");
     u16 name_idx = prev_name_const(p);
 
-    /* Optional superclass / constructor parameters */
-    if (match(p, TOK_LPAREN)) {
-        u32 depth = 1;
-        while (!check(p, TOK_EOF) && depth > 0) {
-            if (match(p, TOK_LPAREN))      depth++;
-            else if (match(p, TOK_RPAREN)) depth--;
-            else                            advance(p);
-        }
-    }
+    bool has_extends = parse_class_extends(p);
+    /* Stack now: [..., parent?]  (nothing yet for the class).            */
 
-    consume(p, TOK_LBRACE, "expected '{' before class body");
+    /* The `=` is mandatory in the statement form -- it is what
+     * distinguishes `class Foo = (...) {...}` from a stray expression.
+     * Allow both `class Foo = (params) { body }` (with params) and
+     * `class Foo = { body }` (constructor takes no args).                */
+    consume(p, TOK_ASSIGN, "expected '=' in class declaration");
+
+    /* Now create the class object on TOS and (if needed) wire __index. */
     emit_op_a(p, OP_NEW_CLASS, name_idx);
 
-    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
-        match(p, TOK_STATIC);
-        match(p, TOK_PRIVATE);
+    emit_class_body(p, has_extends);
 
-        if (match(p, TOK_FUNCTION)) {
-            consume(p, TOK_IDENT, "expected method name");
-            u16 meth_idx = prev_name_const(p);
+    /* Statement form: bind the class as a global. */
+    emit_op_a(p, OP_DEF_GLOBAL, name_idx);
+}
 
-#define MAX_METH_PARAMS 64
-            const char *param_names[MAX_METH_PARAMS];
-            u32         param_lens[MAX_METH_PARAMS];
-            u16 arity = 0;
+/* --- CLASS expression ---------------------------------------------------
+ * Pratt prefix handler for `TOK_CLASS`.
+ *
+ * Forms:
+ *   class                (params) { body }   -- anonymous, no __type
+ *   class Name           (params) { body }   -- named, __type = "Name"
+ *   class [Name] extends Parent (params) { body }
+ *
+ * Distinguishing the expression form from the statement form is done by
+ * the caller: parse_statement matches TOK_CLASS first and dispatches to
+ * parse_class (the statement form) before parse_expr_stmt has a chance to
+ * route through this Pratt prefix.  Inside expressions (e.g. on the RHS of
+ * a `var x = ...`), this handler runs.
+ * ----------------------------------------------------------------------- */
+static void parse_class_expr(CandoParser *p, bool can_assign)
+{
+    (void)can_assign;
 
-            consume(p, TOK_LPAREN, "expected '(' after method name");
-            if (!check(p, TOK_RPAREN)) {
-                do {
-                    if (check(p, TOK_RPAREN)) break;
-                    if (match(p, TOK_VARARG)) break;
-                    consume(p, TOK_IDENT, "expected parameter name");
-                    if (arity < MAX_METH_PARAMS) {
-                        param_names[arity] = p->previous.start;
-                        param_lens[arity]  = p->previous.length;
-                        arity++;
-                    }
-                } while (match(p, TOK_COMMA));
-            }
-            consume(p, TOK_RPAREN, "expected ')' after method parameters");
-            consume(p, TOK_LBRACE, "expected '{' before method body");
-
-            u32 skip = emit_jump(p, OP_JUMP);
-            u32 meth_start = cur(p)->code_len;
-
-            /* Save and reset scope for method body (mirrors parse_function). */
-            CandoLocal saved_locals[CANDO_LOCAL_MAX];
-            u32        saved_count = p->local_count;
-            int        saved_depth = p->scope_depth;
-            memcpy(saved_locals, p->locals,
-                   sizeof(CandoLocal) * saved_count);
-
-            p->local_count = 0;
-            p->scope_depth = 1;
-
-            declare_local(p, "", 0, false); /* slot 0: call frame sentinel */
-            for (u16 i = 0; i < arity; i++)
-                declare_local(p, param_names[i], param_lens[i], false);
-
-            parse_block(p);
-
-            /* Restore outer scope. */
-            p->local_count = saved_count;
-            p->scope_depth = saved_depth;
-            memcpy(p->locals, saved_locals,
-                   sizeof(CandoLocal) * saved_count);
-
-            emit_op(p, OP_NULL);
-            emit_op_a(p, OP_RETURN, 1);
-            patch_jump(p, skip);
-#undef MAX_METH_PARAMS
-
-            /* Push method PC as number, then bind to the class on TOS.  */
-            u16 pc_idx = cando_chunk_add_const(cur(p),
-                                               cando_number((f64)meth_start));
-            emit_op_a(p, OP_CONST, pc_idx);
-            emit_op_a(p, OP_BIND_METHOD, meth_idx);
-        } else {
-            advance(p);  /* skip unknown token */
-        }
+    bool has_name = check(p, TOK_IDENT);
+    u16  name_idx = 0;
+    if (has_name) {
+        advance(p);
+        name_idx = prev_name_const(p);
     }
 
-    consume(p, TOK_RBRACE, "expected '}' after class body");
+    bool has_extends = parse_class_extends(p);
 
-    /* Store the class object as a global variable with the class name. */
-    emit_op_a(p, OP_DEF_GLOBAL, name_idx);
+    /* Push the class object: named classes get __type via OP_NEW_CLASS;
+     * anonymous classes use OP_NEW_OBJECT so __type is left unset.        */
+    if (has_name)
+        emit_op_a(p, OP_NEW_CLASS, name_idx);
+    else
+        emit_op(p, OP_NEW_OBJECT);
+
+    emit_class_body(p, has_extends);
+
+    /* The class is now on TOS as a value -- the surrounding expression
+     * (e.g. `var X = class ...`) will assign or use it.                   */
+    p->last_expr_was_call   = false;
+    p->last_expr_was_unpack = false;
+    p->last_multi_push      = 1;
 }
 
 /* --- RETURN ------------------------------------------------------------- */

@@ -277,6 +277,13 @@ struct CandoVM {
     CandoValue     string_proto;    /* string method table (or null)        */
     CandoValue     array_proto;     /* array method table (or null)         */
 
+    /* Default constructor wrapper ------------------------------------- */
+    /* Native sentinel value bound to __call on every CLASS object.       */
+    /* When a class is invoked (Vector(...)), OP_CALL dispatches via      */
+    /* __call, which lands in this native and runs the default ctor      */
+    /* protocol: allocate {__index=cls}, run cls.__constructor on it.     */
+    CandoValue     default_class_call;
+
     /* Module cache (used by include()) --------------------------------- */
     CandoModuleEntry *module_cache;       /* heap array of cached entries   */
     u32               module_cache_count; /* number of entries used         */

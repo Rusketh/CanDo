@@ -74,10 +74,11 @@ int cando_native_type(CandoVM *vm, int argc, CandoValue *args)
     if (argc < 1) {
         cando_vm_push(vm, cando_null());
     } else if (cando_is_object(args[0]) && g_meta_type) {
-        /* If object has __type field, return it as the type name. */
+        /* Follow the prototype (__index) chain so a class instance whose
+         * class declares __type reports that class as its type. */
         CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
         CdoValue type_val;
-        if (cdo_object_rawget(obj, g_meta_type, &type_val)) {
+        if (cdo_object_get(obj, g_meta_type, &type_val)) {
             cando_vm_push(vm, cando_bridge_to_cando(vm, type_val));
         } else {
             const char *name = cando_value_type_name((TypeTag)args[0].tag);

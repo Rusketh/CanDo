@@ -53,6 +53,8 @@ static bool           vm_is_truthy_meta(CandoVM *vm, CandoValue v, bool *ok);
 static u32            vm_global_hash(const char *str, u32 len);
 static void           vm_call_closure_with_args(CandoVM *vm, CdoObject *fn_obj,
                                                  CandoValue *args, u32 argc);
+static int            vm_native_class_default_call(CandoVM *vm, int argc,
+                                                    CandoValue *args);
 
 /* =========================================================================
  * VM lifecycle
@@ -82,6 +84,7 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) vm->thread_results[i] = cando_null();
     vm->string_proto    = cando_null();
     vm->array_proto     = cando_null();
+    vm->default_class_call = cando_null();
 
     /* Module cache — initially empty. */
     vm->module_cache       = NULL;
@@ -110,6 +113,10 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
                                        64 * sizeof(CandoGlobalEntry));
     memset(vm->globals_owned->entries, 0, 64 * sizeof(CandoGlobalEntry));
     vm->globals = vm->globals_owned;
+
+    /* Register the default class __call wrapper as an unnamed native. */
+    vm->default_class_call =
+        cando_vm_add_native(vm, vm_native_class_default_call);
 }
 
 void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
@@ -136,6 +143,7 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) child->thread_results[i] = cando_null();
     child->string_proto    = cando_value_copy(parent->string_proto);
     child->array_proto     = cando_value_copy(parent->array_proto);
+    child->default_class_call = parent->default_class_call;
 
     /* Module cache: child VMs do not cache modules independently. */
     child->module_cache       = NULL;
@@ -418,6 +426,89 @@ CandoValue cando_vm_add_native(CandoVM *vm, CandoNativeFn fn) {
     u32 idx = vm->native_count++;
     vm->native_fns[idx] = fn;
     return cando_number(-(f64)(idx + 1));
+}
+
+/* =========================================================================
+ * Default class __call wrapper
+ *
+ * Bound as the __call metamethod of every CLASS object.  When the class is
+ * invoked --  Vector(1, 2, 3)  --  OP_CALL routes the call here with:
+ *     args[0]      = the class object itself
+ *     args[1..N-1] = the user-supplied constructor arguments
+ *
+ * Behaviour:
+ *   1. Allocate a fresh instance object.
+ *   2. Set instance.__index = class so methods on the class are reachable
+ *      via the prototype chain.
+ *   3. If the class has a __constructor field, invoke it with
+ *      (instance, args[1..N-1]).  Discard its return values.
+ *   4. Push the instance onto the value stack and return 1.
+ * ===================================================================== */
+static int vm_native_class_default_call(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1 || !cando_is_object(args[0])) {
+        vm_runtime_error(vm, "class __call: missing class receiver");
+        return -1;
+    }
+
+    CandoValue cls_val  = args[0];
+    CdoObject *cls_obj  = cando_bridge_resolve(vm, cls_val.as.handle);
+    if (!cls_obj) {
+        vm_runtime_error(vm, "class __call: invalid class handle");
+        return -1;
+    }
+
+    /* 1. Allocate the instance. */
+    CandoValue inst_val = cando_bridge_new_object(vm);
+    CdoObject *inst_obj = cando_bridge_resolve(vm, inst_val.as.handle);
+
+    /* 2. instance.__index = class. */
+    if (g_meta_index) {
+        CdoValue cls_cdo = cando_bridge_to_cdo(vm, cls_val);
+        cdo_object_rawset(inst_obj, g_meta_index, cls_cdo, FIELD_NONE);
+        cdo_value_release(cls_cdo);
+    }
+
+    /* 3. Look up __constructor on the class (raw, no proto traversal: a
+     * subclass declares its own constructor and we don't want to silently
+     * borrow the parent's body when none is given). */
+    CdoValue ctor_cdo = cdo_null();
+    bool has_ctor = false;
+    if (g_meta_constructor) {
+        has_ctor = cdo_object_rawget(cls_obj, g_meta_constructor, &ctor_cdo);
+    }
+
+    if (has_ctor) {
+        CandoValue ctor_val = cando_bridge_to_cando(vm, ctor_cdo);
+        cdo_value_release(ctor_cdo);
+
+        /* Build the constructor argument list:
+         *   ctor_args[0]      = the new instance
+         *   ctor_args[1..]    = the original user args
+         */
+        u32 ctor_argc = (u32)argc;  /* same total: replace cls with instance */
+        CandoValue *ctor_args = (CandoValue *)cando_alloc(
+            ctor_argc * sizeof(CandoValue));
+        ctor_args[0] = inst_val;
+        for (int i = 1; i < argc; i++) ctor_args[i] = args[i];
+
+        int ret = cando_vm_call_value(vm, ctor_val, ctor_args, ctor_argc);
+        cando_value_release(ctor_val);
+        cando_free(ctor_args);
+
+        if (vm->has_error) {
+            cando_value_release(inst_val);
+            return -1;
+        }
+        /* Pop and discard any return values from the constructor; the
+         * instance, not the body's return value, is what __call yields. */
+        for (int i = 0; i < ret; i++)
+            cando_value_release(cando_vm_pop(vm));
+    }
+
+    /* 4. Push the instance as the result of the call. */
+    cando_vm_push(vm, inst_val);
+    return 1;
 }
 
 /* =========================================================================
@@ -1228,9 +1319,10 @@ static CandoVMResult vm_run(CandoVM *vm) {
         [OP_AWAIT]            = &&lbl_OP_AWAIT,
         [OP_YIELD]            = &&lbl_OP_YIELD,
         [OP_THREAD]           = &&lbl_OP_THREAD,
-        [OP_NEW_CLASS]        = &&lbl_OP_NEW_CLASS,
-        [OP_BIND_METHOD]      = &&lbl_OP_BIND_METHOD,
-        [OP_INHERIT]          = &&lbl_OP_INHERIT,
+        [OP_NEW_CLASS]         = &&lbl_OP_NEW_CLASS,
+        [OP_BIND_METHOD]       = &&lbl_OP_BIND_METHOD,
+        [OP_INHERIT]           = &&lbl_OP_INHERIT,
+        [OP_BIND_DEFAULT_CALL] = &&lbl_OP_BIND_DEFAULT_CALL,
         [OP_MASK_PASS]        = &&lbl_OP_MASK_PASS,
         [OP_MASK_SKIP]        = &&lbl_OP_MASK_SKIP,
         [OP_MASK_APPLY]       = &&lbl_OP_MASK_APPLY,
@@ -2270,6 +2362,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             /* The function value sits just below the arguments. */
             CandoValue callee = *(vm->stack_top - arg_count - 1);
 
+        op_call_dispatch:
             /* Native function: negative-number sentinel convention. */
             if (IS_NATIVE_FN(callee)) {
                 u32 ni = NATIVE_INDEX(callee);
@@ -2382,6 +2475,42 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     }
                     LOAD_FRAME();
                     DISPATCH();
+                }
+
+                /* __call meta-method: invoking a non-function object whose
+                 * __call is a callable.  Splice the original receiver in as
+                 * the first argument and re-enter dispatch with the meta
+                 * function as the new callee.  Used by CLASS objects: every
+                 * class binds vm->default_class_call to its __call.        */
+                if (fn_obj && g_meta_call) {
+                    CdoValue meta_val;
+                    if (cdo_object_get(fn_obj, g_meta_call, &meta_val)) {
+                        if (vm->stack_top >= vm->stack + CANDO_STACK_MAX) {
+                            vm_runtime_error(vm,
+                                "stack overflow in __call dispatch");
+                            goto handle_error;
+                        }
+                        CandoValue meta_callee =
+                            cando_bridge_to_cando(vm, meta_val);
+                        /* Layout before splice (arg_count = N):
+                         *     base[0]   = callee
+                         *     base[1..N] = args
+                         *     stack_top = base + N + 1
+                         * Layout after splice (new arg_count = N+1):
+                         *     base[0]   = meta_callee
+                         *     base[1]   = original callee (now first arg)
+                         *     base[2..N+1] = original args
+                         *     stack_top = base + N + 2
+                         */
+                        CandoValue *base = vm->stack_top - arg_count - 1;
+                        for (int i = (int)arg_count; i >= 0; i--)
+                            base[i + 1] = base[i];
+                        base[0] = meta_callee;
+                        vm->stack_top++;
+                        arg_count++;
+                        callee = meta_callee;
+                        goto op_call_dispatch;
+                    }
                 }
             }
 
@@ -3317,11 +3446,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
         OP_CASE(OP_INHERIT): {
             /* Stack: [..., parent_class, child_class]
-             * Set child.__index = parent so instances find methods on both. */
+             * Set child.__index = parent and leave only child on TOS. */
             CandoValue child_val  = POP();
-            CandoValue parent_val = PEEK(0);
+            CandoValue parent_val = POP();
             if (!cando_is_object(child_val) || !cando_is_object(parent_val)) {
                 cando_value_release(child_val);
+                cando_value_release(parent_val);
                 vm_runtime_error(vm, "INHERIT: expected class objects");
                 goto handle_error;
             }
@@ -3331,7 +3461,25 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cdo_object_rawset(child, g_meta_index, pv, FIELD_NONE);
                 cdo_value_release(pv);
             }
+            cando_value_release(parent_val);
             PUSH(child_val);
+            DISPATCH();
+        }
+        OP_CASE(OP_BIND_DEFAULT_CALL): {
+            /* Stack: [..., class_obj]
+             * Set class.__call to the VM-wide default constructor wrapper.
+             * Class stays on TOS so further bindings can proceed.          */
+            CandoValue cls_val = PEEK(0);
+            if (!cando_is_object(cls_val)) {
+                vm_runtime_error(vm, "BIND_DEFAULT_CALL: expected class object");
+                goto handle_error;
+            }
+            if (g_meta_call) {
+                CdoObject *cls = cando_bridge_resolve(vm, cls_val.as.handle);
+                CdoValue   cv  = cando_bridge_to_cdo(vm, vm->default_class_call);
+                cdo_object_rawset(cls, g_meta_call, cv, FIELD_NONE);
+                cdo_value_release(cv);
+            }
             DISPATCH();
         }
 

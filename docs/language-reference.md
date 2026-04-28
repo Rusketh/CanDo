@@ -392,35 +392,92 @@ their own `pipe` binding.
 
 ## Classes
 
-`CLASS` defines an object whose methods are stored as fields and
-accessible via the `__index` prototype chain.  Method calls with `:`
-pass the receiver as the first argument (`self`).
-
-A factory method should call `object.setPrototype(inst, ClassName)` so
-that instances inherit the class methods:
+`CLASS` defines a callable table.  Calling the class
+(`Vector(1, 2, 3)`) produces a fresh instance whose `__index` points back
+at the class so methods are reachable via the prototype chain.  The body
+between the braces is the **constructor body**; the parameter list comes
+right after the `=` sign:
 
 ```cando
-CLASS Point {
-    FUNCTION make(x, y) {
-        VAR p = { x: x, y: y };
-        object.setPrototype(p, Point);    // p.__index = Point
-        RETURN p;
-    }
-    FUNCTION dist(self) {
-        RETURN math.sqrt(self.x * self.x + self.y * self.y);
-    }
+CLASS Vector = (self, x, y, z) {
+    self.x = x;
+    self.y = y;
+    self.z = z;
 }
 
-print(type(Point));        // Point  (__type set by CLASS)
-VAR p = Point.make(3, 4);
-print(p:dist());           // 5
+VAR v = Vector(1, 2, 3);
+print(type(v));            // Vector
+print(v.x, v.y, v.z);      // 1 2 3
 ```
 
-`CLASS` automatically sets `__type` to the class name (immutable).
-Method declarations inside a class body may be preceded by `STATIC`
-and/or `PRIVATE`, which are accepted by the parser as field-flag hints.
-See [metamethods.md](metamethods.md) for the full prototype system and
-all available meta-keys.
+Methods, including operator metamethods, are added afterwards as ordinary
+field assignments on the class:
+
+```cando
+Vector.__add = FUNCTION(a, b) {
+    RETURN Vector(a.x + b.x, a.y + b.y, a.z + b.z);
+};
+Vector.length = FUNCTION(self) {
+    RETURN math.sqrt(self.x * self.x +
+                     self.y * self.y +
+                     self.z * self.z);
+};
+
+VAR sum = Vector(1, 2, 3) + Vector(4, 5, 6);
+print(sum:length());       // ~10.49
+```
+
+### Three forms
+
+```cando
+// Statement form -- declares a global named after the class.
+//   - The leading `=` is required.
+//   - __type is set to the class name.
+class Vector = (self, x, y, z) { ... }
+
+// Anonymous expression form -- no __type is set.
+var Vector = class (self, x, y, z) { ... };
+
+// Named expression form -- __type = "Vector".
+var Vector = class Vector (self, x, y, z) { ... };
+```
+
+The parameter list is optional; `class Foo = { }` declares an empty
+class with no constructor arguments.
+
+### Inheritance
+
+`EXTENDS` records a parent class so that field lookups fall through the
+parent when a key is not present on the child or its instance.  Use the
+parent's class object directly (via `Child.__index`) to call a parent
+method explicitly -- there is no `super` keyword:
+
+```cando
+class Animal = (self, name) { self.name = name; }
+Animal.speak = FUNCTION(self) { RETURN self.name + " says hello"; };
+
+class Dog extends Animal = (self, name, breed) {
+    Animal.__constructor(self, name);   // call the parent constructor
+    self.breed = breed;
+}
+Dog.bark = FUNCTION(self) {
+    // Dog.__index points at Animal.
+    RETURN Dog.__index.speak(self) + " (woof, " + self.breed + ")";
+};
+
+VAR rex = Dog("Rex", "labrador");
+print(rex:bark());     // Rex says hello (woof, labrador)
+```
+
+### Keyword case
+
+CanDo keywords are case-insensitive but reject mixed-case spellings.
+`class`, `CLASS`, `var`, `VAR`, `extends`, `EXTENDS` etc. all work; a
+mixed-case form like `Class` or `eXtEnDs` is treated as an ordinary
+identifier.
+
+See [metamethods.md](metamethods.md) for the full prototype system,
+the desugaring of `class`, and all available meta-keys.
 
 ## Threads
 
