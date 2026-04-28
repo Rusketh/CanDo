@@ -32,17 +32,30 @@ jobs:
       - name: Test modules (script integration)
         run: ./cando modules/ldap/test_ldap.cdo
 
-      - name: Upload binary
+      - name: Stage release artifact
+        # actions/upload-artifact@v4 strips the lowest common ancestor of
+        # the matched paths, so we collect everything in a dist/ directory
+        # first.  Uploading dist/* makes the artifact ZIP extract cleanly
+        # to "cando" + "modules/<name>/<name>.so".
+        run: |
+          set -e
+          mkdir -p dist/modules
+          cp cando dist/
+          for so in modules/*/*.so; do
+            mod=$(basename "$(dirname "$so")")
+            mkdir -p "dist/modules/$mod"
+            cp "$so" "dist/modules/$mod/"
+            if [ -f "modules/$mod/README.md" ]; then
+              cp "modules/$mod/README.md" "dist/modules/$mod/"
+            fi
+          done
+          ls -lR dist
+
+      - name: Upload binary + modules
         uses: actions/upload-artifact@v4
         with:
           name: cando-linux-x86_64
-          path: cando
-
-      - name: Upload modules
-        uses: actions/upload-artifact@v4
-        with:
-          name: cando-modules-linux-x86_64
-          path: modules/**/*.so
+          path: dist/*
 
   # ---------------------------------------------------------------------------
   # Windows build (MinGW-w64 via MSYS2, includes OpenSSL)
@@ -89,16 +102,26 @@ jobs:
           done
           echo "OK: no MinGW runtime DLL dependencies."
 
-      - name: Upload binary
+      - name: Stage release artifact
+        # See the Linux job for the rationale -- collect everything under
+        # dist/ so the artifact ZIP extracts cleanly to "cando.exe" +
+        # "libcando.dll" + "modules/<name>/<name>.dll".
+        run: |
+          set -e
+          mkdir -p dist/modules
+          cp cando.exe libcando.dll dist/
+          for dll in modules/*/*.dll; do
+            mod=$(basename "$(dirname "$dll")")
+            mkdir -p "dist/modules/$mod"
+            cp "$dll" "dist/modules/$mod/"
+            if [ -f "modules/$mod/README.md" ]; then
+              cp "modules/$mod/README.md" "dist/modules/$mod/"
+            fi
+          done
+          ls -lR dist
+
+      - name: Upload binary + modules
         uses: actions/upload-artifact@v4
         with:
           name: cando-windows-x86_64
-          path: |
-            cando.exe
-            libcando.dll
-
-      - name: Upload modules
-        uses: actions/upload-artifact@v4
-        with:
-          name: cando-modules-windows-x86_64
-          path: modules/**/*.dll
+          path: dist/*
