@@ -553,16 +553,10 @@ static void vm_close_upvalues(CandoVM *vm, CandoValue *last) {
  * Meta-method dispatch helper
  * ===================================================================== */
 
-bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
-                         struct CdoString *meta_key,
-                         CandoValue *args, u32 argc) {
-    CdoObject *obj = cando_bridge_resolve(vm, h);
-    if (!obj || !meta_key) return false;
-
-    CdoValue raw;
-    if (!cdo_object_get(obj, (CdoString *)meta_key, &raw))
-        return false;
-
+bool cando_vm_dispatch_callable(CandoVM *vm, const struct CdoValue *raw_p,
+                                 CandoValue *args, u32 argc) {
+    if (!raw_p) return false;
+    CdoValue raw = *raw_p;
     CandoValue callee = cando_bridge_to_cando(vm, raw);
 
     /* Native sentinel: dispatch via vm->native_fns table. */
@@ -678,6 +672,19 @@ bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
 
     vm_runtime_error(vm, "meta-method is not callable");
     return false;
+}
+
+bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
+                         struct CdoString *meta_key,
+                         CandoValue *args, u32 argc) {
+    CdoObject *obj = cando_bridge_resolve(vm, h);
+    if (!obj || !meta_key) return false;
+
+    CdoValue raw;
+    if (!cdo_object_get(obj, (CdoString *)meta_key, &raw))
+        return false;
+
+    return cando_vm_dispatch_callable(vm, &raw, args, argc);
 }
 
 /* =========================================================================
@@ -2035,6 +2042,29 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CdoObject *tproto = cando_bridge_resolve(
                     vm, vm->thread_proto.as.handle);
                 if (cdo_object_get(tproto, key, &result)) got = true;
+            }
+            if (!got) {
+                /* Try a callable __index: __index(obj, key) -> value. */
+                CdoValue idx_callable;
+                if (cdo_object_index_callable(obj, &idx_callable)) {
+                    CandoValue idx_args[2];
+                    idx_args[0] = obj_val;
+                    idx_args[1] = cando_string_value(
+                        cando_string_new(key->data, key->length));
+                    bool ok = cando_vm_dispatch_callable(
+                        vm, &idx_callable, idx_args, 2);
+                    cando_value_release(idx_args[1]);
+                    if (vm->has_error) {
+                        cdo_string_release(key);
+                        cando_value_release(obj_val);
+                        goto handle_error;
+                    }
+                    if (ok) {
+                        cdo_string_release(key);
+                        cando_value_release(obj_val);
+                        DISPATCH();
+                    }
+                }
             }
             if (got) PUSH(cando_bridge_to_cando(vm, result));
             else     PUSH(cando_null());

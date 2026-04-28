@@ -11,6 +11,18 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Forward declaration: dispatch a resolved callable CdoValue meta-method.
+ * Defined in vm/vm.c; declared here without pulling object/value.h into the
+ * public vm.h surface. */
+bool cando_vm_dispatch_callable(CandoVM *vm, const struct CdoValue *raw,
+                                 CandoValue *args, u32 argc);
+
+static bool meta_is_callable(CdoValue v)
+{
+    return v.tag == CDO_FUNCTION || v.tag == CDO_NATIVE ||
+           v.tag == CDO_NUMBER;
+}
+
 /* =========================================================================
  * Dispatch and name tables
  * Sized to CANDO_NATIVE_MAX; unused trailing slots are zero-initialised
@@ -68,61 +80,71 @@ int cando_native_print(CandoVM *vm, int argc, CandoValue *args)
 /* =========================================================================
  * type(val) -- push the type name of val as a CandoString; returns 1.
  * If the value is an object with a __type field, return that field's value.
+ * __type may be a string (returned directly) or a callable (invoked as
+ * __type(val) -> string).
  * ===================================================================== */
 int cando_native_type(CandoVM *vm, int argc, CandoValue *args)
 {
     if (argc < 1) {
         cando_vm_push(vm, cando_null());
-    } else if (cando_is_object(args[0]) && g_meta_type) {
+        return 1;
+    }
+    if (cando_is_object(args[0]) && g_meta_type) {
         /* Follow the prototype (__index) chain so a class instance whose
          * class declares __type reports that class as its type. */
         CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
         CdoValue type_val;
         if (cdo_object_get(obj, g_meta_type, &type_val)) {
-            cando_vm_push(vm, cando_bridge_to_cando(vm, type_val));
-        } else {
-            const char *name = cando_value_type_name((TypeTag)args[0].tag);
-            u32 len = (u32)strlen(name);
-            CandoString *s = cando_string_new(name, len);
-            cando_vm_push(vm, cando_string_value(s));
+            if (cdo_is_string(type_val)) {
+                cando_vm_push(vm, cando_bridge_to_cando(vm, type_val));
+                return 1;
+            }
+            if (meta_is_callable(type_val)) {
+                if (cando_vm_dispatch_callable(vm, &type_val, args, 1))
+                    return 1;
+                if (vm->has_error) return -1;
+            }
         }
-    } else {
-        const char *name = cando_value_type_name((TypeTag)args[0].tag);
-        u32 len = (u32)strlen(name);
-        CandoString *s = cando_string_new(name, len);
-        cando_vm_push(vm, cando_string_value(s));
     }
+    /* Default: built-in type tag name. */
+    const char *name = cando_value_type_name((TypeTag)args[0].tag);
+    u32 len = (u32)strlen(name);
+    CandoString *s = cando_string_new(name, len);
+    cando_vm_push(vm, cando_string_value(s));
     return 1;
 }
 
 /* =========================================================================
  * toString(val) -- push string representation as a CandoString; returns 1.
- * If the value is an object with a __tostring meta-method, call it.
+ * If the value is an object with a __tostring meta-method, return its value
+ * directly when it is a string, or invoke it when it is a callable.
  * ===================================================================== */
 int cando_native_tostring(CandoVM *vm, int argc, CandoValue *args)
 {
     if (argc < 1) {
         cando_vm_push(vm, cando_null());
-    } else if (cando_is_object(args[0]) && g_meta_tostring) {
-        /* Dispatch __tostring meta-method if present. */
-        if (cando_vm_call_meta(vm, args[0].as.handle,
-                               (struct CdoString *)g_meta_tostring,
-                               args, 1)) {
-            return 1;  /* meta pushed 1 result */
-        }
-        if (vm->has_error) return -1;
-        /* No __tostring — fall through to default. */
-        char *s = cando_value_tostring(args[0]);
-        u32 len = (u32)strlen(s);
-        CandoString *cs = cando_string_new(s, len);
-        free(s);
-        cando_vm_push(vm, cando_string_value(cs));
-    } else {
-        char *s = cando_value_tostring(args[0]);
-        u32 len = (u32)strlen(s);
-        CandoString *cs = cando_string_new(s, len);
-        free(s);
-        cando_vm_push(vm, cando_string_value(cs));
+        return 1;
     }
+    if (cando_is_object(args[0]) && g_meta_tostring) {
+        CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+        CdoValue ts_val;
+        if (cdo_object_get(obj, g_meta_tostring, &ts_val)) {
+            if (cdo_is_string(ts_val)) {
+                cando_vm_push(vm, cando_bridge_to_cando(vm, ts_val));
+                return 1;
+            }
+            if (meta_is_callable(ts_val)) {
+                if (cando_vm_dispatch_callable(vm, &ts_val, args, 1))
+                    return 1;
+                if (vm->has_error) return -1;
+            }
+        }
+    }
+    /* Default: built-in tostring. */
+    char *s = cando_value_tostring(args[0]);
+    u32 len = (u32)strlen(s);
+    CandoString *cs = cando_string_new(s, len);
+    free(s);
+    cando_vm_push(vm, cando_string_value(cs));
     return 1;
 }

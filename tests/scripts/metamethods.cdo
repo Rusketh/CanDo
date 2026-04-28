@@ -246,3 +246,30 @@ VAR ni_proto = {
 object.setPrototype(log_obj, ni_proto);
 log_obj.foo = 1;
 print(ni_log[0]);            // set:foo
+
+/* ----- __index as a function (computed properties) ----------------------- */
+VAR computed = {};
+computed.__index = FUNCTION(self, key) {
+    RETURN "looked_up:" + key;
+};
+print(computed.anything);    // looked_up:anything
+print(computed.other);       // looked_up:other
+
+/* Function __index after a prototype-table chain still dispatches. */
+VAR base_tbl = { explicit: "base_value" };
+base_tbl.__index = FUNCTION(self, key) {
+    RETURN "fallback:" + key;
+};
+VAR layered = {};
+object.setPrototype(layered, base_tbl);
+print(layered.explicit);     // base_value         (table hit short-circuits)
+print(layered.unknown);      // fallback:unknown   (callable __index dispatches)
+
+/* ----- __type as a function ---------------------------------------------- */
+VAR typed_fn = {};
+typed_fn.__type = FUNCTION(self) { RETURN "DynamicType"; };
+print(type(typed_fn));       // DynamicType
+
+/* ----- __tostring as a literal string ------------------------------------ */
+VAR ts_str = { __tostring: "literal-form" };
+print(toString(ts_str));     // literal-form
