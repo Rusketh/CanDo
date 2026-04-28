@@ -37,6 +37,7 @@ typedef enum {
     TOK_FOR,
     TOK_FUNCTION,
     TOK_CLASS,
+    TOK_EXTENDS,
     TOK_RETURN,
     TOK_THROW,
     TOK_TRY,
@@ -143,8 +144,9 @@ const char *cando_token_type_name(CandoTokenType t);
  * cando_keyword_type -- if the given identifier lexeme (length `len`) is a
  * reserved keyword, return its keyword token type; otherwise return TOK_IDENT.
  *
- * The comparison is case-sensitive: Cando keywords are all upper-case
- * ("IF", "WHILE", ...) except for "pipe" which is lower-case.
+ * The comparison is case-insensitive but rejects mixed-case lexemes: only
+ * pure upper-case ("CLASS") and pure lower-case ("class") match.  Mixed
+ * spellings ("Class", "cLaSs") are returned as plain identifiers.
  * ------------------------------------------------------------------------ */
 CandoTokenType cando_keyword_type(const char *ident, u32 len);
 

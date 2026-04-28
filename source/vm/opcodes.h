@@ -179,9 +179,10 @@ typedef enum {
                            push CdoThread handle                          */
 
     /* ===== Band 16: Class sugar ========================================= */
-    OP_NEW_CLASS,       /* create class obj; A = name constant index      */
-    OP_BIND_METHOD,     /* bind method at constants[A] to class on TOS    */
-    OP_INHERIT,         /* set __index on child class to parent class     */
+    OP_NEW_CLASS,         /* create class obj; A = name constant index      */
+    OP_BIND_METHOD,       /* bind method at constants[A] to class on TOS    */
+    OP_INHERIT,           /* set __index on child class to parent; pops parent */
+    OP_BIND_DEFAULT_CALL, /* set __call on class on TOS to vm default ctor  */
 
     /* ===== Band 17: Mask / selector operators =========================== */
     /* These implement the ~ (consume/pass) and . (skip) selector prefixes.

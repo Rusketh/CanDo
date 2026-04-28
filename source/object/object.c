@@ -49,6 +49,7 @@ CdoString *g_meta_unm      = NULL;
 CdoString *g_meta_idiv     = NULL;
 CdoString *g_meta_len      = NULL;
 CdoString *g_meta_newindex = NULL;
+CdoString *g_meta_constructor = NULL;
 
 /* -----------------------------------------------------------------------
  * Global initialisation
@@ -76,6 +77,7 @@ void cdo_object_init(void) {
     INTERN_META(g_meta_idiv,     META_IDIV);
     INTERN_META(g_meta_len,      META_LEN);
     INTERN_META(g_meta_newindex, META_NEWINDEX);
+    INTERN_META(g_meta_constructor, META_CONSTRUCTOR);
 
 #undef INTERN_META
 }
@@ -98,6 +100,7 @@ void cdo_object_destroy_globals(void) {
     cdo_string_release(g_meta_idiv);     g_meta_idiv     = NULL;
     cdo_string_release(g_meta_len);      g_meta_len      = NULL;
     cdo_string_release(g_meta_newindex); g_meta_newindex = NULL;
+    cdo_string_release(g_meta_constructor); g_meta_constructor = NULL;
 
     cdo_intern_destroy();
 }

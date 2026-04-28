@@ -41,6 +41,7 @@ const char *cando_token_type_name(CandoTokenType t)
     case TOK_FOR:            return "FOR";
     case TOK_FUNCTION:       return "FUNCTION";
     case TOK_CLASS:          return "CLASS";
+    case TOK_EXTENDS:        return "EXTENDS";
     case TOK_RETURN:         return "RETURN";
     case TOK_THROW:          return "THROW";
     case TOK_TRY:            return "TRY";
@@ -139,6 +140,7 @@ static const KeywordEntry KEYWORDS[] = {
     { "FOR",      3,  TOK_FOR      },
     { "FUNCTION", 8,  TOK_FUNCTION },
     { "CLASS",    5,  TOK_CLASS    },
+    { "EXTENDS",  7,  TOK_EXTENDS  },
     { "RETURN",   6,  TOK_RETURN   },
     { "THROW",    5,  TOK_THROW    },
     { "TRY",      3,  TOK_TRY      },

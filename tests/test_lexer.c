@@ -632,13 +632,43 @@ TEST(test_try_catch_finaly)
 
 TEST(test_class_snippet)
 {
-    /* CLASS Foo(x) { FUNCTION self.bar() { } }
-     * [0]=CLASS [1]=Foo [2]=( [3]=x [4]=) [5]={ [6]=FUNCTION ... */
+    /* New class syntax:
+     *   CLASS Foo = (self, x) { self.x = x; }
+     * [0]=CLASS [1]=Foo [2]== [3]=( [4]=self [5]=, [6]=x [7]=) [8]={ ...
+     */
     u32 count;
-    CandoToken *toks = lex_all("CLASS Foo(x) { FUNCTION self.bar() { } }", &count);
+    CandoToken *toks = lex_all(
+        "CLASS Foo = (self, x) { self.x = x; }", &count);
     EXPECT_EQ(toks[0].type, TOK_CLASS);
-    EXPECT_EQ(toks[1].type, TOK_IDENT);   /* Foo */
-    EXPECT_EQ(toks[6].type, TOK_FUNCTION);
+    EXPECT_EQ(toks[1].type, TOK_IDENT);    /* Foo */
+    EXPECT_EQ(toks[2].type, TOK_ASSIGN);   /* =  */
+    EXPECT_EQ(toks[3].type, TOK_LPAREN);   /* (  */
+    free(toks);
+}
+
+TEST(test_class_extends_snippet)
+{
+    /* CLASS Dog EXTENDS Animal = (self, name) { ... } */
+    u32 count;
+    CandoToken *toks = lex_all(
+        "CLASS Dog EXTENDS Animal = (self, name) { }", &count);
+    EXPECT_EQ(toks[0].type, TOK_CLASS);
+    EXPECT_EQ(toks[1].type, TOK_IDENT);    /* Dog */
+    EXPECT_EQ(toks[2].type, TOK_EXTENDS);
+    EXPECT_EQ(toks[3].type, TOK_IDENT);    /* Animal */
+    EXPECT_EQ(toks[4].type, TOK_ASSIGN);
+    free(toks);
+}
+
+TEST(test_class_lowercase_snippet)
+{
+    /* Pure lowercase keywords are treated identically to uppercase.       */
+    u32 count;
+    CandoToken *toks = lex_all(
+        "class Foo = (self) { self.x = 1; }", &count);
+    EXPECT_EQ(toks[0].type, TOK_CLASS);
+    EXPECT_EQ(toks[1].type, TOK_IDENT);    /* Foo (mixed case identifier) */
+    EXPECT_EQ(toks[2].type, TOK_ASSIGN);
     free(toks);
 }
 
@@ -712,6 +742,8 @@ int main(void)
     run_test("mask operators",            test_mask_operators);
     run_test("try/catch/finaly",          test_try_catch_finaly);
     run_test("class snippet",             test_class_snippet);
+    run_test("class extends snippet",     test_class_extends_snippet);
+    run_test("class lowercase snippet",   test_class_lowercase_snippet);
 
     printf("\n=== Results: %d/%d passed ===\n",
            g_tests_passed, g_tests_run);
