@@ -275,9 +275,130 @@ static void parse_number(CandoParser *p, bool can_assign)
     emit_op_a(p, OP_CONST, idx);
 }
 
+/* Compile a backtick template string `lit${expr}lit...` as a chain of
+ * concatenations. Each ${expr} is wrapped in toString(...) so non-string
+ * values (numbers, bools, ...) interpolate correctly via the OP_ADD string-
+ * concat path. The lexer has already validated brace balance for the whole
+ * token; we re-walk the body here to split segments and re-lex each
+ * expression substring with a sub-lexer. */
+static void parse_template_string(CandoParser *p)
+{
+    const char *body  = p->previous.start + 1;
+    u32         total = p->previous.length >= 2 ? p->previous.length - 2 : 0;
+    u32         start_line = p->previous.line;
+
+    bool emitted = false;  /* true once we've pushed something on the stack */
+    u32  i = 0;
+
+    while (i < total) {
+        /* Scan literal segment up to the next "${" or end. */
+        u32 lit_start = i;
+        while (i < total) {
+            char c = body[i];
+            if (c == '\\' && i + 1 < total) { i += 2; continue; }
+            if (c == '$' && i + 1 < total && body[i + 1] == '{') break;
+            i++;
+        }
+        u32 lit_len = i - lit_start;
+        if (lit_len > 0) {
+            u16 idx = str_const(p, body + lit_start, lit_len);
+            emit_op_a(p, OP_CONST, idx);
+            if (emitted) emit_op(p, OP_ADD);
+            emitted = true;
+        }
+        if (i >= total) break;
+
+        /* Found "${": find the matching '}'. */
+        i += 2;
+        u32 expr_start = i;
+        int depth = 1;
+        while (i < total) {
+            char c = body[i];
+            if (c == '\\' && i + 1 < total) { i += 2; continue; }
+            if      (c == '{') depth++;
+            else if (c == '}') { depth--; if (depth == 0) break; }
+            i++;
+        }
+        u32 expr_len = i - expr_start;
+        if (i < total && body[i] == '}') i++;  /* consume closing '}' */
+
+        /* Emit toString(<expr>) — load the global, parse the expression,
+         * then OP_CALL with one argument. */
+        u16 fn_idx = str_const(p, "toString", 8);
+        emit_op_a(p, OP_LOAD_GLOBAL, fn_idx);
+
+        /* Trim leading whitespace so an empty `${ }` is detected cleanly. */
+        u32 trim_start = expr_start, trim_end = expr_start + expr_len;
+        while (trim_start < trim_end &&
+               (body[trim_start] == ' '  || body[trim_start] == '\t' ||
+                body[trim_start] == '\n' || body[trim_start] == '\r'))
+            trim_start++;
+
+        if (trim_start >= trim_end) {
+            /* Empty interpolation: pass an empty string so toString(...) is
+             * still well-formed. */
+            u16 empty_idx = str_const(p, "", 0);
+            emit_op_a(p, OP_CONST, empty_idx);
+        } else {
+            /* Save outer parser state, swap in a sub-lexer over the
+             * expression substring, parse, then restore.                  */
+            CandoLexer saved_lexer    = p->lexer;
+            CandoToken saved_current  = p->current;
+            CandoToken saved_previous = p->previous;
+            bool       saved_panic    = p->panic_mode;
+            u32        saved_call_d   = p->call_depth;
+            bool       saved_was_call = p->last_expr_was_call;
+            bool       saved_was_unp  = p->last_expr_was_unpack;
+            u32        saved_mpush    = p->last_multi_push;
+
+            cando_lexer_init(&p->lexer, body + expr_start, expr_len);
+            p->lexer.line = start_line;
+            p->panic_mode = false;
+            p->call_depth = 0;
+            p->last_expr_was_call   = false;
+            p->last_expr_was_unpack = false;
+            p->last_multi_push      = 1;
+
+            advance(p);  /* prime current with first token of the sub-expr */
+            parse_expression(p);
+            /* If the inner expression was itself a call, spread its return
+             * values into our toString argument list so the static argc=1
+             * gets adjusted at runtime to the actual count.               */
+            if (p->last_expr_was_call) emit_op(p, OP_SPREAD_RET);
+
+            p->lexer    = saved_lexer;
+            p->current  = saved_current;
+            p->previous = saved_previous;
+            p->panic_mode           = saved_panic;
+            p->call_depth           = saved_call_d;
+            p->last_expr_was_call   = saved_was_call;
+            p->last_expr_was_unpack = saved_was_unp;
+            p->last_multi_push      = saved_mpush;
+        }
+
+        emit_op_a(p, OP_CALL, 1);
+        if (emitted) emit_op(p, OP_ADD);
+        emitted = true;
+    }
+
+    if (!emitted) {
+        u16 idx = str_const(p, "", 0);
+        emit_op_a(p, OP_CONST, idx);
+    }
+
+    /* The result is a single string value. */
+    p->last_expr_was_call   = false;
+    p->last_expr_was_unpack = false;
+    p->last_multi_push      = 1;
+}
+
 static void parse_string_literal(CandoParser *p, bool can_assign)
 {
     (void)can_assign;
+    if (p->previous.type == TOK_STRING_BT) {
+        parse_template_string(p);
+        return;
+    }
     const char *s   = p->previous.start + 1;
     u32         len = p->previous.length >= 2 ? p->previous.length - 2 : 0;
     u16 idx = str_const(p, s, len);

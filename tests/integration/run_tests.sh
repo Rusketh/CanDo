@@ -85,6 +85,9 @@ run_test "inline_functions" "$SCRIPTS/inline_functions.cdo" \
 run_test "strings" "$SCRIPTS/strings.cdo" \
     "$(printf 'hello world\n5\nstring\nnumber\nbool\nnull\n42\n3.1400000000000001\ntrue\ntrue\nfalse\ntrue\n5\nworld\nhello world\nHELLO WORLD\nhi\nabc\ndef\nababab\n6\na\nb\nc\ncount: 99')"
 
+run_test "template_strings" "$SCRIPTS/template_strings.cdo" \
+    "$(printf 'hello\nhi world!\nworld\n3 = three\na42b43c\nbool=true null=null\nprepost\nauth=user:pass')"
+
 run_test "arrays" "$SCRIPTS/arrays.cdo" \
     "$(printf '3\n10\n20\n30\n99\n15\n1\n2\n3\n4\n0\n1\n4\n9\n15')"
 
