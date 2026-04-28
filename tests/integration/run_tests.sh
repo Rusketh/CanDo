@@ -130,6 +130,9 @@ run_test "metamethods" "$SCRIPTS/metamethods.cdo" \
 run_test "lib_object" "$SCRIPTS/lib_object.cdo" \
     "$(printf '1\n99\n2\n1\n2\n3\n10\n99\n30\n20\nalice\nbob\nhello\nc\na\nb\n3\n1\n2\nfalse\ntrue\nfalse')"
 
+run_test "inspect" "$SCRIPTS/inspect.cdo" \
+    "$(printf 'null\ntrue\nfalse\n0\n42\n-7\n"hi"\n"a\\nb"\n[]\n[1, 2, 3]\n[1, "two", null]\n{}\n{ a: 1 }\n{ a: 1, b: 2 }\n{ "with space": 1 }\n{ list: [1, 2, [3, 4]] }\n{ a: { b: { c: 1 } } }\n{ a: {...} }\n{ a: { b: {...} } }\n{ a: { b: { c: 1 } } }\n[[...]]\n[[[...]]]\n[1, <circular>]\n{ x: 1, self: <circular> }\n[[9], [9]]')"
+
 run_test "lib_meta" "$SCRIPTS/lib_meta.cdo" \
     "$(printf 'object\nhttp_response\nhttp_request\nhttp_server\nhttp_client_response\nobject\nobject\nobject\nthread\nHI!\nYES!\n10\n42\ntrue\ndone\nobject\ngreeter\nhi, world')"
 

@@ -2,7 +2,7 @@
  * natives.h -- Native function interface for the Cando interpreter.
  *
  * Native functions are registered as global variables with negative number
- * sentinel values: print=-1.0, type=-2.0, toString=-3.0.
+ * sentinel values: print=-1.0, type=-2.0, toString=-3.0, inspect=-4.0.
  * IS_NATIVE_FN and NATIVE_INDEX macros identify and dispatch them.
  *
  * Must compile with gcc -std=c11.
@@ -26,6 +26,11 @@ int cando_native_type(CandoVM *vm, int argc, CandoValue *args);
 
 /* toString(val) -- push string representation of val; returns 1. */
 int cando_native_tostring(CandoVM *vm, int argc, CandoValue *args);
+
+/* inspect(val, depth*) -- push a debug string showing array/object contents;
+ * cycle-safe.  depth = 0 (default) means unlimited; depth > 0 truncates
+ * nested arrays/objects beyond that level.  Returns 1. */
+int cando_native_inspect(CandoVM *vm, int argc, CandoValue *args);
 
 /* Dispatch table indexed by NATIVE_INDEX.
  * Sized to CANDO_NATIVE_MAX; unused trailing slots are NULL.

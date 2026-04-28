@@ -38,6 +38,54 @@ instead.
 Returns the canonical string representation.  If `v` is an object with
 a `__tostring` meta-method, calls it and returns the result.
 
+### `inspect(v, depth*) → string`
+
+Returns a debug-friendly string showing the *contents* of arrays and
+objects rather than their handle id.  Designed to be passed to `print`:
+
+```cando
+var data = { name: "Alice", scores: [10, 20, 30] };
+print(inspect(data));
+// { name: "Alice", scores: [10, 20, 30] }
+```
+
+Formatting:
+
+| Value | Rendering |
+|---|---|
+| `null` / `true` / `false` | as-is |
+| number | same as `toString(n)` |
+| string | double-quoted, with `\\`, `\"`, `\n`, `\r`, `\t`, `\xNN` escapes |
+| array | `[v1, v2, ...]` |
+| object | `{ key: value, ... }` (FIFO insertion order; non-identifier keys are quoted) |
+| function / native / thread | `<function>` / `<native>` / `<thread>` |
+
+`depth` (default `0`) limits how many levels of nested arrays / objects
+are expanded:
+
+- `0` (default) — unlimited recursion.
+- `N > 0` — nested arrays / objects beyond level `N` are truncated to
+  `[...]` / `{...}`.
+
+Cycles are detected on the current path and rendered as `<circular>`,
+so `inspect` always terminates regardless of `depth`.  Two distinct
+sub-trees that happen to reference the same object are *not* flagged
+as cycles (they are printed twice).
+
+```cando
+var a = [1];
+a:push(a);
+print(inspect(a));            // [1, <circular>]
+
+var deep = { a: { b: { c: 1 } } };
+print(inspect(deep, 1));      // { a: {...} }
+print(inspect(deep, 2));      // { a: { b: {...} } }
+```
+
+`inspect` does not invoke `__tostring`; it always shows raw structure,
+which is what you want when debugging.  Use `toString(v)` when you do
+want the meta-method.
+
 ---
 
 ## `math`
