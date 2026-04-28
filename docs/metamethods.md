@@ -379,6 +379,27 @@ constant equal to the type name (`"http_response"` for example), so
 `type(instance)` reflects the tag.  Default native methods are inserted with
 `FIELD_NONE` flags so user code may override them.
 
+The same pattern is used by the [`socket`](standard-library.md#socket)
+and [`secure_socket`](standard-library.md#secure_socket) libraries.
+Adding a method once on `_meta.tcp_socket` makes it visible on every
+plain-TCP connection (including those created in a child VM by
+`createServer`):
+
+```cando
+VAR LF = '
+';
+_meta.tcp_socket.writeLine = FUNCTION(self, line) { self:sendAll(line + LF); };
+```
+
+`_meta.tls_socket` is a separate table — it does *not* chain to
+`_meta.tcp_socket` via `__index`, because doing so would make
+`type(s)` return `"tcp_socket"` for TLS connections.  Alias methods
+explicitly when you want them on both:
+
+```cando
+_meta.tls_socket.writeLine = _meta.tcp_socket.writeLine;
+```
+
 You can register your own meta tables and use them as prototypes with
 `object.setPrototype` for any type you control.
 

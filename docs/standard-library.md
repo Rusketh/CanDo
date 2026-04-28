@@ -1,6 +1,6 @@
 # Standard Library
 
-CanDo ships 17 library modules plus 3 built-in native globals.  The
+CanDo ships 19 library modules plus 3 built-in native globals.  The
 `cando` CLI registers all of them.  When you embed the library, call
 `cando_openlibs(vm)` to register all, or an individual
 `cando_open_*lib(vm)` to register only what you need — see
@@ -199,6 +199,10 @@ Subtables registered by the standard library:
 | `_meta.http_response` | Server-side response objects.  Default methods: `status`, `setHeader`, `send`, `json`. |
 | `_meta.http_server` | Server objects returned by `createServer`.  Default methods: `listen`, `close`. |
 | `_meta.http_client_response` | Response objects returned by `http.get`, `https.get`, `fetch`, etc. |
+| `_meta.tcp_socket` | Plain-TCP connections from the [`socket`](#socket) library.  Default methods: `connect`, `send`, `sendAll`, `recv`, `recvAll`, `recvLine`, `close`, `isOpen`, `setTimeout`, `setBlocking`, `setOption`, `fd`, `localAddress`, `remoteAddress`. |
+| `_meta.tcp_server` | TCP listener objects.  Default methods: `listen`, `close`, `fd`, `localAddress`. |
+| `_meta.tls_socket` | TLS connections from the [`secure_socket`](#secure_socket) library.  All `_meta.tcp_socket` methods plus `cipher`, `protocol`, `peerCertificate`. |
+| `_meta.tls_server` | TLS listener objects.  Same surface as `_meta.tcp_server` with a TLS-aware `listen`. |
 
 For `string`, `array`, `object`, and `thread` the meta table is the same
 underlying CdoObject as the like-named global, so writing through either
@@ -333,6 +337,163 @@ proper `strptime` shim is available.
 | Function | Description |
 |---|---|
 | `net.lookup(hostname) → string` | Resolve a hostname to an IPv4 address.  `NULL` on failure. |
+
+---
+
+## `socket`
+
+Raw TCP sockets (IPv4 and IPv6, dual-stack via `getaddrinfo`).  The
+`http` and `https` libraries are layered on top — reach for `socket`
+when you need custom protocols, line-oriented servers, or any non-HTTP
+network code.  See [socket.md](socket.md) for a long-form guide.
+
+### Module functions
+
+| Function | Description |
+|---|---|
+| `socket.tcp() → tcp_socket` | Create an unconnected TCP socket. |
+| `socket.connect(host, port [, opts]) → tcp_socket` | Convenience: open + connect.  `opts.timeout` (ms), `opts.family` (`"inet"`/`"inet6"`/`"any"`). |
+| `socket.createServer(callback) → tcp_server` | Mirrors `http.createServer`.  `callback(conn)` runs in a fresh child VM thread for every accepted connection. |
+| `socket.resolve(host) → array` | Returns up to 16 IPv4/IPv6 numeric address strings, or `NULL` if resolution fails. |
+
+### Connection methods (`_meta.tcp_socket`)
+
+| Method | Description |
+|---|---|
+| `s:connect(host, port [, ms])` | Synchronous connect on an unconnected socket; throws on failure. Returns `self`. |
+| `s:send(data) → bytes` | Single write; returns the number of bytes accepted. |
+| `s:sendAll(data) → self` | Loop until every byte is written. |
+| `s:recv(maxLen [, ms]) → string` | Up to `maxLen` bytes (default 4096; capped at 16 MB).  Returns `""` on clean EOF. |
+| `s:recvAll() → string` | Read until EOF or peer close. |
+| `s:recvLine([maxLen]) → string` | Read up to and including the next LF; CRLF or LF is stripped from the result.  `maxLen` defaults to 65536. |
+| `s:close()` | Idempotent shutdown of the underlying transport. |
+| `s:isOpen() → bool` | True iff the connection is still open. |
+| `s:setTimeout(ms) → self` | Sets `SO_RCVTIMEO` and `SO_SNDTIMEO`; pass `0` to disable. |
+| `s:setBlocking(bool) → self` | Toggle non-blocking mode (`O_NONBLOCK` / `FIONBIO`). |
+| `s:setOption(name, value) → self` | Recognised names: `"tcp_nodelay"`, `"so_keepalive"`, `"so_reuseaddr"` (bool); `"so_rcvbuf"`, `"so_sndbuf"` (number). |
+| `s:fd() → number` | Underlying file-descriptor (escape hatch for advanced use). |
+| `s:localAddress() → object` | `{ host, port, family }` of the local endpoint, or `NULL`. |
+| `s:remoteAddress() → object` | `{ host, port, family }` of the peer, or `NULL`. |
+
+### Server methods (`_meta.tcp_server`)
+
+| Method | Description |
+|---|---|
+| `srv:listen(port [, host [, backlog]]) → self` | Bind, listen, and spawn the accept worker.  Returns immediately; the calling script keeps running.  An optional callback may be passed in place of `host` or as the third argument. |
+| `srv:close()` | Stop the accept loop and release resources. |
+| `srv:fd() → number` | Listener fd. |
+| `srv:localAddress() → object` | Bound address. |
+
+### Errors
+
+I/O failures (refused connect, peer reset, bind failure, `:recv` after
+peer reset) and programmer errors (wrong types, calling `:send` on a
+closed socket, unknown option name) all throw via the standard CanDo
+error mechanism — wrap calls in `try { … } catch (e) { … }` to handle.
+A clean EOF on `:recv` returns `""` and is *not* an error.
+
+```cando
+/* Non-blocking echo server.  Main thread continues past :listen. */
+socket.createServer(FUNCTION(conn) {
+    VAR data = conn:recv(4096);
+    WHILE data != "" {
+        conn:sendAll(data);
+        data = conn:recv(4096);
+    }
+    conn:close();
+}):listen(7000);
+print("server up; main loop is free to do other work");
+```
+
+```cando
+/* Extending sockets via _meta */
+VAR LF = '
+';
+_meta.tcp_socket.writeLine = FUNCTION(self, line) { self:sendAll(line + LF); };
+
+VAR s = socket.connect("127.0.0.1", 7000);
+s:writeLine("ping");
+print(s:recvLine());
+s:close();
+```
+
+---
+
+## `secure_socket`
+
+TLS variant of `socket`.  The surface is a near mirror; the only
+material differences are the additional opts on the constructors and
+three TLS introspection methods.  OpenSSL is statically linked into
+`libcando` so no extra runtime libraries are required beyond what
+`http`/`https` already need.
+
+### Module functions
+
+| Function | Description |
+|---|---|
+| `secure_socket.tcp([opts]) → tls_socket` | Unconnected; opts seed the SSL_CTX and SNI hostname for a later `:connect`. |
+| `secure_socket.connect(host, port [, opts]) → tls_socket` | Open + TLS handshake in one call.  `opts.verifyPeer` defaults to **true** (safer than `http`/`https` for the new API). |
+| `secure_socket.createServer(opts, callback) → tls_server` | `opts.cert` and `opts.key` (PEM strings) are required.  Optional `opts.verifyPeer` + `opts.ca` enable client-cert verification. |
+
+Client `opts`:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `verifyPeer` | bool | `true` | Verify the server cert against the system trust store and the supplied CA bundle. |
+| `ca` | string | — | PEM bundle of additional trust roots. |
+| `cert`, `key` | strings | — | Client cert + key for mutual TLS. |
+| `serverName` | string | host arg | SNI override; also used for hostname verification when `verifyPeer` is true. |
+| `timeout` | number | `0` | Connect / per-call recv timeout in ms. |
+| `family` | string | `"any"` | Address family. |
+
+Server `opts`:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `cert`, `key` | strings | — | **Required.** PEM-encoded leaf certificate (chain optional) and matching private key. |
+| `verifyPeer` | bool | `false` | Require a client certificate. |
+| `ca` | string | — | PEM bundle of acceptable client CAs (used with `verifyPeer`). |
+
+### Methods (`_meta.tls_socket`, `_meta.tls_server`)
+
+`_meta.tls_socket` inherits all of `_meta.tcp_socket`'s methods (the
+shared connection surface) plus three TLS introspection helpers:
+
+| Method | Description |
+|---|---|
+| `s:cipher() → string` | Negotiated cipher suite name (e.g. `"TLS_AES_256_GCM_SHA384"`), or `NULL`. |
+| `s:protocol() → string` | Negotiated TLS version (e.g. `"TLSv1.3"`). |
+| `s:peerCertificate() → object` | `{ subject, issuer, notBefore, notAfter, fingerprint }`.  Fingerprint is the lowercase-hex SHA-256 of the DER encoding. |
+
+`_meta.tls_server` inherits the listener methods from
+`_meta.tcp_server`; `:listen` is replaced with a TLS-aware variant that
+runs the handshake on the connection's worker thread before invoking
+the user callback.  By the time `callback(conn)` runs the TLS session
+is established and `conn:cipher()`/`:peerCertificate()` are valid.
+
+```cando
+/* TLS client with default-on verification */
+VAR s = secure_socket.connect("example.com", 443);
+s:sendAll("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n");
+print(s:recvAll());
+s:close();
+```
+
+```cando
+/* TLS server with cert + key */
+VAR creds = include("modules/test_cert.cdo");
+secure_socket.createServer({ cert: creds.cert, key: creds.key },
+    FUNCTION(conn) {
+        print("peer cipher:", conn:cipher());
+        conn:sendAll("hello over TLS\n");
+        conn:close();
+    }):listen(8443);
+```
+
+> **Note.** `tls_socket` does *not* chain to `tcp_socket` via `__index`
+> — that would make `type()` return `"tcp_socket"` for TLS sockets,
+> which is misleading.  Methods you want available on both should be
+> aliased explicitly: `_meta.tls_socket.write = _meta.tcp_socket.write;`.
 
 ---
 

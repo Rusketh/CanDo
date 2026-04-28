@@ -91,6 +91,8 @@
 #include "lib/crypto.h"
 #include "lib/process.h"
 #include "lib/net.h"
+#include "lib/socket.h"
+#include "lib/secure_socket.h"
 #include "lib/http.h"
 #include "lib/https.h"
 
@@ -152,7 +154,9 @@ CANDO_API void cando_open_datetimelib(CandoVM *vm);  /**< datetime.*        */
 CANDO_API void cando_open_cryptolib(CandoVM *vm);    /**< crypto.*          */
 CANDO_API void cando_open_processlib(CandoVM *vm);   /**< process.*         */
 CANDO_API void cando_open_netlib(CandoVM *vm);       /**< net.*             */
-CANDO_API void cando_open_evallib(CandoVM *vm);      /**< eval()            */
+CANDO_API void cando_open_socketlib(CandoVM *vm);        /**< socket.*       */
+CANDO_API void cando_open_secure_socketlib(CandoVM *vm); /**< secure_socket.*/
+CANDO_API void cando_open_evallib(CandoVM *vm);          /**< eval()         */
 CANDO_API void cando_open_includelib(CandoVM *vm);   /**< include()         */
 CANDO_API void cando_open_httplib(CandoVM *vm);      /**< http.* + fetch()  */
 CANDO_API void cando_open_httpslib(CandoVM *vm);     /**< https.*           */

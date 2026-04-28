@@ -142,6 +142,12 @@ run_test "lib_meta" "$SCRIPTS/lib_meta.cdo" \
 run_test "lib_http" "$SCRIPTS/lib_http.cdo" \
     "$(printf '200\nok-1\nbasic\nhello world\ndelayed\nhi alice')"
 
+run_test "lib_socket" "$SCRIPTS/lib_socket.cdo" \
+    "$(printf 'after listen\nping\necho:first\necho:second\nhi\nhi\ndone')"
+
+run_test "lib_secure_socket" "$SCRIPTS/lib_secure_socket.cdo" \
+    "$(printf 'after listen\ntls-echo:hello\ntrue\ntrue\ndone')"
+
 run_test "lib_crypto" "$SCRIPTS/lib_crypto.cdo" \
     "$(printf 'md5_ok\nsha256_ok\naGVsbG8gd29ybGQA\nhello world')"
 
