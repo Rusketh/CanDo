@@ -164,7 +164,13 @@ target_include_directories(libcando
 target_link_libraries(libcando PUBLIC Threads::Threads OpenSSL::SSL OpenSSL::Crypto ${PLATFORM_LIBS})
 
 if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    target_link_options(libcando PRIVATE -static-libgcc)
+    # Statically link libgcc and libwinpthread so libcando.dll has no runtime
+    # DLL dependencies beyond system libraries.  Without -Bstatic on
+    # winpthread, MinGW pulls in libwinpthread-1.dll dynamically.
+    target_link_options(libcando PRIVATE
+        -static-libgcc
+        -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
+    )
 endif()
 
 # ----------------------------------------------------------------------------
@@ -213,7 +219,10 @@ target_include_directories(cando PRIVATE
 target_link_libraries(cando PRIVATE libcando)
 
 if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    target_link_options(cando PRIVATE -static-libgcc)
+    target_link_options(cando PRIVATE
+        -static-libgcc
+        -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
+    )
 endif()
 
 # ----------------------------------------------------------------------------

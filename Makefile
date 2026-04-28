@@ -267,15 +267,20 @@ CFLAGS_WIN  = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0
 CFLAGS_EXE_WIN = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0600 \
                  -iquote source -iquote source/core -Iinclude
 
-# OpenSSL is linked statically into libcando.dll so the only files needed
-# at runtime are cando.exe and libcando.dll (no libcrypto-3-x64.dll, etc.).
+# OpenSSL and winpthread are linked statically into libcando.dll so the only
+# files needed at runtime are cando.exe and libcando.dll (no
+# libcrypto-3-x64.dll, libwinpthread-1.dll, etc.).
 # crypt32 is required by OpenSSL's static libcrypto on Windows.
 LDFLAGS_LIB_WIN = -static-libgcc \
-                  -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic \
+                  -Wl,-Bstatic -lssl -lcrypto -lwinpthread -Wl,-Bdynamic \
                   -lws2_32 -lcrypt32 -lm
 
 # The executable links against libcando.dll only — no OpenSSL needed here.
-LDFLAGS_EXE_WIN = -static-libgcc -lws2_32 -lm
+# winpthread is statically linked defensively in case the toolchain pulls it
+# in for the EXE itself.
+LDFLAGS_EXE_WIN = -static-libgcc \
+                  -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic \
+                  -lws2_32 -lm
 
 libcando.dll: $(CANDO_LIB_SRCS) $(CANDO_WIN_EXTRA)
 	$(MINGW_CC) $(CFLAGS_WIN) -shared $^ -o $@ \
