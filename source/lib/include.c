@@ -105,11 +105,17 @@ static bool resolve_path(CandoVM *vm, const char *raw_path,
 
     char base_dir[PATH_MAX];
     if (caller_file) {
-        /* dirname: copy up to the last slash. */
+        /* dirname: copy up to the last separator.  On Windows _fullpath
+         * returns backslash-separated paths, so check both '/' and '\\'
+         * and take whichever appears later. */
         size_t len = strlen(caller_file);
         if (len >= PATH_MAX) return false;
         memcpy(base_dir, caller_file, len + 1);
         char *slash = strrchr(base_dir, '/');
+#if defined(_WIN32) || defined(_WIN64)
+        char *bslash = strrchr(base_dir, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+#endif
         if (slash && slash != base_dir) *slash = '\0';
         else { base_dir[0] = '.'; base_dir[1] = '\0'; }
     } else {

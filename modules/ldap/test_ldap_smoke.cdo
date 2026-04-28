@@ -1,0 +1,49 @@
+// modules/ldap/test_ldap_smoke.cdo -- minimal smoke test for the
+// Windows CI job.  Verifies that LoadLibrary + cando_module_init succeed
+// and a few representative natives are reachable.  Kept deliberately
+// simple so a runtime failure points clearly at the binary, not the
+// script.
+
+print("smoke: starting");
+
+// Try the Windows extension first; fall back to POSIX.
+VAR ldap = NULL;
+TRY {
+    ldap = include("./ldap.dll");
+    print("smoke: loaded ldap.dll");
+} CATCH (e) {
+    print(`smoke: ldap.dll load failed: ${e}`);
+    TRY {
+        ldap = include("./ldap.so");
+        print("smoke: loaded ldap.so");
+    } CATCH (e2) {
+        print(`smoke: ldap.so load failed: ${e2}`);
+        os.exit(1);
+    }
+}
+
+// Basic surface check on a handful of representative methods.
+VAR check = ["connect", "bind", "search", "rc4", "md5",
+             "escape_filter", "members", "decode_reversible_password"];
+VAR missing = 0;
+FOR m OF check {
+    IF type(ldap[m]) != "number" {
+        print(`smoke: missing method: ${m}`);
+        missing = missing + 1;
+    }
+}
+
+IF missing > 0 {
+    print(`smoke: FAIL (${missing} missing method(s))`);
+    os.exit(1);
+}
+
+// One round-trip through a pure-C helper.
+VAR enc = ldap.rc4("k", "hello");
+VAR dec = ldap.rc4("k", enc);
+IF dec != "hello" {
+    print("smoke: rc4 round-trip failed");
+    os.exit(1);
+}
+
+print("OK");

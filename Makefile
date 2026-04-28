@@ -165,7 +165,8 @@ TEST_SOCKUTIL_SRCS = $(CORE_SRCS) source/lib/sockutil.c tests/test_sockutil.c
 
 .PHONY: all cando libcando.so libcando.a \
         test test_core test_object test_lexer test_parser test_vm test_thread \
-        test_sockutil test_integration clean
+        test_sockutil test_integration clean \
+        modules modules-test modules-windows modules-clean
 
 all: libcando.so libcando.a $(CANDO_BIN) \
      $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) \
@@ -319,10 +320,45 @@ cando.exe: source/main.c libcando.dll icon.res
 	    -L. -lcando -o $@ $(LDFLAGS_EXE_WIN)
 
 # ---------------------------------------------------------------------------
+# Binary modules (loaded by scripts via include())
+#
+# Each subdirectory of modules/ ships its own Makefile.  Add new module
+# directories to the MODULES list below.
+# ---------------------------------------------------------------------------
+
+MODULES = ldap
+
+# Build every module's POSIX shared library.
+modules:
+	@for m in $(MODULES); do \
+	    echo "==> building module: $$m"; \
+	    $(MAKE) -C modules/$$m || exit $$?; \
+	done
+
+# Run every module's C unit-test suite.
+modules-test:
+	@for m in $(MODULES); do \
+	    echo "==> testing module: $$m"; \
+	    $(MAKE) -C modules/$$m test || exit $$?; \
+	done
+
+# Cross-compile every module to a Windows DLL.
+modules-windows:
+	@for m in $(MODULES); do \
+	    echo "==> cross-compiling module: $$m (windows)"; \
+	    $(MAKE) -C modules/$$m $$m.dll MINGW_CC=$(MINGW_CC) || exit $$?; \
+	done
+
+modules-clean:
+	@for m in $(MODULES); do \
+	    $(MAKE) -C modules/$$m clean || true; \
+	done
+
+# ---------------------------------------------------------------------------
 # Clean
 # ---------------------------------------------------------------------------
 
-clean:
+clean: modules-clean
 	rm -f $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) \
 	      $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN) \
 	      $(TEST_SOCKUTIL_BIN) \

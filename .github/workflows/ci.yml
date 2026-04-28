@@ -18,16 +18,44 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc make libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y gcc make libssl-dev libldap2-dev
 
       - name: Run tests
         run: make test
 
-      - name: Upload binary
+      - name: Build modules
+        run: make modules
+
+      - name: Test modules (C unit tests)
+        run: make modules-test
+
+      - name: Test modules (script integration)
+        run: ./cando modules/ldap/test_ldap.cdo
+
+      - name: Stage release artifact
+        # actions/upload-artifact@v4 strips the lowest common ancestor of
+        # the matched paths, so we collect everything in a dist/ directory
+        # first.  Uploading dist/* makes the artifact ZIP extract cleanly
+        # to "cando" + "modules/<name>/<name>.so".
+        run: |
+          set -e
+          mkdir -p dist/modules
+          cp cando dist/
+          for so in modules/*/*.so; do
+            mod=$(basename "$(dirname "$so")")
+            mkdir -p "dist/modules/$mod"
+            cp "$so" "dist/modules/$mod/"
+            if [ -f "modules/$mod/README.md" ]; then
+              cp "modules/$mod/README.md" "dist/modules/$mod/"
+            fi
+          done
+          ls -lR dist
+
+      - name: Upload binary + modules
         uses: actions/upload-artifact@v4
         with:
           name: cando-linux-x86_64
-          path: cando
+          path: dist/*
 
   # ---------------------------------------------------------------------------
   # Windows build (MinGW-w64 via MSYS2, includes OpenSSL)
@@ -54,6 +82,14 @@ jobs:
       - name: Build cando.exe
         run: make cando.exe MINGW_CC=gcc WINDRES=windres
 
+      - name: Build modules (Windows)
+        run: make modules-windows MINGW_CC=gcc
+
+      - name: Smoke-test modules (Windows)
+        # Verify LoadLibrary + cando_module_init succeed and the public
+        # API surface is registered.
+        run: ./cando.exe modules/ldap/test_ldap_smoke.cdo
+
       - name: Verify no MinGW runtime DLL deps
         run: |
           set -e
@@ -71,10 +107,26 @@ jobs:
           done
           echo "OK: no MinGW runtime DLL dependencies."
 
-      - name: Upload binary
+      - name: Stage release artifact
+        # See the Linux job for the rationale -- collect everything under
+        # dist/ so the artifact ZIP extracts cleanly to "cando.exe" +
+        # "libcando.dll" + "modules/<name>/<name>.dll".
+        run: |
+          set -e
+          mkdir -p dist/modules
+          cp cando.exe libcando.dll dist/
+          for dll in modules/*/*.dll; do
+            mod=$(basename "$(dirname "$dll")")
+            mkdir -p "dist/modules/$mod"
+            cp "$dll" "dist/modules/$mod/"
+            if [ -f "modules/$mod/README.md" ]; then
+              cp "modules/$mod/README.md" "dist/modules/$mod/"
+            fi
+          done
+          ls -lR dist
+
+      - name: Upload binary + modules
         uses: actions/upload-artifact@v4
         with:
           name: cando-windows-x86_64
-          path: |
-            cando.exe
-            libcando.dll
+          path: dist/*
