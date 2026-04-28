@@ -12,6 +12,8 @@
 #ifndef CANDO_LDAP_HELPERS_H
 #define CANDO_LDAP_HELPERS_H
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <string.h>
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -80,6 +82,106 @@ static inline int ldap_helpers_extract_rdn(const char *dn,
     memcpy(buf, dn, l);
     buf[l] = '\0';
     return 1;
+}
+
+/*
+ * ldap_helpers_escape_filter -- escape `value` per RFC 4515 section 3
+ * (assertion-value escaping).  The bytes 0x00, 0x28 ("("), 0x29 (")"),
+ * 0x2A ("*"), 0x5C ("\") are encoded as `\xx` hex pairs; all other bytes
+ * pass through.
+ *
+ * On success writes a NUL-terminated escaped string into out (size buflen)
+ * and returns the number of output bytes excluding the NUL.  Returns -1
+ * if the buffer is too small.  Pass buflen == 0 to query the required
+ * size: returns the byte count not counting the NUL.
+ */
+static inline long ldap_helpers_escape_filter(const char *value, size_t in_len,
+                                              char *out, size_t buflen)
+{
+    if (!value) return -1;
+    size_t need = 0;
+    for (size_t i = 0; i < in_len; i++) {
+        unsigned char c = (unsigned char)value[i];
+        if (c == 0x00 || c == 0x28 || c == 0x29 || c == 0x2A || c == 0x5C)
+            need += 3;
+        else
+            need += 1;
+    }
+    if (buflen == 0) return (long)need;
+    if (out == NULL) return -1;
+    if (need + 1 > buflen) return -1;
+
+    static const char hex[] = "0123456789abcdef";
+    size_t o = 0;
+    for (size_t i = 0; i < in_len; i++) {
+        unsigned char c = (unsigned char)value[i];
+        if (c == 0x00 || c == 0x28 || c == 0x29 || c == 0x2A || c == 0x5C) {
+            out[o++] = '\\';
+            out[o++] = hex[(c >> 4) & 0xF];
+            out[o++] = hex[c & 0xF];
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+    return (long)o;
+}
+
+/*
+ * ldap_helpers_escape_dn -- escape `value` per RFC 4514 section 2.4
+ * (string representation of an attribute-value).  Special characters
+ * `,`, `+`, `"`, `\`, `<`, `>`, `;` are backslash-escaped, leading `#`
+ * and leading/trailing space are escaped, and NULs are encoded as `\00`.
+ *
+ * Returns output length excluding NUL on success, or -1 if the buffer is
+ * too small.  Pass buflen == 0 to query the required size.
+ */
+static inline long ldap_helpers_escape_dn(const char *value, size_t in_len,
+                                          char *out, size_t buflen)
+{
+    if (!value) return -1;
+    /* Two-pass: count then write. */
+    static const char hex[] = "0123456789abcdef";
+    size_t need = 0;
+    for (size_t i = 0; i < in_len; i++) {
+        unsigned char c = (unsigned char)value[i];
+        bool special = (c == ',' || c == '+' || c == '"' || c == '\\'
+                        || c == '<' || c == '>' || c == ';');
+        bool first   = (i == 0);
+        bool last    = (i + 1 == in_len);
+        bool leading = first && (c == ' ' || c == '#');
+        bool trailing= last  && (c == ' ');
+        if (c == 0x00)            need += 3;          /* \00 */
+        else if (special)         need += 2;          /* \X  */
+        else if (leading||trailing) need += 2;        /* \X  */
+        else                      need += 1;
+    }
+    if (buflen == 0) return (long)need;
+    if (out == NULL) return -1;
+    if (need + 1 > buflen) return -1;
+
+    size_t o = 0;
+    for (size_t i = 0; i < in_len; i++) {
+        unsigned char c = (unsigned char)value[i];
+        bool special = (c == ',' || c == '+' || c == '"' || c == '\\'
+                        || c == '<' || c == '>' || c == ';');
+        bool first   = (i == 0);
+        bool last    = (i + 1 == in_len);
+        bool leading = first && (c == ' ' || c == '#');
+        bool trailing= last  && (c == ' ');
+        if (c == 0x00) {
+            out[o++] = '\\';
+            out[o++] = hex[0];
+            out[o++] = hex[0];
+        } else if (special || leading || trailing) {
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+    return (long)o;
 }
 
 #endif /* CANDO_LDAP_HELPERS_H */

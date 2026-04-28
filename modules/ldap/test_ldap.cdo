@@ -1,15 +1,13 @@
 // modules/ldap/test_ldap.cdo -- Script-level integration test for the
-// LDAP module.
-//
-// Run with:
+// LDAP module.  Run with:
 //
 //     ./cando modules/ldap/test_ldap.cdo
 //
-// The test verifies the module's public API surface (the methods exposed
-// after include()) and exercises every error path that does not require a
-// running directory server.  Operations that need a live server (search
-// against a real base, add, modify, etc.) are exercised against an
-// intentionally unreachable host so we can verify the error reporter
+// Verifies the public API surface, the multi-value TRY/CATCH error
+// contract, and every error path that does not require a running directory
+// server.  Operations that need a live server (search results, add /
+// modify / delete, members / member_of expansion) are exercised against
+// an intentionally unreachable host so we verify the error reporter
 // rather than masking failures.
 
 VAR ldap = include("./ldap.so");
@@ -44,7 +42,18 @@ expect("method: delete",         type(ldap.delete)         == "number");
 expect("method: rename",         type(ldap.rename)         == "number");
 expect("method: move",           type(ldap.move)           == "number");
 expect("method: compare",        type(ldap.compare)        == "number");
-expect("method: last_error",     type(ldap.last_error)     == "number");
+
+// New v1.1 methods
+expect("method: rootdse",                     type(ldap.rootdse)                     == "number");
+expect("method: test_credentials",            type(ldap.test_credentials)            == "number");
+expect("method: password_modify",             type(ldap.password_modify)             == "number");
+expect("method: escape_filter",               type(ldap.escape_filter)               == "number");
+expect("method: escape_dn",                   type(ldap.escape_dn)                   == "number");
+expect("method: members",                     type(ldap.members)                     == "number");
+expect("method: member_of",                   type(ldap.member_of)                   == "number");
+expect("method: rc4",                         type(ldap.rc4)                         == "number");
+expect("method: md5",                         type(ldap.md5)                         == "number");
+expect("method: decode_reversible_password",  type(ldap.decode_reversible_password)  == "number");
 
 // ---- Constants ----
 expect("VERSION is a string",    type(ldap.VERSION)    == "string");
@@ -52,27 +61,57 @@ expect("SCOPE_BASE is a number", type(ldap.SCOPE_BASE) == "number");
 expect("SCOPE_ONE is a number",  type(ldap.SCOPE_ONE)  == "number");
 expect("SCOPE_SUB is a number",  type(ldap.SCOPE_SUB)  == "number");
 
-// ---- connect: invalid input ----
+// ---- Pure-C helpers reachable from script ----
+//
+// Byte-level vector verification lives in test_ldap.c (which has direct
+// memcmp access).  The script-level tests just confirm the natives are
+// callable, return strings, and handle bad input cleanly.
+expect("escape_filter: plain pass-through",
+       ldap.escape_filter("hello") == "hello");
+expect("escape_filter: returns a string",
+       type(ldap.escape_filter("(*)")) == "string");
+expect("escape_dn: returns a string",
+       type(ldap.escape_dn("Doe, Jane")) == "string");
+
+// md5 returns 16 raw bytes (string with byte-length 16).
+expect("md5: empty length 16",     #(ldap.md5(""))    == 16);
+expect("md5: 'abc' length 16",     #(ldap.md5("abc")) == 16);
+
+// rc4 round-trip
+VAR plaintext = "secret payload";
+VAR enc = ldap.rc4("k", plaintext);
+VAR dec = ldap.rc4("k", enc);
+expect("rc4: round-trip", dec == plaintext);
+expect("rc4: ciphertext differs from plaintext", enc != plaintext);
+
+// decode_reversible_password rejects odd-length blobs cleanly.
+TRY {
+    ldap.decode_reversible_password("odd", "key");
+    expect("decode_reversible_password: odd-length throws", FALSE);
+} CATCH (msg) {
+    expect("decode_reversible_password: odd-length throws", TRUE);
+}
+
+// ---- connect: invalid input (multi-value CATCH) ----
 TRY {
     ldap.connect();
     expect("connect: missing arg throws", FALSE);
-} CATCH (e) {
+} CATCH (msg, code) {
     expect("connect: missing arg throws", TRUE);
+    expect("connect: missing-arg has numeric code", type(code) == "number");
 }
 
 TRY {
     ldap.connect(42);
     expect("connect: non-string throws", FALSE);
-} CATCH (e) {
+} CATCH (msg) {
     expect("connect: non-string throws", TRUE);
 }
 
-// ---- connect to an unreachable URI: succeeds because libldap defers
-//      the network connect until first operation. ----
-VAR conn = ldap.connect("ldap://127.0.0.1:1");  // port 1 = nothing listens
+// ---- connect to unreachable URI succeeds (libldap defers connect) ----
+VAR conn = ldap.connect("ldap://127.0.0.1:1");
 expect("connect: returns object", type(conn) == "object");
 
-// set_option works without a network round-trip
 VAR ok = ldap.set_option(conn, "protocol_version", 3);
 expect("set_option: protocol_version=3", ok == TRUE);
 
@@ -82,39 +121,91 @@ expect("set_option: referrals=false",    ok == TRUE);
 ok = ldap.set_option(conn, "sizelimit", 100);
 expect("set_option: sizelimit=100",      ok == TRUE);
 
+// New v1.1 TLS option keys -- these set library-global state and may
+// be no-ops on Windows; either way must not throw on POSIX with valid
+// inputs.
+TRY {
+    ldap.set_option(conn, "tls_require_cert", "demand");
+    expect("set_option: tls_require_cert=demand", TRUE);
+} CATCH (msg) {
+    expect("set_option: tls_require_cert=demand", FALSE);
+}
+
 TRY {
     ldap.set_option(conn, "no_such_option", 1);
     expect("set_option: unknown name throws", FALSE);
-} CATCH (e) {
+} CATCH (msg) {
     expect("set_option: unknown name throws", TRUE);
 }
 
-// ---- bind / search against an unreachable host should error ----
+// ---- bind to unreachable server: throws with multi-value (msg, code) ----
 TRY {
     ldap.bind(conn, "cn=admin,dc=ex,dc=com", "secret");
     expect("bind: unreachable server throws", FALSE);
-} CATCH (e) {
-    expect("bind: unreachable server throws", TRUE);
+} CATCH (msg, code, diag) {
+    expect("bind: unreachable server throws",   TRUE);
+    expect("bind: msg is a string",             type(msg)  == "string");
+    expect("bind: code is a number",            type(code) == "number");
+    expect("bind: diag is a string",            type(diag) == "string");
+    expect("bind: code != 0 (LDAP_SERVER_DOWN)", code != 0);
 }
 
-// last_error must surface a non-null record after a failure
-VAR err = ldap.last_error();
-expect("last_error: object after bind failure", type(err) == "object");
-expect("last_error: has code field",            type(err.code) == "number");
-expect("last_error: has message field",         type(err.message) == "string");
+// ---- argument validation for the v1.1 helpers ----
+TRY {
+    ldap.test_credentials();
+    expect("test_credentials: missing args throws", FALSE);
+} CATCH (msg) {
+    expect("test_credentials: missing args throws", TRUE);
+}
+
+TRY {
+    ldap.test_credentials("ldap://127.0.0.1:1", "cn=admin", "x");
+    expect("test_credentials: server-down rethrows", FALSE);
+} CATCH (msg, code) {
+    expect("test_credentials: server-down rethrows", TRUE);
+    expect("test_credentials: rethrow has nonzero code", code != 0);
+}
+
+TRY {
+    ldap.password_modify(conn, "cn=u,dc=x", "old", "new");
+    expect("password_modify: server-down throws", FALSE);
+} CATCH (msg) {
+    expect("password_modify: server-down throws", TRUE);
+}
+
+TRY {
+    ldap.members(conn);
+    expect("members: missing args throws", FALSE);
+} CATCH (msg) {
+    expect("members: missing args throws", TRUE);
+}
+
+TRY {
+    ldap.member_of(conn, 42);
+    expect("member_of: non-string dn throws", FALSE);
+} CATCH (msg) {
+    expect("member_of: non-string dn throws", TRUE);
+}
+
+TRY {
+    ldap.rootdse(conn);
+    expect("rootdse: server-down throws", FALSE);
+} CATCH (msg) {
+    expect("rootdse: server-down throws", TRUE);
+}
 
 // ---- argument validation on the data-modifying ops ----
 TRY {
     ldap.add(conn, "cn=foo,dc=x", "not an object");
     expect("add: non-object attrs throws", FALSE);
-} CATCH (e) {
+} CATCH (msg) {
     expect("add: non-object attrs throws", TRUE);
 }
 
 TRY {
     ldap.modify(conn, "cn=foo,dc=x", "not an array");
     expect("modify: non-array mods throws", FALSE);
-} CATCH (e) {
+} CATCH (msg) {
     expect("modify: non-array mods throws", TRUE);
 }
 
@@ -122,21 +213,21 @@ TRY {
     ldap.modify(conn, "cn=foo,dc=x",
         [ { op: "bogus", attr: "x", values: ["y"] } ]);
     expect("modify: unknown op throws", FALSE);
-} CATCH (e) {
+} CATCH (msg) {
     expect("modify: unknown op throws", TRUE);
 }
 
 TRY {
     ldap.search(conn, { base: "dc=x", scope: "lateral" });
     expect("search: unknown scope throws", FALSE);
-} CATCH (e) {
+} CATCH (msg) {
     expect("search: unknown scope throws", TRUE);
 }
 
 TRY {
     ldap.search(conn, { scope: "sub" });
     expect("search: missing base throws", FALSE);
-} CATCH (e) {
+} CATCH (msg) {
     expect("search: missing base throws", TRUE);
 }
 
@@ -147,11 +238,10 @@ expect("unbind: returns true",      ok == TRUE);
 TRY {
     ldap.bind(conn, "cn=admin", "x");
     expect("bind on closed conn throws", FALSE);
-} CATCH (e) {
+} CATCH (msg) {
     expect("bind on closed conn throws", TRUE);
 }
 
-// double unbind is a no-op
 ok = ldap.unbind(conn);
 expect("unbind: idempotent", ok == TRUE);
 

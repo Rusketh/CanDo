@@ -85,6 +85,13 @@ jobs:
       - name: Build modules (Windows)
         run: make modules-windows MINGW_CC=gcc
 
+      - name: Smoke-test modules (Windows)
+        # Verify LoadLibrary + cando_module_init succeed and the public
+        # API surface is registered.  We can't run the full integration
+        # test on Windows because it relies on a connect-to-port-1
+        # failure path that's flaky against wldap32.
+        run: ./cando.exe modules/ldap/test_ldap_smoke.cdo
+
       - name: Verify no MinGW runtime DLL deps
         run: |
           set -e

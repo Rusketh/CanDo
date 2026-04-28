@@ -93,6 +93,37 @@ ldap.delete(conn, "cn=Ada L,ou=Disabled,dc=example,dc=com");
 ldap.unbind(conn);
 ```
 
+## Error handling
+
+Every operation that can fail throws a CanDo error.  Catch with
+multi-value `CATCH` to inspect both the human-readable message and the
+numeric LDAP result code:
+
+```cando
+TRY {
+    ldap.bind(conn, dn, pw);
+} CATCH (msg, code, diag) {
+    IF code == 49 { print("invalid credentials"); }
+    IF code == 81 { print("server is down"); }
+    print(msg);   // formatted module-side message
+    print(diag);  // libldap diagnostic (POSIX only; "" on Windows)
+}
+```
+
+| Code | Constant            | Meaning |
+|------|---------------------|---------|
+| 0    | LDAP_SUCCESS        | (used for module-side errors with no LDAP result code) |
+| 32   | LDAP_NO_SUCH_OBJECT | DN does not exist |
+| 49   | LDAP_INVALID_CREDENTIALS | bind: wrong password |
+| 50   | LDAP_INSUFFICIENT_ACCESS | caller lacks rights for the operation |
+| 53   | LDAP_UNWILLING_TO_PERFORM | server policy refused (e.g. password too short) |
+| 68   | LDAP_ALREADY_EXISTS | add: target DN already exists |
+| 81   | LDAP_SERVER_DOWN    | network failure / server unreachable |
+
+`code` is `0` for module-internal errors (bad arguments, out of memory,
+unknown option name).  `diag` may be `""` even on POSIX when libldap has
+nothing to report.
+
 ## API reference
 
 ### `connect(uri) → connection`
@@ -112,7 +143,7 @@ Upgrades the existing connection to TLS via the StartTLS extended
 operation.  Call before `bind` for STARTTLS-then-bind flows.
 
 ### `set_option(conn, name, value) → true`
-Mutates connection-level options.  Supported names:
+Mutates connection- or library-level options.  Supported names:
 
 | Name | Value | Notes |
 |---|---|---|
@@ -121,20 +152,31 @@ Mutates connection-level options.  Supported names:
 | `network_timeout`  | number (seconds, fractional ok) | Connect timeout. |
 | `timelimit`        | number (seconds) | Server-side time limit per search. |
 | `sizelimit`        | number          | Maximum search results per search. |
+| `tls_cacertfile`   | string (path)   | CA bundle for verifying the server cert.  POSIX only — Schannel reads the Windows trust store. |
+| `tls_certfile`     | string (path)   | Client cert for SASL EXTERNAL.  POSIX only. |
+| `tls_keyfile`      | string (path)   | Private key matching `tls_certfile`.  POSIX only. |
+| `tls_require_cert` | `"never" \| "allow" \| "try" \| "demand"` | Cert validation strictness.  On Windows, `"never"` disables SSL validation, all other values enable it. |
 
 ### `search(conn, options) → [entry, …]`
 Performs a synchronous LDAP search.  `options` is an object:
 
 ```cando
 {
-    base:      "dc=example,dc=com",        // required
-    scope:     "sub",                      // base | one | onelevel | sub | subtree
-    filter:    "(objectClass=*)",          // RFC 4515 filter; default "(objectClass=*)"
-    attrs:     ["cn", "mail"],             // null = return all attributes
-    sizelimit: 1000,                       // 0 = server default
-    timelimit: 30                          // 0 = server default
+    base:       "dc=example,dc=com",        // required
+    scope:      "sub",                      // base | one | onelevel | sub | subtree
+    filter:     "(objectClass=*)",          // RFC 4515 filter; default "(objectClass=*)"
+    attrs:      ["cn", "mail"],             // null = return all attributes
+    sizelimit:  1000,                       // 0 = server default
+    timelimit:  30,                         // 0 = server default
+    page_size:  0                           // > 0 enables RFC 2696 paged results
 }
 ```
+
+When `page_size > 0` the module attaches a paged-results control and
+loops internally until the server reports no more pages, accumulating
+all entries into the single returned array.  This is the only way to
+retrieve more than 1000 entries from a default-configured Active
+Directory.
 
 Each returned entry has shape:
 
@@ -185,14 +227,90 @@ Moves an object under a new parent.  If `new_rdn` is omitted, the
 object keeps its existing RDN.
 
 ### `unbind(conn) → true`
-Closes the connection.  Subsequent operations on the handle throw.
-Calling `unbind` on an already-closed handle is a no-op.
+Closes the connection and releases its slot in the connection pool.
+Subsequent operations on the handle throw.  Calling `unbind` on an
+already-closed handle is a no-op.
 
-### `last_error() → { code, message } | null`
-Returns the most recent LDAP error from this thread of execution, or
-`null` if the last operation succeeded.  Useful for inspecting the
-numeric LDAP result code (e.g. `LDAP_NO_SUCH_OBJECT`) when a `TRY`
-block has caught the message.
+### `rootdse(conn[, attrs]) → attributes-object | null`
+Reads the directory's rootDSE — the per-server status entry that lists
+`namingContexts`, `supportedControl`, `supportedExtension`,
+`defaultNamingContext` (AD), `vendorName`, etc.  Returns the same
+shape as `entry.attributes` from `search`.
+
+### `test_credentials(uri, dn, password) → bool`
+One-shot credential validation.  Opens a fresh connection, performs a
+simple bind, unbinds, and returns `TRUE` on success or `FALSE` on
+`LDAP_INVALID_CREDENTIALS`.  Any other failure (server unreachable,
+TLS failure, etc.) re-throws so genuine errors aren't silently coerced
+into "wrong password".  Useful for password-prompt screens.
+
+### `password_modify(conn, dn, old_password, new_password[, format]) → true`
+Set a user's password.
+
+| `format` | Action |
+|---|---|
+| `"auto"` (default) | Picks AD vs RFC 3062 from rootDSE / platform; defaults to AD on Windows. |
+| `"ad"`             | Active Directory style: `modify` on `unicodePwd` with `'"'+UTF-16LE+'"'`. AD requires LDAPS or StartTLS for this to succeed. |
+| `"rfc3062"`        | LDAP extended op `1.3.6.1.4.1.4203.1.11.1`.  POSIX only; throws on Windows. |
+
+Pass `""` for `old_password` for an admin-mode reset (the bound
+principal must have password-reset rights).
+
+### `members(conn, group_dn[, options]) → [dn, ...]`
+Return the DNs of users that are members of `group_dn`.
+- `options.recursive: TRUE` walks nested groups transitively.  On
+  Active Directory this uses the `LDAP_MATCHING_RULE_IN_CHAIN`
+  matching rule (OID `1.2.840.113556.1.4.1941`) for a single
+  server-side query; on plain OpenLDAP it falls back to a
+  client-side breadth-first walk.
+
+### `member_of(conn, user_dn[, options]) → [dn, ...]`
+Return the DNs of groups that `user_dn` is a member of.  Uses the
+user's `memberOf` attribute (virtual on AD, requires the `memberof`
+overlay on OpenLDAP).
+- `options.recursive: TRUE` resolves transitive group nesting via the
+  same AD matching rule / BFS fallback as `members`.
+
+### `compare(conn, dn, attr, value) → boolean`
+RFC 4511 compare.  Returns `TRUE` if equal, `FALSE` if not, throws on
+any other error.
+
+### `escape_filter(value) → string`  (RFC 4515)
+Escape a single string for safe interpolation into a search filter:
+
+```cando
+VAR f = `(&(objectClass=user)(cn=${ldap.escape_filter(name)}))`;
+ldap.search(conn, { base: "dc=ex", filter: f });
+```
+
+### `escape_dn(value) → string`  (RFC 4514)
+Escape a single attribute value for safe interpolation into a DN
+component (the part to the right of `=`).
+
+### Active Directory password-recovery helpers
+
+These three helpers are reserved for legitimate password-recovery /
+auditing workflows where the operator has Domain Admin and the
+"Store password using reversible encryption" group policy is enabled.
+A regular LDAP bind cannot read the encrypted blob — retrieving it
+requires the DRSUAPI replication protocol (DCSync), which this module
+does **not** implement.  Once you have the bytes (typically from
+impacket's `secretsdump.py` or equivalent), the helpers below complete
+the unwrap step:
+
+#### `rc4(key, data) → string`
+Generic RC4 (ARCFOUR) stream cipher.  Cando strings are byte-safe so
+keys and outputs may contain arbitrary bytes including NULs.
+
+#### `md5(data) → string` (16 raw bytes)
+RFC 1321 MD5.  Returns the 16-byte digest as a binary string.
+
+#### `decode_reversible_password(blob, key) → string`
+RC4-decrypts `blob` with `key`, then converts the resulting UTF-16LE
+plaintext to UTF-8.  The caller is responsible for deriving `key`
+correctly per MS-SAMR §3.1.1.8.10–11; for typical AD setups the key
+is `MD5(syskey || rid_le || RPC_CONST_STRING)` — compose with `md5`
+above.
 
 ### Constants
 
@@ -237,11 +355,18 @@ host so the error reporter is verified rather than masked.
 
 ## Limitations
 
-- TLS certificate verification is left at OpenLDAP / wldap32 defaults.
-  Set `TLS_REQCERT` in `/etc/ldap/ldap.conf` (Linux) or
-  `LDAP_OPT_SERVER_CERTIFICATE` (Windows) before connecting if you
-  need stricter checks.
 - The module is synchronous only.  Asynchronous LDAP operations
   (`ldap_search_ext`, `ldap_result`) are not yet exposed.
 - SASL mechanisms beyond `simple` (e.g. `GSSAPI`, `EXTERNAL`,
   `DIGEST-MD5`) are not yet exposed; use `bind` with a DN/password.
+- `password_modify` with `format="rfc3062"` is POSIX-only;
+  `format="ad"` works on both platforms against Active Directory.
+- TLS option keys (`tls_cacertfile`, `tls_certfile`, `tls_keyfile`)
+  are POSIX-only — Windows reads CA roots from the system trust store.
+- `members(..., {recursive:TRUE})` against non-AD directories falls
+  back to a client-side BFS; on huge groups this can be many round
+  trips.  Use AD or accept the latency.
+- `decode_reversible_password` is the unwrap step only; obtaining the
+  encrypted blob requires DCSync (DRSUAPI) which is out of scope.
+- The connection pool caps at 256 simultaneously open connections.
+  `connect()` throws `"connection pool exhausted"` past that.

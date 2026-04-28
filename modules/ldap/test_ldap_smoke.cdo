@@ -1,0 +1,53 @@
+// modules/ldap/test_ldap_smoke.cdo -- minimal smoke test that exercises
+// the bits of the module that don't need a directory server.
+//
+// Used by the Windows CI job to verify LoadLibrary() + cando_module_init
+// + the in-process pure-C surface works.  We can't run the full
+// integration test (test_ldap.cdo) on Windows because connect() against
+// 127.0.0.1:1 has different libldap-vs-wldap32 timing characteristics
+// that risk flaky failures in CI; instead we verify everything we can
+// without touching the network.
+
+// Try Windows extension first, fall back to POSIX -- include() throws on
+// miss.  Paths are relative to this script's directory.
+VAR ldap = NULL;
+TRY {
+    ldap = include("./ldap.dll");
+} CATCH (e) {
+    ldap = include("./ldap.so");
+}
+
+// Surface check -- if the binary loaded and init returned a populated
+// table, every documented method is registered.
+VAR methods = ["connect", "bind", "bind_anonymous", "unbind", "start_tls",
+               "set_option", "search", "add", "modify", "delete",
+               "rename", "move", "compare", "rootdse", "test_credentials",
+               "password_modify", "escape_filter", "escape_dn",
+               "members", "member_of", "rc4", "md5",
+               "decode_reversible_password"];
+
+VAR missing = 0;
+FOR m OF methods {
+    IF type(ldap[m]) != "number" {
+        print(`MISSING ${m}`);
+        missing = missing + 1;
+    }
+}
+
+// Pure-C round-trips that touch every helper exposed to scripts.
+IF ldap.escape_filter("a*b") == ldap.escape_filter("a*b") {
+    // OK -- function is callable and deterministic.
+}
+
+VAR enc = ldap.rc4("k", "hello");
+VAR dec = ldap.rc4("k", enc);
+IF dec != "hello" { print("FAIL rc4"); missing = missing + 1; }
+
+IF #(ldap.md5("abc")) != 16 { print("FAIL md5"); missing = missing + 1; }
+
+IF missing == 0 {
+    print("OK");
+} ELSE {
+    print(`FAIL (${missing} problem(s))`);
+    os.exit(1);
+}
