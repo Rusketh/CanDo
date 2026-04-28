@@ -17,7 +17,8 @@ endif()
 # Platform link libraries
 # ----------------------------------------------------------------------------
 if(WIN32)
-    set(PLATFORM_LIBS ws2_32 m)
+    # crypt32 is required by OpenSSL's static libcrypto on Windows.
+    set(PLATFORM_LIBS ws2_32 crypt32 m)
 else()
     set(PLATFORM_LIBS m dl)
 endif()
@@ -26,6 +27,11 @@ endif()
 find_package(Threads REQUIRED)
 
 # OpenSSL (hard dependency for the http/https standard library)
+# On Windows, prefer static OpenSSL so libcrypto-3-x64.dll / libssl-3-x64.dll
+# do not need to ship alongside cando.exe and libcando.dll.
+if(WIN32)
+    set(OPENSSL_USE_STATIC_LIBS TRUE)
+endif()
 find_package(OpenSSL REQUIRED)
 
 # ----------------------------------------------------------------------------
