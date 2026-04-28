@@ -174,15 +174,12 @@ static void ldap_attach_extra(CandoVM *vm, int code, const char *diag)
     if (vm->error_val_count < 3) vm->error_val_count = 3;
 }
 
+#if !defined(LDAP_PLATFORM_WINDOWS)
 /* Diagnostic message lookup (libldap-side, not the human-readable result
- * code text from ldap_err2string).  May return NULL on Windows where
- * wldap32 doesn't expose the same option. */
+ * code text from ldap_err2string).  POSIX-only; wldap32 doesn't expose
+ * an equivalent option, and ldap_throw routes around it on Windows. */
 static const char *ldap_get_diagnostic(LDAP *ld)
 {
-#if defined(LDAP_PLATFORM_WINDOWS)
-    (void)ld;
-    return NULL;
-#else
     char *diag = NULL;
     if (!ld) return NULL;
     if (ldap_get_option(ld, LDAP_OPT_DIAGNOSTIC_MESSAGE, &diag) != LDAP_SUCCESS)
@@ -190,8 +187,8 @@ static const char *ldap_get_diagnostic(LDAP *ld)
     /* libldap manages the storage.  The caller copies it if it needs to
      * survive past the next libldap call. */
     return diag;
-#endif
 }
+#endif
 
 /* ldap_throw -- helper that fires a multi-value throw from native code.
  * After this call, return -1 from the native. */
@@ -624,8 +621,14 @@ static int native_ldap_start_tls(CandoVM *vm, int argc, CandoValue *args)
     LDAP *ld = (LDAP *)handle_unwrap(vm, args[0]);
     if (!ld) return -1;
 #if defined(LDAP_PLATFORM_WINDOWS)
-    /* winldap exposes ldap_start_tls_s(ld, serverctrls, clientctrls) */
-    int irc = (int)ldap_start_tls_s(ld, NULL, NULL);
+    /* winldap signature: ldap_start_tls_s(ld, ServerReturnValue, result,
+     * ServerControls, ClientControls).  ServerReturnValue holds the
+     * extended-op result code; we discard it and surface only success/
+     * failure via the function return. */
+    ULONG svr_rc = 0;
+    LDAPMessage *res = NULL;
+    int irc = (int)ldap_start_tls_s(ld, &svr_rc, &res, NULL, NULL);
+    if (res) ldap_msgfree(res);
 #else
     int irc = ldap_start_tls_s(ld, NULL, NULL);
 #endif
@@ -1990,7 +1993,7 @@ static void push_dn_array_from_results(CandoVM *vm, LDAP *ld,
          e = ldap_next_entry(ld, e))
     {
         if (want_attr) {
-            struct berval **vals = ldap_get_values_len(ld, e, want_attr);
+            struct berval **vals = ldap_get_values_len(ld, e, (char *)want_attr);
             if (vals) {
                 for (int i = 0; vals[i]; i++) {
                     CdoString *s = cdo_string_intern(vals[i]->bv_val,
@@ -2038,7 +2041,7 @@ static int read_dn_values(LDAP *ld, const char *dn, const char *attr,
     }
     LDAPMessage *e = ldap_first_entry(ld, result);
     if (e) {
-        struct berval **vals = ldap_get_values_len(ld, e, attr);
+        struct berval **vals = ldap_get_values_len(ld, e, (char *)attr);
         if (vals) {
             size_t n = 0;
             while (vals[n]) n++;
