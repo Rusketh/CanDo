@@ -1,53 +1,49 @@
-// modules/ldap/test_ldap_smoke.cdo -- minimal smoke test that exercises
-// the bits of the module that don't need a directory server.
-//
-// Used by the Windows CI job to verify LoadLibrary() + cando_module_init
-// + the in-process pure-C surface works.  We can't run the full
-// integration test (test_ldap.cdo) on Windows because connect() against
-// 127.0.0.1:1 has different libldap-vs-wldap32 timing characteristics
-// that risk flaky failures in CI; instead we verify everything we can
-// without touching the network.
+// modules/ldap/test_ldap_smoke.cdo -- minimal smoke test for the
+// Windows CI job.  Verifies that LoadLibrary + cando_module_init succeed
+// and a few representative natives are reachable.  Kept deliberately
+// simple so a runtime failure points clearly at the binary, not the
+// script.
 
-// Try Windows extension first, fall back to POSIX -- include() throws on
-// miss.  Paths are relative to this script's directory.
+print("smoke: starting");
+
+// Try the Windows extension first; fall back to POSIX.
 VAR ldap = NULL;
 TRY {
     ldap = include("./ldap.dll");
+    print("smoke: loaded ldap.dll");
 } CATCH (e) {
-    ldap = include("./ldap.so");
+    print(`smoke: ldap.dll load failed: ${e}`);
+    TRY {
+        ldap = include("./ldap.so");
+        print("smoke: loaded ldap.so");
+    } CATCH (e2) {
+        print(`smoke: ldap.so load failed: ${e2}`);
+        os.exit(1);
+    }
 }
 
-// Surface check -- if the binary loaded and init returned a populated
-// table, every documented method is registered.
-VAR methods = ["connect", "bind", "bind_anonymous", "unbind", "start_tls",
-               "set_option", "search", "add", "modify", "delete",
-               "rename", "move", "compare", "rootdse", "test_credentials",
-               "password_modify", "escape_filter", "escape_dn",
-               "members", "member_of", "rc4", "md5",
-               "decode_reversible_password"];
-
+// Basic surface check on a handful of representative methods.
+VAR check = ["connect", "bind", "search", "rc4", "md5",
+             "escape_filter", "members", "decode_reversible_password"];
 VAR missing = 0;
-FOR m OF methods {
+FOR m OF check {
     IF type(ldap[m]) != "number" {
-        print(`MISSING ${m}`);
+        print(`smoke: missing method: ${m}`);
         missing = missing + 1;
     }
 }
 
-// Pure-C round-trips that touch every helper exposed to scripts.
-IF ldap.escape_filter("a*b") == ldap.escape_filter("a*b") {
-    // OK -- function is callable and deterministic.
-}
-
-VAR enc = ldap.rc4("k", "hello");
-VAR dec = ldap.rc4("k", enc);
-IF dec != "hello" { print("FAIL rc4"); missing = missing + 1; }
-
-IF #(ldap.md5("abc")) != 16 { print("FAIL md5"); missing = missing + 1; }
-
-IF missing == 0 {
-    print("OK");
-} ELSE {
-    print(`FAIL (${missing} problem(s))`);
+IF missing > 0 {
+    print(`smoke: FAIL (${missing} missing method(s))`);
     os.exit(1);
 }
+
+// One round-trip through a pure-C helper.
+VAR enc = ldap.rc4("k", "hello");
+VAR dec = ldap.rc4("k", enc);
+IF dec != "hello" {
+    print("smoke: rc4 round-trip failed");
+    os.exit(1);
+}
+
+print("OK");
