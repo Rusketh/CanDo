@@ -266,18 +266,26 @@ CFLAGS_WIN  = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0
 CFLAGS_EXE_WIN = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0600 \
                  -iquote source -iquote source/core -Iinclude
 
-LDFLAGS_WIN = -lm -lws2_32 -lssl -lcrypto -static-libgcc
+# OpenSSL is linked statically into libcando.dll so the only files needed
+# at runtime are cando.exe and libcando.dll (no libcrypto-3-x64.dll, etc.).
+# crypt32 is required by OpenSSL's static libcrypto on Windows.
+LDFLAGS_LIB_WIN = -static-libgcc \
+                  -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic \
+                  -lws2_32 -lcrypt32 -lm
+
+# The executable links against libcando.dll only — no OpenSSL needed here.
+LDFLAGS_EXE_WIN = -static-libgcc -lws2_32 -lm
 
 libcando.dll: $(CANDO_LIB_SRCS) $(CANDO_WIN_EXTRA)
-	$(MINGW_CC) $(CFLAGS_WIN) -shared $^ -o $@ $(LDFLAGS_WIN) \
-	    -Wl,--out-implib,libcando.lib
+	$(MINGW_CC) $(CFLAGS_WIN) -shared $^ -o $@ \
+	    -Wl,--out-implib,libcando.lib $(LDFLAGS_LIB_WIN)
 
 icon.res: source/icon.rc assets/icon.ico
 	cd source && $(WINDRES) icon.rc -O coff -o ../icon.res
 
 cando.exe: source/main.c libcando.dll icon.res
 	$(MINGW_CC) $(CFLAGS_EXE_WIN) source/main.c icon.res \
-	    -L. -lcando -o $@ $(LDFLAGS_WIN)
+	    -L. -lcando -o $@ $(LDFLAGS_EXE_WIN)
 
 # ---------------------------------------------------------------------------
 # Clean
