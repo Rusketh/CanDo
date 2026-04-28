@@ -129,6 +129,7 @@ CANDO_LIB_SRCS = \
     source/lib/httputil.c         \
     source/lib/http.c             \
     source/lib/https.c            \
+    source/lib/meta.c             \
     source/cando_lib.c
 
 # Windows compatibility shim added on Windows

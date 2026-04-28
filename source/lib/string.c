@@ -11,6 +11,7 @@
 
 #include "string.h"
 #include "libutil.h"
+#include "meta.h"
 #include "../vm/bridge.h"
 #include "../vm/vm.h"
 #include "../object/string.h"
@@ -582,4 +583,9 @@ void cando_lib_string_register(CandoVM *vm)
     /* Expose as both a global module and the default string prototype. */
     cando_vm_set_global(vm, "string", proto_val, true);
     vm->string_proto = proto_val;
+
+    /* Mirror onto `_meta.string` so user scripts can extend the prototype
+     * via either name (`string.foo = ...` or `_meta.string.foo = ...`). */
+    cando_lib_meta_register(vm);
+    cando_lib_meta_set(vm, "string", proto);
 }

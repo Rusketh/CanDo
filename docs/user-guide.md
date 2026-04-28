@@ -615,9 +615,9 @@ VAR res2 = fetch("https://httpbin.org/post", {
 
 ```cando
 VAR server = http.createServer(FUNCTION(req, res) {
-    res.status = 200;
-    res.headers["Content-Type"] = "text/plain";
-    res.body = `Hello! You requested ${req.path}`;
+    res:status(200);
+    res:setHeader("Content-Type", "text/plain");
+    res:send(`Hello! You requested ${req.path}`);
 });
 
 server:listen(8080);
@@ -625,6 +625,33 @@ print("listening on :8080");
 ```
 
 Each request runs on its own thread.  Call `server:close()` to shut down.
+
+`res` follows the prototype chain to `_meta.http_response`, so you can add
+helpers globally:
+
+```cando
+_meta.http_response.write = FUNCTION(self, data) {
+    self.body = self.body + data;
+};
+
+http.createServer(FUNCTION(req, res) {
+    res:write("Hello, ");
+    res:write("world!");
+    res:send();           // sends the accumulated `body`
+});
+```
+
+`res:send()` does **not** have to run inside the handler.  Stash `res` and
+call `:send()` later from another thread:
+
+```cando
+VAR pending = NULL;
+http.createServer(FUNCTION(req, res) { pending = res; });
+thread {
+    thread.sleep(100);
+    pending:send("delayed");
+};
+```
 
 ## Crypto
 

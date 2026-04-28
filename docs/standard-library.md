@@ -112,6 +112,61 @@ Array values answer to these methods via `:`.  Indices are 0-based.
 
 ---
 
+## `_meta` (global meta registry) {#meta-global-meta-registry}
+
+`_meta` is a writable global object that holds **meta tables** — prototype
+objects for built-in types.  Native libraries register a subtable per type
+and stamp every instance they create with `instance.__index = _meta.<type>`,
+so user code can attach methods that immediately become callable on every
+instance.
+
+```cando
+print(type(_meta));                       // object
+print(type(_meta.http_response));         // http_response
+
+_meta.http_response.write = FUNCTION(self, data) {
+    self.body = self.body + data;
+};
+
+http.createServer(FUNCTION(req, res) {
+    res:write("Hello, world!");
+    res:send();
+});
+```
+
+The `_meta.<name>` subtable's `__type` field is stamped immutably (`FIELD_STATIC`)
+to the type name, so `type(instance)` returns the type tag.  Method slots
+(`status`, `send`, `listen`, …) use ordinary `FIELD_NONE` flags so user code
+may override them.
+
+Subtables registered by the standard library:
+
+| Subtable | Used by |
+|---|---|
+| `_meta.string` | Same table as the global `string` and `vm->string_proto` -- the prototype consulted whenever a method is called on a string. |
+| `_meta.array` | Same table as `array` / `vm->array_proto` -- consulted for methods on array receivers. |
+| `_meta.object` | Same table as `object`.  Not auto-applied to plain objects; use `object.setPrototype(o, _meta.object)` to opt in. |
+| `_meta.thread` | Per-instance methods for thread receivers (`t:done()`, `t:join()`, `t:state()`, `t:then(fn)`, …).  Aliased onto the same native sentinels exposed via `thread.<name>`. |
+| `_meta.http_request` | Server-side request objects passed into `http.createServer`'s handler. |
+| `_meta.http_response` | Server-side response objects.  Default methods: `status`, `setHeader`, `send`, `json`. |
+| `_meta.http_server` | Server objects returned by `createServer`.  Default methods: `listen`, `close`. |
+| `_meta.http_client_response` | Response objects returned by `http.get`, `https.get`, `fetch`, etc. |
+
+For `string`, `array`, `object`, and `thread` the meta table is the same
+underlying CdoObject as the like-named global, so writing through either
+name is observable through the other:
+
+```cando
+_meta.string.shout = FUNCTION(self) { RETURN self:toUpper() + "!"; };
+print("hi":shout());        // HI!
+print(string.shout("yes")); // YES!  -- same table, same method
+```
+
+You may also attach your own subtables at runtime (`_meta.foo = { ... }`)
+and use them as prototypes via `object.setPrototype(instance, _meta.foo)`.
+
+---
+
 ## `object`
 
 Utilities for manipulating objects.  All take the object as the first
@@ -251,6 +306,21 @@ provides:
 | `thread.then(t, fn)` | Register a success callback; called with `t`'s return values. |
 | `thread.catch(t, fn)` | Register an error callback; called with the thrown value. |
 
+Every per-thread function (`done`, `join`, `cancel`, `state`, `error`,
+`then`, `catch`) is also reachable through the `_meta.thread` prototype as
+a method on the thread receiver itself:
+
+```cando
+VAR t = thread { RETURN 42; };
+print(t:state());   // running | done
+print(await t);     // 42
+print(t:done());    // true
+```
+
+Because `_meta.thread` aliases the same native sentinels as `thread.<name>`,
+both forms call the same underlying implementation -- and overrides applied
+under either name take effect for both.
+
 The language-level `thread { … }` expression and `await` operator are
 described in [language-reference.md](language-reference.md).
 
@@ -271,8 +341,9 @@ the same implementation but requires OpenSSL and uses TLS.
 | `https.request(options) → response` | TLS equivalent. |
 | `fetch(url, options*) → response` | Scheme-aware global; picks http vs https from the URL. |
 
-The response object has fields `status`, `statusText`, `headers` (object), and `body` (string), plus a
-`:json()` method that parses `body` using `json.parse`.
+Client responses inherit from `_meta.http_client_response`; the instance
+itself carries `status`, `ok`, `body`, and `headers` fields and methods are
+attached on the meta table so user code can extend it (see [`_meta`](#meta-global-meta-registry) below).
 
 ### Server
 
@@ -282,6 +353,52 @@ The response object has fields `status`, `statusText`, `headers` (object), and `
 | `https.createServer(handler, keyPath, certPath)` | TLS equivalent. |
 | `server:listen(port, host*)` | Start accepting connections. |
 | `server:close()` | Stop accepting new connections and let in-flight ones finish. |
+
+Server `req` / `res` objects inherit from `_meta.http_request` and
+`_meta.http_response`; `server` objects inherit from `_meta.http_server`.
+The default response methods are:
+
+| Method | Description |
+|---|---|
+| `res:status(code)` | Set the status code (returns the receiver for chaining). |
+| `res:setHeader(name, value)` | Add a response header. |
+| `res:send(body*)` | Flush the response.  If `body` is omitted, the receiver's `body` field (a string accumulator that defaults to `""`) is used. |
+| `res:json(value)` | JSON-encode `value` and send it with `Content-Type: application/json`. |
+
+`res:send()` may be invoked **synchronously from the handler**, or
+**asynchronously from any other thread**.  The connection thread keeps the
+TCP/TLS socket open after the handler returns and waits for `:send()` before
+cleaning up.  Stash `res` on a global, hand it to a `thread { ... }`, or push
+it into a queue — the response is only flushed once `:send()` runs.
+
+```cando
+VAR pending = NULL;
+http.createServer(FUNCTION(req, res) {
+    pending = res;            // defer
+});
+thread {
+    thread.sleep(50);
+    pending:send("delayed");  // sends from another thread
+};
+```
+
+### Extending request and response objects
+
+Because `req` and `res` follow the prototype chain, any function attached to
+`_meta.http_response` (or `_meta.http_request`) becomes a method on every
+instance.  This is the recommended way to build response helpers:
+
+```cando
+_meta.http_response.write = FUNCTION(self, data) {
+    self.body = self.body + data;
+};
+
+http.createServer(FUNCTION(req, res) {
+    res:write("Hello, ");
+    res:write("world!");
+    res:send();               // sends the accumulated body
+});
+```
 
 ---
 
