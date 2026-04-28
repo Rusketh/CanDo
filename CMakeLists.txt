@@ -90,6 +90,7 @@ set(LIB_SRCS
     source/lib/httputil.c
     source/lib/http.c
     source/lib/https.c
+    source/lib/meta.c
 )
 
 # Windows compatibility shim (POSIX regex replacement)

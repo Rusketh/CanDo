@@ -53,6 +53,7 @@
 #include "lib/net.h"
 #include "lib/http.h"
 #include "lib/https.h"
+#include "lib/meta.h"
 
 /* cando.h error codes and CANDO_API */
 #include "../include/cando.h"
@@ -153,6 +154,10 @@ CANDO_API void cando_close(CandoVM *vm)
 
 CANDO_API void cando_openlibs(CandoVM *vm)
 {
+    /* `_meta` is registered first so any other library can populate its
+     * subtables during its own registration. */
+    cando_lib_meta_register(vm);
+
     cando_lib_math_register(vm);
     cando_lib_file_register(vm);
     cando_lib_eval_register(vm);
@@ -191,6 +196,7 @@ CANDO_API void cando_open_evallib(CandoVM *vm)     { cando_lib_eval_register(vm)
 CANDO_API void cando_open_includelib(CandoVM *vm)  { cando_lib_include_register(vm);  }
 CANDO_API void cando_open_httplib(CandoVM *vm)     { cando_lib_http_register(vm);     }
 CANDO_API void cando_open_httpslib(CandoVM *vm)    { cando_lib_https_register(vm);    }
+CANDO_API void cando_open_metalib(CandoVM *vm)     { cando_lib_meta_register(vm);     }
 
 /* =========================================================================
  * Internal: compile source into a chunk

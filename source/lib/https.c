@@ -196,4 +196,8 @@ void cando_lib_https_register(CandoVM *vm)
     libutil_set_method(vm, https_obj, "createServer", https_create_server_fn);
 
     cando_vm_set_global(vm, "https", https_val, true);
+
+    /* Share the same `_meta` tables as http: TLS only changes the transport,
+     * not the request/response shape, so users register methods once. */
+    http_register_meta_tables(vm);
 }

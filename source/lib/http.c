@@ -18,6 +18,7 @@
 #include "http.h"
 #include "httputil.h"
 #include "libutil.h"
+#include "meta.h"
 #include "../vm/bridge.h"
 #include "../vm/vm.h"
 #include "../object/object.h"
@@ -69,11 +70,16 @@ typedef struct HttpServer {
 } HttpServer;
 
 typedef struct HttpResCtx {
-    HttpConn     conn;
-    int          status_code;
-    HttpHeaders  headers;
-    bool         sent;
-    bool         active;
+    HttpConn      conn;
+    int           status_code;
+    HttpHeaders   headers;
+    bool          sent;
+    bool          active;
+    /* Wakes the connection thread once the response has been written so it
+     * can clean up the connection.  Necessary because res:send() may run from
+     * a different thread (e.g. one spawned inside the request handler). */
+    cando_mutex_t mu;
+    cando_cond_t  cv;
 } HttpResCtx;
 
 static HttpServer    g_servers[HTTP_MAX_SERVERS];
@@ -129,6 +135,8 @@ static int res_alloc(void)
             memset(&g_res_pool[i], 0, sizeof(HttpResCtx));
             http_conn_init(&g_res_pool[i].conn);
             http_headers_init(&g_res_pool[i].headers);
+            cando_os_mutex_init(&g_res_pool[i].mu);
+            cando_os_cond_init(&g_res_pool[i].cv);
             g_res_pool[i].active = true;
             g_res_pool[i].status_code = 200;
             idx = i;
@@ -144,6 +152,8 @@ static void res_free(int idx)
     if (idx < 0 || idx >= HTTP_MAX_ACTIVE_RESPONSES) return;
     cando_os_mutex_lock(&g_res_pool_mutex);
     http_headers_free(&g_res_pool[idx].headers);
+    cando_os_mutex_destroy(&g_res_pool[idx].mu);
+    cando_os_cond_destroy(&g_res_pool[idx].cv);
     g_res_pool[idx].active = false;
     cando_os_mutex_unlock(&g_res_pool_mutex);
 }
@@ -439,6 +449,10 @@ int http_do_request_native(CandoVM *vm, int argc, CandoValue *args,
     }
     set_obj_field(result, "headers", hdrs);
 
+    /* Attach the user-extensible meta table so script code can add helper
+     * methods via `_meta.http_client_response.<name> = FUNCTION(...) { ... }`. */
+    cando_lib_meta_attach(vm, result, "http_client_response");
+
     http_response_free(&resp);
 
     cando_vm_push(vm, result_val);
@@ -490,9 +504,22 @@ static HttpResCtx *res_get_ctx_from(CandoVM *vm, CandoValue receiver)
     return &g_res_pool[idx];
 }
 
-/* Build and send a complete response on ctx->conn. */
+/*
+ * res_send_impl -- write the complete HTTP response on ctx->conn, mark it as
+ * sent, and wake any thread (typically the connection thread) blocked in
+ * res_wait_until_sent waiting for cleanup.
+ *
+ * Caller must NOT hold ctx->mu; this function acquires it internally so the
+ * write is serialised against itself if invoked concurrently.
+ */
 static bool res_send_impl(HttpResCtx *ctx, const char *body, usize body_len)
 {
+    cando_os_mutex_lock(&ctx->mu);
+    if (ctx->sent) {
+        cando_os_mutex_unlock(&ctx->mu);
+        return false;
+    }
+
     HttpBuf out;
     httpbuf_init(&out);
 
@@ -524,7 +551,22 @@ static bool res_send_impl(HttpResCtx *ctx, const char *body, usize body_len)
     bool ok = http_conn_write_all(&ctx->conn, out.data, out.len);
     httpbuf_free(&out);
     ctx->sent = true;
+    cando_os_cond_broadcast(&ctx->cv);
+    cando_os_mutex_unlock(&ctx->mu);
     return ok;
+}
+
+/*
+ * res_wait_until_sent -- block until ctx->sent becomes true.  Used by the
+ * connection thread to keep the socket and response context alive after the
+ * request handler returns so res:send() may be invoked from another thread.
+ */
+static void res_wait_until_sent(HttpResCtx *ctx)
+{
+    cando_os_mutex_lock(&ctx->mu);
+    while (!ctx->sent)
+        cando_os_cond_wait(&ctx->cv, &ctx->mu);
+    cando_os_mutex_unlock(&ctx->mu);
 }
 
 /* res.status(code) */
@@ -555,27 +597,56 @@ static int res_setHeader_fn(CandoVM *vm, int argc, CandoValue *args)
     return 1;
 }
 
-/* res.send(body) */
+/*
+ * res.send([body])
+ *
+ * If `body` is omitted (or null), the value of the receiver's `body` field is
+ * sent instead.  The default `body` field is initialised to "" when the res
+ * object is built, and meta-method extensions like `_meta.http_response.write`
+ * append to it before calling :send().
+ */
 static int res_send_fn(CandoVM *vm, int argc, CandoValue *args)
 {
     if (argc < 1) { cando_vm_push(vm, cando_null()); return 1; }
     HttpResCtx *ctx = res_get_ctx_from(vm, args[0]);
-    if (!ctx || ctx->sent) { cando_vm_push(vm, args[0]); return 1; }
+    if (!ctx) { cando_vm_push(vm, args[0]); return 1; }
 
     const char *body = "";
     u32         blen = 0;
     char       *tmp  = NULL;
-    if (argc >= 2) {
+    CdoValue    field_val = cdo_null();
+    bool        have_field = false;
+
+    if (argc >= 2 && !cando_is_null(args[1])) {
         if (cando_is_string(args[1])) {
             body = args[1].as.string->data;
             blen = args[1].as.string->length;
-        } else if (!cando_is_null(args[1])) {
+        } else {
             tmp = cando_value_tostring(args[1]);
             if (tmp) { body = tmp; blen = (u32)strlen(tmp); }
         }
+    } else {
+        /* Fall back to the receiver's `body` field so users can build the
+         * response incrementally (e.g. via res:write) and call res:send(). */
+        CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+        if (obj) {
+            CdoString *kbody = cdo_string_intern("body", 4);
+            have_field = cdo_object_get(obj, kbody, &field_val);
+            cdo_string_release(kbody);
+        }
+        if (have_field && field_val.tag == CDO_STRING && field_val.as.string) {
+            body = field_val.as.string->data;
+            blen = field_val.as.string->length;
+        } else if (have_field && field_val.tag != CDO_NULL) {
+            tmp = cdo_value_tostring(field_val);
+            if (tmp) { body = tmp; blen = (u32)strlen(tmp); }
+        }
     }
+
     res_send_impl(ctx, body, blen);
     if (tmp) free(tmp);
+    /* field_val is borrowed from cdo_object_get -- do NOT release. */
+    (void)have_field;
     cando_vm_push(vm, args[0]);
     return 1;
 }
@@ -723,25 +794,36 @@ static CANDO_THREAD_RETURN conn_thread_fn(void *arg_p)
                       (u32)strlen(preq.headers.entries[i].value));
     }
     set_obj_field(req_obj, "headers", hdrs_obj);
+    cando_lib_meta_attach(&child, req_obj, "http_request");
 
-    /* Build res object. */
+    /* Build res object.  Methods live on `_meta.http_response` so users can
+     * extend them; we only stash the per-instance `__res_id` and an empty
+     * mutable `body` accumulator here. */
     CandoValue res_val = cando_bridge_new_object(&child);
     CdoObject *res_obj = cando_bridge_resolve(&child, res_val.as.handle);
     set_num_field(res_obj, "__res_id", (f64)res_idx);
-    libutil_set_method(&child, res_obj, "status",    res_status_fn);
-    libutil_set_method(&child, res_obj, "setHeader", res_setHeader_fn);
-    libutil_set_method(&child, res_obj, "send",      res_send_fn);
-    libutil_set_method(&child, res_obj, "json",      res_json_fn);
+    set_str_field(res_obj, "body", "", 0);
+    cando_lib_meta_attach(&child, res_obj, "http_response");
 
     /* Call the user callback(req, res). */
     CandoValue cb_args[2] = { req_val, res_val };
     cando_vm_call_value(&child, server->callback_fn, cb_args, 2);
 
-    /* If the callback did not send anything, flush a default 500. */
-    if (!ctx->sent) {
-        ctx->status_code = 500;
-        res_send_impl(ctx, "Internal Server Error", 21);
+    /* If the callback errored out, send a 500 immediately so the client
+     * doesn't hang.  Otherwise wait for res:send -- which may be invoked
+     * synchronously from the callback or asynchronously from another
+     * Cando thread that captured the res object. */
+    if (child.has_error) {
+        cando_os_mutex_lock(&ctx->mu);
+        bool already_sent = ctx->sent;
+        cando_os_mutex_unlock(&ctx->mu);
+        if (!already_sent) {
+            ctx->status_code = 500;
+            res_send_impl(ctx, "Internal Server Error", 21);
+        }
     }
+
+    res_wait_until_sent(ctx);
 
     /* Cleanup. */
     http_parsed_request_free(&preq);
@@ -933,11 +1015,12 @@ int http_create_server_native_impl(CandoVM *vm, CandoValue callback,
     server->ssl_ctx     = (SSL_CTX *)ssl_ctx;
     server->listen_fd   = -1;
 
+    /* The instance only carries the per-server identifier; listen/close are
+     * inherited from `_meta.http_server`. */
     CandoValue sobj_val = cando_bridge_new_object(vm);
     CdoObject *sobj     = cando_bridge_resolve(vm, sobj_val.as.handle);
     set_num_field(sobj, "__server_id", (f64)sidx);
-    libutil_set_method(vm, sobj, "listen", server_listen_fn);
-    libutil_set_method(vm, sobj, "close",  server_close_fn);
+    cando_lib_meta_attach(vm, sobj, "http_server");
 
     cando_vm_push(vm, sobj_val);
     return 1;
@@ -956,6 +1039,52 @@ static int http_create_server_fn(CandoVM *vm, int argc, CandoValue *args)
  * Registration
  * ===================================================================== */
 
+/*
+ * meta_define_method -- like libutil_set_method but a no-op if the slot is
+ * already populated.  Keeps http_register_meta_tables idempotent so both http
+ * and https registration paths can call it without exhausting the per-VM
+ * native function table.
+ */
+static void meta_define_method(CandoVM *vm, CdoObject *obj,
+                               const char *name, CandoNativeFn fn)
+{
+    CdoString *key = cdo_string_intern(name, (u32)strlen(name));
+    CdoValue   existing = cdo_null();
+    bool       have     = cdo_object_rawget(obj, key, &existing);
+    cdo_string_release(key);
+    if (have && !cdo_is_null(existing)) return;
+    libutil_set_method(vm, obj, name, fn);
+}
+
+/*
+ * http_register_meta_tables -- populate the user-extensible `_meta` tables
+ * for HTTP/HTTPS objects with their default native methods.  Idempotent and
+ * safe to call from both http and https registration so either library may
+ * be opened standalone.
+ */
+void http_register_meta_tables(CandoVM *vm)
+{
+    cando_lib_meta_register(vm);
+
+    CdoObject *res_meta = cando_lib_meta_table(vm, "http_response");
+    if (res_meta) {
+        meta_define_method(vm, res_meta, "status",    res_status_fn);
+        meta_define_method(vm, res_meta, "setHeader", res_setHeader_fn);
+        meta_define_method(vm, res_meta, "send",      res_send_fn);
+        meta_define_method(vm, res_meta, "json",      res_json_fn);
+    }
+    /* http_request currently has no native methods.  The table is created
+     * eagerly so user code can attach methods reliably at script startup. */
+    (void)cando_lib_meta_table(vm, "http_request");
+    (void)cando_lib_meta_table(vm, "http_client_response");
+
+    CdoObject *server_meta = cando_lib_meta_table(vm, "http_server");
+    if (server_meta) {
+        meta_define_method(vm, server_meta, "listen", server_listen_fn);
+        meta_define_method(vm, server_meta, "close",  server_close_fn);
+    }
+}
+
 void cando_lib_http_register(CandoVM *vm)
 {
     ensure_pools_inited();
@@ -969,6 +1098,8 @@ void cando_lib_http_register(CandoVM *vm)
     libutil_set_method(vm, http_obj, "createServer", http_create_server_fn);
 
     cando_vm_set_global(vm, "http", http_val, true);
+
+    http_register_meta_tables(vm);
 
     /* Register global fetch(). */
     cando_vm_register_native(vm, "fetch", fetch_fn);

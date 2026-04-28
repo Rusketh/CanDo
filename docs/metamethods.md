@@ -361,6 +361,32 @@ for `cdo_class_new`.
 
 ---
 
+## The `_meta` global registry
+
+Native libraries that hand out instance objects (HTTP request/response,
+servers, etc.) wire them up to a shared prototype stored at `_meta.<name>`.
+Because `_meta` is an ordinary writable global, user code can attach new
+methods that propagate to every instance through the `__index` chain:
+
+```cando
+_meta.http_response.write = FUNCTION(self, data) {
+    self.body = self.body + data;
+};
+```
+
+Each subtable is created lazily; its `__type` is stamped as a `FIELD_STATIC`
+constant equal to the type name (`"http_response"` for example), so
+`type(instance)` reflects the tag.  Default native methods are inserted with
+`FIELD_NONE` flags so user code may override them.
+
+You can register your own meta tables and use them as prototypes with
+`object.setPrototype` for any type you control.
+
+See [standard-library.md `#_meta`](standard-library.md#meta-global-meta-registry)
+for the list of built-in subtables and their default methods.
+
+---
+
 ## Further reading
 
 - [object-system.md](object-system.md) — `CdoObject` internals, field flags,

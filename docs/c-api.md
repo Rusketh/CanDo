@@ -69,6 +69,7 @@ void cando_open_evallib(CandoVM *vm);             /* eval()                */
 void cando_open_includelib(CandoVM *vm);          /* include()             */
 void cando_open_httplib(CandoVM *vm);             /* http.* + fetch()      */
 void cando_open_httpslib(CandoVM *vm);            /* https.*               */
+void cando_open_metalib(CandoVM *vm);             /* `_meta` registry      */
 ```
 
 Each opener is idempotent.  `cando_openlibs` registers the libraries
