@@ -1,0 +1,46 @@
+/* lib_secure_socket.cdo -- Integration tests for the `secure_socket`
+ * library.  Uses a vendored self-signed cert so the test is fully
+ * self-contained and requires no external CA.
+ *
+ * Verifies:
+ *   1. `secure_socket.createServer({cert,key}, cb):listen(port)` returns
+ *      immediately (non-blocking listen contract).
+ *   2. A TLS round-trip works end-to-end, including the handshake on the
+ *      worker thread.
+ *   3. `:cipher()` and `:protocol()` return non-null after handshake.
+ *
+ * Expected output is registered in tests/integration/run_tests.sh.
+ */
+
+VAR LF = '
+';
+
+VAR creds = include("modules/test_cert.cdo");
+
+VAR srv = secure_socket.createServer({ cert: creds.cert, key: creds.key },
+    FUNCTION(conn) {
+        VAR line = conn:recvLine();
+        WHILE line != "" {
+            conn:sendAll("tls-echo:" + line + LF);
+            line = conn:recvLine();
+        }
+        conn:close();
+    });
+srv:listen(18821);
+print("after listen");          /* expected: after listen */
+
+thread.sleep(50);
+
+/* Cert is self-signed, so the client must turn off verification. */
+VAR c = secure_socket.connect("127.0.0.1", 18821, { verifyPeer: FALSE });
+c:sendAll("hello" + LF);
+print(c:recvLine());            /* expected: tls-echo:hello */
+
+VAR proto = c:protocol();
+print(proto != NULL);           /* expected: true */
+VAR cipher = c:cipher();
+print(cipher != NULL);          /* expected: true */
+
+c:close();
+srv:close();
+print("done");                  /* expected: done */

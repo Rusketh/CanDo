@@ -87,6 +87,9 @@ set(LIB_SRCS
     source/lib/process.c
     source/lib/net.c
     source/lib/object.c
+    source/lib/sockutil.c
+    source/lib/socket.c
+    source/lib/secure_socket.c
     source/lib/httputil.c
     source/lib/http.c
     source/lib/https.c
@@ -310,3 +313,17 @@ add_executable(test_vm
 target_compile_options(test_vm PRIVATE ${CANDO_IQUOTE_FLAGS})
 target_link_libraries(test_vm PRIVATE Threads::Threads ${PLATFORM_LIBS})
 add_test(NAME test_vm COMMAND $<TARGET_FILE:test_vm>)
+
+# test_sockutil — covers the cross-platform TCP/TLS primitives directly.
+add_executable(test_sockutil
+    ${CORE_SRCS}
+    source/lib/sockutil.c
+    tests/test_sockutil.c
+)
+target_compile_options(test_sockutil PRIVATE
+    ${CANDO_IQUOTE_FLAGS}
+    "SHELL:-iquote ${CMAKE_SOURCE_DIR}/source/lib"
+)
+target_link_libraries(test_sockutil PRIVATE
+    Threads::Threads OpenSSL::SSL OpenSSL::Crypto ${PLATFORM_LIBS})
+add_test(NAME test_sockutil COMMAND $<TARGET_FILE:test_sockutil>)

@@ -51,6 +51,8 @@
 #include "lib/crypto.h"
 #include "lib/process.h"
 #include "lib/net.h"
+#include "lib/socket.h"
+#include "lib/secure_socket.h"
 #include "lib/http.h"
 #include "lib/https.h"
 #include "lib/meta.h"
@@ -173,6 +175,11 @@ CANDO_API void cando_openlibs(CandoVM *vm)
     cando_lib_crypto_register(vm);
     cando_lib_process_register(vm);
     cando_lib_net_register(vm);
+    /* socket sits above net but below http/https; the latter still use the
+     * legacy HttpConn wrappers (now backed by sockutil) so the registration
+     * order is "low-level transports first, protocol libs after". */
+    cando_lib_socket_register(vm);
+    cando_lib_secure_socket_register(vm);
     /* http/https must register after json so res.json(value) can look up
      * the json.stringify method on the child VM's shared globals. */
     cando_lib_http_register(vm);
@@ -192,6 +199,8 @@ CANDO_API void cando_open_datetimelib(CandoVM *vm) { cando_lib_datetime_register
 CANDO_API void cando_open_cryptolib(CandoVM *vm)   { cando_lib_crypto_register(vm);   }
 CANDO_API void cando_open_processlib(CandoVM *vm)  { cando_lib_process_register(vm);  }
 CANDO_API void cando_open_netlib(CandoVM *vm)      { cando_lib_net_register(vm);      }
+CANDO_API void cando_open_socketlib(CandoVM *vm)        { cando_lib_socket_register(vm);        }
+CANDO_API void cando_open_secure_socketlib(CandoVM *vm) { cando_lib_secure_socket_register(vm); }
 CANDO_API void cando_open_evallib(CandoVM *vm)     { cando_lib_eval_register(vm);     }
 CANDO_API void cando_open_includelib(CandoVM *vm)  { cando_lib_include_register(vm);  }
 CANDO_API void cando_open_httplib(CandoVM *vm)     { cando_lib_http_register(vm);     }

@@ -5,6 +5,7 @@
  */
 
 #include "httputil.h"
+#include "sockutil.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -12,29 +13,6 @@
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
-
-#if defined(CANDO_PLATFORM_WINDOWS)
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  include <winsock2.h>
-#  include <ws2tcpip.h>
-#  define CLOSESOCK(fd) closesocket(fd)
-#  define SOCK_ERRNO() WSAGetLastError()
-typedef int socklen_t_compat;
-#else
-#  include <unistd.h>
-#  include <sys/types.h>
-#  include <sys/socket.h>
-#  include <netinet/in.h>
-#  include <netinet/tcp.h>
-#  include <arpa/inet.h>
-#  include <netdb.h>
-#  include <fcntl.h>
-#  include <sys/time.h>
-#  define CLOSESOCK(fd) close(fd)
-#  define SOCK_ERRNO() errno
-#endif
 
 /* =========================================================================
  * Dynamic byte buffer
@@ -247,29 +225,20 @@ void http_headers_free(HttpHeaders *h)
 }
 
 /* =========================================================================
- * One-time global init
+ * One-time global init  (delegates to sockutil)
  * ===================================================================== */
-
-static _Atomic(int) g_init_done = 0;
 
 void http_one_time_init(void)
 {
-    int expected = 0;
-    if (!atomic_compare_exchange_strong(&g_init_done, &expected, 1))
-        return;
-
-#if defined(CANDO_PLATFORM_WINDOWS)
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
-#endif
-
-    /* OpenSSL 1.1+ auto-initialises; this call is a no-op but harmless. */
-    (void)OPENSSL_init_ssl(
-        OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
+    sockutil_one_time_init();
 }
 
 /* =========================================================================
  * Connection abstraction
+ *
+ * HttpConn is now a thin wrapper around sockutil's primitives.  The fd field
+ * is preserved for binary compatibility with http.c which directly assigns
+ * incoming `accept`-returned descriptors into ctx->conn.fd.
  * ===================================================================== */
 
 void http_conn_init(HttpConn *c)
@@ -280,52 +249,14 @@ void http_conn_init(HttpConn *c)
     c->ssl_ctx = NULL;
 }
 
-static void set_timeouts(int fd, int timeout_ms)
-{
-    if (timeout_ms <= 0) return;
-#if defined(CANDO_PLATFORM_WINDOWS)
-    DWORD tv = (DWORD)timeout_ms;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv));
-#else
-    struct timeval tv;
-    tv.tv_sec  = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-#endif
-}
-
 bool http_conn_connect(HttpConn *c, const HttpUrl *url, int timeout_ms)
 {
-    http_one_time_init();
     http_conn_init(c);
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    char portstr[16];
-    snprintf(portstr, sizeof(portstr), "%d", url->port);
-
-    struct addrinfo *res = NULL;
-    int rc = getaddrinfo(url->host, portstr, &hints, &res);
-    if (rc != 0 || !res) return false;
-
-    int fd = -1;
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = (int)socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
-        set_timeouts(fd, timeout_ms);
-        if (connect(fd, ai->ai_addr, (socklen_t)ai->ai_addrlen) == 0) break;
-        CLOSESOCK(fd);
-        fd = -1;
-    }
-    freeaddrinfo(res);
-    if (fd < 0) return false;
-
-    c->fd = fd;
+    sockutil_socket_t fd = sockutil_tcp_connect(url->host, url->port,
+                                                AF_UNSPEC, timeout_ms,
+                                                NULL, 0);
+    if (fd == SOCKUTIL_INVALID_SOCKET) return false;
+    c->fd = (int)fd;
     return true;
 }
 
@@ -333,27 +264,18 @@ bool http_conn_start_tls_client(HttpConn *c, const char *sni_host)
 {
     if (c->fd < 0) return false;
 
-    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    /* Match the previous behaviour of httputil: no peer verification by
+     * default.  Callers that require verification should use the new
+     * `secure_socket` library which defaults verifyPeer to true. */
+    SockutilTlsClientOpts opts = { 0 };
+    opts.verify_peer = false;
+
+    SSL_CTX *ctx = sockutil_build_client_ssl_ctx(&opts, NULL, 0);
     if (!ctx) return false;
 
-    /* Use system default verify paths; we accept unverified by default
-     * (callers can strengthen later).  For self-signed testing we skip verify. */
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
-
-    SSL *ssl = SSL_new(ctx);
+    SSL *ssl = sockutil_tls_wrap((sockutil_socket_t)c->fd, ctx, true,
+                                 sni_host, NULL, 0);
     if (!ssl) {
-        SSL_CTX_free(ctx);
-        return false;
-    }
-
-    if (sni_host && *sni_host) {
-        SSL_set_tlsext_host_name(ssl, sni_host);
-    }
-
-    SSL_set_fd(ssl, c->fd);
-
-    if (SSL_connect(ssl) <= 0) {
-        SSL_free(ssl);
         SSL_CTX_free(ctx);
         return false;
     }
@@ -368,14 +290,9 @@ bool http_conn_start_tls_server(HttpConn *c, SSL_CTX *ctx)
 {
     if (c->fd < 0 || !ctx) return false;
 
-    SSL *ssl = SSL_new(ctx);
+    SSL *ssl = sockutil_tls_wrap((sockutil_socket_t)c->fd, ctx, false,
+                                 NULL, NULL, 0);
     if (!ssl) return false;
-
-    SSL_set_fd(ssl, c->fd);
-    if (SSL_accept(ssl) <= 0) {
-        SSL_free(ssl);
-        return false;
-    }
 
     c->ssl     = ssl;
     c->ssl_ctx = NULL;  /* context is owned externally (by the server) */
@@ -386,47 +303,29 @@ bool http_conn_start_tls_server(HttpConn *c, SSL_CTX *ctx)
 int http_conn_read(HttpConn *c, void *buf, int len)
 {
     if (c->fd < 0) return -1;
-    if (c->is_tls) {
-        return SSL_read(c->ssl, buf, len);
-    }
-#if defined(CANDO_PLATFORM_WINDOWS)
-    return recv(c->fd, (char *)buf, len, 0);
-#else
-    return (int)recv(c->fd, buf, (size_t)len, 0);
-#endif
+    if (c->is_tls) return sockutil_tls_recv(c->ssl, buf, len);
+    return sockutil_recv_raw((sockutil_socket_t)c->fd, buf, len);
 }
 
 int http_conn_write(HttpConn *c, const void *buf, int len)
 {
     if (c->fd < 0) return -1;
-    if (c->is_tls) {
-        return SSL_write(c->ssl, buf, len);
-    }
-#if defined(CANDO_PLATFORM_WINDOWS)
-    return send(c->fd, (const char *)buf, len, 0);
-#else
-    return (int)send(c->fd, buf, (size_t)len, 0);
-#endif
+    if (c->is_tls) return sockutil_tls_send(c->ssl, buf, len);
+    return sockutil_send_raw((sockutil_socket_t)c->fd, buf, len);
 }
 
 bool http_conn_write_all(HttpConn *c, const void *buf, usize len)
 {
-    const char *p = (const char *)buf;
-    usize left = len;
-    while (left > 0) {
-        int n = http_conn_write(c, p, (int)(left > 65536 ? 65536 : left));
-        if (n <= 0) return false;
-        p    += n;
-        left -= (usize)n;
-    }
-    return true;
+    if (c->fd < 0) return false;
+    return sockutil_send_all((sockutil_socket_t)c->fd,
+                             c->is_tls ? c->ssl : NULL,
+                             buf, len);
 }
 
 void http_conn_close(HttpConn *c)
 {
     if (c->ssl) {
-        SSL_shutdown(c->ssl);
-        SSL_free(c->ssl);
+        sockutil_tls_free(c->ssl);
         c->ssl = NULL;
     }
     if (c->ssl_ctx) {
@@ -434,7 +333,7 @@ void http_conn_close(HttpConn *c)
         c->ssl_ctx = NULL;
     }
     if (c->fd >= 0) {
-        CLOSESOCK(c->fd);
+        sockutil_close((sockutil_socket_t)c->fd);
         c->fd = -1;
     }
     c->is_tls = false;

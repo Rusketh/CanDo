@@ -45,7 +45,7 @@ source/
     vm.h/.c           CandoVM -- interpreter, call frames, threading
     debug.h/.c        cando_chunk_disasm
 
-  lib/                17 standard library modules
+  lib/                19 standard library modules
     math, file, string, array, object, json, csv,
     thread, os, datetime, crypto, process, net,
     eval, include, http, https
@@ -172,7 +172,7 @@ All public entry points live in `include/cando.h` and are implemented in
 |--------------------|------------------------------------------------------|
 | `cando_open()`     | Allocate VM, init global singleton (ref-counted)     |
 | `cando_close()`    | Destroy VM, tear down singleton on last close        |
-| `cando_openlibs()` | Register all 17 standard library modules             |
+| `cando_openlibs()` | Register all 19 standard library modules             |
 | `cando_dofile()`   | Read file + compile + execute                        |
 | `cando_dostring()` | Compile string + execute                             |
 | `cando_loadstring()`| Compile only, returns `CandoChunk*`                 |

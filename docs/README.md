@@ -13,6 +13,7 @@ compiled to bytecode for a stack-based VM.
 | [user-guide.md](user-guide.md) | Hands-on tutorial: learn CanDo by example |
 | [language-reference.md](language-reference.md) | Complete syntax: types, expressions, statements, functions, classes |
 | [standard-library.md](standard-library.md) | Every built-in library module, function-by-function |
+| [socket.md](socket.md) | Long-form guide to the `socket` and `secure_socket` libraries |
 | [threading.md](threading.md) | `thread` / `await`, the `thread` library, shared state |
 
 ## For C embedders
@@ -89,7 +90,7 @@ source/
   object/            heap objects: CdoObject, array, function, thread
   parser/            lexer + Pratt parser → bytecode
   vm/                bytecode, dispatch loop, bridge layer, disassembler
-  lib/               17 standard library modules
+  lib/               19 standard library modules
   natives.c          core natives: print, type, toString
   cando_lib.c        public embedding API (cando_open, cando_dofile, …)
   main.c             `cando` CLI entry point
