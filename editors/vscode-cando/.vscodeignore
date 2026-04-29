@@ -1,7 +1,7 @@
 .vscode/**
 .vscode-test/**
 **/tsconfig.json
-*.tsbuildinfo
+**/*.tsbuildinfo
 **/*.map
 **/*.ts
 !**/*.d.ts
