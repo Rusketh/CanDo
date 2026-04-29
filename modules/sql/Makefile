@@ -61,9 +61,18 @@ sql.dylib: $(SRCS) sql_buf.h sql_crypto.h sql_driver.h sql_net.h sql_pg.h sql_my
 	    $(SRCS) -o $@ $(LDLIBS)
 
 # ---------------------------------------------------------------------------
-# Windows DLL (cross-compile from Linux).  Links libcando from the repo
-# root for the symbols cando_bridge_*, cando_vm_*, etc.; libssl/libcrypto
-# come from MSYS2's mingw64 build of OpenSSL.
+# Windows DLL (cross-compile from Linux).
+#
+# Links:
+#   - libcando.dll for the cando_bridge_* / cando_vm_* APIs
+#   - OpenSSL libssl/libcrypto **statically** so users don't have to
+#     ship libssl-3-x64.dll / libcrypto-3-x64.dll alongside sql.dll
+#     (cando's own CI gate explicitly rejects DLLs that import them).
+#     libcando.dll has its own private static copy too; sql.dll keeps
+#     its own to avoid relying on private exports.
+#   - winpthread + libgcc statically for the same reason; libgcc's spec
+#     adds an implicit -lpthread that we have to neutralise via the
+#     --whole-archive trick mirroring the top-level Makefile.
 # ---------------------------------------------------------------------------
 sql.dll: $(SRCS) sql_buf.h sql_crypto.h sql_driver.h sql_net.h sql_pg.h sql_mysql.h
 	$(MINGW_CC) -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS \
@@ -73,7 +82,11 @@ sql.dll: $(SRCS) sql_buf.h sql_crypto.h sql_driver.h sql_net.h sql_pg.h sql_mysq
 	    -iquote $(ROOT)/source/object -iquote $(ROOT)/source/compat \
 	    -I$(ROOT)/include -I. \
 	    -shared $(SRCS) -o $@ \
-	    -L$(ROOT) -lcando -lssl -lcrypto -lws2_32
+	    -static-libgcc \
+	    -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive \
+	    -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic \
+	    -L$(ROOT) -lcando -lws2_32 -lcrypt32 -lm \
+	    -Wl,-Bstatic
 
 # ---------------------------------------------------------------------------
 # C unit tests for protocol-internal helpers (sql_buf.h, sql_crypto.h,
