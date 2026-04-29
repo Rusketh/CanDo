@@ -123,10 +123,65 @@ Plus, control-specific methods that no-op on the wrong kind:
 | ----------------------- | -------------------------------- |
 | `setChecked(b)` / `getChecked()` | CheckBox, RadioButton    |
 | `addItem(text)`         | ComboBox, ListBox                |
+| `removeItem(index)`     | ComboBox, ListBox                |
 | `clearItems()`          | ComboBox, ListBox                |
+| `getItem(index)`        | ComboBox, ListBox -- returns string or `NULL` |
+| `getItems()`            | ComboBox, ListBox -- returns array |
+| `getItemCount()`        | ComboBox, ListBox -- returns number |
 | `getSelectedIndex()` / `setSelectedIndex(i)` | ComboBox, ListBox |
 | `setValue(n)` / `getValue()` | ProgressBar, TrackBar, NumericUpDown, TextBox |
 | `setRange(lo, hi)`      | ProgressBar, TrackBar            |
+| `setMarquee(active, [speed_ms])` | ProgressBar (needs `marquee=true` at construction) |
+| `setState(name)`        | ProgressBar -- `"normal"`, `"warning"` (amber), `"error"` (red), `"paused"` |
+
+### Colours
+
+```cando
+btn:setForeColor(255, 255, 255);     // R, G, B
+btn:setBackColor(0x2266AA);          // packed 0xRRGGBB
+btn:clearBackColor();                // revert to system default
+```
+
+`setForeColor` and `setBackColor` set the text and background colours
+honoured via `WM_CTLCOLOR*` in the parent form's WndProc.  Both accept
+either a packed `0xRRGGBB` integer or three separate `(r, g, b)`
+arguments (0-255 each).  The form itself also honours `setBackColor`
+via `WM_ERASEBKGND`.
+
+### Docking
+
+```cando
+top:setDock("top");          // string form
+side:setDock(forms.Dock.left);  // numeric constant form
+```
+
+`setDock(value)` accepts either a string name or a numeric constant
+from `forms.Dock` (`none`, `top`, `bottom`, `left`, `right`, `fill`).
+The semantics mirror `System.Windows.Forms.DockStyle`:
+
+* `top` / `bottom` -- child gets the parent's full width and uses its
+  own stored height.  Anchors to the top or bottom of whatever client
+  area is left after earlier-docked children peel their rects.
+* `left` / `right` -- analogous on the horizontal axis using the
+  child's stored width.
+* `fill` -- child takes the entire remaining client area.  Use at
+  most one fill child per parent.
+
+Docking re-runs automatically on every parent resize and on
+`setDock()`.  Call `parent:relayout()` to force a relayout if the
+script has mutated child sizes manually.
+
+```cando
+VAR top    = forms.Panel(f);    top:setSize(0, 40):setDock("top")
+VAR side   = forms.Panel(f);    side:setSize(120, 0):setDock("left")
+VAR status = forms.Label(f);    status:setSize(0, 20):setDock("bottom")
+VAR body   = forms.Panel(f);    body:setDock("fill")    // takes the rest
+```
+
+A `0` in the unused dimension is a hint that the layout will fill it
+in -- e.g. a `top`-docked child with `setSize(0, 40)` says "I want 40
+pixels tall; pick the width from whatever the parent's client area
+gives me."
 
 ## Events
 
