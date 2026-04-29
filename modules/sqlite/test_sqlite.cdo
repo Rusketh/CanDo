@@ -461,6 +461,136 @@ ist:finalize();
 
 tdb:close();
 
+// ===========================================================================
+// Chunk 5: function / aggregate / loadExtension / backup
+// ===========================================================================
+print("");
+print("-- functions / aggregates / backup --");
+
+VAR udb = sql.open(":memory:");
+
+expect("method: defineFunction",  type(sql.defineFunction)  == "number");
+expect("method: defineAggregate", type(sql.defineAggregate) == "number");
+expect("method: loadExtension",   type(sql.loadExtension)   == "number");
+expect("method: backup",          type(sql.backup)          == "number");
+
+// ---- scalar UDF -----------------------------------------------------------
+udb:defineFunction("addone", FUNCTION(x) { return x + 1; });
+VAR sf = udb:prepare("SELECT addone(10) AS v");
+expect("UDF: addone(10) == 11",  sf:get().v == 11);
+sf:finalize();
+
+udb:defineFunction("greet", FUNCTION(name) { return "hello, " + name; });
+sf = udb:prepare("SELECT greet(?) AS v");
+expect("UDF takes string args",  sf:get("Ada").v == "hello, Ada");
+sf:finalize();
+
+// UDF returning null
+udb:defineFunction("retnull", FUNCTION() { return NULL; });
+sf = udb:prepare("SELECT retnull() AS v");
+expect("UDF returns null",       sf:get().v == NULL);
+sf:finalize();
+
+// UDF that throws -> SQL error
+udb:defineFunction("kaboom", FUNCTION() { throw "udf error: kaboom"; });
+sf = udb:prepare("SELECT kaboom() AS v");
+VAR caught_u = "";
+TRY { sf:get(); } CATCH (m, code, sqlstate) { caught_u = m; }
+expect("UDF throw becomes SQL error", caught_u != "");
+sf:finalize();
+
+// ---- aggregate UDF --------------------------------------------------------
+udb:exec("CREATE TABLE nums (n INTEGER)");
+udb:exec("INSERT INTO nums VALUES (1), (2), (3), (4), (5)");
+
+udb:defineAggregate("sum_squares", {
+    start: 0,
+    step: FUNCTION(acc, x) { return acc + x * x; }
+});
+VAR ag = udb:prepare("SELECT sum_squares(n) AS s FROM nums");
+expect("aggregate: sum_squares == 55", ag:get().s == 55);
+ag:finalize();
+
+// aggregate with result fn
+udb:defineAggregate("avg_my", {
+    start: { sum: 0, n: 0 },
+    step:   FUNCTION(acc, x) {
+        return { sum: acc.sum + x, n: acc.n + 1 };
+    },
+    result: FUNCTION(acc) {
+        IF acc.n == 0 { return NULL; }
+        return acc.sum / acc.n;
+    }
+});
+VAR ag2 = udb:prepare("SELECT avg_my(n) AS a FROM nums");
+expect("aggregate with result fn", ag2:get().a == 3);
+ag2:finalize();
+
+// ---- loadExtension is gated ----------------------------------------------
+caught_u = "";
+TRY {
+    udb:loadExtension("./nonexistent.so");
+} CATCH (m) { caught_u = m; }
+expect("loadExtension on default db throws",  caught_u != "");
+
+// (Cannot test the success path without a real extension; the gate is
+// what's interesting here -- chunk 1 already proved the linkage works.)
+VAR udb2 = sql.open(":memory:", { enableLoadExtension: TRUE });
+caught_u = "";
+TRY {
+    udb2:loadExtension("./absolutely-not-here.so");
+} CATCH (m, code, sqlstate) {
+    caught_u = m;
+}
+expect("loadExtension on enabled db reports load error",
+    caught_u != "");
+udb2:close();
+
+// ---- backup ---------------------------------------------------------------
+// Use a file path inside /tmp; clean up afterward via os.remove if available.
+VAR bk_path = "/tmp/cando_sqlite_backup_test.db";
+TRY { os.remove(bk_path); } CATCH (e) { caught_u = ""; }
+
+udb:exec("CREATE TABLE zzz (k INTEGER PRIMARY KEY, v TEXT)");
+udb:exec("INSERT INTO zzz VALUES (1, 'one'), (2, 'two')");
+
+VAR rep = udb:backup(bk_path);
+expect("backup returns object",     type(rep) == "object");
+expect("backup reported >= 1 page", rep.pages >= 1);
+
+// Reopen the backup file and verify the data made it.
+VAR rdb = sql.open(bk_path, { readonly: TRUE });
+VAR rcheck = rdb:prepare("SELECT k, v FROM zzz ORDER BY k");
+VAR rrows  = rcheck:all();
+expect("backup preserved 2 rows",    rrows:length() == 2);
+expect("backup row 0 v == 'one'",    rrows[0].v == "one");
+expect("backup row 1 v == 'two'",    rrows[1].v == "two");
+rcheck:finalize();
+rdb:close();
+TRY { os.remove(bk_path); } CATCH (e) { caught_u = ""; }
+
+// ---- threaded use: a UDF call that runs on a worker thread ---------------
+// (Demonstrates that scripts use the language's `thread` syntax in place
+// of an async API.  Both threads call the same db; SQLite's serialized
+// mode does the rest.)
+udb:exec("CREATE TABLE counts (id INTEGER PRIMARY KEY, n INTEGER)");
+udb:exec("INSERT INTO counts VALUES (1, 0)");
+
+VAR worker = thread {
+    VAR s = udb:prepare("UPDATE counts SET n = n + 1 WHERE id = 1");
+    s:run();
+    s:finalize();
+    return TRUE;
+};
+VAR ok = await worker;
+expect("threaded write committed",  ok == TRUE);
+
+VAR sq = udb:prepare("SELECT n FROM counts WHERE id = 1");
+expect("threaded write visible to main", sq:get().n == 1);
+sq:finalize();
+
+udb:close();
+
 // ---- Summary --------------------------------------------------------------
 print("");
 print(`pass: ${pass}    fail: ${fail}`);

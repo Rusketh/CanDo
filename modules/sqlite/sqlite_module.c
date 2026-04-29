@@ -71,7 +71,7 @@
 #include "vendor/sqlite3.h"
 #include "sqlite_helpers.h"
 
-#define SQLITE_MODULE_VERSION "0.4.0"
+#define SQLITE_MODULE_VERSION "0.5.0"
 
 /* =========================================================================
  * Connection pool
@@ -90,6 +90,7 @@ typedef struct SqliteSlot {
     sqlite3 *db;
     bool     in_use;
     bool     bigint_string;  /* true => return INTEGERs > 2^53 as decimal strings */
+    bool     load_ext_ok;    /* true => sqlite3_load_extension is allowed */
     int      tx_depth;       /* 0 = none; 1 = BEGIN; >1 = SAVEPOINT cdo_sp_N */
 } SqliteSlot;
 
@@ -119,6 +120,7 @@ static void ensure_pool_inited(void)
             g_db_pool[i].db            = NULL;
             g_db_pool[i].in_use        = false;
             g_db_pool[i].bigint_string = false;
+            g_db_pool[i].load_ext_ok   = false;
             g_db_pool[i].tx_depth      = 0;
         }
         for (int i = 0; i < SQLITE_MAX_STMTS; i++) {
@@ -160,6 +162,7 @@ static void db_pool_release(int idx)
     g_db_pool[idx].db            = NULL;
     g_db_pool[idx].in_use        = false;
     g_db_pool[idx].bigint_string = false;
+    g_db_pool[idx].load_ext_ok   = false;
     g_db_pool[idx].tx_depth      = 0;
     SQLITE_MUTEX_UNLOCK(&g_db_pool_mutex);
 }
@@ -1047,6 +1050,7 @@ static int native_sqlite_open(CandoVM *vm, int argc, CandoValue *args)
             SQLITE_MAX_DBS);
         return -1;
     }
+    g_db_pool[slot].load_ext_ok = opt_enable_load_ext;
 
     cando_vm_push(vm, make_db_handle(vm, slot));
     return 1;
@@ -1610,6 +1614,551 @@ static int native_sqlite_pragma(CandoVM *vm, int argc, CandoValue *args)
 }
 
 /* =========================================================================
+ * User-defined functions (scalar + aggregate)
+ *
+ * `db:function(name, fn)` registers `fn` as a SQL scalar UDF.  When
+ * SQLite invokes the function, we re-enter the calling VM via
+ * cando_vm_call_value with the SQL arguments converted to CandoValues.
+ *
+ * `db:aggregate(name, { start, step, result })` registers an
+ * aggregate.  `start` is the initial accumulator value; `step` is
+ * called with (accumulator, ...args) for each row and must return the
+ * new accumulator; `result` is called with the final accumulator and
+ * its return value is the aggregate's output.
+ *
+ * Threading: SQLite invokes UDF callbacks on the same thread that
+ * called sqlite3_step (serialized mode guarantees this).  The VM that
+ * registered the function is captured at registration time, so cross-
+ * VM dispatch via thread{} is safe as long as the parent VM remains
+ * live; if the parent VM has been torn down, the UDF call will throw.
+ * ======================================================================= */
+
+typedef struct UdfCtx {
+    CandoVM     *vm;          /* VM that registered the function */
+    bool         is_aggregate;
+    CandoValue   fn;          /* scalar UDF, or step fn for aggregate */
+    CandoValue   start;       /* aggregate initial accumulator (null if scalar) */
+    CandoValue   result;      /* aggregate result fn (null if scalar) */
+} UdfCtx;
+
+/* Convert a sqlite3_value to a CandoValue.  bigint_string drives the
+ * INTEGER overflow behaviour just like read_column does. */
+static CandoValue value_to_cando(sqlite3_value *v, bool bigint_string)
+{
+    int t = sqlite3_value_type(v);
+    switch (t) {
+        case SQLITE_NULL:    return cando_null();
+        case SQLITE_INTEGER: {
+            sqlite3_int64 i = sqlite3_value_int64(v);
+            if (bigint_string && (i >  (sqlite3_int64)INTEGER_SAFE_MAX ||
+                                  i < -(sqlite3_int64)INTEGER_SAFE_MAX)) {
+                char buf[24];
+                int  n = snprintf(buf, sizeof(buf), "%lld", (long long)i);
+                return cando_string_value(cando_string_new(buf, (u32)n));
+            }
+            return cando_number((f64)i);
+        }
+        case SQLITE_FLOAT:   return cando_number(sqlite3_value_double(v));
+        case SQLITE_TEXT: {
+            const unsigned char *s = sqlite3_value_text(v);
+            int n = sqlite3_value_bytes(v);
+            return cando_string_value(cando_string_new((const char *)s, (u32)n));
+        }
+        case SQLITE_BLOB: {
+            const void *p = sqlite3_value_blob(v);
+            int n = sqlite3_value_bytes(v);
+            return cando_string_value(cando_string_new((const char *)p, (u32)n));
+        }
+        default: return cando_null();
+    }
+}
+
+/* Convert a CandoValue to a sqlite3_result_*. */
+static void cando_to_result(CandoVM *vm, sqlite3_context *ctx, CandoValue v)
+{
+    if (cando_is_null(v))  { sqlite3_result_null(ctx); return; }
+    if (cando_is_bool(v))  { sqlite3_result_int(ctx, v.as.boolean ? 1 : 0); return; }
+    if (cando_is_number(v)) {
+        f64 d = v.as.number;
+        if (isfinite(d) && fabs(d) <= INTEGER_SAFE_MAX && d == (f64)(int64_t)d) {
+            sqlite3_result_int64(ctx, (sqlite3_int64)d);
+        } else {
+            sqlite3_result_double(ctx, d);
+        }
+        return;
+    }
+    if (cando_is_string(v)) {
+        sqlite3_result_text(ctx, v.as.string->data,
+                            (int)v.as.string->length, SQLITE_TRANSIENT);
+        return;
+    }
+    if (cando_is_object(v)) {
+        CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
+        CdoString *kblob = cdo_string_intern("blob", 4);
+        CdoValue   bv;
+        bool has = cdo_object_rawget(o, kblob, &bv);
+        cdo_string_release(kblob);
+        if (has && bv.tag == CDO_STRING) {
+            sqlite3_result_blob(ctx, bv.as.string->data,
+                                (int)bv.as.string->length, SQLITE_TRANSIENT);
+            return;
+        }
+    }
+    sqlite3_result_error(ctx, "UDF returned an unsupported value type", -1);
+}
+
+static void udf_destroy(void *p)
+{
+    UdfCtx *u = (UdfCtx *)p;
+    if (!u) return;
+    cando_value_release(u->fn);
+    cando_value_release(u->start);
+    cando_value_release(u->result);
+    free(u);
+}
+
+/* Build a [CandoValue *] array on the stack from the UDF args. */
+static void udf_build_args(sqlite3_value **argv, int argc,
+                           CandoValue *out, bool bigint_string)
+{
+    for (int i = 0; i < argc; i++) {
+        out[i] = value_to_cando(argv[i], bigint_string);
+    }
+}
+
+static void udf_release_args(CandoValue *args, int n)
+{
+    for (int i = 0; i < n; i++) cando_value_release(args[i]);
+}
+
+#define UDF_MAX_ARGS 16
+
+static void udf_scalar_func(sqlite3_context *ctx,
+                            int argc, sqlite3_value **argv)
+{
+    UdfCtx *u = (UdfCtx *)sqlite3_user_data(ctx);
+    if (!u || !u->vm) {
+        sqlite3_result_error(ctx, "UDF context lost", -1);
+        return;
+    }
+    if (argc > UDF_MAX_ARGS) {
+        sqlite3_result_error(ctx, "UDF: too many arguments", -1);
+        return;
+    }
+    CandoValue args[UDF_MAX_ARGS];
+    udf_build_args(argv, argc, args, /*bigint_string=*/false);
+
+    /* Hide outer try frames so the user's throw lands here, mirroring
+     * what `db:transaction` does -- otherwise a throw in a UDF could
+     * escape to script-side TRY around an unrelated SQL call. */
+    u32 saved_try = u->vm->try_depth;
+    u->vm->try_depth = 0;
+    int ret = cando_vm_call_value(u->vm, u->fn, args, (u32)argc);
+    bool had_err = u->vm->has_error;
+    u->vm->try_depth = saved_try;
+
+    udf_release_args(args, argc);
+
+    if (had_err) {
+        const char *msg = u->vm->error_msg[0] ? u->vm->error_msg
+                                              : "UDF threw an error";
+        sqlite3_result_error(ctx, msg, -1);
+        u->vm->has_error = false;
+        u->vm->error_val_count = 0;
+        return;
+    }
+
+    if (ret <= 0) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+    /* The native pushed `ret` values; the first is the function's
+     * primary return value.  Pop them, use the first. */
+    CandoValue rv  = u->vm->stack_top[-ret];
+    cando_to_result(u->vm, ctx, rv);
+    for (int i = 0; i < ret; i++) {
+        cando_value_release(u->vm->stack_top[-1]);
+        u->vm->stack_top--;
+    }
+}
+
+static void udf_agg_step(sqlite3_context *ctx,
+                         int argc, sqlite3_value **argv)
+{
+    UdfCtx *u = (UdfCtx *)sqlite3_user_data(ctx);
+    if (!u || !u->vm) {
+        sqlite3_result_error(ctx, "UDF aggregate context lost", -1);
+        return;
+    }
+    /* Per-row state holds the accumulator CandoValue. */
+    CandoValue *acc = (CandoValue *)sqlite3_aggregate_context(ctx,
+                                                              sizeof(CandoValue));
+    if (!acc) {
+        sqlite3_result_error_nomem(ctx);
+        return;
+    }
+    /* SQLite zero-fills the buffer on first allocation; tag 0 is
+     * TYPE_NULL so an uninitialised acc reads as null. */
+    if (cando_is_null(*acc)) {
+        *acc = cando_value_copy(u->start);
+    }
+
+    if (argc > UDF_MAX_ARGS - 1) {
+        sqlite3_result_error(ctx, "UDF aggregate: too many arguments", -1);
+        return;
+    }
+    /* step(acc, ...args) */
+    CandoValue all[UDF_MAX_ARGS];
+    all[0] = cando_value_copy(*acc);
+    udf_build_args(argv, argc, &all[1], /*bigint_string=*/false);
+
+    u32 saved_try = u->vm->try_depth;
+    u->vm->try_depth = 0;
+    int ret = cando_vm_call_value(u->vm, u->fn, all, (u32)(argc + 1));
+    bool had_err = u->vm->has_error;
+    u->vm->try_depth = saved_try;
+
+    udf_release_args(all, argc + 1);
+
+    if (had_err) {
+        const char *msg = u->vm->error_msg[0] ? u->vm->error_msg
+                                              : "UDF aggregate step threw";
+        sqlite3_result_error(ctx, msg, -1);
+        u->vm->has_error = false;
+        u->vm->error_val_count = 0;
+        cando_value_release(*acc);
+        *acc = cando_null();
+        return;
+    }
+
+    /* Replace acc with the step's return value. */
+    cando_value_release(*acc);
+    if (ret > 0) {
+        *acc = cando_value_copy(u->vm->stack_top[-ret]);
+        for (int i = 0; i < ret; i++) {
+            cando_value_release(u->vm->stack_top[-1]);
+            u->vm->stack_top--;
+        }
+    } else {
+        *acc = cando_null();
+    }
+}
+
+static void udf_agg_final(sqlite3_context *ctx)
+{
+    UdfCtx *u = (UdfCtx *)sqlite3_user_data(ctx);
+    if (!u || !u->vm) {
+        sqlite3_result_error(ctx, "UDF aggregate context lost", -1);
+        return;
+    }
+    CandoValue *acc = (CandoValue *)sqlite3_aggregate_context(ctx, 0);
+    CandoValue value = (acc && !cando_is_null(*acc))
+                       ? cando_value_copy(*acc)
+                       : cando_value_copy(u->start);
+
+    /* If a result fn was provided, run it on the accumulator. */
+    if (!cando_is_null(u->result)) {
+        u32 saved_try = u->vm->try_depth;
+        u->vm->try_depth = 0;
+        CandoValue arg = cando_value_copy(value);
+        int ret = cando_vm_call_value(u->vm, u->result, &arg, 1);
+        bool had_err = u->vm->has_error;
+        u->vm->try_depth = saved_try;
+        cando_value_release(arg);
+
+        if (had_err) {
+            const char *msg = u->vm->error_msg[0] ? u->vm->error_msg
+                                                  : "UDF aggregate result threw";
+            sqlite3_result_error(ctx, msg, -1);
+            u->vm->has_error = false;
+            u->vm->error_val_count = 0;
+            cando_value_release(value);
+            if (acc) { cando_value_release(*acc); *acc = cando_null(); }
+            return;
+        }
+        cando_value_release(value);
+        if (ret > 0) {
+            value = cando_value_copy(u->vm->stack_top[-ret]);
+            for (int i = 0; i < ret; i++) {
+                cando_value_release(u->vm->stack_top[-1]);
+                u->vm->stack_top--;
+            }
+        } else {
+            value = cando_null();
+        }
+    }
+
+    cando_to_result(u->vm, ctx, value);
+    cando_value_release(value);
+    if (acc) {
+        cando_value_release(*acc);
+        *acc = cando_null();
+    }
+}
+
+static int native_sqlite_function(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 3) {
+        sqlite_throw(vm, NULL, 0, "sqlite.function: (db, name, fn) required");
+        return -1;
+    }
+    sqlite3 *db = db_handle_unwrap(vm, args[0]);
+    if (!db) return -1;
+    const char *name = libutil_arg_cstr_at(args, argc, 1);
+    if (!name) {
+        sqlite_throw(vm, NULL, 0, "sqlite.function: name must be a string");
+        return -1;
+    }
+    /* Functions land in CandoValue with TYPE_OBJECT regardless of
+     * whether they're script closures or native sentinels (the bridge
+     * promotes both kinds when crossing back into the VM).  Reject
+     * anything not callable rather than just non-object. */
+    if (!cando_is_object(args[2])) {
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.defineFunction: fn must be a function");
+        return -1;
+    }
+
+    UdfCtx *u = (UdfCtx *)calloc(1, sizeof(UdfCtx));
+    if (!u) {
+        sqlite_throw(vm, NULL, 0, "sqlite.function: out of memory");
+        return -1;
+    }
+    u->vm           = vm;
+    u->is_aggregate = false;
+    u->fn           = cando_value_copy(args[2]);
+    u->start        = cando_null();
+    u->result       = cando_null();
+
+    int rc = sqlite3_create_function_v2(db, name, -1, /* variadic */
+        SQLITE_UTF8 | SQLITE_DETERMINISTIC, u,
+        udf_scalar_func, NULL, NULL, udf_destroy);
+    if (rc != SQLITE_OK) {
+        udf_destroy(u);
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.function: %s", sqlite3_errmsg(db));
+        return -1;
+    }
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+static int native_sqlite_aggregate(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 3) {
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.aggregate: (db, name, { start, step, result }) required");
+        return -1;
+    }
+    sqlite3 *db = db_handle_unwrap(vm, args[0]);
+    if (!db) return -1;
+    const char *name = libutil_arg_cstr_at(args, argc, 1);
+    if (!name) {
+        sqlite_throw(vm, NULL, 0, "sqlite.aggregate: name must be a string");
+        return -1;
+    }
+    if (!cando_is_object(args[2])) {
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.aggregate: third arg must be { start, step, result }");
+        return -1;
+    }
+
+    CdoObject *opts = cando_bridge_resolve(vm, args[2].as.handle);
+    CdoValue   v;
+
+    /* start: any value (defaults to null). */
+    CandoValue start_v = cando_null();
+    {
+        CdoString *k = cdo_string_intern("start", 5);
+        if (cdo_object_rawget(opts, k, &v))
+            start_v = cando_value_copy(cando_bridge_to_cando(vm, v));
+        cdo_string_release(k);
+    }
+
+    /* step: required function.  Script functions are stored as
+     * CDO_FUNCTION (and natives as CDO_NATIVE) -- accept either. */
+    CandoValue step_v = cando_null();
+    {
+        CdoString *k = cdo_string_intern("step", 4);
+        bool has = cdo_object_rawget(opts, k, &v);
+        cdo_string_release(k);
+        if (!has || (v.tag != CDO_FUNCTION && v.tag != CDO_NATIVE)) {
+            cando_value_release(start_v);
+            sqlite_throw(vm, NULL, 0, "sqlite.aggregate: 'step' is required");
+            return -1;
+        }
+        step_v = cando_value_copy(cando_bridge_to_cando(vm, v));
+    }
+
+    /* result: optional function. */
+    CandoValue result_v = cando_null();
+    {
+        CdoString *k = cdo_string_intern("result", 6);
+        if (cdo_object_rawget(opts, k, &v) &&
+            (v.tag == CDO_FUNCTION || v.tag == CDO_NATIVE))
+            result_v = cando_value_copy(cando_bridge_to_cando(vm, v));
+        cdo_string_release(k);
+    }
+
+    UdfCtx *u = (UdfCtx *)calloc(1, sizeof(UdfCtx));
+    if (!u) {
+        cando_value_release(start_v);
+        cando_value_release(step_v);
+        cando_value_release(result_v);
+        sqlite_throw(vm, NULL, 0, "sqlite.aggregate: out of memory");
+        return -1;
+    }
+    u->vm           = vm;
+    u->is_aggregate = true;
+    u->fn           = step_v;
+    u->start        = start_v;
+    u->result       = result_v;
+
+    int rc = sqlite3_create_function_v2(db, name, -1,
+        SQLITE_UTF8, u,
+        NULL, udf_agg_step, udf_agg_final, udf_destroy);
+    if (rc != SQLITE_OK) {
+        udf_destroy(u);
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.aggregate: %s", sqlite3_errmsg(db));
+        return -1;
+    }
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+/* =========================================================================
+ * native_sqlite_load_extension(db, path[, entryPoint]) -> true
+ *
+ * Only callable when the db was opened with `enableLoadExtension: TRUE`.
+ * ======================================================================= */
+
+static int native_sqlite_load_extension(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2) {
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.loadExtension: (db, path[, entryPoint]) required");
+        return -1;
+    }
+    int slot = db_handle_slot(vm, args[0]);
+    sqlite3 *db = db_handle_unwrap(vm, args[0]);
+    if (!db) return -1;
+    if (!g_db_pool[slot].load_ext_ok) {
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.loadExtension: open the db with "
+            "{ enableLoadExtension: TRUE } first");
+        return -1;
+    }
+    const char *path = libutil_arg_cstr_at(args, argc, 1);
+    if (!path) {
+        sqlite_throw(vm, NULL, 0, "sqlite.loadExtension: path must be a string");
+        return -1;
+    }
+    const char *entry = (argc >= 3) ? libutil_arg_cstr_at(args, argc, 2) : NULL;
+
+    char *err = NULL;
+    int rc = sqlite3_load_extension(db, path, entry, &err);
+    if (rc != SQLITE_OK) {
+        char tmp[480];
+        snprintf(tmp, sizeof(tmp), "%s", err ? err : sqlite3_errstr(rc));
+        if (err) sqlite3_free(err);
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.loadExtension: %s", tmp);
+        return -1;
+    }
+    if (err) sqlite3_free(err);
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+/* =========================================================================
+ * native_sqlite_backup(srcDb, destPath[, options]) -> { pages, totalPages }
+ *
+ * Synchronous wrapper around sqlite3_backup_*.  options:
+ *   { pages: -1 (all), step: 100, dbName: "main", destDbName: "main" }
+ * ======================================================================= */
+
+static int native_sqlite_backup(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2) {
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.backup: (db, destPath[, options]) required");
+        return -1;
+    }
+    sqlite3 *src = db_handle_unwrap(vm, args[0]);
+    if (!src) return -1;
+
+    const char *dest_path = libutil_arg_cstr_at(args, argc, 1);
+    if (!dest_path) {
+        sqlite_throw(vm, NULL, 0, "sqlite.backup: destPath must be a string");
+        return -1;
+    }
+
+    int          step_pages = 100;
+    int          max_pages  = -1;     /* -1 = all */
+    const char  *src_name   = "main";
+    const char  *dest_name  = "main";
+    if (argc >= 3 && cando_is_object(args[2])) {
+        CdoObject *o = cando_bridge_resolve(vm, args[2].as.handle);
+        f64 n;
+        if (obj_get_number(o, "step", &n))       step_pages = (int)n;
+        if (obj_get_number(o, "pages", &n))      max_pages  = (int)n;
+        const char *s; size_t sl;
+        if (obj_get_string(o, "dbName",     &s, &sl)) src_name  = s;
+        if (obj_get_string(o, "destDbName", &s, &sl)) dest_name = s;
+    }
+
+    sqlite3 *dest = NULL;
+    int rc = sqlite3_open(dest_path, &dest);
+    if (rc != SQLITE_OK) {
+        if (dest) sqlite3_close(dest);
+        sqlite_throw(vm, NULL, rc,
+            "sqlite.backup: cannot open dest: %s",
+            dest ? sqlite3_errmsg(dest) : sqlite3_errstr(rc));
+        return -1;
+    }
+
+    sqlite3_backup *bk = sqlite3_backup_init(dest, dest_name, src, src_name);
+    if (!bk) {
+        rc = sqlite3_extended_errcode(dest);
+        char tmp[256];
+        snprintf(tmp, sizeof(tmp), "%s", sqlite3_errmsg(dest));
+        sqlite3_close(dest);
+        sqlite_throw(vm, NULL, rc, "sqlite.backup: %s", tmp);
+        return -1;
+    }
+
+    int total_pages = 0;
+    int pages_done  = 0;
+    do {
+        rc = sqlite3_backup_step(bk, step_pages);
+        if (rc == SQLITE_OK || rc == SQLITE_DONE) {
+            total_pages = sqlite3_backup_pagecount(bk);
+            pages_done  = total_pages - sqlite3_backup_remaining(bk);
+        }
+        if (max_pages > 0 && pages_done >= max_pages) break;
+    } while (rc == SQLITE_OK);
+
+    sqlite3_backup_finish(bk);
+    int final_rc = sqlite3_extended_errcode(dest);
+    sqlite3_close(dest);
+
+    if (rc != SQLITE_DONE && rc != SQLITE_OK) {
+        sqlite_throw(vm, NULL, final_rc != 0 ? final_rc : rc,
+                     "sqlite.backup: step failed (%s)",
+                     sqlite3_errstr(rc));
+        return -1;
+    }
+
+    CandoValue ov = cando_bridge_new_object(vm);
+    CdoObject *o  = cando_bridge_resolve(vm, ov.as.handle);
+    obj_set_number(o, "pages",      (f64)pages_done);
+    obj_set_number(o, "totalPages", (f64)total_pages);
+    cando_vm_push(vm, ov);
+    return 1;
+}
+
+/* =========================================================================
  * Module init
  * ======================================================================= */
 
@@ -1665,6 +2214,19 @@ CandoValue cando_module_init(CandoVM *vm)
     register_method(vm, obj, "inTransaction", native_sqlite_in_transaction, METHOD_ON_DB);
     register_method(vm, obj, "transaction",   native_sqlite_transaction,   METHOD_ON_DB);
     register_method(vm, obj, "pragma",        native_sqlite_pragma,        METHOD_ON_DB);
+
+    /* User-defined functions / extensions / backup.  Note that
+     * `function` is reserved in Cando, so we use the longer form
+     * `defineFunction` instead -- the same applies to `defineAggregate`
+     * for symmetry. */
+    register_method(vm, obj, "defineFunction",  native_sqlite_function,
+                    METHOD_ON_DB);
+    register_method(vm, obj, "defineAggregate", native_sqlite_aggregate,
+                    METHOD_ON_DB);
+    register_method(vm, obj, "loadExtension",   native_sqlite_load_extension,
+                    METHOD_ON_DB);
+    register_method(vm, obj, "backup",          native_sqlite_backup,
+                    METHOD_ON_DB);
 
     /* Module-version string. */
     obj_set_string(obj, "VERSION",
