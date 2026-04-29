@@ -50,6 +50,9 @@
 #define STBI_NO_STDIO_HACKS
 #include "stb_image.h"
 
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
+
 #if defined(_WIN32) || defined(_WIN64)
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -58,7 +61,7 @@
 #endif
 #include <GL/gl.h>
 
-#define DRAW_MODULE_VERSION "0.2.0"
+#define DRAW_MODULE_VERSION "0.3.0"
 
 /* =========================================================================
  * Module state -- current colour / line width.  Shared by all windows
@@ -640,6 +643,349 @@ static int image_release(CandoVM *vm, int argc, CandoValue *args)
 }
 
 /* =========================================================================
+ * Font objects (`draw.newFont` / `_meta.draw_font`).
+ *
+ * Loaded TTF data is baked into an 8-bit greyscale glyph atlas via
+ * stbtt_BakeFontBitmap covering printable Latin-1 (32..255).  Wider
+ * Unicode coverage and per-glyph Subpixel positioning are out of
+ * scope for this first cut.  The atlas is uploaded to a GL texture
+ * lazily on first draw.print, exactly like images.
+ * ===================================================================== */
+
+#define DRAW_MAX_FONTS    32
+#define FONT_FIRST_CHAR   32
+#define FONT_NUM_CHARS    (256 - FONT_FIRST_CHAR)
+#define FONT_ATLAS_W      512
+#define FONT_ATLAS_H      512
+
+typedef struct FontSlot {
+    int                  alive;
+    int                  generation;
+    unsigned char       *ttf_data;        /* malloc'd, owned          */
+    float                pixel_height;
+    unsigned char       *atlas_pixels;    /* greyscale alpha, owned  */
+    int                  atlas_w;
+    int                  atlas_h;
+    stbtt_bakedchar      baked[FONT_NUM_CHARS];
+    GLuint               texture;
+    int                  uploaded;
+    float                ascent;          /* in pixels at this size  */
+    float                line_height;
+} FontSlot;
+
+static FontSlot g_fonts[DRAW_MAX_FONTS];
+
+/* The "current font" used by draw.print -- script-side instance copy
+ * so we can retain a reference and resolve it on each print. */
+static int   g_current_font_slot = -1;
+static int   g_current_font_gen  = -1;
+
+static int font_alloc(void)
+{
+    for (int i = 0; i < DRAW_MAX_FONTS; i++) {
+        if (!g_fonts[i].alive) {
+            g_fonts[i].alive       = 1;
+            g_fonts[i].generation++;
+            g_fonts[i].ttf_data     = NULL;
+            g_fonts[i].atlas_pixels = NULL;
+            g_fonts[i].texture      = 0;
+            g_fonts[i].uploaded     = 0;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void font_release_slot(FontSlot *s)
+{
+    if (!s || !s->alive) return;
+    if (s->ttf_data)     { free(s->ttf_data);     s->ttf_data     = NULL; }
+    if (s->atlas_pixels) { free(s->atlas_pixels); s->atlas_pixels = NULL; }
+    if (s->texture)      { glDeleteTextures(1, &s->texture); s->texture = 0; }
+    s->uploaded = 0;
+    s->alive    = 0;
+}
+
+#define FONT_SLOT_KEY "__draw_font_slot"
+#define FONT_GEN_KEY  "__draw_font_gen"
+
+static FontSlot *resolve_font(CandoVM *vm, CandoValue v, const char *fn)
+{
+    if (!cando_is_object(v)) {
+        cando_vm_error(vm, "%s: expected font instance", fn);
+        return NULL;
+    }
+    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    f64 fslot = -1.0, fgen = -1.0;
+    CdoString *kslot = cdo_string_intern(FONT_SLOT_KEY,
+                                         (u32)strlen(FONT_SLOT_KEY));
+    CdoString *kgen  = cdo_string_intern(FONT_GEN_KEY,
+                                         (u32)strlen(FONT_GEN_KEY));
+    CdoValue vv;
+    if (cdo_object_rawget(obj, kslot, &vv) && vv.tag == CDO_NUMBER)
+        fslot = vv.as.number;
+    if (cdo_object_rawget(obj, kgen, &vv) && vv.tag == CDO_NUMBER)
+        fgen = vv.as.number;
+    cdo_string_release(kslot);
+    cdo_string_release(kgen);
+    int idx = (int)fslot;
+    int gen = (int)fgen;
+    if (idx < 0 || idx >= DRAW_MAX_FONTS) {
+        cando_vm_error(vm, "%s: not a font instance", fn);
+        return NULL;
+    }
+    FontSlot *s = &g_fonts[idx];
+    if (!s->alive || s->generation != gen) {
+        cando_vm_error(vm, "%s: font has been released", fn);
+        return NULL;
+    }
+    return s;
+}
+
+/* draw.newFont(path, pixel_height) */
+static int draw_new_font(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1 || args[0].tag != CDO_STRING || !args[0].as.string) {
+        cando_vm_error(vm, "draw.newFont: (path[, size]) required");
+        return -1;
+    }
+    float ph = (float)(argc >= 2 ? argd(args[1], 16.0) : 16.0);
+    if (ph < 4.0f) ph = 4.0f;
+
+    /* Slurp the file. */
+    char path[1024];
+    u32 plen = args[0].as.string->length;
+    if (plen >= sizeof(path)) plen = sizeof(path) - 1;
+    memcpy(path, args[0].as.string->data, plen);
+    path[plen] = '\0';
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        cando_vm_error(vm, "draw.newFont: cannot open %s", path);
+        return -1;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    if (sz <= 0) { fclose(f); cando_vm_error(vm, "draw.newFont: empty file %s", path); return -1; }
+    fseek(f, 0, SEEK_SET);
+    unsigned char *buf = (unsigned char *)malloc((size_t)sz);
+    if (!buf) { fclose(f); cando_vm_error(vm, "draw.newFont: out of memory"); return -1; }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        free(buf); fclose(f);
+        cando_vm_error(vm, "draw.newFont: short read on %s", path);
+        return -1;
+    }
+    fclose(f);
+
+    int idx = font_alloc();
+    if (idx < 0) {
+        free(buf);
+        cando_vm_error(vm, "draw.newFont: too many fonts (max %d)", DRAW_MAX_FONTS);
+        return -1;
+    }
+    FontSlot *fs = &g_fonts[idx];
+    fs->ttf_data     = buf;
+    fs->pixel_height = ph;
+    fs->atlas_w      = FONT_ATLAS_W;
+    fs->atlas_h      = FONT_ATLAS_H;
+
+    fs->atlas_pixels = (unsigned char *)calloc(1,
+        (size_t)fs->atlas_w * (size_t)fs->atlas_h);
+    if (!fs->atlas_pixels) {
+        font_release_slot(fs);
+        cando_vm_error(vm, "draw.newFont: out of memory for atlas");
+        return -1;
+    }
+
+    int rc = stbtt_BakeFontBitmap(buf, 0, ph,
+                                   fs->atlas_pixels,
+                                   fs->atlas_w, fs->atlas_h,
+                                   FONT_FIRST_CHAR, FONT_NUM_CHARS,
+                                   fs->baked);
+    /* rc < 0 means atlas too small for some glyphs; rc > 0 means
+     * the first un-baked row.  Either way we use what we baked. */
+    (void)rc;
+
+    /* Pull v-metrics so getHeight / line spacing are sensible. */
+    stbtt_fontinfo info;
+    if (stbtt_InitFont(&info, buf, 0)) {
+        int a, d, lg;
+        stbtt_GetFontVMetrics(&info, &a, &d, &lg);
+        float scale = stbtt_ScaleForPixelHeight(&info, ph);
+        fs->ascent      = (float)a * scale;
+        fs->line_height = (float)(a - d + lg) * scale;
+    } else {
+        fs->ascent      = ph * 0.8f;
+        fs->line_height = ph * 1.2f;
+    }
+
+    CandoValue inst = cando_bridge_new_object(vm);
+    CdoObject *o    = cando_bridge_resolve(vm, inst.as.handle);
+    obj_set_number_local(o, FONT_SLOT_KEY, (f64)idx);
+    obj_set_number_local(o, FONT_GEN_KEY,  (f64)fs->generation);
+    obj_set_number_local(o, "size", (f64)ph);
+    cando_lib_meta_attach(vm, o, "draw_font");
+
+    cando_vm_push(vm, inst);
+    return 1;
+}
+
+static void font_ensure_uploaded(FontSlot *fs)
+{
+    if (fs->uploaded) return;
+    glGenTextures(1, &fs->texture);
+    glBindTexture(GL_TEXTURE_2D, fs->texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA,
+                 fs->atlas_w, fs->atlas_h, 0,
+                 GL_ALPHA, GL_UNSIGNED_BYTE, fs->atlas_pixels);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    fs->uploaded = 1;
+}
+
+/* draw.setFont(font) */
+static int draw_set_font(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        cando_vm_error(vm, "draw.setFont: (font) required");
+        return -1;
+    }
+    FontSlot *fs = resolve_font(vm, args[0], "draw.setFont");
+    if (!fs) return -1;
+    g_current_font_slot = (int)(fs - g_fonts);
+    g_current_font_gen  = fs->generation;
+    cando_vm_push(vm, cando_null());
+    return 1;
+}
+
+/* draw.print(text, x, y[, r, sx, sy])
+ *
+ * text:        UTF-8 string; non-Latin-1 codepoints render as missing
+ *              boxes (atlas only covers 32..255).
+ * (x, y):      top-left corner of the first glyph's "ascent line".
+ *              We add ascent so the text sits on a baseline at y+ascent.
+ * r, sx, sy:   optional rotation/scale, applied via the modelview
+ *              matrix the same way draw.draw does. */
+static int draw_print(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 3 || args[0].tag != CDO_STRING || !args[0].as.string) {
+        cando_vm_error(vm, "draw.print: (text, x, y[, r, sx, sy]) required");
+        return -1;
+    }
+    if (g_current_font_slot < 0 ||
+        g_current_font_slot >= DRAW_MAX_FONTS ||
+        !g_fonts[g_current_font_slot].alive ||
+        g_fonts[g_current_font_slot].generation != g_current_font_gen) {
+        cando_vm_error(vm, "draw.print: no font set (call draw.setFont first)");
+        return -1;
+    }
+    FontSlot *fs = &g_fonts[g_current_font_slot];
+
+    const char *text = args[0].as.string->data;
+    u32         tlen = args[0].as.string->length;
+    float x = (float)argd(args[1], 0.0);
+    float y = (float)argd(args[2], 0.0);
+    float r  = (float)(argc >= 4 ? argd(args[3], 0.0) : 0.0);
+    float sx = (float)(argc >= 5 ? argd(args[4], 1.0) : 1.0);
+    float sy = (float)(argc >= 6 ? argd(args[5], (double)sx) : (double)sx);
+
+    font_ensure_uploaded(fs);
+
+    glPushMatrix();
+    glTranslatef(x, y, 0.0f);
+    if (r != 0.0f) glRotatef(r * 180.0f / (float)M_PI, 0.0f, 0.0f, 1.0f);
+    if (sx != 1.0f || sy != 1.0f) glScalef(sx, sy, 1.0f);
+
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, fs->texture);
+    glColor4f(g_color_r, g_color_g, g_color_b, g_color_a);
+
+    float pen_x = 0.0f;
+    float pen_y = fs->ascent;
+
+    glBegin(GL_QUADS);
+    for (u32 i = 0; i < tlen; i++) {
+        unsigned char ch = (unsigned char)text[i];
+        if (ch < FONT_FIRST_CHAR) continue;  /* skip control chars */
+        /* unsigned char max is 255, atlas covers 32..255 entirely. */
+        stbtt_aligned_quad q;
+        stbtt_GetBakedQuad(fs->baked, fs->atlas_w, fs->atlas_h,
+                           ch - FONT_FIRST_CHAR, &pen_x, &pen_y, &q, 1);
+        glTexCoord2f(q.s0, q.t0); glVertex2f(q.x0, q.y0);
+        glTexCoord2f(q.s1, q.t0); glVertex2f(q.x1, q.y0);
+        glTexCoord2f(q.s1, q.t1); glVertex2f(q.x1, q.y1);
+        glTexCoord2f(q.s0, q.t1); glVertex2f(q.x0, q.y1);
+    }
+    glEnd();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
+    glPopMatrix();
+
+    cando_vm_push(vm, cando_null());
+    return 1;
+}
+
+/* font:getWidth(text) */
+static int font_get_width(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2 || args[1].tag != CDO_STRING || !args[1].as.string) {
+        cando_vm_error(vm, "font.getWidth: (font, text) required");
+        return -1;
+    }
+    FontSlot *fs = resolve_font(vm, args[0], "font.getWidth");
+    if (!fs) return -1;
+    const char *text = args[1].as.string->data;
+    u32         tlen = args[1].as.string->length;
+    float w = 0.0f;
+    for (u32 i = 0; i < tlen; i++) {
+        unsigned char ch = (unsigned char)text[i];
+        if (ch < FONT_FIRST_CHAR) continue;
+        w += fs->baked[ch - FONT_FIRST_CHAR].xadvance;
+    }
+    cando_vm_push(vm, cando_number((f64)w));
+    return 1;
+}
+
+/* font:getHeight() -- pixel size used at construction. */
+static int font_get_height(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) { cando_vm_error(vm, "font.getHeight: (font) required"); return -1; }
+    FontSlot *fs = resolve_font(vm, args[0], "font.getHeight");
+    if (!fs) return -1;
+    cando_vm_push(vm, cando_number((f64)fs->line_height));
+    return 1;
+}
+
+/* font:release() */
+static int font_release(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) { cando_vm_error(vm, "font.release: (font) required"); return -1; }
+    if (!cando_is_object(args[0])) { cando_vm_push(vm, cando_bool(false)); return 1; }
+    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    f64 fslot = -1.0;
+    CdoString *kslot = cdo_string_intern(FONT_SLOT_KEY,
+                                         (u32)strlen(FONT_SLOT_KEY));
+    CdoValue v;
+    if (cdo_object_rawget(obj, kslot, &v) && v.tag == CDO_NUMBER)
+        fslot = v.as.number;
+    cdo_string_release(kslot);
+    int idx = (int)fslot;
+    if (idx >= 0 && idx < DRAW_MAX_FONTS) {
+        if (g_current_font_slot == idx) {
+            g_current_font_slot = -1;
+            g_current_font_gen  = -1;
+        }
+        font_release_slot(&g_fonts[idx]);
+    }
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+/* =========================================================================
  * Module entry point.
  * ===================================================================== */
 
@@ -647,7 +993,7 @@ CandoValue cando_module_init(CandoVM *vm)
 {
     cando_lib_meta_register(vm);
     CdoObject *image_meta = cando_lib_meta_table(vm, "draw_image");
-    (void)cando_lib_meta_table(vm, "draw_font");
+    CdoObject *font_meta  = cando_lib_meta_table(vm, "draw_font");
 
     /* Image instance methods. */
     cando_lib_meta_define(vm, image_meta, "getWidth",      image_get_width);
@@ -655,6 +1001,11 @@ CandoValue cando_module_init(CandoVM *vm)
     cando_lib_meta_define(vm, image_meta, "getDimensions", image_get_dimensions);
     cando_lib_meta_define(vm, image_meta, "setFilter",     image_set_filter);
     cando_lib_meta_define(vm, image_meta, "release",       image_release);
+
+    /* Font instance methods. */
+    cando_lib_meta_define(vm, font_meta, "getWidth",  font_get_width);
+    cando_lib_meta_define(vm, font_meta, "getHeight", font_get_height);
+    cando_lib_meta_define(vm, font_meta, "release",   font_release);
 
     CandoValue tbl = cando_bridge_new_object(vm);
     CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
@@ -687,6 +1038,11 @@ CandoValue cando_module_init(CandoVM *vm)
     /* Image */
     libutil_set_method(vm, obj, "newImage",      draw_new_image);
     libutil_set_method(vm, obj, "draw",          draw_draw);
+
+    /* Font */
+    libutil_set_method(vm, obj, "newFont",       draw_new_font);
+    libutil_set_method(vm, obj, "setFont",       draw_set_font);
+    libutil_set_method(vm, obj, "print",         draw_print);
 
     return tbl;
 }
