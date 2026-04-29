@@ -40,6 +40,30 @@ void cando_vm_wait_all_threads(CandoVM *vm) {
     cando_os_mutex_unlock(&reg->mutex);
 }
 
+void cando_vm_wait_all_lifelines(CandoVM *vm) {
+    /* Currently aliased to wait_all_threads -- the registry counts both
+     * `thread { }` blocks and native lifelines via the same counter. */
+    cando_vm_wait_all_threads(vm);
+}
+
+void cando_vm_lifeline_acquire(CandoVM *vm, const char *kind) {
+    (void)kind;  /* reserved for diagnostics in a later commit */
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return;
+    cando_os_mutex_lock(&reg->mutex);
+    reg->count++;
+    cando_os_mutex_unlock(&reg->mutex);
+}
+
+void cando_vm_lifeline_release(CandoVM *vm) {
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return;
+    cando_os_mutex_lock(&reg->mutex);
+    if (reg->count > 0) reg->count--;
+    cando_os_cond_broadcast(&reg->cond);
+    cando_os_mutex_unlock(&reg->mutex);
+}
+
 /* =========================================================================
  * Internal forward declarations
  * ===================================================================== */

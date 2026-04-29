@@ -135,8 +135,10 @@ CANDO_API void cando_close(CandoVM *vm)
 {
     if (!vm) return;
 
-    /* Wait for any spawned threads before destroying the VM. */
-    cando_vm_wait_all_threads(vm);
+    /* Wait for any subsystem holding the app open: spawned threads,
+     * native window render threads, accept-loop servers, etc.
+     * Lifelines and threads share the same counter. */
+    cando_vm_wait_all_lifelines(vm);
     cando_vm_destroy(vm);
     cando_free(vm);
 

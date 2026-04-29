@@ -505,8 +505,32 @@ CANDO_API struct CdoThread *cando_current_thread(void);
  * Call this after cando_vm_exec returns to ensure the process does not exit
  * while spawned threads are still running.  Has no effect if no threads were
  * ever spawned.
+ *
+ * This is the legacy entry point; new code should prefer
+ * `cando_vm_wait_all_lifelines` which also waits on subsystem-owned
+ * lifelines (HTTP servers, sockets, native window render threads, ...).
  */
 CANDO_API void cando_vm_wait_all_threads(CandoVM *vm);
+
+/*
+ * Lifeline registry -- generic "things keeping this VM alive" counter.
+ *
+ * Subsystems that own long-lived resources (raw OS threads, accept loops,
+ * native window render threads) call cando_vm_lifeline_acquire when the
+ * resource starts and cando_vm_lifeline_release when it shuts down.
+ * `cando_vm_wait_all_lifelines` blocks until the count drops to zero,
+ * the same way `cando_vm_wait_all_threads` already does for `thread { }`
+ * blocks.  In this initial version both call sites share the same
+ * counter; later commits will add per-lifeline quit hooks for `app.quit()`.
+ *
+ * Both functions are safe to call from any OS thread.
+ *
+ * `kind` is a short label for diagnostics ("window", "http_server", etc.)
+ * and may be NULL when none is available.
+ */
+CANDO_API void cando_vm_lifeline_acquire(CandoVM *vm, const char *kind);
+CANDO_API void cando_vm_lifeline_release(CandoVM *vm);
+CANDO_API void cando_vm_wait_all_lifelines(CandoVM *vm);
 
 /*
  * cando_vm_call_value -- call a Cando function value with argc arguments.
