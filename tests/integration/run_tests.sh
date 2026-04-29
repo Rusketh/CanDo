@@ -115,6 +115,9 @@ run_test "include" "$SCRIPTS/include.cdo" \
 run_test "include_16" "$SCRIPTS/include_16.cdo" \
     "$(printf '1\n8\n16\ntrue\ntrue\ntrue')"
 
+run_test "include_ext" "$SCRIPTS/include_ext.cdo" \
+    "$(printf 'Cando\n1\ntrue\nalpha\nbeta\nalice\nbob\neve\nLA\nHello, Ext!\nMutated')"
+
 run_test "threads" "$SCRIPTS/threads.cdo" \
     "$(printf '42\n10\n20\ntrue\nsleep_ok\nid_ok\n99\ntrue\nnull\n7\n1\n2\n3\ndone\nerror\nbad\ntrue\ntrue\n77\n88\ncaught_err\nalready\nfalse')"
 

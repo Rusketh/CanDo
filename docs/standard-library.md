@@ -693,15 +693,31 @@ Load and cache a module.  Resolution rules:
 - Absolute paths are canonicalised with `realpath()` and used directly.
 - Relative paths are resolved relative to the **script's directory** —
   the nearest enclosing frame whose chunk name is an absolute path.
-- `.cdo` files are parsed and executed; their top-level `RETURN` value
-  (or the last expression) becomes the module value.
-- `.so` / `.dylib` / `.dll` files are loaded with `dlopen`; the symbol
-  `cando_module_init(CandoVM *) → CandoValue` is called once and its
-  return value becomes the module value.  See
-  [writing-extensions.md](writing-extensions.md).
+
+The file extension selects the loader:
+
+| Extension                | Loader                                                                                                                                                            |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.cdo`                   | Parsed and executed; top-level `RETURN` (or the last expression) is the module value.                                                                             |
+| `.so` / `.dylib` / `.dll`| Loaded with `dlopen`; the symbol `cando_module_init(CandoVM *) → CandoValue` is called once and its return value is the module value. See [writing-extensions.md](writing-extensions.md). |
+| `.json`                  | File contents are parsed as JSON and the resulting Cando value (object/array/string/number/bool/null) is returned.                                                |
+| `.csv`                   | File contents are parsed as CSV with the default `,` delimiter and no header row; the result is an array of arrays of strings.                                    |
+
+If the path has **no extension at all**, `include` probes the
+filesystem in this order and uses the first match it finds:
+
+1. `<path>.so`
+2. `<path>.dylib`
+3. `<path>.dll`
+4. `<path>.cdo`
+
+If a path is supplied with one of the recognised extensions but the
+file does not exist, `include` raises an error rather than probing
+alternatives.
 
 Identical canonical paths share one cached value across the whole VM —
-Node.js `require()` semantics.
+Node.js `require()` semantics.  This applies to JSON and CSV results
+too, so mutating the returned value mutates every other holder of it.
 
 Example:
 
@@ -714,6 +730,14 @@ RETURN lib;
 
 ```cando
 // main.cdo
-VAR my = include("./mylib.cdo");
+VAR my   = include("./mylib.cdo");
 print(my.hello("world"));           // hi, world
+
+VAR cfg  = include("./config.json");   // parsed JSON object
+print(cfg.port);
+
+VAR rows = include("./data.csv");       // array of arrays of strings
+print(rows[0][0]);
+
+VAR bin  = include("./mylib");          // tries mylib.so, .dylib, .dll, .cdo
 ```
