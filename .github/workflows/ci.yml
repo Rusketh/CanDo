@@ -49,6 +49,13 @@ jobs:
       - name: Smoke-test modules (script integration -- draw)
         run: ./cando modules/draw/test_draw_smoke.cdo
 
+      - name: Smoke-test modules (script integration -- forms)
+        # forms.so loads on Linux as a stub backend; the smoke test
+        # checks the public surface is registered.  The full Windows
+        # backend ships in forms.dll and is exercised by the matching
+        # smoke step in the Windows job.
+        run: cd modules/forms && ../../cando test_forms_smoke.cdo
+
       - name: Generate test PNG for the draw script test
         # The full draw test exercises stb_image; bake a 4x4 RGBA PNG
         # so we have something deterministic to load.
@@ -150,6 +157,11 @@ jobs:
       - name: Smoke-test modules (Windows -- draw)
         run: ./cando.exe modules/draw/test_draw_smoke.cdo
 
+      - name: Smoke-test modules (Windows -- forms)
+        # Verifies forms.dll loads and registers all 14 constructors +
+        # the forms_control meta table without actually opening a form.
+        run: cd modules/forms && ../../cando.exe test_forms_smoke.cdo
+
       - name: Verify no MinGW runtime DLL deps
         run: |
           set -e
@@ -157,7 +169,7 @@ jobs:
           objdump -p cando.exe | grep "DLL Name" || true
           echo "=== libcando.dll imports ==="
           objdump -p libcando.dll | grep "DLL Name" || true
-          for bin in cando.exe libcando.dll modules/sqlite/sqlite.dll modules/window/window.dll modules/draw/draw.dll; do
+          for bin in cando.exe libcando.dll modules/sqlite/sqlite.dll modules/window/window.dll modules/draw/draw.dll modules/forms/forms.dll; do
             for dll in libwinpthread-1.dll libgcc_s_seh-1.dll libstdc++-6.dll libssl-3-x64.dll libcrypto-3-x64.dll; do
               if objdump -p "$bin" | grep -qi "DLL Name: $dll"; then
                 echo "ERROR: $bin still imports $dll"

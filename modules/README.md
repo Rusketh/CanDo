@@ -7,13 +7,19 @@ own subdirectory with its own source, build rules, tests, and docs:
 ```
 modules/
 ├── README.md                this file
-└── ldap/                    LDAP / Active Directory bindings
-    ├── README.md            module documentation
-    ├── ldap_module.c        implementation
-    ├── ldap_helpers.h       pure-C helpers (also used by tests)
-    ├── test_ldap.c          C unit tests
-    ├── test_ldap.cdo        script-level integration tests
-    └── Makefile             per-module build
+├── ldap/                    LDAP / Active Directory bindings
+│   ├── README.md            module documentation
+│   ├── ldap_module.c        implementation
+│   ├── ldap_helpers.h       pure-C helpers (also used by tests)
+│   ├── test_ldap.c          C unit tests
+│   ├── test_ldap.cdo        script-level integration tests
+│   └── Makefile             per-module build
+├── sqlite/                  SQLite bindings
+├── window/                  GLFW window + OpenGL context
+├── draw/                    2D drawing primitives (layered on `window`)
+└── forms/                   .NET-Forms-shaped Win32 GUI binding
+                             (Windows-only at runtime; loads as a stub
+                              on Linux/macOS so feature detection works)
 ```
 
 A module compiles to a single shared library (`name.so` / `name.dylib` /
