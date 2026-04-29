@@ -61,6 +61,13 @@
 #endif
 #include <GL/gl.h>
 
+/* MinGW's <GL/gl.h> is OpenGL 1.1 only; backfill the OpenGL 1.2+
+ * tokens we use so the module compiles unchanged on Windows.  Linux
+ * picks them up from the system gl.h. */
+#ifndef GL_CLAMP_TO_EDGE
+#  define GL_CLAMP_TO_EDGE 0x812F
+#endif
+
 #define DRAW_MODULE_VERSION "0.3.0"
 
 /* =========================================================================

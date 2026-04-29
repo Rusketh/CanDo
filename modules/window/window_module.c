@@ -49,6 +49,11 @@
 #  include <GL/gl.h>
 #endif
 
+/* Backfill OpenGL 1.2+ tokens MinGW's <GL/gl.h> doesn't carry. */
+#ifndef GL_CLAMP_TO_EDGE
+#  define GL_CLAMP_TO_EDGE 0x812F
+#endif
+
 /* Tiny mutex / cond / thread wrapper -- libcando does not export its
  * cando_os_* sync helpers so binary modules cannot link them.  Same
  * trick used by modules/sqlite/sqlite_module.c. */
