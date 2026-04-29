@@ -137,9 +137,13 @@ window.dll: window_module.c $(GLFW_SRC)
 	    -iquote $(ROOT)/source/parser -iquote $(ROOT)/source/vm \
 	    -iquote $(ROOT)/source/object -iquote $(ROOT)/source/compat \
 	    -I$(ROOT)/include -Ivendor -Ivendor/glfw/include -I$(GLFW_DIR) \
+	    $(GLFW_QUIET) \
+	    -static-libgcc \
 	    -shared window_module.c $(GLFW_COMMON_SRC) $(GLFW_WIN32_SRC) -o $@ \
-	    -L$(ROOT) -lcando -lopengl32 -lgdi32 -luser32 -lshell32 \
-	    $(GLFW_QUIET)
+	    -L$(ROOT) -lcando \
+	    -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive \
+	    -Wl,-Bdynamic -lopengl32 -lgdi32 -luser32 -lshell32 \
+	    -Wl,-Bstatic
 
 # ---------------------------------------------------------------------------
 # C unit tests

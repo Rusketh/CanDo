@@ -68,8 +68,12 @@ draw.dll: draw_module.c
 	    -iquote $(ROOT)/source/parser -iquote $(ROOT)/source/vm \
 	    -iquote $(ROOT)/source/object -iquote $(ROOT)/source/compat \
 	    -I$(ROOT)/include -Ivendor \
+	    -static-libgcc \
 	    -shared draw_module.c -o $@ \
-	    -L$(ROOT) -lcando -lopengl32 -lgdi32 -luser32
+	    -L$(ROOT) -lcando \
+	    -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive \
+	    -Wl,-Bdynamic -lopengl32 -lgdi32 -luser32 \
+	    -Wl,-Bstatic
 
 # ---------------------------------------------------------------------------
 # C unit tests
