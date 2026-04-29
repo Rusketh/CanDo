@@ -29,8 +29,11 @@ jobs:
       - name: Test modules (C unit tests)
         run: make modules-test
 
-      - name: Test modules (script integration)
+      - name: Test modules (script integration -- ldap)
         run: ./cando modules/ldap/test_ldap.cdo
+
+      - name: Test modules (script integration -- sqlite)
+        run: ./cando modules/sqlite/test_sqlite.cdo
 
       - name: Stage release artifact
         # actions/upload-artifact@v4 strips the lowest common ancestor of
@@ -85,10 +88,13 @@ jobs:
       - name: Build modules (Windows)
         run: make modules-windows MINGW_CC=gcc
 
-      - name: Smoke-test modules (Windows)
+      - name: Smoke-test modules (Windows -- ldap)
         # Verify LoadLibrary + cando_module_init succeed and the public
         # API surface is registered.
         run: ./cando.exe modules/ldap/test_ldap_smoke.cdo
+
+      - name: Smoke-test modules (Windows -- sqlite)
+        run: ./cando.exe modules/sqlite/test_sqlite_smoke.cdo
 
       - name: Verify no MinGW runtime DLL deps
         run: |
@@ -97,7 +103,7 @@ jobs:
           objdump -p cando.exe | grep "DLL Name" || true
           echo "=== libcando.dll imports ==="
           objdump -p libcando.dll | grep "DLL Name" || true
-          for bin in cando.exe libcando.dll; do
+          for bin in cando.exe libcando.dll modules/sqlite/sqlite.dll; do
             for dll in libwinpthread-1.dll libgcc_s_seh-1.dll libstdc++-6.dll libssl-3-x64.dll libcrypto-3-x64.dll; do
               if objdump -p "$bin" | grep -qi "DLL Name: $dll"; then
                 echo "ERROR: $bin still imports $dll"

@@ -1,0 +1,6 @@
+sqlite.so
+sqlite.dylib
+sqlite.dll
+sqlite.lib
+test_sqlite
+vendor/sqlite3.o
