@@ -856,6 +856,20 @@ static void mgr_render_frame(void)
         glfwGetFramebufferSize(s->handle, &fbw, &fbh);
         if (fbw > 0 && fbh > 0) {
             glViewport(0, 0, fbw, fbh);
+            /* Set up an LOVE-style coordinate system: pixels, origin at
+             * top-left, Y axis pointing down.  This lets the draw module's
+             * primitives accept the same numbers a user would expect. */
+            glMatrixMode(GL_PROJECTION);
+            glLoadIdentity();
+            glOrtho(0.0, (double)fbw, (double)fbh, 0.0, -1.0, 1.0);
+            glMatrixMode(GL_MODELVIEW);
+            glLoadIdentity();
+            /* Sane default raster state -- the draw module assumes these
+             * are set when its primitives run inside a `draw` callback. */
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
         }

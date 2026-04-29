@@ -29,14 +29,15 @@ CFLAGS     = -std=c11 -Wall -Wextra -Wpedantic -fPIC $(INCLUDES)
 
 ifeq ($(OS),Windows_NT)
     SHARED   = draw.dll
-    LDLIBS   =
+    LDLIBS   = -lopengl32 -lgdi32 -luser32
 else
     UNAME_S := $(shell uname -s)
     LDLIBS   = -lpthread -lm -ldl
     ifeq ($(UNAME_S),Darwin)
-        SHARED = draw.dylib
+        SHARED  = draw.dylib
     else
-        SHARED = draw.so
+        SHARED  = draw.so
+        LDLIBS += -lGL
     endif
 endif
 
@@ -68,7 +69,7 @@ draw.dll: draw_module.c
 	    -iquote $(ROOT)/source/object -iquote $(ROOT)/source/compat \
 	    -I$(ROOT)/include -Ivendor \
 	    -shared draw_module.c -o $@ \
-	    -L$(ROOT) -lcando
+	    -L$(ROOT) -lcando -lopengl32 -lgdi32 -luser32
 
 # ---------------------------------------------------------------------------
 # C unit tests
