@@ -571,6 +571,54 @@ TEST(test_filter_operator)
     free(toks);
 }
 
+TEST(test_cond_filter_operator)
+{
+    /* items ~&> pipe > 0 */
+    u32 count;
+    CandoToken *toks = lex_all("items ~&> pipe > 0", &count);
+    EXPECT_EQ(count, 5u);
+    EXPECT_EQ(toks[0].type, TOK_IDENT);
+    EXPECT_EQ(toks[1].type, TOK_COND_FILTER_OP);
+    EXPECT_EQ(toks[2].type, TOK_PIPE_KW);
+    EXPECT_EQ(toks[3].type, TOK_GT);
+    EXPECT_EQ(toks[4].type, TOK_NUMBER);
+    free(toks);
+}
+
+TEST(test_ternary_tokens)
+{
+    /* a ? b : c */
+    u32 count;
+    CandoToken *toks = lex_all("a ? b : c", &count);
+    EXPECT_EQ(count, 5u);
+    EXPECT_EQ(toks[0].type, TOK_IDENT);
+    EXPECT_EQ(toks[1].type, TOK_QUESTION);
+    EXPECT_EQ(toks[2].type, TOK_IDENT);
+    EXPECT_EQ(toks[3].type, TOK_COLON);
+    EXPECT_EQ(toks[4].type, TOK_IDENT);
+    free(toks);
+}
+
+TEST(test_safe_access_tokens)
+{
+    /* obj?.a, obj?[k], and bare '?' must each lex distinctly. */
+    u32 count;
+    CandoToken *toks = lex_all("obj?.a obj?[k] x ?y", &count);
+    /* obj ?. a obj ?[ k ] x ? y  ->  10 tokens */
+    EXPECT_EQ(count, 10u);
+    EXPECT_EQ(toks[0].type, TOK_IDENT);
+    EXPECT_EQ(toks[1].type, TOK_QDOT);
+    EXPECT_EQ(toks[2].type, TOK_IDENT);
+    EXPECT_EQ(toks[3].type, TOK_IDENT);
+    EXPECT_EQ(toks[4].type, TOK_QLBRACKET);
+    EXPECT_EQ(toks[5].type, TOK_IDENT);
+    EXPECT_EQ(toks[6].type, TOK_RBRACKET);
+    EXPECT_EQ(toks[7].type, TOK_IDENT);
+    EXPECT_EQ(toks[8].type, TOK_QUESTION);
+    EXPECT_EQ(toks[9].type, TOK_IDENT);
+    free(toks);
+}
+
 TEST(test_range_operators)
 {
     /* 1 -> 5 ; 5 <- 1
@@ -747,6 +795,9 @@ int main(void)
     run_test("if statement",              test_if_statement);
     run_test("pipe operator",             test_pipe_operator);
     run_test("filter operator",           test_filter_operator);
+    run_test("conditional filter operator", test_cond_filter_operator);
+    run_test("ternary tokens",            test_ternary_tokens);
+    run_test("safe-access tokens",        test_safe_access_tokens);
     run_test("range operators",           test_range_operators);
     run_test("fluent call",               test_fluent_call);
     run_test("vararg",                    test_vararg);

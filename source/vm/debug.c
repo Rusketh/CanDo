@@ -137,6 +137,7 @@ u32 cando_instr_disasm(const CandoChunk *chunk, u32 offset, FILE *out) {
         case OP_PIPE_END:         return disasm_simple("OP_PIPE_END",         offset, out);
         case OP_PIPE_COLLECT:     return disasm_simple("OP_PIPE_COLLECT",     offset, out);
         case OP_FILTER_COLLECT:   return disasm_simple("OP_FILTER_COLLECT",   offset, out);
+        case OP_COND_FILTER_COLLECT: return disasm_simple("OP_COND_FILTER_COLLECT", offset, out);
         case OP_SPREAD_RET:       return disasm_simple("OP_SPREAD_RET",       offset, out);
         case OP_NOP:              return disasm_simple("OP_NOP",               offset, out);
         case OP_HALT:         return disasm_simple("OP_HALT",         offset, out);
@@ -189,6 +190,8 @@ u32 cando_instr_disasm(const CandoChunk *chunk, u32 offset, FILE *out) {
             return disasm_jump("OP_JUMP_IF_FALSE", offset, 1, chunk, out);
         case OP_JUMP_IF_TRUE:
             return disasm_jump("OP_JUMP_IF_TRUE",  offset, 1, chunk, out);
+        case OP_JUMP_IF_NULL:
+            return disasm_jump("OP_JUMP_IF_NULL",  offset, 1, chunk, out);
         case OP_LOOP:
             return disasm_jump("OP_LOOP",          offset, -1, chunk, out);
         case OP_AND_JUMP:

@@ -1363,6 +1363,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         [OP_JUMP]             = &&lbl_OP_JUMP,
         [OP_JUMP_IF_FALSE]    = &&lbl_OP_JUMP_IF_FALSE,
         [OP_JUMP_IF_TRUE]     = &&lbl_OP_JUMP_IF_TRUE,
+        [OP_JUMP_IF_NULL]     = &&lbl_OP_JUMP_IF_NULL,
         [OP_LOOP]             = &&lbl_OP_LOOP,
         [OP_BREAK]            = &&lbl_OP_BREAK,
         [OP_CONTINUE]         = &&lbl_OP_CONTINUE,
@@ -1389,6 +1390,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         [OP_PIPE_END]         = &&lbl_OP_PIPE_END,
         [OP_PIPE_COLLECT]     = &&lbl_OP_PIPE_COLLECT,
         [OP_FILTER_COLLECT]   = &&lbl_OP_FILTER_COLLECT,
+        [OP_COND_FILTER_COLLECT] = &&lbl_OP_COND_FILTER_COLLECT,
         [OP_TRY_BEGIN]        = &&lbl_OP_TRY_BEGIN,
         [OP_TRY_END]          = &&lbl_OP_TRY_END,
         [OP_CATCH_BEGIN]      = &&lbl_OP_CATCH_BEGIN,
@@ -2365,6 +2367,14 @@ static CandoVMResult vm_run(CandoVM *vm) {
             if (truthy) ip += offset;
             DISPATCH();
         }
+        OP_CASE(OP_JUMP_IF_NULL): {
+            /* Peek TOS; jump if exactly null (no pop). Used by the safety
+             * indexer (?. / ?[) so that hitting null mid-chain leaves the
+             * null on the stack as the chain's result.                     */
+            i16 offset = READ_I16();
+            if (cando_is_null(PEEK(0))) ip += offset;
+            DISPATCH();
+        }
         OP_CASE(OP_LOOP): {
             u16 back = READ_U16();
             ip -= back;
@@ -3324,6 +3334,30 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cdo_array_push(arr, cdo_result);
             }
             cando_value_release(result);
+            DISPATCH();
+        }
+        OP_CASE(OP_COND_FILTER_COLLECT): {
+            /* Conditional filter (~&>): body produced a predicate result.
+             * If truthy, append the *original source element* (not the body
+             * result) to result_arr.  src_idx was already incremented by
+             * OP_FILTER_NEXT, so the iterated element sits at src_idx-1.   */
+            CandoValue pred = POP();
+            bool keep = vm_is_truthy(pred);
+            cando_value_release(pred);
+            if (keep) {
+                f64 src_idx_f = (vm->stack_top - 1)->as.number;
+                f64 count_f   = (vm->stack_top - 2)->as.number;
+                i64 N   = (i64)count_f;
+                i64 idx = (i64)src_idx_f - 1;
+                CandoValue *val_ptr = vm->stack_top - 2 - N + idx;
+                CandoValue *arr_ptr = vm->stack_top - 3 - N;
+                CdoObject  *arr = cando_bridge_resolve(vm,
+                                      (HandleIndex)arr_ptr->as.handle);
+                CandoValue elem_copy = cando_value_copy(*val_ptr);
+                CdoValue cdo_elem = cando_bridge_to_cdo(vm, elem_copy);
+                cdo_array_push(arr, cdo_elem);
+                cando_value_release(elem_copy);
+            }
             DISPATCH();
         }
 
