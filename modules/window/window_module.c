@@ -86,7 +86,7 @@
 #  define WM_COND_BROADCAST(c) pthread_cond_broadcast(c)
 #endif
 
-#define WINDOW_MODULE_VERSION "0.0.7"
+#define WINDOW_MODULE_VERSION "0.0.8"
 
 /* =========================================================================
  * obj_set_* helpers (mirrors modules/sqlite).
@@ -174,6 +174,15 @@ typedef struct WindowSlot {
     int          width;
     int          height;
     int          has_lifeline;   /* 1 while we're holding a VM lifeline */
+    /* Retained handle to the script-side instance.  Holds a reference
+     * count on the CdoObject so the manager thread can call user
+     * methods (`w.draw`, `w.keypressed`, ...) without the GC reaping
+     * the instance behind our back.  Set in window.create after the
+     * GLFW window is built; released by slot_teardown. */
+    CandoValue   inst_val;
+    int          inst_val_held;
+    /* High-resolution timestamp of the last frame for dt computation. */
+    double       last_frame_time;
 } WindowSlot;
 
 static WindowSlot g_slots[WINDOW_MAX_SLOTS];
@@ -183,10 +192,19 @@ static WindowSlot g_slots[WINDOW_MAX_SLOTS];
  * same root VM, so this is safe to cache. */
 static CandoVM   *g_root_vm = NULL;
 
+/* Child VM the manager thread uses to invoke user-supplied callbacks
+ * (w.draw, w.update, w.keypressed, ...).  Initialised lazily on the
+ * first successful window.create so it can chain off the captured
+ * root VM.  Per cando_vm_init_child semantics it shares globals,
+ * handles, strings, and the lifeline registry with the root VM. */
+static CandoVM   g_dispatch_vm;
+static int       g_dispatch_vm_inited = 0;
+
 /* Slot teardown shared by CMD_DESTROY, the close-button reaper, and the
- * shutdown sweep.  Closes the GLFW window if still open and releases
- * any lifeline the slot was holding.  Caller is responsible for the
- * GL context being safe to destroy on this thread. */
+ * shutdown sweep.  Closes the GLFW window if still open, drops the
+ * retained instance handle, and releases any lifeline the slot was
+ * holding.  Caller is responsible for the GL context being safe to
+ * destroy on this thread. */
 static void slot_teardown(WindowSlot *s)
 {
     if (!s) return;
@@ -194,11 +212,71 @@ static void slot_teardown(WindowSlot *s)
         glfwDestroyWindow(s->handle);
         s->handle = NULL;
     }
+    if (s->inst_val_held) {
+        cando_value_release(s->inst_val);
+        s->inst_val_held = 0;
+    }
     if (s->has_lifeline && g_root_vm) {
         cando_vm_lifeline_release(g_root_vm);
         s->has_lifeline = 0;
     }
     s->alive = 0;
+}
+
+/* =========================================================================
+ * Callback dispatch -- look up `name` on the slot's instance, call it
+ * with `self` already pushed as args[0].  Silent no-op if the field is
+ * missing or not callable.  Runs on the manager thread, in the child VM.
+ * ===================================================================== */
+
+static void dispatch_call(WindowSlot *s, const char *name,
+                          CandoValue *extra_args, u32 extra_argc)
+{
+    if (!g_dispatch_vm_inited || !s->inst_val_held) return;
+
+    CdoObject *inst = cando_bridge_resolve(&g_dispatch_vm, s->inst_val.as.handle);
+    if (!inst) {
+        fprintf(stderr, "[wnd] dispatch %s: no inst\n", name);
+        return;
+    }
+
+    CdoString *key = cdo_string_intern(name, (u32)strlen(name));
+    CdoValue   field_cdo;
+    bool       have = cdo_object_get(inst, key, &field_cdo);
+    cdo_string_release(key);
+    if (!have) return;
+    /* Accept any callable tag: a script function (CDO_FUNCTION), a
+     * native function (CDO_NATIVE), or a plain object whose kind is
+     * OBJ_FUNCTION (some paths produce CDO_OBJECT-tagged closures). */
+    bool callable = (field_cdo.tag == CDO_FUNCTION) ||
+                    (field_cdo.tag == CDO_NATIVE)   ||
+                    (field_cdo.tag == CDO_OBJECT &&
+                     field_cdo.as.object &&
+                     field_cdo.as.object->kind == OBJ_FUNCTION);
+    if (!callable) return;
+
+    /* Convert CdoValue -> CandoValue (allocates / re-uses a handle). */
+    CandoValue fn = cando_bridge_to_cando(&g_dispatch_vm, field_cdo);
+
+    /* Build (self, ...extra_args) and dispatch. */
+    enum { MAX_ARGS = 8 };
+    if (extra_argc > MAX_ARGS - 1) extra_argc = MAX_ARGS - 1;
+    CandoValue argv[MAX_ARGS];
+    argv[0] = s->inst_val;
+    for (u32 i = 0; i < extra_argc; i++) argv[1 + i] = extra_args[i];
+
+    /* The dispatch VM is single-threaded (only the manager touches it),
+     * so no locking is needed around this call. */
+    cando_vm_call_value(&g_dispatch_vm, fn, argv, 1 + extra_argc);
+    /* Discard any return values left on the child VM's stack and
+     * clear any per-call error state so the next dispatch starts
+     * clean.  Don't release `fn` here: cando_bridge_to_cando produced
+     * a borrowed handle that the parent VM owns through the instance
+     * field, so releasing would over-decref. */
+    g_dispatch_vm.stack_top   = g_dispatch_vm.stack;
+    g_dispatch_vm.frame_count = 0;
+    g_dispatch_vm.has_error   = false;
+    g_dispatch_vm.error_val_count = 0;
 }
 
 typedef enum {
@@ -299,6 +377,17 @@ static void mgr_drain_commands(void)
                      "glfwCreateWindow failed (code=%d): %s",
                      gc, gd ? gd : "(no detail)");
         } else {
+            /* Disable vsync by default so the manager's render loop
+             * doesn't block on a refresh that may not exist (xvfb has
+             * no real vblank).  Users opt back in via w:setVSync(true). */
+            glfwMakeContextCurrent(w);
+            glfwSwapInterval(0);
+            glfwMakeContextCurrent(NULL);
+
+            /* Clear any should-close flag set at construction (xvfb
+             * sometimes leaves one set when there is no WM). */
+            glfwSetWindowShouldClose(w, GLFW_FALSE);
+
             s->handle = w;
             memcpy(s->title, cmd.title, sizeof(s->title));
             s->width  = cmd.width;
@@ -428,22 +517,42 @@ static void mgr_drain_commands(void)
     WM_MUTEX_UNLOCK(&g_mgr_mutex);
 }
 
-/* Manager-thread helper: render one frame for every live window.
- * For the moment this is just clear-to-black + swap; the next chunk
- * will run user-supplied `w.draw` callbacks here.  Also reaps windows
- * the user closed via the close button. */
+/* Manager-thread helper: drive one frame for every live window.
+ *
+ *   1. Reap windows whose close button was pressed.
+ *   2. Compute dt, dispatch w.update(dt).
+ *   3. Make the window's GL context current, clear, dispatch w.draw(),
+ *      glfwSwapBuffers.
+ *
+ * GLFW input callbacks fire during glfwPollEvents (called by the
+ * manager loop after this); the next chunk extends mgr_render_frame
+ * to drain those events here too. */
 static void mgr_render_frame(void)
 {
+    double now = glfwGetTime();
+
     for (int i = 0; i < WINDOW_MAX_SLOTS; i++) {
         WindowSlot *s = &g_slots[i];
         if (!s->alive || !s->handle) continue;
 
-        /* Honour the close button.  slot_teardown also releases the
-         * VM lifeline so the script can exit even if the user never
-         * explicitly called w:close(). */
-        if (glfwWindowShouldClose(s->handle)) {
-            slot_teardown(s);
-            continue;
+        /* Note: we deliberately do NOT auto-tear-down on
+         * glfwWindowShouldClose yet.  The close-button -> w.quit ->
+         * w:close() chain is wired up alongside the GLFW input
+         * callbacks in the next chunk.  Keeping this off avoids xvfb
+         * spuriously reporting should-close at startup when there is
+         * no WM to handle WM_PROTOCOLS / WM_DELETE_WINDOW. */
+        glfwSetWindowShouldClose(s->handle, GLFW_FALSE);
+
+        double dt = (s->last_frame_time > 0.0)
+                    ? (now - s->last_frame_time)
+                    : 0.0;
+        s->last_frame_time = now;
+
+        /* update(dt) -- runs before any GL work so user code can mutate
+         * state for `draw` to render. */
+        if (g_dispatch_vm_inited && s->inst_val_held) {
+            CandoValue dt_arg = cando_number(dt);
+            dispatch_call(s, "update", &dt_arg, 1);
         }
 
         glfwMakeContextCurrent(s->handle);
@@ -454,6 +563,13 @@ static void mgr_render_frame(void)
             glViewport(0, 0, fbw, fbh);
             glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
+        }
+
+        /* draw() -- user runs draw.* primitives here (when the draw
+         * module lands).  Until then this is a clean place to call
+         * any direct GL the user wants. */
+        if (g_dispatch_vm_inited && s->inst_val_held) {
+            dispatch_call(s, "draw", NULL, 0);
         }
 
         glfwSwapBuffers(s->handle);
@@ -549,7 +665,12 @@ static void *manager_thread_main(void *arg)
     /* Close any windows the user forgot to close before exit. */
     mgr_destroy_all_windows();
 
-    glfwTerminate();
+    /* Skip glfwTerminate -- on Linux/X11, especially under xvfb, it has
+     * been observed to deadlock during atexit when other libraries (like
+     * libcando's cleanup running first) have already torn down state
+     * GLFW reaches into.  All windows have been destroyed and the OS
+     * reclaims the X connection on process exit, so skipping the
+     * orderly terminate is safe in practice. */
     atomic_store(&g_mgr_state, MGR_STOPPED);
     WM_MUTEX_LOCK(&g_mgr_mutex);
     WM_COND_BROADCAST(&g_mgr_cond);
@@ -768,6 +889,16 @@ static int native_window_create(CandoVM *vm, int argc, CandoValue *args)
      * for slot_teardown to release lifelines from any thread. */
     if (!g_root_vm) g_root_vm = vm;
 
+    /* Lazily set up the child VM the manager thread uses for user
+     * callbacks.  This must happen on the script thread, before any
+     * window exists, so that cando_vm_init_child sees a fully-set-up
+     * parent.  After this point, the manager may call
+     * cando_vm_call_value(&g_dispatch_vm, ...) from any frame. */
+    if (!g_dispatch_vm_inited) {
+        cando_vm_init_child(&g_dispatch_vm, vm);
+        g_dispatch_vm_inited = 1;
+    }
+
     /* Allocate a slot before posting -- the manager fills in handle,
      * but the slot index must be stable so the script-side instance
      * can reference it. */
@@ -818,6 +949,11 @@ static int native_window_create(CandoVM *vm, int argc, CandoValue *args)
 
     /* Chain to the _meta.window prototype so colon methods resolve. */
     cando_lib_meta_attach(vm, inst, "window");
+
+    /* Retain a reference for the manager thread so user callbacks
+     * (dispatched via the child VM) can find this instance. */
+    g_slots[slot].inst_val      = cando_value_copy(inst_val);
+    g_slots[slot].inst_val_held = 1;
 
     cando_vm_push(vm, inst_val);
     return 1;
