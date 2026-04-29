@@ -31,9 +31,12 @@
 #include <cando.h>
 #include "vm/bridge.h"
 #include "object/object.h"
+#include "object/array.h"
 #include "object/string.h"
 #include "object/value.h"
 #include "lib/libutil.h"
+
+#include <math.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,7 +71,7 @@
 #include "vendor/sqlite3.h"
 #include "sqlite_helpers.h"
 
-#define SQLITE_MODULE_VERSION "0.2.0"
+#define SQLITE_MODULE_VERSION "0.3.0"
 
 /* =========================================================================
  * Connection pool
@@ -86,20 +89,40 @@
 typedef struct SqliteSlot {
     sqlite3 *db;
     bool     in_use;
+    bool     bigint_string;  /* true => return INTEGERs > 2^53 as decimal strings */
 } SqliteSlot;
 
-static SqliteSlot   g_db_pool[SQLITE_MAX_DBS];
-static sqlite_mutex_t g_db_pool_mutex;
-static _Atomic(int)   g_db_pool_inited = 0;
+#define SQLITE_MAX_STMTS    1024
+#define SQLITE_STMT_SLOT_KEY "__sqlite_stmt_slot"
+#define SQLITE_STMT_SQL_KEY  "sourceSQL"
+
+typedef struct SqliteStmtSlot {
+    sqlite3_stmt *st;
+    int           db_slot;     /* parent db slot index */
+    bool          in_use;
+} SqliteStmtSlot;
+
+static SqliteSlot       g_db_pool[SQLITE_MAX_DBS];
+static SqliteStmtSlot   g_stmt_pool[SQLITE_MAX_STMTS];
+static sqlite_mutex_t   g_db_pool_mutex;
+static sqlite_mutex_t   g_stmt_pool_mutex;
+static _Atomic(int)     g_db_pool_inited = 0;
 
 static void ensure_pool_inited(void)
 {
     int expected = 0;
     if (atomic_compare_exchange_strong(&g_db_pool_inited, &expected, 1)) {
         SQLITE_MUTEX_INIT(&g_db_pool_mutex);
+        SQLITE_MUTEX_INIT(&g_stmt_pool_mutex);
         for (int i = 0; i < SQLITE_MAX_DBS; i++) {
-            g_db_pool[i].db     = NULL;
-            g_db_pool[i].in_use = false;
+            g_db_pool[i].db            = NULL;
+            g_db_pool[i].in_use        = false;
+            g_db_pool[i].bigint_string = false;
+        }
+        for (int i = 0; i < SQLITE_MAX_STMTS; i++) {
+            g_stmt_pool[i].st      = NULL;
+            g_stmt_pool[i].db_slot = -1;
+            g_stmt_pool[i].in_use  = false;
         }
     }
 }
@@ -132,9 +155,47 @@ static void db_pool_release(int idx)
 {
     if (idx < 0 || idx >= SQLITE_MAX_DBS) return;
     SQLITE_MUTEX_LOCK(&g_db_pool_mutex);
-    g_db_pool[idx].db     = NULL;
-    g_db_pool[idx].in_use = false;
+    g_db_pool[idx].db            = NULL;
+    g_db_pool[idx].in_use        = false;
+    g_db_pool[idx].bigint_string = false;
     SQLITE_MUTEX_UNLOCK(&g_db_pool_mutex);
+}
+
+/* ---- Statement pool ----------------------------------------------------- */
+
+static int stmt_pool_alloc(sqlite3_stmt *st, int db_slot)
+{
+    ensure_pool_inited();
+    SQLITE_MUTEX_LOCK(&g_stmt_pool_mutex);
+    int idx = -1;
+    for (int i = 0; i < SQLITE_MAX_STMTS; i++) {
+        if (!g_stmt_pool[i].in_use) {
+            g_stmt_pool[i].st      = st;
+            g_stmt_pool[i].db_slot = db_slot;
+            g_stmt_pool[i].in_use  = true;
+            idx = i;
+            break;
+        }
+    }
+    SQLITE_MUTEX_UNLOCK(&g_stmt_pool_mutex);
+    return idx;
+}
+
+static SqliteStmtSlot *stmt_pool_get(int idx)
+{
+    if (idx < 0 || idx >= SQLITE_MAX_STMTS) return NULL;
+    if (!g_stmt_pool[idx].in_use)           return NULL;
+    return &g_stmt_pool[idx];
+}
+
+static void stmt_pool_release(int idx)
+{
+    if (idx < 0 || idx >= SQLITE_MAX_STMTS) return;
+    SQLITE_MUTEX_LOCK(&g_stmt_pool_mutex);
+    g_stmt_pool[idx].st      = NULL;
+    g_stmt_pool[idx].db_slot = -1;
+    g_stmt_pool[idx].in_use  = false;
+    SQLITE_MUTEX_UNLOCK(&g_stmt_pool_mutex);
 }
 
 /* =========================================================================
@@ -255,38 +316,44 @@ static void obj_set_number(CdoObject *obj, const char *key, f64 value)
  * `sql.exec(db, ...)` and `db:exec(...)` resolve to the same native.
  * ======================================================================= */
 
+typedef enum {
+    METHOD_MODULE_ONLY = 0,
+    METHOD_ON_DB       = 1,
+    METHOD_ON_STMT     = 2,
+} MethodTarget;
+
 typedef struct MethodEntry {
-    const char *name;
-    f64         sentinel;
-    bool        on_db;       /* attach to db handles */
+    const char  *name;
+    f64          sentinel;
+    MethodTarget target;
 } MethodEntry;
 
-#define MAX_METHOD_ENTRIES 32
+#define MAX_METHOD_ENTRIES 48
 static MethodEntry g_methods[MAX_METHOD_ENTRIES];
 static int         g_method_count = 0;
 
 static void register_method(CandoVM *vm, CdoObject *mod_obj,
                             const char *name, CandoNativeFn fn,
-                            bool on_db)
+                            MethodTarget target)
 {
     CandoValue sentinel = cando_vm_add_native(vm, fn);
-    /* libutil_set_method asserts on full table; we trust the module
-     * author to keep the table small enough.  Mirror its behaviour. */
+    /* libutil_set_method asserts on full table; mirror that behaviour
+     * by trusting the module author to keep the table small enough. */
     f64 s = cando_is_number(sentinel) ? sentinel.as.number : 0.0;
     obj_set_number(mod_obj, name, s);
 
     if (g_method_count < MAX_METHOD_ENTRIES) {
         g_methods[g_method_count].name     = name;
         g_methods[g_method_count].sentinel = s;
-        g_methods[g_method_count].on_db    = on_db;
+        g_methods[g_method_count].target   = target;
         g_method_count++;
     }
 }
 
-static void attach_db_methods(CdoObject *handle)
+static void attach_methods_for(CdoObject *handle, MethodTarget target)
 {
     for (int i = 0; i < g_method_count; i++) {
-        if (g_methods[i].on_db) {
+        if (g_methods[i].target == target) {
             obj_set_number(handle, g_methods[i].name, g_methods[i].sentinel);
         }
     }
@@ -301,7 +368,7 @@ static CandoValue make_db_handle(CandoVM *vm, int slot)
     CandoValue v   = cando_bridge_new_object(vm);
     CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
     obj_set_number(obj, SQLITE_DB_SLOT_KEY, (f64)slot);
-    attach_db_methods(obj);
+    attach_methods_for(obj, METHOD_ON_DB);
     return v;
 }
 
@@ -341,6 +408,554 @@ static void db_handle_mark_closed(CandoVM *vm, CandoValue v)
         CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
         obj_set_number(obj, SQLITE_DB_SLOT_KEY, -1.0);
     }
+}
+
+/* =========================================================================
+ * Stmt handle: pool slot index boxed inside an object
+ * ======================================================================= */
+
+static CandoValue make_stmt_handle(CandoVM *vm, int slot, const char *sql, u32 sql_len)
+{
+    CandoValue v   = cando_bridge_new_object(vm);
+    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    obj_set_number(obj, SQLITE_STMT_SLOT_KEY, (f64)slot);
+    obj_set_string(obj, SQLITE_STMT_SQL_KEY,  sql, sql_len);
+    attach_methods_for(obj, METHOD_ON_STMT);
+    return v;
+}
+
+static int stmt_handle_slot(CandoVM *vm, CandoValue v)
+{
+    if (!cando_is_object(v)) return -1;
+    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    f64 idx = -1.0;
+    if (!obj_get_number(obj, SQLITE_STMT_SLOT_KEY, &idx)) return -1;
+    int i = (int)idx;
+    if (i < 0 || i >= SQLITE_MAX_STMTS) return -1;
+    return i;
+}
+
+/* Resolve to a (live stmt slot, parent db) pair.  Throws and returns
+ * NULL if either has been finalised / closed. */
+static SqliteStmtSlot *stmt_handle_unwrap(CandoVM *vm, CandoValue v,
+                                          sqlite3 **out_db)
+{
+    int slot = stmt_handle_slot(vm, v);
+    if (slot < 0) {
+        sqlite_throw(vm, NULL, 0, "sqlite: expected statement handle");
+        return NULL;
+    }
+    SqliteStmtSlot *s = stmt_pool_get(slot);
+    if (!s || !s->st) {
+        sqlite_throw(vm, NULL, 0, "sqlite: statement has been finalised");
+        return NULL;
+    }
+    sqlite3 *db = db_pool_get(s->db_slot);
+    if (!db) {
+        sqlite_throw(vm, NULL, 0, "sqlite: parent database has been closed");
+        return NULL;
+    }
+    if (out_db) *out_db = db;
+    return s;
+}
+
+static void stmt_handle_mark_finalised(CandoVM *vm, CandoValue v)
+{
+    int slot = stmt_handle_slot(vm, v);
+    if (slot >= 0) stmt_pool_release(slot);
+    if (cando_is_object(v)) {
+        CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+        obj_set_number(obj, SQLITE_STMT_SLOT_KEY, -1.0);
+    }
+}
+
+/* =========================================================================
+ * Parameter binding
+ *
+ * Three call shapes for run / get / all / bind:
+ *   stmt:run()                       -- no parameters
+ *   stmt:run(p0, p1, ...)             -- positional
+ *   stmt:run([p0, p1, ...])           -- positional via array
+ *   stmt:run({ name1: v1, name2: v2 })-- named (:name / @name / $name)
+ *
+ * Per element value mapping:
+ *   null                  -> sqlite3_bind_null
+ *   bool                  -> sqlite3_bind_int(0|1)
+ *   number (whole, |x|<=2^53) -> sqlite3_bind_int64
+ *   number (fractional / overflow) -> sqlite3_bind_double
+ *   string                -> sqlite3_bind_text   (SQLITE_TRANSIENT)
+ *   { blob: <string> }    -> sqlite3_bind_blob   (SQLITE_TRANSIENT)
+ *   anything else         -> error
+ *
+ * Returns true on success.  On error, throws (the caller returns -1).
+ * ======================================================================= */
+
+#define INTEGER_SAFE_MAX 9007199254740992.0  /* 2^53 */
+
+static bool bind_one_value(CandoVM *vm, sqlite3_stmt *st, int idx,
+                           CandoValue v, const char *what)
+{
+    if (cando_is_null(v)) {
+        sqlite3_bind_null(st, idx);
+        return true;
+    }
+    if (cando_is_bool(v)) {
+        sqlite3_bind_int(st, idx, v.as.boolean ? 1 : 0);
+        return true;
+    }
+    if (cando_is_number(v)) {
+        f64 d = v.as.number;
+        if (isfinite(d) && fabs(d) <= INTEGER_SAFE_MAX && d == (f64)(int64_t)d) {
+            sqlite3_bind_int64(st, idx, (sqlite3_int64)d);
+        } else {
+            sqlite3_bind_double(st, idx, d);
+        }
+        return true;
+    }
+    if (cando_is_string(v)) {
+        const char *s = v.as.string->data;
+        u32         n = v.as.string->length;
+        sqlite3_bind_text(st, idx, s, (int)n, SQLITE_TRANSIENT);
+        return true;
+    }
+    if (cando_is_object(v)) {
+        CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
+        /* { blob: <string> } -> bind as BLOB */
+        CdoString *kblob = cdo_string_intern("blob", 4);
+        CdoValue   bv;
+        bool has = cdo_object_rawget(o, kblob, &bv);
+        cdo_string_release(kblob);
+        if (has && bv.tag == CDO_STRING) {
+            const char *s = bv.as.string->data;
+            u32         n = bv.as.string->length;
+            sqlite3_bind_blob(st, idx, s, (int)n, SQLITE_TRANSIENT);
+            return true;
+        }
+        sqlite_throw(vm, NULL, 0,
+            "%s: parameter %d is an object without a 'blob' string field",
+            what, idx);
+        return false;
+    }
+    sqlite_throw(vm, NULL, 0,
+        "%s: parameter %d has unsupported type", what, idx);
+    return false;
+}
+
+/* Binds parameters from args[start..argc-1] onto st.  Returns true on
+ * success, false on error (with throw already fired). */
+static bool bind_params(CandoVM *vm, sqlite3_stmt *st,
+                        int argc, CandoValue *args, int start,
+                        const char *what)
+{
+    sqlite3_reset(st);
+    sqlite3_clear_bindings(st);
+
+    int n_provided = argc - start;
+
+    /* Single-arg array -> positional from array elements. */
+    if (n_provided == 1 && cando_is_object(args[start])) {
+        CdoObject *o = cando_bridge_resolve(vm, args[start].as.handle);
+        if (o->kind == OBJ_ARRAY) {
+            u32 n = cdo_array_len(o);
+            for (u32 i = 0; i < n; i++) {
+                CdoValue ev;
+                if (!cdo_array_rawget_idx(o, i, &ev)) continue;
+                CandoValue cv = cando_bridge_to_cando(vm, ev);
+                if (!bind_one_value(vm, st, (int)(i + 1), cv, what)) return false;
+            }
+            return true;
+        }
+        /* Single-arg plain object -> named-bind by SQL parameter name. */
+        if (o->kind == OBJ_OBJECT) {
+            int total = sqlite3_bind_parameter_count(st);
+            for (int i = 1; i <= total; i++) {
+                const char *pname = sqlite3_bind_parameter_name(st, i);
+                if (!pname) {
+                    sqlite_throw(vm, NULL, 0,
+                        "%s: positional ? parameter %d cannot be bound from an object",
+                        what, i);
+                    return false;
+                }
+                /* Skip the leading sigil: ':', '@', or '$'. */
+                const char *key = pname + 1;
+                CdoString *k = cdo_string_intern(key, (u32)strlen(key));
+                CdoValue   ev;
+                bool has = cdo_object_rawget(o, k, &ev);
+                cdo_string_release(k);
+                if (!has) {
+                    /* Missing keys bind to NULL, mirroring node:sqlite's
+                     * setAllowUnknownNamedParameters default-off behaviour
+                     * but lenient on the missing side. */
+                    sqlite3_bind_null(st, i);
+                    continue;
+                }
+                CandoValue cv = cando_bridge_to_cando(vm, ev);
+                if (!bind_one_value(vm, st, i, cv, what)) return false;
+            }
+            return true;
+        }
+    }
+
+    /* Otherwise treat each remaining arg as a positional parameter. */
+    for (int i = 0; i < n_provided; i++) {
+        if (!bind_one_value(vm, st, i + 1, args[start + i], what)) return false;
+    }
+    return true;
+}
+
+/* =========================================================================
+ * Column reading -- builds a row object keyed by column name.
+ * ======================================================================= */
+
+static CandoValue read_column(CandoVM *vm, sqlite3_stmt *st, int col,
+                              bool bigint_string)
+{
+    int t = sqlite3_column_type(st, col);
+    switch (t) {
+        case SQLITE_NULL:
+            return cando_null();
+        case SQLITE_INTEGER: {
+            sqlite3_int64 v = sqlite3_column_int64(st, col);
+            f64 d = (f64)v;
+            if (bigint_string && (v >  (sqlite3_int64)INTEGER_SAFE_MAX ||
+                                  v < -(sqlite3_int64)INTEGER_SAFE_MAX)) {
+                char buf[24];
+                int  n = snprintf(buf, sizeof(buf), "%lld", (long long)v);
+                CandoString *s = cando_string_new(buf, (u32)n);
+                return cando_string_value(s);
+            }
+            return cando_number(d);
+        }
+        case SQLITE_FLOAT:
+            return cando_number(sqlite3_column_double(st, col));
+        case SQLITE_TEXT: {
+            const unsigned char *s = sqlite3_column_text(st, col);
+            int n = sqlite3_column_bytes(st, col);
+            CandoString *cs = cando_string_new((const char *)s, (u32)n);
+            return cando_string_value(cs);
+        }
+        case SQLITE_BLOB: {
+            /* Cando strings are byte-safe, so blobs round-trip cleanly
+             * as opaque strings.  Use { blob: ... } to bind back. */
+            const void *p = sqlite3_column_blob(st, col);
+            int n = sqlite3_column_bytes(st, col);
+            CandoString *cs = cando_string_new((const char *)p, (u32)n);
+            return cando_string_value(cs);
+        }
+        default:
+            (void)vm;
+            return cando_null();
+    }
+}
+
+static CandoValue build_row(CandoVM *vm, sqlite3_stmt *st, bool bigint_string)
+{
+    int ncols = sqlite3_column_count(st);
+    CandoValue rowv = cando_bridge_new_object(vm);
+    CdoObject *row  = cando_bridge_resolve(vm, rowv.as.handle);
+    for (int c = 0; c < ncols; c++) {
+        const char *name = sqlite3_column_name(st, c);
+        if (!name) name = "?";
+        CandoValue cv = read_column(vm, st, c, bigint_string);
+        CdoString *k  = cdo_string_intern(name, (u32)strlen(name));
+        cdo_object_rawset(row, k, cando_bridge_to_cdo(vm, cv), FIELD_NONE);
+        cdo_string_release(k);
+    }
+    return rowv;
+}
+
+/* =========================================================================
+ * native_sqlite_prepare(db, sql) -> stmt
+ * ======================================================================= */
+
+static int native_sqlite_prepare(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2) {
+        sqlite_throw(vm, NULL, 0, "sqlite.prepare: (db, sql) required");
+        return -1;
+    }
+    sqlite3 *db = db_handle_unwrap(vm, args[0]);
+    if (!db) return -1;
+
+    int db_slot = db_handle_slot(vm, args[0]);
+
+    const char *sql = libutil_arg_cstr_at(args, argc, 1);
+    if (!sql) {
+        sqlite_throw(vm, db, 0, "sqlite.prepare: sql must be a string");
+        return -1;
+    }
+    u32 sql_len = (u32)strlen(sql);
+
+    sqlite3_stmt *st = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, (int)sql_len + 1, &st, NULL);
+    if (rc != SQLITE_OK || !st) {
+        char tmp[480];
+        snprintf(tmp, sizeof(tmp), "%s", sqlite3_errmsg(db));
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.prepare: %s", tmp);
+        if (st) sqlite3_finalize(st);
+        return -1;
+    }
+
+    int slot = stmt_pool_alloc(st, db_slot);
+    if (slot < 0) {
+        sqlite3_finalize(st);
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.prepare: statement pool exhausted (max %d)",
+            SQLITE_MAX_STMTS);
+        return -1;
+    }
+
+    cando_vm_push(vm, make_stmt_handle(vm, slot, sql, sql_len));
+    return 1;
+}
+
+/* =========================================================================
+ * native_sqlite_finalize(stmt) -> true
+ * Idempotent.
+ * ======================================================================= */
+
+static int native_sqlite_finalize(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.finalize: (stmt) required");
+        return -1;
+    }
+    int slot = stmt_handle_slot(vm, args[0]);
+    if (slot >= 0) {
+        SqliteStmtSlot *s = stmt_pool_get(slot);
+        if (s && s->st) {
+            sqlite3_finalize(s->st);
+            s->st = NULL;
+        }
+        stmt_handle_mark_finalised(vm, args[0]);
+    }
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+/* =========================================================================
+ * native_sqlite_reset(stmt) -> true
+ * Clears bindings and rewinds the cursor.
+ * ======================================================================= */
+
+static int native_sqlite_reset(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.reset: (stmt) required");
+        return -1;
+    }
+    sqlite3 *db = NULL;
+    SqliteStmtSlot *s = stmt_handle_unwrap(vm, args[0], &db);
+    if (!s) return -1;
+    sqlite3_reset(s->st);
+    sqlite3_clear_bindings(s->st);
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+/* =========================================================================
+ * native_sqlite_bind(stmt, params) -> true
+ * Binds without stepping; useful for iterate() / re-use across rows.
+ * ======================================================================= */
+
+static int native_sqlite_bind(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.bind: (stmt, params...) required");
+        return -1;
+    }
+    sqlite3 *db = NULL;
+    SqliteStmtSlot *s = stmt_handle_unwrap(vm, args[0], &db);
+    if (!s) return -1;
+    if (!bind_params(vm, s->st, argc, args, 1, "sqlite.bind")) return -1;
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+/* =========================================================================
+ * native_sqlite_run(stmt, params...) -> { lastInsertRowid, changes }
+ *
+ * Steps the statement once; expects no row results (a single SQLITE_DONE).
+ * Returns the rowid + changes object that node:sqlite scripts expect.
+ * ======================================================================= */
+
+static int native_sqlite_run(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.run: (stmt, params...) required");
+        return -1;
+    }
+    sqlite3 *db = NULL;
+    SqliteStmtSlot *s = stmt_handle_unwrap(vm, args[0], &db);
+    if (!s) return -1;
+
+    if (!bind_params(vm, s->st, argc, args, 1, "sqlite.run")) return -1;
+
+    int rc = sqlite3_step(s->st);
+    /* SQLITE_ROW from `run` is fine: scripts who used the wrong helper
+     * still get a clean lastInsertRowid/changes back. */
+    while (rc == SQLITE_ROW) rc = sqlite3_step(s->st);
+    if (rc != SQLITE_DONE) {
+        char tmp[480];
+        snprintf(tmp, sizeof(tmp), "%s", sqlite3_errmsg(db));
+        sqlite3_reset(s->st);
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.run: %s", tmp);
+        return -1;
+    }
+
+    sqlite3_int64 rowid   = sqlite3_last_insert_rowid(db);
+    int            changes = sqlite3_changes(db);
+
+    sqlite3_reset(s->st);
+
+    /* Build { lastInsertRowid, changes } */
+    CandoValue rv  = cando_bridge_new_object(vm);
+    CdoObject *o   = cando_bridge_resolve(vm, rv.as.handle);
+    obj_set_number(o, "lastInsertRowid", (f64)rowid);
+    obj_set_number(o, "changes",         (f64)changes);
+
+    cando_vm_push(vm, rv);
+    return 1;
+}
+
+/* =========================================================================
+ * native_sqlite_get(stmt, params...) -> row | null
+ * ======================================================================= */
+
+static int native_sqlite_get(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.get: (stmt, params...) required");
+        return -1;
+    }
+    sqlite3 *db = NULL;
+    SqliteStmtSlot *s = stmt_handle_unwrap(vm, args[0], &db);
+    if (!s) return -1;
+
+    if (!bind_params(vm, s->st, argc, args, 1, "sqlite.get")) return -1;
+
+    int rc = sqlite3_step(s->st);
+    if (rc == SQLITE_DONE) {
+        sqlite3_reset(s->st);
+        cando_vm_push(vm, cando_null());
+        return 1;
+    }
+    if (rc != SQLITE_ROW) {
+        char tmp[480];
+        snprintf(tmp, sizeof(tmp), "%s", sqlite3_errmsg(db));
+        sqlite3_reset(s->st);
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.get: %s", tmp);
+        return -1;
+    }
+
+    bool bigint_string = g_db_pool[s->db_slot].bigint_string;
+    CandoValue row = build_row(vm, s->st, bigint_string);
+
+    sqlite3_reset(s->st);
+    cando_vm_push(vm, row);
+    return 1;
+}
+
+/* =========================================================================
+ * native_sqlite_all(stmt, params...) -> [row, ...]
+ * ======================================================================= */
+
+static int native_sqlite_all(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.all: (stmt, params...) required");
+        return -1;
+    }
+    sqlite3 *db = NULL;
+    SqliteStmtSlot *s = stmt_handle_unwrap(vm, args[0], &db);
+    if (!s) return -1;
+
+    if (!bind_params(vm, s->st, argc, args, 1, "sqlite.all")) return -1;
+
+    bool bigint_string = g_db_pool[s->db_slot].bigint_string;
+
+    CandoValue av = cando_bridge_new_array(vm);
+    CdoObject *a  = cando_bridge_resolve(vm, av.as.handle);
+
+    int rc;
+    while ((rc = sqlite3_step(s->st)) == SQLITE_ROW) {
+        CandoValue row = build_row(vm, s->st, bigint_string);
+        cdo_array_push(a, cando_bridge_to_cdo(vm, row));
+    }
+    if (rc != SQLITE_DONE) {
+        char tmp[480];
+        snprintf(tmp, sizeof(tmp), "%s", sqlite3_errmsg(db));
+        sqlite3_reset(s->st);
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.all: %s", tmp);
+        return -1;
+    }
+
+    sqlite3_reset(s->st);
+    cando_vm_push(vm, av);
+    return 1;
+}
+
+/* =========================================================================
+ * native_sqlite_bigint_mode(db, mode) -> mode
+ *
+ * mode is "number" (default; INTEGERs > 2^53 become lossy doubles) or
+ * "string" (overflow-safe; INTEGERs over 2^53 are returned as decimal
+ * strings).  Returns the now-active mode.
+ * ======================================================================= */
+
+static int native_sqlite_bigint_mode(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.bigintMode: (db[, mode]) required");
+        return -1;
+    }
+    int slot = db_handle_slot(vm, args[0]);
+    if (slot < 0 || !db_pool_get(slot)) {
+        sqlite_throw(vm, NULL, 0, "sqlite.bigintMode: invalid database handle");
+        return -1;
+    }
+    if (argc >= 2) {
+        const char *m = libutil_arg_cstr_at(args, argc, 1);
+        if (!m) {
+            sqlite_throw(vm, NULL, 0,
+                "sqlite.bigintMode: mode must be \"number\" or \"string\"");
+            return -1;
+        }
+        if      (strcmp(m, "number") == 0) g_db_pool[slot].bigint_string = false;
+        else if (strcmp(m, "string") == 0) g_db_pool[slot].bigint_string = true;
+        else {
+            sqlite_throw(vm, NULL, 0,
+                "sqlite.bigintMode: unknown mode \"%s\"", m);
+            return -1;
+        }
+    }
+    const char *out = g_db_pool[slot].bigint_string ? "string" : "number";
+    libutil_push_cstr(vm, out);
+    return 1;
+}
+
+/* node:sqlite-compat alias: db:setReadBigInts(true|false) */
+static int native_sqlite_set_read_bigints(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2) {
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.setReadBigInts: (db, bool) required");
+        return -1;
+    }
+    int slot = db_handle_slot(vm, args[0]);
+    if (slot < 0 || !db_pool_get(slot)) {
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.setReadBigInts: invalid database handle");
+        return -1;
+    }
+    bool on = cando_is_bool(args[1]) && args[1].as.boolean;
+    g_db_pool[slot].bigint_string = on;
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
 }
 
 /* =========================================================================
@@ -514,11 +1129,28 @@ CandoValue cando_module_init(CandoVM *vm)
 
     /* `open` lives only on the module -- there's no handle to attach
      * it to, since the caller is creating one. */
-    register_method(vm, obj, "open",  native_sqlite_open,  /*on_db=*/false);
+    register_method(vm, obj, "open",          native_sqlite_open,
+                    METHOD_MODULE_ONLY);
 
     /* db handle methods: callable as both `sql.close(db)` and `db:close()`. */
-    register_method(vm, obj, "close", native_sqlite_close, /*on_db=*/true);
-    register_method(vm, obj, "exec",  native_sqlite_exec,  /*on_db=*/true);
+    register_method(vm, obj, "close",         native_sqlite_close,
+                    METHOD_ON_DB);
+    register_method(vm, obj, "exec",          native_sqlite_exec,
+                    METHOD_ON_DB);
+    register_method(vm, obj, "prepare",       native_sqlite_prepare,
+                    METHOD_ON_DB);
+    register_method(vm, obj, "bigintMode",    native_sqlite_bigint_mode,
+                    METHOD_ON_DB);
+    register_method(vm, obj, "setReadBigInts", native_sqlite_set_read_bigints,
+                    METHOD_ON_DB);
+
+    /* stmt handle methods: callable as `sql.run(stmt, ...)` or `stmt:run(...)`. */
+    register_method(vm, obj, "run",      native_sqlite_run,      METHOD_ON_STMT);
+    register_method(vm, obj, "get",      native_sqlite_get,      METHOD_ON_STMT);
+    register_method(vm, obj, "all",      native_sqlite_all,      METHOD_ON_STMT);
+    register_method(vm, obj, "bind",     native_sqlite_bind,     METHOD_ON_STMT);
+    register_method(vm, obj, "reset",    native_sqlite_reset,    METHOD_ON_STMT);
+    register_method(vm, obj, "finalize", native_sqlite_finalize, METHOD_ON_STMT);
 
     /* Module-version string. */
     obj_set_string(obj, "VERSION",

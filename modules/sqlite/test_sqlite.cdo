@@ -143,6 +143,176 @@ fast:exec("CREATE TABLE z(a INTEGER)");
 fast:close();
 expect("custom timeout option accepted", TRUE);
 
+// ===========================================================================
+// Prepared statements (chunk 3)
+// ===========================================================================
+print("");
+print("-- prepared statements --");
+
+VAR pdb = sql.open(":memory:");
+pdb:exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)");
+
+// ---- prepare returns a stmt handle with the right methods ----------------
+VAR ins = pdb:prepare("INSERT INTO users (name, age) VALUES (?, ?)");
+expect("prepare returns object",          type(ins) == "object");
+expect("stmt has __sqlite_stmt_slot",     type(ins.__sqlite_stmt_slot) == "number");
+expect("stmt has sourceSQL",              type(ins.sourceSQL) == "string");
+expect("stmt:run sentinel attached",      type(ins.run)  == "number");
+expect("stmt:get sentinel attached",      type(ins.get)  == "number");
+expect("stmt:all sentinel attached",      type(ins.all)  == "number");
+expect("stmt:bind sentinel attached",     type(ins.bind) == "number");
+expect("stmt:reset sentinel attached",    type(ins.reset) == "number");
+expect("stmt:finalize sentinel attached", type(ins.finalize) == "number");
+
+// ---- run: positional, multiple invocations --------------------------------
+VAR r1 = ins:run("Ada", 36);
+expect("run() returns object",          type(r1) == "object");
+expect("r1.lastInsertRowid == 1",       r1.lastInsertRowid == 1);
+expect("r1.changes        == 1",       r1.changes == 1);
+
+VAR r2 = ins:run("Grace", 85);
+expect("r2.lastInsertRowid == 2",       r2.lastInsertRowid == 2);
+
+VAR r3 = ins:run("Hedy", 0);
+expect("r3.lastInsertRowid == 3",       r3.lastInsertRowid == 3);
+ins:finalize();
+
+// ---- run via array binding ------------------------------------------------
+VAR ins2 = pdb:prepare("INSERT INTO users (name, age) VALUES (?, ?)");
+ins2:run(["Linus", 54]);
+expect("run([params]) bound positionally", TRUE);
+ins2:finalize();
+
+// ---- run via named-bind ---------------------------------------------------
+VAR ins3 = pdb:prepare("INSERT INTO users (name, age) VALUES (:n, :a)");
+ins3:run({ n: "Margaret", a: 88 });
+expect("run({name: ...}) bound by name", TRUE);
+ins3:finalize();
+
+// ---- get: returns first row or null --------------------------------------
+VAR sel = pdb:prepare("SELECT id, name, age FROM users WHERE name = ?");
+VAR row = sel:get("Ada");
+expect("get returns object",               type(row) == "object");
+expect("get row.name == 'Ada'",            row.name == "Ada");
+expect("get row.age  == 36",               row.age  == 36);
+expect("get row.id   == 1",                row.id   == 1);
+
+VAR none = sel:get("Nobody");
+expect("get returns NULL when no row",     none == NULL);
+
+sel:finalize();
+
+// ---- all: returns array of rows -------------------------------------------
+VAR list = pdb:prepare("SELECT id, name FROM users ORDER BY id");
+VAR rows = list:all();
+expect("all returns array",                  type(rows) == "object");
+expect("all returned 5 rows",                rows:length() == 5);
+expect("all rows[0].name == 'Ada'",          rows[0].name == "Ada");
+expect("all rows[4].name == 'Margaret'",     rows[4].name == "Margaret");
+list:finalize();
+
+// ---- bind + reset + step via run -----------------------------------------
+VAR upd = pdb:prepare("UPDATE users SET age = ? WHERE name = ?");
+upd:bind([99, "Ada"]);
+expect("bind() returns true",  TRUE);
+upd:reset();
+VAR ru = upd:run([42, "Ada"]);
+expect("run after reset works", ru.changes == 1);
+upd:finalize();
+
+VAR check = pdb:prepare("SELECT age FROM users WHERE name = 'Ada'");
+expect("update propagated", check:get().age == 42);
+check:finalize();
+
+// ---- error: prepare invalid SQL -------------------------------------------
+VAR caught = "";
+VAR caught_state = "";
+TRY {
+    pdb:prepare("SELECT * FROM nonexistent");
+} CATCH (m, code, sqlstate) {
+    caught = m;
+    caught_state = sqlstate;
+}
+expect("prepare on bogus table throws",     caught != "");
+expect("prepare error sqlstate SQLITE_ERROR", caught_state == "SQLITE_ERROR");
+
+// ---- error: run with constraint violation --------------------------------
+VAR dup = pdb:prepare("INSERT INTO users (id, name, age) VALUES (?, ?, ?)");
+caught = ""; caught_state = "";
+TRY {
+    dup:run(1, "Conflict", 0);
+} CATCH (m, code, sqlstate) {
+    caught       = m;
+    caught_state = sqlstate;
+}
+expect("run with PK conflict throws",                 caught != "");
+expect("PK conflict sqlstate -> CONSTRAINT_PRIMARYKEY",
+    caught_state == "SQLITE_CONSTRAINT_PRIMARYKEY");
+dup:finalize();
+
+// ---- finalize is idempotent ----------------------------------------------
+VAR fin = pdb:prepare("SELECT 1");
+fin:finalize();
+caught = "";
+TRY { fin:finalize(); } CATCH (m) { caught = m; }
+expect("finalize twice is a no-op", caught == "");
+
+// ---- using a finalised stmt throws ---------------------------------------
+caught = "";
+TRY { fin:run(); } CATCH (m, code, sqlstate) { caught = m; }
+expect("run on finalised stmt throws", caught != "");
+
+// ---- type round-trip: text, blob, null, real -----------------------------
+pdb:exec("CREATE TABLE blobs (id INTEGER PRIMARY KEY, b BLOB, t TEXT, r REAL, n INTEGER)");
+VAR tins = pdb:prepare("INSERT INTO blobs (b, t, r, n) VALUES (?, ?, ?, ?)");
+// Cando string literals don't expose hex escapes, but Cando strings
+// are byte-safe, so a plain ASCII payload still verifies that the
+// blob path bypasses TEXT/UTF-8 conversions.
+tins:run({ blob: "raw-bytes" }, "snowman", 3.14, NULL);
+tins:finalize();
+
+VAR tsel = pdb:prepare("SELECT b, t, r, n, typeof(b) AS bt FROM blobs WHERE id = 1");
+VAR trow = tsel:get();
+expect("blob round-trips bytes",        trow.b == "raw-bytes");
+expect("blob column type is 'blob'",    trow.bt == "blob");
+expect("text round-trips",              trow.t == "snowman");
+expect("real round-trips",              trow.r == 3.14);
+expect("null round-trips",              trow.n == NULL);
+tsel:finalize();
+
+// ---- bigintMode: number (default) vs string -------------------------------
+pdb:exec("CREATE TABLE big (x INTEGER)");
+VAR bigsql = pdb:prepare("INSERT INTO big (x) VALUES (?)");
+// 2^53 + 1 cannot be represented exactly as a double, so passing it
+// from script-side is already lossy.  Insert via SQL so SQLite stores
+// the precise value and the read-side bigintMode can be verified.
+pdb:exec("INSERT INTO big VALUES (9223372036854775000)");
+bigsql:finalize();
+
+VAR rd = pdb:prepare("SELECT x FROM big");
+expect("default bigintMode is 'number'", pdb:bigintMode() == "number");
+VAR num_row = rd:get();
+expect("default returns f64 (lossy)",    type(num_row.x) == "number");
+rd:finalize();
+
+pdb:bigintMode("string");
+expect("bigintMode now 'string'",        pdb:bigintMode() == "string");
+VAR rd2 = pdb:prepare("SELECT x FROM big");
+VAR str_row = rd2:get();
+expect("string mode returns string",     type(str_row.x) == "string");
+expect("string is precise",              str_row.x == "9223372036854775000");
+rd2:finalize();
+
+// setReadBigInts is the node:sqlite-compat alias.
+pdb:setReadBigInts(FALSE);
+expect("setReadBigInts(FALSE) flips back",  pdb:bigintMode() == "number");
+
+caught = "";
+TRY { pdb:bigintMode("nope"); } CATCH (m) { caught = m; }
+expect("bigintMode unknown mode throws", caught != "");
+
+pdb:close();
+
 // ---- Summary --------------------------------------------------------------
 print("");
 print(`pass: ${pass}    fail: ${fail}`);
