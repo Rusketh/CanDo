@@ -102,6 +102,8 @@ db:transaction(FUNCTION (from, to, amt) {
 | Member | Description |
 |---|---|
 | `sql.open(path[, options])`     | Open / create a database, returns a `db` handle. |
+| `sql.escape(value)`             | Quote a value as a SQLite literal (`'...'` with `'` doubled).  Accepts null / bool / number / string. |
+| `sql.escapeIdentifier(name)`    | Quote a column / table name as `"name"` with embedded `"` doubled. |
 | `sql.VERSION`                   | Module version string (`"0.5.0"`). |
 | `sql.SQLITE_VERSION`            | Vendored SQLite library version. |
 | `sql.OPEN_READONLY` `sql.OPEN_READWRITE` `sql.OPEN_CREATE` `sql.OPEN_URI` `sql.OPEN_MEMORY` | Bit-flag constants. |
@@ -208,6 +210,29 @@ Per-element value mapping:
 | `REAL`    | `number` |
 | `TEXT`    | `string` |
 | `BLOB`    | `string` (Cando strings are byte-safe) |
+
+## Manual SQL building -- `sql.escape` / `sql.escapeIdentifier`
+
+Prepared statements are the safe default; for the cases where you
+have to assemble SQL by hand (dynamic identifiers, IN-list builders)
+the module exposes the same `escape` helpers as the `sql` (Postgres /
+MySQL) module:
+
+```cando
+VAR table = sql.escapeIdentifier("user_profiles");      // -> "user_profiles"
+VAR who   = sql.escape("o'brien");                       // -> 'o''brien'
+db:exec(`SELECT * FROM ${table} WHERE name = ${who}`);
+```
+
+`sql.escape(value)` accepts null / bool / number / string and produces:
+
+| Cando value      | SQLite output |
+|---|---|
+| `NULL`           | `NULL` |
+| `TRUE` / `FALSE` | `1` / `0` |
+| number           | decimal text |
+| string           | `'...'` with `'` doubled |
+| anything else    | error |
 
 ## Errors
 

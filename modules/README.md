@@ -15,6 +15,7 @@ modules/
 │   ├── test_ldap.cdo        script-level integration tests
 │   └── Makefile             per-module build
 ├── sqlite/                  SQLite bindings
+├── sql/                     PostgreSQL + MySQL/MariaDB bindings
 ├── window/                  GLFW window + OpenGL context
 ├── draw/                    2D drawing primitives (layered on `window`)
 └── forms/                   .NET-Forms-shaped Win32 GUI binding

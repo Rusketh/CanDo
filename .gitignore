@@ -26,6 +26,8 @@ icon.res
 
 # Module build artifacts
 modules/*/test_ldap
+modules/*/test_sqlite
+modules/*/test_sql
 modules/*/*.so
 modules/*/*.dylib
 modules/*/*.dll
