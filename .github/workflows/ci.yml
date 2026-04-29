@@ -190,3 +190,46 @@ jobs:
         with:
           name: cando-windows-x86_64
           path: dist/*
+
+  # ---------------------------------------------------------------------------
+  # VS Code extension build + package
+  # ---------------------------------------------------------------------------
+  vscode-extension:
+    name: Build (VS Code extension)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode-cando
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        # `npm install` (not `ci`) because the repo intentionally does not
+        # commit a package-lock.json; this lets minor patch updates of the
+        # language-server libs flow in automatically.
+        run: npm install --no-audit --no-fund
+
+      - name: Compile TypeScript (client + server)
+        run: npm run compile
+
+      - name: Drop dev dependencies before packaging
+        # Keep only runtime deps in node_modules so the .vsix doesn't ship
+        # TypeScript, vsce, @types, etc.
+        run: npm prune --omit=dev
+
+      - name: Package extension (.vsix)
+        run: npx --yes @vscode/vsce package --out vscode-cando.vsix
+
+      - name: Show package contents
+        run: npx --yes @vscode/vsce ls
+
+      - name: Upload .vsix
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-cando-extension
+          path: editors/vscode-cando/vscode-cando.vsix
