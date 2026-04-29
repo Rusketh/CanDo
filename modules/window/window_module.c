@@ -86,7 +86,7 @@
 #  define WM_COND_BROADCAST(c) pthread_cond_broadcast(c)
 #endif
 
-#define WINDOW_MODULE_VERSION "0.0.6"
+#define WINDOW_MODULE_VERSION "0.0.7"
 
 /* =========================================================================
  * obj_set_* helpers (mirrors modules/sqlite).
@@ -173,9 +173,33 @@ typedef struct WindowSlot {
     char         title[128];
     int          width;
     int          height;
+    int          has_lifeline;   /* 1 while we're holding a VM lifeline */
 } WindowSlot;
 
 static WindowSlot g_slots[WINDOW_MAX_SLOTS];
+
+/* Captured on first window.create and used by any thread that needs to
+ * touch the VM lifeline counter.  All windows in a process share the
+ * same root VM, so this is safe to cache. */
+static CandoVM   *g_root_vm = NULL;
+
+/* Slot teardown shared by CMD_DESTROY, the close-button reaper, and the
+ * shutdown sweep.  Closes the GLFW window if still open and releases
+ * any lifeline the slot was holding.  Caller is responsible for the
+ * GL context being safe to destroy on this thread. */
+static void slot_teardown(WindowSlot *s)
+{
+    if (!s) return;
+    if (s->handle) {
+        glfwDestroyWindow(s->handle);
+        s->handle = NULL;
+    }
+    if (s->has_lifeline && g_root_vm) {
+        cando_vm_lifeline_release(g_root_vm);
+        s->has_lifeline = 0;
+    }
+    s->alive = 0;
+}
 
 typedef enum {
     CMD_NONE = 0,
@@ -284,13 +308,8 @@ static void mgr_drain_commands(void)
         break;
     }
     case CMD_DESTROY: {
-        WindowSlot *s = &g_slots[cmd.slot];
-        if (s->handle) {
-            glfwDestroyWindow(s->handle);
-            s->handle = NULL;
-        }
-        s->alive = 0;
-        cmd.ok   = 1;
+        slot_teardown(&g_slots[cmd.slot]);
+        cmd.ok = 1;
         break;
     }
     case CMD_SET_TITLE: {
@@ -419,15 +438,11 @@ static void mgr_render_frame(void)
         WindowSlot *s = &g_slots[i];
         if (!s->alive || !s->handle) continue;
 
-        /* Honour the close button.  Don't free the slot here -- the
-         * script-side handle still holds a generation, and freeing
-         * would race with mgr_drain_commands; just destroy the GLFW
-         * window and mark the slot dormant.  isOpen() will then
-         * return FALSE. */
+        /* Honour the close button.  slot_teardown also releases the
+         * VM lifeline so the script can exit even if the user never
+         * explicitly called w:close(). */
         if (glfwWindowShouldClose(s->handle)) {
-            glfwDestroyWindow(s->handle);
-            s->handle = NULL;
-            s->alive  = 0;
+            slot_teardown(s);
             continue;
         }
 
@@ -451,11 +466,7 @@ static void mgr_render_frame(void)
 static void mgr_destroy_all_windows(void)
 {
     for (int i = 0; i < WINDOW_MAX_SLOTS; i++) {
-        if (g_slots[i].alive && g_slots[i].handle) {
-            glfwDestroyWindow(g_slots[i].handle);
-            g_slots[i].handle = NULL;
-            g_slots[i].alive  = 0;
-        }
+        slot_teardown(&g_slots[i]);
     }
 }
 
@@ -752,6 +763,11 @@ static int native_window_create(CandoVM *vm, int argc, CandoValue *args)
         return -1;
     }
 
+    /* Capture the VM the first time we're called.  All windows in a
+     * process share the same root VM, so a single reference is enough
+     * for slot_teardown to release lifelines from any thread. */
+    if (!g_root_vm) g_root_vm = vm;
+
     /* Allocate a slot before posting -- the manager fills in handle,
      * but the slot index must be stable so the script-side instance
      * can reference it. */
@@ -782,6 +798,12 @@ static int native_window_create(CandoVM *vm, int argc, CandoValue *args)
         window_throw(vm, "window.create: %s", result.err);
         return -1;
     }
+
+    /* Pin the VM so the script can `return` immediately and the process
+     * stays alive until the user (or the close button) tears the
+     * window down.  slot_teardown releases the matching lifeline. */
+    cando_vm_lifeline_acquire(vm, "window");
+    g_slots[slot].has_lifeline = 1;
 
     /* Build the script-side instance.  Stamp the slot index + generation
      * so subsequent method calls can locate the C-side state. */
