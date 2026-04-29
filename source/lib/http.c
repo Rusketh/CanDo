@@ -61,6 +61,7 @@ typedef struct HttpServer {
     _Atomic(bool)    running;
     cando_thread_t   accept_thread;
     bool             has_thread;
+    bool             has_lifeline;   /* held while accept thread runs */
     CandoVM         *parent_vm;
     CandoValue       callback_fn;
     _Atomic(u32)     active_conns;
@@ -858,7 +859,8 @@ static CANDO_THREAD_RETURN accept_thread_fn(void *arg)
     if (sidx < 0 || sidx >= HTTP_MAX_SERVERS) return CANDO_THREAD_RETURN_VAL;
     HttpServer *server = &g_servers[sidx];
 
-    while (atomic_load(&server->running)) {
+    while (atomic_load(&server->running) &&
+           !cando_vm_quit_requested(server->parent_vm)) {
         struct sockaddr_storage sa;
         socklen_t slen = sizeof(sa);
         int cfd = (int)accept(server->listen_fd, (struct sockaddr *)&sa, &slen);
@@ -878,6 +880,13 @@ static CANDO_THREAD_RETURN accept_thread_fn(void *arg)
             continue;
         }
         cando_os_thread_detach(t);
+    }
+    /* Release the VM lifeline now that the accept loop is winding
+     * down.  server:close() joins this thread, so the join naturally
+     * synchronises with the lifeline release. */
+    if (server->has_lifeline) {
+        server->has_lifeline = false;
+        cando_vm_lifeline_release(server->parent_vm);
     }
     return CANDO_THREAD_RETURN_VAL;
 }
@@ -968,6 +977,10 @@ static int server_listen_fn(CandoVM *vm, int argc, CandoValue *args)
         return -1;
     }
     server->has_thread = true;
+
+    /* Pin the script's process while the accept thread runs. */
+    cando_vm_lifeline_acquire(vm, "http_server");
+    server->has_lifeline = true;
 
     cando_vm_push(vm, args[0]);  /* return receiver */
     return 1;

@@ -18,7 +18,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc make libssl-dev libldap2-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc make libssl-dev libldap2-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
+            libgl1-mesa-dev libxkbcommon-dev libxext-dev \
+            xvfb
 
       - name: Run tests
         run: make test
@@ -34,6 +40,48 @@ jobs:
 
       - name: Test modules (script integration -- sqlite)
         run: ./cando modules/sqlite/test_sqlite.cdo
+
+      - name: Smoke-test modules (script integration -- window)
+        # window.so loads OK and registers _meta.window even on a
+        # display-less host (no glfwInit needed for module init).
+        run: ./cando modules/window/test_window_smoke.cdo
+
+      - name: Smoke-test modules (script integration -- draw)
+        run: ./cando modules/draw/test_draw_smoke.cdo
+
+      - name: Generate test PNG for the draw script test
+        # The full draw test exercises stb_image; bake a 4x4 RGBA PNG
+        # so we have something deterministic to load.
+        run: |
+          python3 - <<'PY'
+          import struct, zlib
+          def png(w, h, rgba):
+              sig = b'\x89PNG\r\n\x1a\n'
+              def chunk(t, d):
+                  c = zlib.crc32(t + d) & 0xffffffff
+                  return struct.pack('>I', len(d)) + t + d + struct.pack('>I', c)
+              ihdr = struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)
+              raw = b''
+              for y in range(h):
+                  raw += b'\x00' + bytes(rgba[y*w*4:(y+1)*w*4])
+              return sig + chunk(b'IHDR', ihdr) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
+          pix = []
+          for y in range(4):
+              for x in range(4):
+                  if x < 2 and y < 2:    pix += [255, 0, 0, 255]
+                  elif x >=2 and y >= 2: pix += [0, 0, 255, 255]
+                  else:                   pix += [0, 255, 0, 255]
+          open('/tmp/test4x4.png', 'wb').write(png(4, 4, pix))
+          PY
+
+      - name: Full window script test (xvfb)
+        run: |
+          # cd into the module dir so include("./window.so") works.
+          cd modules/window && xvfb-run -a ../../cando test_window.cdo
+
+      - name: Full draw script test (xvfb)
+        run: |
+          cd modules/draw && xvfb-run -a ../../cando test_draw.cdo
 
       - name: Stage release artifact
         # actions/upload-artifact@v4 strips the lowest common ancestor of
@@ -96,6 +144,12 @@ jobs:
       - name: Smoke-test modules (Windows -- sqlite)
         run: ./cando.exe modules/sqlite/test_sqlite_smoke.cdo
 
+      - name: Smoke-test modules (Windows -- window)
+        run: ./cando.exe modules/window/test_window_smoke.cdo
+
+      - name: Smoke-test modules (Windows -- draw)
+        run: ./cando.exe modules/draw/test_draw_smoke.cdo
+
       - name: Verify no MinGW runtime DLL deps
         run: |
           set -e
@@ -103,7 +157,7 @@ jobs:
           objdump -p cando.exe | grep "DLL Name" || true
           echo "=== libcando.dll imports ==="
           objdump -p libcando.dll | grep "DLL Name" || true
-          for bin in cando.exe libcando.dll modules/sqlite/sqlite.dll; do
+          for bin in cando.exe libcando.dll modules/sqlite/sqlite.dll modules/window/window.dll modules/draw/draw.dll; do
             for dll in libwinpthread-1.dll libgcc_s_seh-1.dll libstdc++-6.dll libssl-3-x64.dll libcrypto-3-x64.dll; do
               if objdump -p "$bin" | grep -qi "DLL Name: $dll"; then
                 echo "ERROR: $bin still imports $dll"

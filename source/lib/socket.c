@@ -749,7 +749,8 @@ static CANDO_THREAD_RETURN accept_thread_fn(void *arg_p)
     SocketSlot *listener = socket_pool_get(lidx);
     if (!listener) return CANDO_THREAD_RETURN_VAL;
 
-    while (atomic_load(&listener->running)) {
+    while (atomic_load(&listener->running) &&
+           !cando_vm_quit_requested(listener->parent_vm)) {
         /* Short timeout so the loop re-checks `running` periodically. */
         sockutil_socket_t cfd = sockutil_tcp_accept(listener->fd, 500,
                                                     NULL, NULL, NULL, 0);
@@ -771,6 +772,14 @@ static CANDO_THREAD_RETURN accept_thread_fn(void *arg_p)
             continue;
         }
         cando_os_thread_detach(t);
+    }
+    /* Release the lifeline now that the listener has stopped.  The
+     * server:close() join naturally synchronises with this -- after
+     * join returns, count has dropped, so cando_vm_wait_all_lifelines
+     * can wake. */
+    if (listener->has_lifeline) {
+        listener->has_lifeline = false;
+        cando_vm_lifeline_release(listener->parent_vm);
     }
     return CANDO_THREAD_RETURN_VAL;
 }
@@ -889,6 +898,13 @@ static int tcp_listen_fn(CandoVM *vm, int argc, CandoValue *args)
         return -1;
     }
     s->has_accept_thread = true;
+
+    /* Acquire a VM lifeline so the script doesn't have to await on
+     * the listener -- the process stays alive until close() (which
+     * joins the accept thread, releasing the lifeline) or app.quit()
+     * (which trips cando_vm_quit_requested in the loop above). */
+    cando_vm_lifeline_acquire(vm, "tcp_listener");
+    s->has_lifeline = true;
 
     cando_vm_push(vm, args[0]);
     return 1;

@@ -120,6 +120,7 @@ CANDO_LIB_SRCS = \
     source/lib/csv.c              \
     source/lib/thread.c           \
     source/lib/os.c               \
+    source/lib/app.c              \
     source/lib/datetime.c         \
     source/lib/array.c            \
     source/lib/object.c           \
@@ -326,7 +327,7 @@ cando.exe: source/main.c libcando.dll icon.res
 # directories to the MODULES list below.
 # ---------------------------------------------------------------------------
 
-MODULES = ldap sqlite
+MODULES = ldap sqlite window draw
 
 # Build every module's POSIX shared library.
 modules:

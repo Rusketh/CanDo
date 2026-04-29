@@ -195,6 +195,9 @@ typedef struct CandoThreadRegistry {
     cando_mutex_t mutex;
     cando_cond_t  cond;     /* signalled each time a thread finishes       */
     u32           count;    /* number of threads currently alive           */
+    /* Quit signalling -- accessed under `mutex`. */
+    int           quit_requested;
+    int           exit_code;
 } CandoThreadRegistry;
 
 /* =========================================================================
@@ -505,8 +508,52 @@ CANDO_API struct CdoThread *cando_current_thread(void);
  * Call this after cando_vm_exec returns to ensure the process does not exit
  * while spawned threads are still running.  Has no effect if no threads were
  * ever spawned.
+ *
+ * This is the legacy entry point; new code should prefer
+ * `cando_vm_wait_all_lifelines` which also waits on subsystem-owned
+ * lifelines (HTTP servers, sockets, native window render threads, ...).
  */
 CANDO_API void cando_vm_wait_all_threads(CandoVM *vm);
+
+/*
+ * Lifeline registry -- generic "things keeping this VM alive" counter.
+ *
+ * Subsystems that own long-lived resources (raw OS threads, accept loops,
+ * native window render threads) call cando_vm_lifeline_acquire when the
+ * resource starts and cando_vm_lifeline_release when it shuts down.
+ * `cando_vm_wait_all_lifelines` blocks until the count drops to zero,
+ * the same way `cando_vm_wait_all_threads` already does for `thread { }`
+ * blocks.  In this initial version both call sites share the same
+ * counter; later commits will add per-lifeline quit hooks for `app.quit()`.
+ *
+ * Both functions are safe to call from any OS thread.
+ *
+ * `kind` is a short label for diagnostics ("window", "http_server", etc.)
+ * and may be NULL when none is available.
+ */
+CANDO_API void cando_vm_lifeline_acquire(CandoVM *vm, const char *kind);
+CANDO_API void cando_vm_lifeline_release(CandoVM *vm);
+CANDO_API void cando_vm_wait_all_lifelines(CandoVM *vm);
+
+/*
+ * Quit signalling -- backs the `app` builtin's app.quit() / app.exit() /
+ * app.isQuitting() / app.exitCode().  A subsystem that wants to react to
+ * app.quit() (e.g. close its windows so its lifelines release) polls
+ * cando_vm_quit_requested from its loop.
+ *
+ * cando_vm_request_quit is safe to call from any thread; it sets an
+ * atomic flag and broadcasts on the lifeline registry's condition
+ * variable so any thread blocked in cando_vm_wait_all_lifelines wakes
+ * once subsystems have released their holds.
+ *
+ * The exit code is stored on the registry as well; cando_vm_get_exit_code
+ * returns the most recent value set (default 0).
+ */
+CANDO_API void cando_vm_request_quit(CandoVM *vm, int exit_code);
+CANDO_API bool cando_vm_quit_requested(CandoVM *vm);
+CANDO_API int  cando_vm_get_exit_code(CandoVM *vm);
+CANDO_API void cando_vm_set_exit_code(CandoVM *vm, int exit_code);
+CANDO_API u32  cando_vm_lifeline_count(CandoVM *vm);
 
 /*
  * cando_vm_call_value -- call a Cando function value with argc arguments.

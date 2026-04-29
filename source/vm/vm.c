@@ -40,6 +40,75 @@ void cando_vm_wait_all_threads(CandoVM *vm) {
     cando_os_mutex_unlock(&reg->mutex);
 }
 
+void cando_vm_wait_all_lifelines(CandoVM *vm) {
+    /* Currently aliased to wait_all_threads -- the registry counts both
+     * `thread { }` blocks and native lifelines via the same counter. */
+    cando_vm_wait_all_threads(vm);
+}
+
+void cando_vm_lifeline_acquire(CandoVM *vm, const char *kind) {
+    (void)kind;  /* reserved for diagnostics in a later commit */
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return;
+    cando_os_mutex_lock(&reg->mutex);
+    reg->count++;
+    cando_os_mutex_unlock(&reg->mutex);
+}
+
+void cando_vm_lifeline_release(CandoVM *vm) {
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return;
+    cando_os_mutex_lock(&reg->mutex);
+    if (reg->count > 0) reg->count--;
+    cando_os_cond_broadcast(&reg->cond);
+    cando_os_mutex_unlock(&reg->mutex);
+}
+
+void cando_vm_request_quit(CandoVM *vm, int exit_code) {
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return;
+    cando_os_mutex_lock(&reg->mutex);
+    reg->quit_requested = 1;
+    reg->exit_code      = exit_code;
+    cando_os_cond_broadcast(&reg->cond);
+    cando_os_mutex_unlock(&reg->mutex);
+}
+
+bool cando_vm_quit_requested(CandoVM *vm) {
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return false;
+    cando_os_mutex_lock(&reg->mutex);
+    bool q = reg->quit_requested != 0;
+    cando_os_mutex_unlock(&reg->mutex);
+    return q;
+}
+
+int cando_vm_get_exit_code(CandoVM *vm) {
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return 0;
+    cando_os_mutex_lock(&reg->mutex);
+    int c = reg->exit_code;
+    cando_os_mutex_unlock(&reg->mutex);
+    return c;
+}
+
+void cando_vm_set_exit_code(CandoVM *vm, int exit_code) {
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return;
+    cando_os_mutex_lock(&reg->mutex);
+    reg->exit_code = exit_code;
+    cando_os_mutex_unlock(&reg->mutex);
+}
+
+u32 cando_vm_lifeline_count(CandoVM *vm) {
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return 0;
+    cando_os_mutex_lock(&reg->mutex);
+    u32 c = reg->count;
+    cando_os_mutex_unlock(&reg->mutex);
+    return c;
+}
+
 /* =========================================================================
  * Internal forward declarations
  * ===================================================================== */
@@ -96,7 +165,9 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     vm->thread_registry_owned = (CandoThreadRegistry *)cando_alloc(sizeof(CandoThreadRegistry));
     cando_os_mutex_init(&vm->thread_registry_owned->mutex);
     cando_os_cond_init(&vm->thread_registry_owned->cond);
-    vm->thread_registry_owned->count = 0;
+    vm->thread_registry_owned->count          = 0;
+    vm->thread_registry_owned->quit_requested = 0;
+    vm->thread_registry_owned->exit_code      = 0;
     vm->thread_registry = vm->thread_registry_owned;
 
     /* Initialise object layer and handle table (root VM owns both). */

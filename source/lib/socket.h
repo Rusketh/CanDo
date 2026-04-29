@@ -90,6 +90,7 @@ typedef struct SocketSlot {
     /* Listener-only */
     cando_thread_t       accept_thread;
     bool                 has_accept_thread;
+    bool                 has_lifeline;     /* held while listener is alive */
     _Atomic(bool)        running;
     CandoVM             *parent_vm;
     CandoValue           callback_fn;
