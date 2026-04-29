@@ -26,6 +26,7 @@
 typedef enum {
     PREC_NONE,
     PREC_ASSIGN,      /* =  +=  -=  *=  /=  %=  ^=          right-assoc */
+    PREC_TERNARY,     /* ?:                                  right-assoc */
     PREC_OR,          /* ||                                               */
     PREC_AND,         /* &&                                               */
     PREC_BITOR,       /* |                                                */
@@ -814,6 +815,21 @@ static void parse_or(CandoParser *p, bool can_assign)
     patch_jump(p, end_jump);
 }
 
+/* Record a safe-chain null-guard jump.  Called from access infix handlers
+ * when in_safe_chain is true (or from the ?. / ?[ handlers themselves).
+ * The patch position is stored so parse_precedence can rewrite it to point
+ * past the entire chain once parsing finishes.                            */
+static void emit_safe_chain_guard(CandoParser *p)
+{
+    u32 patch = emit_jump(p, OP_JUMP_IF_NULL);
+    if (p->safe_chain_count <
+        (u32)(sizeof(p->safe_chain_jumps) / sizeof(p->safe_chain_jumps[0]))) {
+        p->safe_chain_jumps[p->safe_chain_count++] = patch;
+    } else {
+        error(p, "safe-access chain too long");
+    }
+}
+
 /* Property access: expr.name */
 static void parse_dot(CandoParser *p, bool can_assign)
 {
@@ -831,13 +847,38 @@ static void parse_dot(CandoParser *p, bool can_assign)
         parse_expression(p);
         emit_op_a(p, OP_SET_FIELD, idx);
     } else {
+        if (p->in_safe_chain) emit_safe_chain_guard(p);
         emit_op_a(p, OP_GET_FIELD, idx);
     }
+}
+
+/* Safe property access: expr ?. name
+ * If receiver is null, leaves null on the stack and short-circuits the rest
+ * of the chain.  Otherwise behaves like '.'.                              */
+static void parse_safe_dot(CandoParser *p, bool can_assign)
+{
+    (void)can_assign;
+    if (p->current.type != TOK_IDENT &&
+            (p->current.type < TOK_IF || p->current.type > TOK_PIPE_KW)) {
+        error_current(p, "expected property name after '?.'");
+        return;
+    }
+    advance(p);
+    u16 idx = prev_name_const(p);
+
+    /* Activate safe-chain mode for the remainder of this expression. */
+    p->in_safe_chain = true;
+    emit_safe_chain_guard(p);
+    emit_op_a(p, OP_GET_FIELD, idx);
 }
 
 /* Subscript: expr[expr] */
 static void parse_subscript(CandoParser *p, bool can_assign)
 {
+    /* If we're in a safe-chain, guard the receiver before evaluating the
+     * index so a null receiver cleanly skips index evaluation.  We emit
+     * the guard here while the receiver is still on TOS.                  */
+    if (p->in_safe_chain) emit_safe_chain_guard(p);
     parse_expression(p);
     consume(p, TOK_RBRACKET, "expected ']' after index");
     if (can_assign && match(p, TOK_ASSIGN)) {
@@ -848,10 +889,26 @@ static void parse_subscript(CandoParser *p, bool can_assign)
     }
 }
 
+/* Safe subscript: expr ?[ expr ]
+ * If receiver is null, leaves null on the stack and short-circuits the rest
+ * of the chain.  Otherwise behaves like '['.                              */
+static void parse_safe_subscript(CandoParser *p, bool can_assign)
+{
+    (void)can_assign;
+    p->in_safe_chain = true;
+    emit_safe_chain_guard(p);   /* guards the receiver before index evaluation */
+    parse_expression(p);
+    consume(p, TOK_RBRACKET, "expected ']' after index");
+    emit_op(p, OP_GET_INDEX);
+}
+
 /* Function call: expr(arg, arg, ...) */
 static void parse_call(CandoParser *p, bool can_assign)
 {
     (void)can_assign;
+    /* In a safe-access chain, calling a null callable should short-circuit
+     * to null rather than raise.  Emit the guard before evaluating args.   */
+    if (p->in_safe_chain) emit_safe_chain_guard(p);
     u16 argc = 0;
     if (!check(p, TOK_RPAREN)) {
         p->call_depth++;
@@ -891,6 +948,13 @@ static void parse_fluent(CandoParser *p, bool can_assign)
     consume(p, TOK_IDENT, "expected method name after '::'");
     u16 name_idx = prev_name_const(p);
     consume(p, TOK_LPAREN, "expected '(' after fluent method name");
+    /* Guard the receiver in a safe-access chain. */
+    /* Note: the receiver was already on TOS when '::' was parsed; the
+     * method name is encoded as constant operand of OP_FLUENT_CALL.       */
+    /* We can't insert the guard before name parsing (already past it);
+     * but the receiver hasn't been popped — it's still on TOS — so emit
+     * the guard now, before argument evaluation.                          */
+    if (p->in_safe_chain) emit_safe_chain_guard(p);
     u16 argc = 0;
     if (!check(p, TOK_RPAREN)) {
         p->call_depth++;
@@ -918,6 +982,8 @@ static void parse_method_call(CandoParser *p, bool can_assign)
     consume(p, TOK_IDENT, "expected method name after ':'");
     u16 name_idx = prev_name_const(p);
     consume(p, TOK_LPAREN, "expected '(' after method name");
+    /* Guard the receiver in a safe-access chain. */
+    if (p->in_safe_chain) emit_safe_chain_guard(p);
     u16 argc = 0;
     if (!check(p, TOK_RPAREN)) {
         p->call_depth++;
@@ -1122,6 +1188,34 @@ static void parse_pipe_op(CandoParser *p, bool can_assign)
     emit_op(p, OP_PIPE_END);
 }
 
+/* Ternary conditional: cond ? then_expr : else_expr
+ * Evaluates cond once, returns then_expr if cond is truthy, else else_expr.
+ * Right-associative so `a ? b : c ? d : e` parses as `a ? b : (c ? d : e)`. */
+static void parse_ternary(CandoParser *p, bool can_assign)
+{
+    (void)can_assign;
+    /* Condition is already on the stack (left operand). */
+    u32 else_jump = emit_jump(p, OP_JUMP_IF_FALSE);
+    emit_op(p, OP_POP);            /* discard truthy condition */
+    p->ternary_then_depth++;
+    parse_precedence(p, PREC_TERNARY);
+    p->ternary_then_depth--;
+    u32 end_jump = emit_jump(p, OP_JUMP);
+
+    consume(p, TOK_COLON, "expected ':' in ternary expression");
+
+    patch_jump(p, else_jump);
+    emit_op(p, OP_POP);            /* discard falsy condition */
+    /* Right-associative: parse the else branch at the same precedence so
+     * a chained ternary becomes the entire false branch.                  */
+    parse_precedence(p, PREC_TERNARY);
+    patch_jump(p, end_jump);
+
+    p->last_expr_was_call   = false;
+    p->last_expr_was_unpack = false;
+    p->last_multi_push      = 1;
+}
+
 /* Filter operator: collection ~!> predicate_expr
  *   Like pipe (~>) but null body results are dropped from the output.   */
 static void parse_filter_op(CandoParser *p, bool can_assign)
@@ -1158,6 +1252,52 @@ static void parse_filter_op(CandoParser *p, bool can_assign)
     }
 
     emit_op(p, OP_FILTER_COLLECT);
+    emit_loop(p, loop_start);
+
+    patch_jump(p, exit_jump);
+    scope_end(p);
+    emit_op(p, OP_PIPE_END);
+}
+
+/* Conditional filter operator: collection ~&> predicate_expr
+ *   Like ~!>, but the body is interpreted as a boolean predicate: when the
+ *   body returns a truthy value the *original* element (not the body
+ *   result) is kept in the output array; otherwise the element is dropped.
+ *   Identical structure to parse_filter_op except the collect opcode.    */
+static void parse_cond_filter_op(CandoParser *p, bool can_assign)
+{
+    (void)can_assign;
+
+    emit_op_a(p, OP_PIPE_INIT, 1);
+
+    scope_begin(p);
+    emit_op(p, OP_NULL);
+    u32 pipe_slot = declare_local(p, "pipe", 4, false);
+    emit_op_a(p, OP_DEF_LOCAL, (u16)pipe_slot);
+
+    u32 loop_start = cur(p)->code_len;
+    u32 exit_jump  = emit_jump(p, OP_FILTER_NEXT);
+    emit_op_a(p, OP_DEF_LOCAL, (u16)pipe_slot);
+
+    if (match(p, TOK_LBRACE)) {
+        bool saved_in_pipe    = p->in_pipe_body;
+        u32  saved_exit_count = p->pipe_exit_count;
+        p->in_pipe_body    = true;
+        p->pipe_exit_count = 0;
+
+        parse_block(p);
+
+        emit_op(p, OP_NULL);   /* fall-through default predicate value */
+        for (u32 i = 0; i < p->pipe_exit_count; i++)
+            patch_jump(p, p->pipe_exits[i]);
+
+        p->in_pipe_body    = saved_in_pipe;
+        p->pipe_exit_count = saved_exit_count;
+    } else {
+        parse_expression(p);
+    }
+
+    emit_op(p, OP_COND_FILTER_COLLECT);
     emit_loop(p, loop_start);
 
     patch_jump(p, exit_jump);
@@ -1306,10 +1446,16 @@ static const ParseRule RULES[TOK_COUNT] = {
     [TOK_DOT]            = { NULL,                  parse_dot,        PREC_CALL_PREC  },
     [TOK_FLUENT]         = { NULL,                 parse_fluent,     PREC_CALL_PREC  },
     [TOK_COLON]          = { NULL,                 parse_method_call,PREC_CALL_PREC  },
+    [TOK_QDOT]           = { NULL,                 parse_safe_dot,   PREC_CALL_PREC  },
+    [TOK_QLBRACKET]      = { NULL,                 parse_safe_subscript, PREC_CALL_PREC },
+
+    /* Ternary conditional */
+    [TOK_QUESTION]       = { NULL,                 parse_ternary,    PREC_TERNARY    },
 
     /* Pipe / filter */
     [TOK_PIPE_OP]        = { NULL,                 parse_pipe_op,    PREC_PIPE_PREC  },
     [TOK_FILTER_OP]      = { NULL,                 parse_filter_op,  PREC_PIPE_PREC  },
+    [TOK_COND_FILTER_OP] = { NULL,                 parse_cond_filter_op, PREC_PIPE_PREC },
 };
 
 static const ParseRule *get_rule(CandoTokenType t)
@@ -1329,6 +1475,16 @@ static void parse_precedence(CandoParser *p, Precedence min_prec)
      * body and cause spurious OP_TRUNCATE_RET inside comparisons.           */
     p->last_expr_was_call = false;
 
+    /* Save and reset safe-chain state for this expression.  A '?.' / '?['
+     * encountered during this call will set in_safe_chain=true, and any
+     * subsequent member-access infix in the same chain will append a guard
+     * to safe_chain_jumps[].  After the infix loop finishes we patch all
+     * recorded jumps to land here (past the chain).                        */
+    bool saved_safe_active = p->in_safe_chain;
+    u32  saved_safe_count  = p->safe_chain_count;
+    p->in_safe_chain  = false;
+    p->safe_chain_count = saved_safe_count;  /* preserve outer entries */
+
     advance(p);
     ParseFn prefix = get_rule(p->previous.type)->prefix;
     if (!prefix) {
@@ -1340,6 +1496,9 @@ static void parse_precedence(CandoParser *p, Precedence min_prec)
     prefix(p, can_assign);
 
     while (!check(p, TOK_EOF)) {
+        /* Inside the THEN branch of a ternary, ':' is the ternary
+         * delimiter, not the method-call infix.                          */
+        if (p->ternary_then_depth > 0 && check(p, TOK_COLON)) break;
         Precedence cur_prec = get_rule(p->current.type)->precedence;
         if (cur_prec < min_prec) break;
         advance(p);
@@ -1347,6 +1506,16 @@ static void parse_precedence(CandoParser *p, Precedence min_prec)
         if (!infix) break;
         infix(p, can_assign);
     }
+
+    /* If a safe chain was opened during this expression, patch all of its
+     * null-guard jumps to land here, leaving the (possibly null) chain
+     * value on the stack.                                                 */
+    if (p->in_safe_chain) {
+        for (u32 i = saved_safe_count; i < p->safe_chain_count; i++)
+            patch_jump(p, p->safe_chain_jumps[i]);
+    }
+    p->in_safe_chain    = saved_safe_active;
+    p->safe_chain_count = saved_safe_count;
 
     if (can_assign && match(p, TOK_ASSIGN)) {
         error(p, "invalid assignment target");
@@ -2204,6 +2373,9 @@ void cando_parser_init(CandoParser *p, const char *source, usize len,
     p->in_pipe_body       = false;
     p->pipe_exit_count    = 0;
     p->last_multi_push    = 1;
+    p->in_safe_chain      = false;
+    p->safe_chain_count   = 0;
+    p->ternary_then_depth = 0;
     p->error_msg[0] = '\0';
 
     p->current.type = TOK_EOF;

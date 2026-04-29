@@ -740,6 +740,95 @@ TEST(test_filter_operator)
     cando_chunk_free(c);
 }
 
+TEST(test_cond_filter_operator)
+{
+    /* The conditional filter shares the FILTER_NEXT loop opcode but emits
+     * OP_COND_FILTER_COLLECT instead of OP_FILTER_COLLECT.                */
+    CandoChunk *c = compile_ok("items ~&> pipe > 0;");
+    EXPECT_TRUE(find_op(c, OP_PIPE_INIT) >= 0);
+    EXPECT_TRUE(find_op(c, OP_FILTER_NEXT) >= 0);
+    EXPECT_TRUE(find_op(c, OP_COND_FILTER_COLLECT) >= 0);
+    EXPECT_TRUE(find_op(c, OP_PIPE_END) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_cond_filter_block)
+{
+    CandoChunk *c = compile_ok("items ~&> { return pipe % 2 == 0; };");
+    EXPECT_TRUE(find_op(c, OP_COND_FILTER_COLLECT) >= 0);
+    cando_chunk_free(c);
+}
+
+/* -------------------------------------------------------------------------
+ * Tests: ternary conditional
+ * ------------------------------------------------------------------------ */
+TEST(test_ternary_simple)
+{
+    CandoChunk *c = compile_ok("var x = TRUE ? 1 : 2;");
+    /* Ternary lowers to JUMP_IF_FALSE + JUMP, like an IF/ELSE. */
+    EXPECT_TRUE(find_op(c, OP_JUMP_IF_FALSE) >= 0);
+    EXPECT_TRUE(find_op(c, OP_JUMP) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_ternary_nested)
+{
+    /* Right-associative: a ? b : c ? d : e parses as a ? b : (c ? d : e). */
+    CompileResult r = compile("var x = TRUE ? 1 : FALSE ? 2 : 3;");
+    EXPECT_TRUE(r.ok);
+    if (r.chunk) cando_chunk_free(r.chunk);
+}
+
+TEST(test_ternary_in_assignment)
+{
+    CompileResult r = compile("var x; x = (1 < 2) ? \"yes\" : \"no\";");
+    EXPECT_TRUE(r.ok);
+    if (r.chunk) cando_chunk_free(r.chunk);
+}
+
+/* -------------------------------------------------------------------------
+ * Tests: safety indexer
+ * ------------------------------------------------------------------------ */
+TEST(test_safe_dot)
+{
+    CandoChunk *c = compile_ok("var x = obj?.a;");
+    EXPECT_TRUE(find_op(c, OP_JUMP_IF_NULL) >= 0);
+    EXPECT_TRUE(find_op(c, OP_GET_FIELD) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_safe_dot_chain)
+{
+    /* Every access after the first ?. should also be guarded. */
+    CandoChunk *c = compile_ok("var x = obj?.a.b.c;");
+    int n_guards = 0;
+    for (u32 i = 0; i < c->code_len; ) {
+        u8 op = c->code[i];
+        if (op == OP_JUMP_IF_NULL) n_guards++;
+        i += cando_opcode_size((CandoOpcode)op);
+    }
+    EXPECT_TRUE(n_guards >= 3);   /* one per access in the chain */
+    cando_chunk_free(c);
+}
+
+TEST(test_safe_subscript)
+{
+    CandoChunk *c = compile_ok("var x = obj?[\"a\"];");
+    EXPECT_TRUE(find_op(c, OP_JUMP_IF_NULL) >= 0);
+    EXPECT_TRUE(find_op(c, OP_GET_INDEX) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_logical_or_lua)
+{
+    /* `||` should compile to OP_OR_JUMP (peek-keep-on-truthy) which gives
+     * Lua-style semantics: returns the left operand if truthy, else the
+     * right operand verbatim.                                            */
+    CandoChunk *c = compile_ok("var x = a || b;");
+    EXPECT_TRUE(find_op(c, OP_OR_JUMP) >= 0);
+    cando_chunk_free(c);
+}
+
 /* -------------------------------------------------------------------------
  * Tests: range operators
  * ------------------------------------------------------------------------ */
@@ -1093,6 +1182,15 @@ int main(void)
     printf("\n-- pipe / filter --\n");
     run_test("pipe operator (~>)",             test_pipe_operator);
     run_test("filter operator (~!>)",          test_filter_operator);
+    run_test("cond filter (~&>) inline",       test_cond_filter_operator);
+    run_test("cond filter (~&>) block",        test_cond_filter_block);
+    run_test("ternary simple",                 test_ternary_simple);
+    run_test("ternary nested (right-assoc)",   test_ternary_nested);
+    run_test("ternary in assignment",          test_ternary_in_assignment);
+    run_test("safe dot (?.)",                  test_safe_dot);
+    run_test("safe dot chain (?.a.b.c)",       test_safe_dot_chain);
+    run_test("safe subscript (?[])",           test_safe_subscript);
+    run_test("logical || (Lua semantics)",     test_logical_or_lua);
 
     printf("\n-- ranges --\n");
     run_test("ascending range (->)",           test_range_asc);

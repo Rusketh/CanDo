@@ -124,6 +124,7 @@ typedef enum {
     OP_JUMP,            /* unconditional; A = signed i16 byte offset      */
     OP_JUMP_IF_FALSE,   /* pop, jump if falsy; A = signed i16 offset      */
     OP_JUMP_IF_TRUE,    /* pop, jump if truthy; A = signed i16 offset     */
+    OP_JUMP_IF_NULL,    /* peek, jump if TOS is null (no pop)             */
     OP_LOOP,            /* unconditional backward; A = unsigned back bytes */
     /* Break/continue: A encodes loop depth (0 = innermost).
      * The VM walks the loop-frame stack A levels up and jumps.           */
@@ -161,6 +162,7 @@ typedef enum {
     OP_PIPE_END,        /* clean up pipe state; result_arr stays on stack */
     OP_PIPE_COLLECT,    /* pop body result and append to result array     */
     OP_FILTER_COLLECT,  /* like PIPE_COLLECT but skips null results       */
+    OP_COND_FILTER_COLLECT, /* (~&>) keep src element if body result truthy */
 
     /* ===== Band 14: Error handling ====================================== */
     OP_TRY_BEGIN,       /* push try frame; A = signed offset to catch     */

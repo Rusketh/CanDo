@@ -1,0 +1,47 @@
+/* new_syntax.cdo -- end-to-end tests for the three new syntactic forms:
+ *   - Ternary conditional         A ? B : C
+ *   - Conditional filter          arr ~&> { expr }
+ *   - Safety indexer              Obj?.A.B   /  Obj?[K]
+ *
+ * Also re-verifies the Lua-style semantics of `||`.
+ */
+
+/* ── Ternary conditional ─────────────────────────────────────────────── */
+print(1 < 2 ? "yes" : "no");           /* yes  */
+print(1 > 2 ? "yes" : "no");           /* no   */
+print(TRUE ? "a" : FALSE ? "b" : "c"); /* a    */
+print(FALSE ? "a" : TRUE ? "b" : "c"); /* b    */
+print(FALSE ? "a" : FALSE ? "b" : "c"); /* c   */
+
+VAR ternary_in_assign = (3 + 4 > 5) ? "big" : "small";
+print(ternary_in_assign);              /* big  */
+
+/* ── Conditional filter (~&>) ────────────────────────────────────────── */
+VAR nums = [1, 2, 3, 4, 5];
+VAR evens = nums ~&> { RETURN pipe % 2 == 0; };
+print(evens);                          /* 2 4  */
+VAR bigs  = nums ~&> pipe > 2;
+print(bigs);                           /* 3 4 5 */
+VAR none  = nums ~&> FALSE;
+print(none);                           /* (empty array prints nothing)  */
+VAR all   = nums ~&> TRUE;
+print(all);                            /* 1 2 3 4 5 */
+
+/* ── Safety indexer (?., ?[) ─────────────────────────────────────────── */
+VAR obj = { a: { b: { c: 99 } } };
+print(obj?.a.b.c);                     /* 99   */
+print(obj?.x);                         /* null */
+print(obj?.x.y.z);                     /* null (chain short-circuits) */
+print(obj?["a"].b.c);                  /* 99   */
+print(obj?.a?["b"].c);                 /* 99   */
+
+VAR nothing = NULL;
+print(nothing?.anything);              /* null */
+print(nothing?.a.b.c);                 /* null */
+print(nothing?["k"]);                  /* null */
+
+/* ── Logical || (Lua-style or) ───────────────────────────────────────── */
+print(FALSE || 0);                     /* 0       */
+print(NULL  || "fallback");            /* fallback */
+print(FALSE || FALSE);                 /* false   */
+print("first" || "second");            /* first   */

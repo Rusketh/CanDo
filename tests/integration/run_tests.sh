@@ -160,6 +160,9 @@ run_test "lib_enhance" "$SCRIPTS/lib_enhance.cdo" \
 run_test "break_continue" "$SCRIPTS/break_continue.cdo" \
     "$(printf '0\n1\n2\n1\n2\n4\n5\n10\n20\n10\n20\n40\n50\n0\n1\n0\n1\n2\n0\n1\n3\n4\n0\n10\n20\ndone')"
 
+run_test "new_syntax" "$SCRIPTS/new_syntax.cdo" \
+    "$(printf 'yes\nno\na\nb\nc\nbig\n2 4\n3 4 5\n\n1 2 3 4 5\n99\nnull\nnull\n99\n99\nnull\nnull\nnull\n0\nfallback\nfalse\nfirst')"
+
 run_smoke "test_array"          "$SCRIPTS/test_array.cdo"
 run_smoke "test_array_ext"      "$SCRIPTS/test_array_ext.cdo"
 run_smoke "test_race_conditions" "$SCRIPTS/test_race_conditions.cdo"

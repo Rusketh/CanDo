@@ -64,6 +64,9 @@ typedef enum {
     /* --- Multi-character operators --------------------------------------- */
     TOK_PIPE_OP,         /* ~>   functional map (pipe)                      */
     TOK_FILTER_OP,       /* ~!>  functional filter                          */
+    TOK_COND_FILTER_OP,  /* ~&>  conditional filter (predicate keeps value) */
+    TOK_QDOT,            /* ?.   safe property access                       */
+    TOK_QLBRACKET,       /* ?[   safe subscript access                      */
     TOK_RANGE_ASC,       /* ->   ascending range generator                  */
     TOK_RANGE_DESC,      /* <-   descending range generator                 */
     TOK_FLUENT,          /* ::   fluent method call (returns receiver)      */
@@ -112,6 +115,7 @@ typedef enum {
     TOK_SEMI,            /* ;  */
     TOK_COMMA,           /* ,  */
     TOK_COLON,           /* :  (method call or object key separator)        */
+    TOK_QUESTION,        /* ?  (ternary conditional)                        */
 
     /* --- Sentinel / error ----------------------------------------------- */
     TOK_EOF,             /* end of source                                   */
