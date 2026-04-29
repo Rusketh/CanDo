@@ -26,6 +26,12 @@ IF type(window.VERSION) != "string" {
 }
 print(`smoke: module VERSION = ${window.VERSION}`);
 
+IF type(window.glfwVersion) != "string" {
+    print("smoke: glfwVersion missing or not a string");
+    os.exit(1);
+}
+print(`smoke: vendored GLFW   = ${window.glfwVersion}`);
+
 // _meta.<name> tables stamp their __type to <name>, so type(_meta.window)
 // is "window" (see source/lib/meta.c:62-68).
 IF type(_meta.window) != "window" {

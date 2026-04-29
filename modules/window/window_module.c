@@ -6,11 +6,10 @@
  *     VAR window = include("./window.so");      // Linux / macOS
  *     VAR window = include("./window.dll");     // Windows
  *
- * This is the skeleton chunk: cando_module_init builds the public
- * `window` namespace (VERSION + placeholder fields) and registers an
- * empty `_meta.window` prototype using the cando_lib_meta_* helpers.
- * Window creation, the GLFW manager thread, the per-window render
- * thread, and event dispatch arrive in later chunks.
+ * This chunk wires the vendored GLFW into the .so and exposes its
+ * runtime version string at `window.glfwVersion`.  The `_meta.window`
+ * prototype is reserved (empty for now); window creation, manager
+ * thread, render thread, and events arrive in the next chunks.
  *
  * Must compile with gcc / clang / MinGW-w64 -std=c11.
  */
@@ -26,7 +25,9 @@
 #include <stddef.h>
 #include <string.h>
 
-#define WINDOW_MODULE_VERSION "0.0.1"
+#include <GLFW/glfw3.h>
+
+#define WINDOW_MODULE_VERSION "0.0.2"
 
 /* =========================================================================
  * Tiny obj_set_* helpers (same idiom as modules/sqlite/sqlite_module.c).
@@ -62,6 +63,12 @@ CandoValue cando_module_init(CandoVM *vm)
     obj_set_string(obj, "VERSION",
                    WINDOW_MODULE_VERSION,
                    (u32)sizeof(WINDOW_MODULE_VERSION) - 1);
+
+    /* Expose the linked GLFW version so scripts can sanity-check the
+     * binary they loaded.  Calling glfwGetVersionString does not require
+     * glfwInit; it is documented as safe to call before / without init. */
+    const char *gv = glfwGetVersionString();
+    if (gv) obj_set_string(obj, "glfwVersion", gv, (u32)strlen(gv));
 
     return tbl;
 }

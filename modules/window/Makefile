@@ -110,6 +110,8 @@ WINDOW_OBJS = vendor/glfw/libglfw.a
 
 .PHONY: all test clean window.dll
 
+.DEFAULT_GOAL := all
+
 all: $(SHARED) test_window
 
 # ---------------------------------------------------------------------------
