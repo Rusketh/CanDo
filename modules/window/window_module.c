@@ -38,6 +38,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#if !(defined(_WIN32) || defined(_WIN64))
+#  include <time.h>
+#endif
 
 #include <GLFW/glfw3.h>
 #if defined(_WIN32) || defined(_WIN64)
@@ -83,7 +86,7 @@
 #  define WM_COND_BROADCAST(c) pthread_cond_broadcast(c)
 #endif
 
-#define WINDOW_MODULE_VERSION "0.0.5"
+#define WINDOW_MODULE_VERSION "0.0.6"
 
 /* =========================================================================
  * obj_set_* helpers (mirrors modules/sqlite).
@@ -178,23 +181,50 @@ typedef enum {
     CMD_NONE = 0,
     CMD_CREATE,
     CMD_DESTROY,
+    CMD_SET_TITLE,
+    CMD_SET_SIZE,
+    CMD_GET_SIZE,
+    CMD_SET_POSITION,
+    CMD_GET_POSITION,
+    CMD_FOCUS,
+    CMD_SET_VISIBLE,
+    CMD_GET_ATTRIB,        /* read a GLFW_* window attribute */
+    CMD_GET_MOUSE,
+    CMD_GET_DPI_SCALE,
+    CMD_GET_FRAMEBUFFER,
+    CMD_SET_VSYNC,
 } CmdType;
 
 typedef struct Command {
     CmdType      type;
-    int          slot;           /* slot index for CREATE / DESTROY */
-    /* CREATE inputs (read by manager): */
+    int          slot;
+    /* General-purpose inputs (semantics depend on type): */
     char         title[128];
     int          width;
     int          height;
-    /* outputs (written by manager): */
-    int          ok;             /* 1 = success, 0 = failure         */
+    int          ix;             /* attrib id, vsync int, etc.       */
+    int          iy;
+    /* outputs: */
+    int          ok;
     char         err[160];
+    int          ox;             /* int outputs (size, pos, attribs) */
+    int          oy;
+    double       fx;             /* float outputs (mouse, scale)     */
+    double       fy;
 } Command;
 
-static Command g_pending_cmd;
-static int     g_cmd_present = 0;   /* 1 = command waiting for manager */
-static int     g_cmd_done    = 0;   /* 1 = manager has finished it     */
+/* Command-queue state machine.  Each post is a 3-step round-trip:
+ *
+ *   IDLE  -- caller-side: post a request, transition to PENDING
+ *   PENDING -- manager-side: pick up the request, run it, transition to RESULT
+ *   RESULT -- caller-side: collect the result, transition back to IDLE
+ *
+ * The manager holds the slot at PENDING until its work is finished; this
+ * blocks a second caller from clobbering the in-flight command. */
+typedef enum { CMD_IDLE = 0, CMD_PENDING, CMD_RESULT } CmdState;
+
+static Command  g_pending_cmd;
+static CmdState g_cmd_state = CMD_IDLE;
 
 /* Allocate a fresh slot.  Caller must hold g_mgr_mutex.  Returns -1 if
  * the table is full. */
@@ -218,15 +248,13 @@ static int slot_alloc_locked(void)
 static void mgr_drain_commands(void)
 {
     WM_MUTEX_LOCK(&g_mgr_mutex);
-    if (!g_cmd_present) {
+    if (g_cmd_state != CMD_PENDING) {
         WM_MUTEX_UNLOCK(&g_mgr_mutex);
         return;
     }
     Command cmd = g_pending_cmd;
-    g_cmd_present = 0;
-    /* Release the mutex while we run GLFW so other threads can post the
-     * next command (it will block on g_cmd_present, but won't deadlock
-     * with anything we do here). */
+    /* Stay at CMD_PENDING through the GLFW work so a fast caller can't
+     * post a second command before this one's result is consumed. */
     WM_MUTEX_UNLOCK(&g_mgr_mutex);
 
     switch (cmd.type) {
@@ -265,6 +293,108 @@ static void mgr_drain_commands(void)
         cmd.ok   = 1;
         break;
     }
+    case CMD_SET_TITLE: {
+        WindowSlot *s = &g_slots[cmd.slot];
+        if (s->handle) {
+            glfwSetWindowTitle(s->handle, cmd.title);
+            memcpy(s->title, cmd.title, sizeof(s->title));
+        }
+        cmd.ok = 1;
+        break;
+    }
+    case CMD_SET_SIZE: {
+        WindowSlot *s = &g_slots[cmd.slot];
+        if (s->handle) {
+            glfwSetWindowSize(s->handle, cmd.width, cmd.height);
+            s->width  = cmd.width;
+            s->height = cmd.height;
+        }
+        cmd.ok = 1;
+        break;
+    }
+    case CMD_GET_SIZE: {
+        WindowSlot *s = &g_slots[cmd.slot];
+        if (s->handle) {
+            int w = 0, h = 0;
+            glfwGetWindowSize(s->handle, &w, &h);
+            cmd.ox = w; cmd.oy = h;
+            s->width  = w;
+            s->height = h;
+        } else {
+            cmd.ox = s->width; cmd.oy = s->height;
+        }
+        cmd.ok = 1;
+        break;
+    }
+    case CMD_SET_POSITION: {
+        WindowSlot *s = &g_slots[cmd.slot];
+        if (s->handle) glfwSetWindowPos(s->handle, cmd.ix, cmd.iy);
+        cmd.ok = 1;
+        break;
+    }
+    case CMD_GET_POSITION: {
+        WindowSlot *s = &g_slots[cmd.slot];
+        int x = 0, y = 0;
+        if (s->handle) glfwGetWindowPos(s->handle, &x, &y);
+        cmd.ox = x; cmd.oy = y;
+        cmd.ok = 1;
+        break;
+    }
+    case CMD_FOCUS: {
+        WindowSlot *s = &g_slots[cmd.slot];
+        if (s->handle) glfwFocusWindow(s->handle);
+        cmd.ok = 1;
+        break;
+    }
+    case CMD_SET_VISIBLE: {
+        WindowSlot *s = &g_slots[cmd.slot];
+        if (s->handle) {
+            if (cmd.ix) glfwShowWindow(s->handle);
+            else        glfwHideWindow(s->handle);
+        }
+        cmd.ok = 1;
+        break;
+    }
+    case CMD_GET_ATTRIB: {
+        WindowSlot *s = &g_slots[cmd.slot];
+        cmd.ox = s->handle ? glfwGetWindowAttrib(s->handle, cmd.ix) : 0;
+        cmd.ok = 1;
+        break;
+    }
+    case CMD_GET_MOUSE: {
+        WindowSlot *s = &g_slots[cmd.slot];
+        double x = 0.0, y = 0.0;
+        if (s->handle) glfwGetCursorPos(s->handle, &x, &y);
+        cmd.fx = x; cmd.fy = y;
+        cmd.ok = 1;
+        break;
+    }
+    case CMD_GET_DPI_SCALE: {
+        WindowSlot *s = &g_slots[cmd.slot];
+        float sx = 1.0f, sy = 1.0f;
+        if (s->handle) glfwGetWindowContentScale(s->handle, &sx, &sy);
+        cmd.fx = sx; cmd.fy = sy;
+        cmd.ok = 1;
+        break;
+    }
+    case CMD_GET_FRAMEBUFFER: {
+        WindowSlot *s = &g_slots[cmd.slot];
+        int fbw = 0, fbh = 0;
+        if (s->handle) glfwGetFramebufferSize(s->handle, &fbw, &fbh);
+        cmd.ox = fbw; cmd.oy = fbh;
+        cmd.ok = 1;
+        break;
+    }
+    case CMD_SET_VSYNC: {
+        WindowSlot *s = &g_slots[cmd.slot];
+        if (s->handle) {
+            glfwMakeContextCurrent(s->handle);
+            glfwSwapInterval(cmd.ix);
+            glfwMakeContextCurrent(NULL);
+        }
+        cmd.ok = 1;
+        break;
+    }
     default:
         cmd.ok = 0;
         snprintf(cmd.err, sizeof(cmd.err), "unknown command type %d",
@@ -274,7 +404,7 @@ static void mgr_drain_commands(void)
 
     WM_MUTEX_LOCK(&g_mgr_mutex);
     g_pending_cmd = cmd;     /* propagate ok / err back to the caller */
-    g_cmd_done    = 1;
+    g_cmd_state   = CMD_RESULT;
     WM_COND_BROADCAST(&g_mgr_cond);
     WM_MUTEX_UNLOCK(&g_mgr_mutex);
 }
@@ -335,13 +465,12 @@ static void mgr_destroy_all_windows(void)
 static Command mgr_post_command(Command cmd)
 {
     WM_MUTEX_LOCK(&g_mgr_mutex);
-    /* Wait if a previous command is still in flight. */
-    while (g_cmd_present || g_cmd_done) {
+    while (g_cmd_state != CMD_IDLE) {
         WM_COND_WAIT(&g_mgr_cond, &g_mgr_mutex);
     }
     g_pending_cmd = cmd;
-    g_cmd_present = 1;
-    g_cmd_done    = 0;
+    g_cmd_state   = CMD_PENDING;
+    WM_COND_BROADCAST(&g_mgr_cond);
     WM_MUTEX_UNLOCK(&g_mgr_mutex);
 
     /* Kick the manager out of glfwWaitEventsTimeout so it picks up the
@@ -349,11 +478,11 @@ static Command mgr_post_command(Command cmd)
     glfwPostEmptyEvent();
 
     WM_MUTEX_LOCK(&g_mgr_mutex);
-    while (!g_cmd_done) {
+    while (g_cmd_state != CMD_RESULT) {
         WM_COND_WAIT(&g_mgr_cond, &g_mgr_mutex);
     }
     Command result = g_pending_cmd;
-    g_cmd_done = 0;
+    g_cmd_state    = CMD_IDLE;
     WM_COND_BROADCAST(&g_mgr_cond);
     WM_MUTEX_UNLOCK(&g_mgr_mutex);
     return result;
@@ -384,11 +513,24 @@ static void *manager_thread_main(void *arg)
     WM_COND_BROADCAST(&g_mgr_cond);
     WM_MUTEX_UNLOCK(&g_mgr_mutex);
 
-    /* Event loop -- drain commands, render every alive window, poll. */
+    /* Event loop -- drain commands, render every alive window, poll.
+     *
+     * We use glfwPollEvents (non-blocking) + a short sleep instead of
+     * glfwWaitEventsTimeout because the latter does not reliably wake
+     * on glfwPostEmptyEvent when no windows remain (observed on X11),
+     * which strands the manager thread inside an unwakeable wait at
+     * shutdown.  Polling also keeps the shutdown latency bounded by
+     * the sleep interval. */
     while (!atomic_load(&g_mgr_should_stop)) {
         mgr_drain_commands();
         mgr_render_frame();
-        glfwWaitEventsTimeout(0.016); /* ~60 Hz wakeup */
+        glfwPollEvents();
+#if defined(_WIN32) || defined(_WIN64)
+        Sleep(8);
+#else
+        struct timespec ts = { 0, 8 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+#endif
     }
 
     /* Final drain so any in-flight DESTROY commands complete cleanly. */
@@ -708,6 +850,323 @@ static int native_window_is_open(CandoVM *vm, int argc, CandoValue *args)
 }
 
 /* =========================================================================
+ * _meta.window accessor methods.
+ * ===================================================================== */
+
+/* Helpers ----------------------------------------------------------------- */
+
+/* Update an existing string field on the script-side instance. */
+static void inst_update_string(CdoObject *inst, const char *key,
+                               const char *data, u32 len)
+{
+    obj_set_string(inst, key, data, len);
+}
+
+static void inst_update_number(CdoObject *inst, const char *key, f64 value)
+{
+    obj_set_number(inst, key, value);
+}
+
+/* Common epilogue: post `cmd` to the manager and throw on failure. */
+static int post_or_throw(CandoVM *vm, Command cmd, const char *fn,
+                         Command *out)
+{
+    Command r = mgr_post_command(cmd);
+    if (!r.ok) {
+        window_throw(vm, "%s: %s", fn,
+                     r.err[0] ? r.err : "manager command failed");
+        return 0;
+    }
+    if (out) *out = r;
+    return 1;
+}
+
+/* w:setTitle(str) ---------------------------------------------------------- */
+
+static int native_window_set_title(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2) {
+        window_throw(vm, "window.setTitle: (window, str) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.setTitle");
+    if (!s) return -1;
+    if (args[1].tag != CDO_STRING || !args[1].as.string) {
+        window_throw(vm, "window.setTitle: title must be a string");
+        return -1;
+    }
+    Command cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.type = CMD_SET_TITLE;
+    cmd.slot = (int)(s - g_slots);
+    u32 n = args[1].as.string->length;
+    if (n >= sizeof(cmd.title)) n = sizeof(cmd.title) - 1;
+    memcpy(cmd.title, args[1].as.string->data, n);
+    cmd.title[n] = '\0';
+    if (!post_or_throw(vm, cmd, "window.setTitle", NULL)) return -1;
+
+    /* Mirror onto the script-side instance so `w.title` stays current. */
+    CdoObject *inst = cando_bridge_resolve(vm, args[0].as.handle);
+    inst_update_string(inst, "title", cmd.title, (u32)strlen(cmd.title));
+
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+/* w:getTitle() ------------------------------------------------------------- */
+
+static int native_window_get_title(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        window_throw(vm, "window.getTitle: (window) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.getTitle");
+    if (!s) return -1;
+    libutil_push_cstr(vm, s->title);
+    return 1;
+}
+
+/* w:setSize(w, h) ---------------------------------------------------------- */
+
+static int native_window_set_size(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 3 || args[1].tag != CDO_NUMBER || args[2].tag != CDO_NUMBER) {
+        window_throw(vm, "window.setSize: (window, width, height) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.setSize");
+    if (!s) return -1;
+    Command cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.type   = CMD_SET_SIZE;
+    cmd.slot   = (int)(s - g_slots);
+    cmd.width  = (int)args[1].as.number;
+    cmd.height = (int)args[2].as.number;
+    if (cmd.width  < 1) cmd.width  = 1;
+    if (cmd.height < 1) cmd.height = 1;
+    if (!post_or_throw(vm, cmd, "window.setSize", NULL)) return -1;
+
+    CdoObject *inst = cando_bridge_resolve(vm, args[0].as.handle);
+    inst_update_number(inst, "width",  (f64)cmd.width);
+    inst_update_number(inst, "height", (f64)cmd.height);
+
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+/* w:getSize() -- multi-return (width, height) ----------------------------- */
+
+static int native_window_get_size(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        window_throw(vm, "window.getSize: (window) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.getSize");
+    if (!s) return -1;
+    Command cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.type = CMD_GET_SIZE;
+    cmd.slot = (int)(s - g_slots);
+    Command r;
+    if (!post_or_throw(vm, cmd, "window.getSize", &r)) return -1;
+    cando_vm_push(vm, cando_number((f64)r.ox));
+    cando_vm_push(vm, cando_number((f64)r.oy));
+    return 2;
+}
+
+/* w:setPosition(x, y) / w:getPosition() ----------------------------------- */
+
+static int native_window_set_position(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 3 || args[1].tag != CDO_NUMBER || args[2].tag != CDO_NUMBER) {
+        window_throw(vm, "window.setPosition: (window, x, y) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.setPosition");
+    if (!s) return -1;
+    Command cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.type = CMD_SET_POSITION;
+    cmd.slot = (int)(s - g_slots);
+    cmd.ix   = (int)args[1].as.number;
+    cmd.iy   = (int)args[2].as.number;
+    if (!post_or_throw(vm, cmd, "window.setPosition", NULL)) return -1;
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+static int native_window_get_position(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        window_throw(vm, "window.getPosition: (window) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.getPosition");
+    if (!s) return -1;
+    Command cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.type = CMD_GET_POSITION;
+    cmd.slot = (int)(s - g_slots);
+    Command r;
+    if (!post_or_throw(vm, cmd, "window.getPosition", &r)) return -1;
+    cando_vm_push(vm, cando_number((f64)r.ox));
+    cando_vm_push(vm, cando_number((f64)r.oy));
+    return 2;
+}
+
+/* w:focus() / w:hasFocus() ------------------------------------------------ */
+
+static int native_window_focus(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        window_throw(vm, "window.focus: (window) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.focus");
+    if (!s) return -1;
+    Command cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.type = CMD_FOCUS;
+    cmd.slot = (int)(s - g_slots);
+    if (!post_or_throw(vm, cmd, "window.focus", NULL)) return -1;
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+static int native_window_has_focus(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        window_throw(vm, "window.hasFocus: (window) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.hasFocus");
+    if (!s) return -1;
+    Command cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.type = CMD_GET_ATTRIB;
+    cmd.slot = (int)(s - g_slots);
+    cmd.ix   = GLFW_FOCUSED;
+    Command r;
+    if (!post_or_throw(vm, cmd, "window.hasFocus", &r)) return -1;
+    cando_vm_push(vm, cando_bool(r.ox != 0));
+    return 1;
+}
+
+/* w:setVisible(bool) / w:isVisible() -------------------------------------- */
+
+static int native_window_set_visible(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2) {
+        window_throw(vm, "window.setVisible: (window, bool) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.setVisible");
+    if (!s) return -1;
+    bool show = (args[1].tag == CDO_BOOL) ? args[1].as.boolean : true;
+    Command cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.type = CMD_SET_VISIBLE;
+    cmd.slot = (int)(s - g_slots);
+    cmd.ix   = show ? 1 : 0;
+    if (!post_or_throw(vm, cmd, "window.setVisible", NULL)) return -1;
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+static int native_window_is_visible(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        window_throw(vm, "window.isVisible: (window) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.isVisible");
+    if (!s) return -1;
+    Command cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.type = CMD_GET_ATTRIB;
+    cmd.slot = (int)(s - g_slots);
+    cmd.ix   = GLFW_VISIBLE;
+    Command r;
+    if (!post_or_throw(vm, cmd, "window.isVisible", &r)) return -1;
+    cando_vm_push(vm, cando_bool(r.ox != 0));
+    return 1;
+}
+
+/* w:getMouse() -- multi-return (x, y) ------------------------------------- */
+
+static int native_window_get_mouse(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        window_throw(vm, "window.getMouse: (window) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.getMouse");
+    if (!s) return -1;
+    Command cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.type = CMD_GET_MOUSE;
+    cmd.slot = (int)(s - g_slots);
+    Command r;
+    if (!post_or_throw(vm, cmd, "window.getMouse", &r)) return -1;
+    cando_vm_push(vm, cando_number(r.fx));
+    cando_vm_push(vm, cando_number(r.fy));
+    return 2;
+}
+
+/* w:getDPIScale() -- multi-return (sx, sy) -------------------------------- */
+
+static int native_window_get_dpi_scale(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        window_throw(vm, "window.getDPIScale: (window) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.getDPIScale");
+    if (!s) return -1;
+    Command cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.type = CMD_GET_DPI_SCALE;
+    cmd.slot = (int)(s - g_slots);
+    Command r;
+    if (!post_or_throw(vm, cmd, "window.getDPIScale", &r)) return -1;
+    cando_vm_push(vm, cando_number(r.fx));
+    cando_vm_push(vm, cando_number(r.fy));
+    return 2;
+}
+
+/* w:getFramebufferSize() -- multi-return (w, h) --------------------------- */
+
+static int native_window_get_framebuffer_size(CandoVM *vm, int argc,
+                                              CandoValue *args)
+{
+    if (argc < 1) {
+        window_throw(vm, "window.getFramebufferSize: (window) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.getFramebufferSize");
+    if (!s) return -1;
+    Command cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.type = CMD_GET_FRAMEBUFFER;
+    cmd.slot = (int)(s - g_slots);
+    Command r;
+    if (!post_or_throw(vm, cmd, "window.getFramebufferSize", &r)) return -1;
+    cando_vm_push(vm, cando_number((f64)r.ox));
+    cando_vm_push(vm, cando_number((f64)r.oy));
+    return 2;
+}
+
+/* w:setVSync(bool) -------------------------------------------------------- */
+
+static int native_window_set_vsync(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2) {
+        window_throw(vm, "window.setVSync: (window, bool) required");
+        return -1;
+    }
+    WindowSlot *s = resolve_window(vm, args[0], "window.setVSync");
+    if (!s) return -1;
+    bool on = (args[1].tag == CDO_BOOL) ? args[1].as.boolean : true;
+    Command cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.type = CMD_SET_VSYNC;
+    cmd.slot = (int)(s - g_slots);
+    cmd.ix   = on ? 1 : 0;
+    if (!post_or_throw(vm, cmd, "window.setVSync", NULL)) return -1;
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+/* =========================================================================
  * Module entry point.
  * ===================================================================== */
 
@@ -717,8 +1176,22 @@ CandoValue cando_module_init(CandoVM *vm)
     CdoObject *meta = cando_lib_meta_table(vm, "window");
 
     /* _meta.window methods: callable as w:close(), w:isOpen(), ... */
-    cando_lib_meta_define(vm, meta, "close",  native_window_close);
-    cando_lib_meta_define(vm, meta, "isOpen", native_window_is_open);
+    cando_lib_meta_define(vm, meta, "close",              native_window_close);
+    cando_lib_meta_define(vm, meta, "isOpen",             native_window_is_open);
+    cando_lib_meta_define(vm, meta, "setTitle",           native_window_set_title);
+    cando_lib_meta_define(vm, meta, "getTitle",           native_window_get_title);
+    cando_lib_meta_define(vm, meta, "setSize",            native_window_set_size);
+    cando_lib_meta_define(vm, meta, "getSize",            native_window_get_size);
+    cando_lib_meta_define(vm, meta, "setPosition",        native_window_set_position);
+    cando_lib_meta_define(vm, meta, "getPosition",        native_window_get_position);
+    cando_lib_meta_define(vm, meta, "focus",              native_window_focus);
+    cando_lib_meta_define(vm, meta, "hasFocus",           native_window_has_focus);
+    cando_lib_meta_define(vm, meta, "setVisible",         native_window_set_visible);
+    cando_lib_meta_define(vm, meta, "isVisible",          native_window_is_visible);
+    cando_lib_meta_define(vm, meta, "getMouse",           native_window_get_mouse);
+    cando_lib_meta_define(vm, meta, "getDPIScale",        native_window_get_dpi_scale);
+    cando_lib_meta_define(vm, meta, "getFramebufferSize", native_window_get_framebuffer_size);
+    cando_lib_meta_define(vm, meta, "setVSync",           native_window_set_vsync);
 
     CandoValue tbl = cando_bridge_new_object(vm);
     CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
