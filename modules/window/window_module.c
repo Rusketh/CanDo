@@ -86,7 +86,7 @@
 #  define WM_COND_BROADCAST(c) pthread_cond_broadcast(c)
 #endif
 
-#define WINDOW_MODULE_VERSION "0.0.8"
+#define WINDOW_MODULE_VERSION "0.0.9"
 
 /* =========================================================================
  * obj_set_* helpers (mirrors modules/sqlite).
@@ -183,6 +183,16 @@ typedef struct WindowSlot {
     int          inst_val_held;
     /* High-resolution timestamp of the last frame for dt computation. */
     double       last_frame_time;
+    /* Per-window event queue.  Single-producer (GLFW callbacks fire on
+     * the manager thread inside glfwPollEvents) and single-consumer
+     * (the manager dispatches in mgr_render_frame), so no locking is
+     * needed.  If the queue overflows we drop the new event rather
+     * than the old one -- a runaway flood (e.g. 1000 mouse_moved/sec)
+     * shouldn't starve out an earlier keypressed. */
+    struct Event *events;        /* heap-allocated circular buffer    */
+    int          ev_capacity;
+    int          ev_head;        /* read index                        */
+    int          ev_tail;        /* write index (head==tail => empty) */
 } WindowSlot;
 
 static WindowSlot g_slots[WINDOW_MAX_SLOTS];
@@ -199,6 +209,9 @@ static CandoVM   *g_root_vm = NULL;
  * handles, strings, and the lifeline registry with the root VM. */
 static CandoVM   g_dispatch_vm;
 static int       g_dispatch_vm_inited = 0;
+
+/* Forward decl -- definition lives in the event-queue section below. */
+static void slot_clear_event_queue(WindowSlot *s);
 
 /* Slot teardown shared by CMD_DESTROY, the close-button reaper, and the
  * shutdown sweep.  Closes the GLFW window if still open, drops the
@@ -220,6 +233,10 @@ static void slot_teardown(WindowSlot *s)
         cando_vm_lifeline_release(g_root_vm);
         s->has_lifeline = 0;
     }
+    /* Reset queue indices but keep the buffer allocated so slot
+     * recycling avoids the malloc churn.  free() at shutdown is
+     * skipped -- the OS reclaims everything. */
+    slot_clear_event_queue(s);
     s->alive = 0;
 }
 
@@ -346,6 +363,271 @@ static int slot_alloc_locked(void)
     return -1;
 }
 
+/* =========================================================================
+ * Event queue + GLFW input callbacks.
+ *
+ * GLFW callbacks fire on the manager thread (inside glfwPollEvents)
+ * and enqueue Event records into the destination slot's ring buffer.
+ * mgr_render_frame drains the queue at the start of every frame and
+ * dispatches each event to the matching user-defined callback (LOVE-
+ * style names: keypressed, keyreleased, textinput, mousepressed, ...)
+ * via the dispatch VM.
+ * ===================================================================== */
+
+typedef enum {
+    EV_KEY_PRESS = 0,
+    EV_KEY_RELEASE,
+    EV_TEXT,
+    EV_MOUSE_PRESS,
+    EV_MOUSE_RELEASE,
+    EV_MOUSE_MOVE,
+    EV_WHEEL,
+    EV_RESIZE,
+    EV_FOCUS,
+} EvType;
+
+typedef struct Event {
+    EvType type;
+    int    i0, i1, i2;     /* general-purpose int args */
+    double d0, d1;         /* general-purpose double args */
+    char   text[8];        /* UTF-8 codepoint for EV_TEXT, NUL terminated */
+} Event;
+
+#define WINDOW_EV_QUEUE_CAP 128
+
+static void slot_init_event_queue(WindowSlot *s)
+{
+    if (s->events) return;  /* already allocated, slot recycle */
+    s->events     = (Event *)calloc(WINDOW_EV_QUEUE_CAP, sizeof(Event));
+    s->ev_capacity = WINDOW_EV_QUEUE_CAP;
+    s->ev_head    = 0;
+    s->ev_tail    = 0;
+}
+
+static void slot_clear_event_queue(WindowSlot *s)
+{
+    if (!s->events) return;
+    s->ev_head = 0;
+    s->ev_tail = 0;
+}
+
+static void event_push(WindowSlot *s, Event ev)
+{
+    if (!s || !s->events) return;
+    int next = (s->ev_tail + 1) % s->ev_capacity;
+    if (next == s->ev_head) return;  /* queue full -- drop the new event */
+    s->events[s->ev_tail] = ev;
+    s->ev_tail = next;
+}
+
+/* Resolve a GLFWwindow* back to its WindowSlot via the user pointer
+ * we set at create time.  Returns NULL if the slot has been torn down
+ * underneath us (shouldn't happen: GLFW callbacks fire only during
+ * glfwPollEvents on the manager thread, and slot_teardown also runs
+ * on that thread). */
+static WindowSlot *slot_from_glfw(GLFWwindow *w)
+{
+    if (!w) return NULL;
+    return (WindowSlot *)glfwGetWindowUserPointer(w);
+}
+
+/* Encode a Unicode codepoint as UTF-8 into `out` (max 4 bytes + NUL).
+ * Used by EV_TEXT so user code receives strings, like LOVE's love.textinput. */
+static void utf8_encode(unsigned cp, char out[8])
+{
+    int n = 0;
+    if (cp < 0x80) {
+        out[n++] = (char)cp;
+    } else if (cp < 0x800) {
+        out[n++] = (char)(0xC0 | (cp >> 6));
+        out[n++] = (char)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out[n++] = (char)(0xE0 | (cp >> 12));
+        out[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[n++] = (char)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x110000) {
+        out[n++] = (char)(0xF0 | (cp >> 18));
+        out[n++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        out[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[n++] = (char)(0x80 | (cp & 0x3F));
+    }
+    out[n] = '\0';
+}
+
+/* GLFW callbacks ---------------------------------------------------------- */
+
+static void cb_key(GLFWwindow *w, int key, int scancode, int action, int mods)
+{
+    (void)scancode; (void)mods;
+    WindowSlot *s = slot_from_glfw(w);
+    if (!s) return;
+    Event ev = (Event){0};
+    if (action == GLFW_RELEASE) {
+        ev.type = EV_KEY_RELEASE;
+        ev.i0   = key;
+    } else {
+        ev.type = EV_KEY_PRESS;
+        ev.i0   = key;
+        ev.i1   = (action == GLFW_REPEAT) ? 1 : 0;
+    }
+    event_push(s, ev);
+}
+
+static void cb_char(GLFWwindow *w, unsigned int codepoint)
+{
+    WindowSlot *s = slot_from_glfw(w);
+    if (!s) return;
+    Event ev = (Event){0};
+    ev.type = EV_TEXT;
+    utf8_encode(codepoint, ev.text);
+    event_push(s, ev);
+}
+
+static void cb_mouse_button(GLFWwindow *w, int button, int action, int mods)
+{
+    (void)mods;
+    WindowSlot *s = slot_from_glfw(w);
+    if (!s) return;
+    double cx = 0.0, cy = 0.0;
+    glfwGetCursorPos(w, &cx, &cy);
+    Event ev = (Event){0};
+    ev.type = (action == GLFW_PRESS) ? EV_MOUSE_PRESS : EV_MOUSE_RELEASE;
+    ev.i0   = button;
+    ev.d0   = cx;
+    ev.d1   = cy;
+    event_push(s, ev);
+}
+
+static void cb_cursor_pos(GLFWwindow *w, double xpos, double ypos)
+{
+    WindowSlot *s = slot_from_glfw(w);
+    if (!s) return;
+    Event ev = (Event){0};
+    ev.type = EV_MOUSE_MOVE;
+    ev.d0   = xpos;
+    ev.d1   = ypos;
+    event_push(s, ev);
+}
+
+static void cb_scroll(GLFWwindow *w, double dx, double dy)
+{
+    WindowSlot *s = slot_from_glfw(w);
+    if (!s) return;
+    Event ev = (Event){0};
+    ev.type = EV_WHEEL;
+    ev.d0   = dx;
+    ev.d1   = dy;
+    event_push(s, ev);
+}
+
+static void cb_framebuffer_size(GLFWwindow *w, int width, int height)
+{
+    WindowSlot *s = slot_from_glfw(w);
+    if (!s) return;
+    s->width  = width;
+    s->height = height;
+    Event ev = (Event){0};
+    ev.type = EV_RESIZE;
+    ev.i0   = width;
+    ev.i1   = height;
+    event_push(s, ev);
+}
+
+static void cb_window_focus(GLFWwindow *w, int focused)
+{
+    WindowSlot *s = slot_from_glfw(w);
+    if (!s) return;
+    Event ev = (Event){0};
+    ev.type = EV_FOCUS;
+    ev.i0   = focused ? 1 : 0;
+    event_push(s, ev);
+}
+
+/* Wire up every callback on a freshly-created window.  Runs on the
+ * manager thread during CMD_CREATE. */
+static void slot_install_callbacks(WindowSlot *s)
+{
+    if (!s || !s->handle) return;
+    glfwSetWindowUserPointer(s->handle, s);
+    glfwSetKeyCallback             (s->handle, cb_key);
+    glfwSetCharCallback            (s->handle, cb_char);
+    glfwSetMouseButtonCallback     (s->handle, cb_mouse_button);
+    glfwSetCursorPosCallback       (s->handle, cb_cursor_pos);
+    glfwSetScrollCallback          (s->handle, cb_scroll);
+    glfwSetFramebufferSizeCallback (s->handle, cb_framebuffer_size);
+    glfwSetWindowFocusCallback     (s->handle, cb_window_focus);
+}
+
+/* Dispatch every queued event to the matching user-defined callback.
+ * Called from mgr_render_frame at the start of each frame, before
+ * w.update / w.draw fire. */
+static void slot_dispatch_events(WindowSlot *s)
+{
+    while (s->ev_head != s->ev_tail) {
+        Event ev = s->events[s->ev_head];
+        s->ev_head = (s->ev_head + 1) % s->ev_capacity;
+        if (!s->alive) break;  /* w:close() during dispatch */
+
+        switch (ev.type) {
+        case EV_KEY_PRESS: {
+            CandoValue args[2] = { cando_number((f64)ev.i0),
+                                    cando_bool(ev.i1 != 0) };
+            dispatch_call(s, "keypressed", args, 2);
+            break;
+        }
+        case EV_KEY_RELEASE: {
+            CandoValue args[1] = { cando_number((f64)ev.i0) };
+            dispatch_call(s, "keyreleased", args, 1);
+            break;
+        }
+        case EV_TEXT: {
+            CandoValue args[1] = { cando_string_value(
+                cando_string_new(ev.text, (u32)strlen(ev.text))) };
+            dispatch_call(s, "textinput", args, 1);
+            cando_value_release(args[0]);
+            break;
+        }
+        case EV_MOUSE_PRESS: {
+            CandoValue args[3] = { cando_number(ev.d0),
+                                    cando_number(ev.d1),
+                                    cando_number((f64)ev.i0) };
+            dispatch_call(s, "mousepressed", args, 3);
+            break;
+        }
+        case EV_MOUSE_RELEASE: {
+            CandoValue args[3] = { cando_number(ev.d0),
+                                    cando_number(ev.d1),
+                                    cando_number((f64)ev.i0) };
+            dispatch_call(s, "mousereleased", args, 3);
+            break;
+        }
+        case EV_MOUSE_MOVE: {
+            CandoValue args[2] = { cando_number(ev.d0),
+                                    cando_number(ev.d1) };
+            dispatch_call(s, "mousemoved", args, 2);
+            break;
+        }
+        case EV_WHEEL: {
+            CandoValue args[2] = { cando_number(ev.d0),
+                                    cando_number(ev.d1) };
+            dispatch_call(s, "wheelmoved", args, 2);
+            break;
+        }
+        case EV_RESIZE: {
+            CandoValue args[2] = { cando_number((f64)ev.i0),
+                                    cando_number((f64)ev.i1) };
+            dispatch_call(s, "resize", args, 2);
+            break;
+        }
+        case EV_FOCUS: {
+            CandoValue args[1] = { cando_bool(ev.i0 != 0) };
+            dispatch_call(s, "focus", args, 1);
+            break;
+        }
+        }
+    }
+}
+
 /* Manager-thread helper: drain the single pending command slot. */
 static void mgr_drain_commands(void)
 {
@@ -392,6 +674,14 @@ static void mgr_drain_commands(void)
             memcpy(s->title, cmd.title, sizeof(s->title));
             s->width  = cmd.width;
             s->height = cmd.height;
+
+            /* Set up the per-slot event queue and wire up GLFW input
+             * callbacks so user-defined keypressed / mousemoved /
+             * etc. fire on subsequent frames. */
+            slot_init_event_queue(s);
+            slot_clear_event_queue(s);
+            slot_install_callbacks(s);
+
             cmd.ok    = 1;
         }
         break;
@@ -547,6 +837,11 @@ static void mgr_render_frame(void)
                     ? (now - s->last_frame_time)
                     : 0.0;
         s->last_frame_time = now;
+
+        /* Drain queued GLFW input events first so the user's update()
+         * sees current state and can react to fresh keys / clicks. */
+        slot_dispatch_events(s);
+        if (!s->alive || !s->handle) continue;
 
         /* update(dt) -- runs before any GL work so user code can mutate
          * state for `draw` to render. */
