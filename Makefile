@@ -328,7 +328,7 @@ cando.exe: source/main.c libcando.dll icon.res
 # directories to the MODULES list below.
 # ---------------------------------------------------------------------------
 
-MODULES = ldap sqlite window draw forms
+MODULES = ldap sqlite sql window draw forms
 
 # Build every module's POSIX shared library.
 modules:

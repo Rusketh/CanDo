@@ -1,0 +1,75 @@
+// modules/sql/test_sql_smoke.cdo -- minimal smoke test that runs without
+// any database server.  Verifies the module loads, cando_module_init
+// returns the expected object, and every method sentinel is present.
+// Kept deliberately simple so a runtime failure points clearly at the
+// binary, not the script.
+
+print("smoke: starting");
+
+VAR sql = NULL;
+TRY {
+    sql = include("./sql.dll");
+    print("smoke: loaded sql.dll");
+} CATCH (e) {
+    print(`smoke: sql.dll load failed: ${e}`);
+    TRY {
+        sql = include("./sql.so");
+        print("smoke: loaded sql.so");
+    } CATCH (e2) {
+        print(`smoke: sql.so load failed: ${e2}`);
+        os.exit(1);
+    }
+}
+
+IF type(sql.VERSION) != "string" {
+    print("smoke: VERSION missing or not a string");
+    os.exit(1);
+}
+print(`smoke: module VERSION = ${sql.VERSION}`);
+
+// Every documented method should be registered as a number sentinel.
+VAR methods = [
+    "open", "openPostgres", "openMySQL",
+    "close", "exec", "prepare",
+    "begin", "commit", "rollback", "inTransaction", "transaction",
+    "bigintMode", "ping",
+    "run", "get", "all", "finalize"
+];
+VAR missing = 0;
+FOR (m IN methods) {
+    IF type(sql[m]) != "number" {
+        print(`smoke: missing method ${m}`);
+        missing = missing + 1;
+    }
+}
+IF missing > 0 {
+    print(`smoke: ${missing} missing method(s)`);
+    os.exit(1);
+}
+
+// Driver-name constants.
+IF sql.DRIVER_POSTGRES != "postgres" OR sql.DRIVER_MYSQL != "mysql" {
+    print("smoke: driver-name constants missing");
+    os.exit(1);
+}
+
+// Calling open() with an unknown driver must throw a multi-value error
+// even when no server is running -- this exercises the throw path
+// without needing a database.
+VAR threw = FALSE;
+VAR caught_msg      = "";
+VAR caught_sqlstate = "";
+TRY {
+    sql.open("oracle", { host: "127.0.0.1" });
+} CATCH (msg, code, sqlstate) {
+    threw = TRUE;
+    caught_msg      = msg;
+    caught_sqlstate = sqlstate;
+}
+IF NOT threw {
+    print("smoke: open(unknown driver) did not throw");
+    os.exit(1);
+}
+print(`smoke: open(unknown) threw: ${caught_msg}`);
+
+print("OK");

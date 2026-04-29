@@ -41,6 +41,13 @@ jobs:
       - name: Test modules (script integration -- sqlite)
         run: ./cando modules/sqlite/test_sqlite.cdo
 
+      - name: Smoke-test modules (script integration -- sql)
+        # The sql module talks to PostgreSQL and MySQL servers.  CI
+        # runs without those dependencies, so only the no-server smoke
+        # test is invoked here -- full coverage in test_sql.cdo runs
+        # against locally-provisioned servers.
+        run: ./cando modules/sql/test_sql_smoke.cdo
+
       - name: Smoke-test modules (script integration -- window)
         # window.so loads OK and registers _meta.window even on a
         # display-less host (no glfwInit needed for module init).
@@ -151,6 +158,9 @@ jobs:
       - name: Smoke-test modules (Windows -- sqlite)
         run: ./cando.exe modules/sqlite/test_sqlite_smoke.cdo
 
+      - name: Smoke-test modules (Windows -- sql)
+        run: ./cando.exe modules/sql/test_sql_smoke.cdo
+
       - name: Smoke-test modules (Windows -- window)
         run: ./cando.exe modules/window/test_window_smoke.cdo
 
@@ -169,7 +179,7 @@ jobs:
           objdump -p cando.exe | grep "DLL Name" || true
           echo "=== libcando.dll imports ==="
           objdump -p libcando.dll | grep "DLL Name" || true
-          for bin in cando.exe libcando.dll modules/sqlite/sqlite.dll modules/window/window.dll modules/draw/draw.dll modules/forms/forms.dll; do
+          for bin in cando.exe libcando.dll modules/sqlite/sqlite.dll modules/sql/sql.dll modules/window/window.dll modules/draw/draw.dll modules/forms/forms.dll; do
             for dll in libwinpthread-1.dll libgcc_s_seh-1.dll libstdc++-6.dll libssl-3-x64.dll libcrypto-3-x64.dll; do
               if objdump -p "$bin" | grep -qi "DLL Name: $dll"; then
                 echo "ERROR: $bin still imports $dll"
