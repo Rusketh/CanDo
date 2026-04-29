@@ -611,6 +611,214 @@ bool http_read_response(HttpConn *conn, HttpResponse *r)
 }
 
 /* =========================================================================
+ * Streaming response: header-only parser + body state machine
+ * ===================================================================== */
+
+void http_response_head_init(HttpResponseHead *r)
+{
+    r->status     = 0;
+    r->reason[0]  = '\0';
+    r->framing    = HBF_NONE;
+    r->length_remaining = 0;
+    r->tail_off   = 0;
+    http_headers_init(&r->headers);
+    httpbuf_init(&r->tail);
+}
+
+void http_response_head_free(HttpResponseHead *r)
+{
+    http_headers_free(&r->headers);
+    httpbuf_free(&r->tail);
+}
+
+bool http_read_response_head(HttpConn *conn, HttpResponseHead *r)
+{
+    HttpBuf recv;
+    httpbuf_init(&recv);
+    usize offset = 0;
+
+    char line[8192];
+    int n = read_crlf_line(conn, &recv, &offset, line, sizeof(line));
+    if (n <= 0) { httpbuf_free(&recv); return false; }
+
+    /* HTTP/X.Y SP STATUS SP REASON */
+    char *sp1 = strchr(line, ' ');
+    if (!sp1) { httpbuf_free(&recv); return false; }
+    *sp1 = '\0';
+    char *code_s = sp1 + 1;
+    char *sp2 = strchr(code_s, ' ');
+    if (sp2) *sp2 = '\0';
+
+    r->status = (int)strtol(code_s, NULL, 10);
+    if (sp2) {
+        const char *reason = sp2 + 1;
+        usize rl = strlen(reason);
+        if (rl >= sizeof(r->reason)) rl = sizeof(r->reason) - 1;
+        memcpy(r->reason, reason, rl); r->reason[rl] = '\0';
+    }
+
+    if (!parse_headers(conn, &recv, &offset, &r->headers)) {
+        httpbuf_free(&recv);
+        return false;
+    }
+
+    /* Choose framing exactly as http_read_response does so the streamed
+     * path matches the buffered path byte-for-byte for any given server. */
+    const char *te = http_headers_get(&r->headers, "transfer-encoding");
+    const char *cl = http_headers_get(&r->headers, "content-length");
+    const char *cn = http_headers_get(&r->headers, "connection");
+    bool close_delim = (cn && strcasecmp(cn, "close") == 0);
+
+    if (te && strcasecmp(te, "chunked") == 0) {
+        r->framing = HBF_CHUNKED;
+    } else if (cl) {
+        r->framing = HBF_LENGTH;
+        r->length_remaining = strtoul(cl, NULL, 10);
+    } else if (close_delim || r->status == 200 || r->status == 204) {
+        r->framing = HBF_CLOSE;
+    } else {
+        r->framing = HBF_NONE;
+    }
+
+    /* Stash any bytes we over-read past the headers so the body reader
+     * sees them before going back to the wire. */
+    if (offset < recv.len) {
+        httpbuf_append(&r->tail, recv.data + offset, recv.len - offset);
+    }
+    r->tail_off = 0;
+    httpbuf_free(&recv);
+    return true;
+}
+
+void http_body_reader_init(HttpBodyReader *br,
+                           const HttpResponseHead *head, HttpConn *conn)
+{
+    br->conn             = conn;
+    br->framing          = head->framing;
+    br->length_remaining = head->length_remaining;
+    br->chunk_state      = 0;
+    br->chunk_remaining  = 0;
+    br->recv_off         = 0;
+    br->eof              = (head->framing == HBF_NONE) ||
+                           (head->framing == HBF_LENGTH &&
+                            head->length_remaining == 0);
+    httpbuf_init(&br->recv);
+    /* Seed the reader's recv buffer with whatever the head parser
+     * already pulled past the header terminator. */
+    if (head->tail.len > head->tail_off) {
+        httpbuf_append(&br->recv,
+                       head->tail.data + head->tail_off,
+                       head->tail.len - head->tail_off);
+    }
+}
+
+void http_body_reader_free(HttpBodyReader *br)
+{
+    httpbuf_free(&br->recv);
+    br->conn = NULL;
+}
+
+/* Drain min(cap, available) bytes out of br->recv into `out`.  Returns
+ * the number of bytes copied; advances recv_off. */
+static usize body_drain_recv(HttpBodyReader *br, void *out, usize cap)
+{
+    usize avail = br->recv.len - br->recv_off;
+    if (avail == 0) return 0;
+    usize n = cap < avail ? cap : avail;
+    memcpy(out, br->recv.data + br->recv_off, n);
+    br->recv_off += n;
+    return n;
+}
+
+int http_body_reader_read(HttpBodyReader *br, void *out, usize cap)
+{
+    if (br->eof || cap == 0) return 0;
+    u8 *outb = (u8 *)out;
+
+    if (br->framing == HBF_LENGTH) {
+        usize want = cap < br->length_remaining ? cap : br->length_remaining;
+        if (want == 0) { br->eof = true; return 0; }
+        usize taken = body_drain_recv(br, outb, want);
+        if (taken < want) {
+            int n = http_conn_read(br->conn, outb + taken,
+                                   (int)(want - taken));
+            if (n <= 0) return -1;
+            taken += (usize)n;
+        }
+        br->length_remaining -= taken;
+        if (br->length_remaining == 0) br->eof = true;
+        return (int)taken;
+    }
+
+    if (br->framing == HBF_CLOSE) {
+        usize taken = body_drain_recv(br, outb, cap);
+        if (taken == 0) {
+            int n = http_conn_read(br->conn, outb, (int)cap);
+            if (n < 0)  return -1;
+            if (n == 0) { br->eof = true; return 0; }
+            taken = (usize)n;
+        }
+        return (int)taken;
+    }
+
+    if (br->framing == HBF_CHUNKED) {
+        /* Iterate the state machine until we have at least one byte for
+         * the caller, hit clean EOF, or hit an error.  cap > 0 here so
+         * the loop terminates as soon as `taken` advances. */
+        usize taken = 0;
+        while (taken == 0 && !br->eof) {
+            if (br->chunk_state == 0) {
+                char line[64];
+                int n = read_crlf_line(br->conn, &br->recv, &br->recv_off,
+                                       line, sizeof(line));
+                if (n < 0) return -1;
+                char *semi = strchr(line, ';');
+                if (semi) *semi = '\0';
+                br->chunk_remaining = (usize)strtoul(line, NULL, 16);
+                if (br->chunk_remaining == 0) {
+                    /* Consume any trailers, then we're done. */
+                    while (1) {
+                        n = read_crlf_line(br->conn, &br->recv, &br->recv_off,
+                                           line, sizeof(line));
+                        if (n < 0) return -1;
+                        if (n == 0) break;
+                    }
+                    br->chunk_state = 3;
+                    br->eof = true;
+                    return 0;
+                }
+                br->chunk_state = 1;
+            } else if (br->chunk_state == 1) {
+                usize want = cap < br->chunk_remaining ? cap : br->chunk_remaining;
+                usize from_buf = body_drain_recv(br, outb, want);
+                taken += from_buf;
+                br->chunk_remaining -= from_buf;
+                if (br->chunk_remaining > 0 && taken < cap) {
+                    usize need = cap - taken;
+                    if (need > br->chunk_remaining) need = br->chunk_remaining;
+                    int n = http_conn_read(br->conn, outb + taken, (int)need);
+                    if (n <= 0) return -1;
+                    taken += (usize)n;
+                    br->chunk_remaining -= (usize)n;
+                }
+                if (br->chunk_remaining == 0) br->chunk_state = 2;
+            } else if (br->chunk_state == 2) {
+                char line[8];
+                int n = read_crlf_line(br->conn, &br->recv, &br->recv_off,
+                                       line, sizeof(line));
+                if (n != 0) return -1;     /* expected empty CRLF */
+                br->chunk_state = 0;
+            }
+        }
+        return (int)taken;
+    }
+
+    /* HBF_NONE — no body. */
+    br->eof = true;
+    return 0;
+}
+
+/* =========================================================================
  * Status code to reason phrase mapping
  * ===================================================================== */
 

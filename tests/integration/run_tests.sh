@@ -149,7 +149,7 @@ run_test "lib_secure_socket" "$SCRIPTS/lib_secure_socket.cdo" \
     "$(printf 'after listen\ntls-echo:hello\ntrue\ntrue\ndone')"
 
 run_test "lib_stream" "$SCRIPTS/lib_stream.cdo" \
-    "$(printf 'memory\nhello, world\n'\'''\''\nfalse\n1600\n1600\n1600\nfinal\n'\'''\''\ntrue\nfile\nalpha-bravo\n'\'''\''\nthrew\n20\npiped through memory\n29\nCanDo streams compose nicely.\nfrom thread\nchannel\nhello-from-channel\ntcp\nECHO:hello\nfile-piped-as-response\npayload-from-http\n0\nspawned-output\n800\nok')"
+    "$(printf 'memory\nhello, world\n'\'''\''\nfalse\n1600\n1600\n1600\nfinal\n'\'''\''\ntrue\nfile\nalpha-bravo\n'\'''\''\nthrew\n20\npiped through memory\n29\nCanDo streams compose nicely.\nfrom thread\nchannel\nhello-from-channel\ntcp\nECHO:hello\nfile-piped-as-response\npayload-from-http\n0\nspawned-output\n800\nnull\nstreamed-from-server\nHELLO, WORLD\ntransform\nPIPED THROUGH TRANSFORM\nok')"
 
 run_test "lib_crypto" "$SCRIPTS/lib_crypto.cdo" \
     "$(printf 'md5_ok\nsha256_ok\naGVsbG8gd29ybGQA\nhello world')"
