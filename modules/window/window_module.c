@@ -40,6 +40,11 @@
 #include <stdatomic.h>
 
 #include <GLFW/glfw3.h>
+#if defined(_WIN32) || defined(_WIN64)
+#  include <GL/gl.h>
+#else
+#  include <GL/gl.h>
+#endif
 
 /* Tiny mutex / cond / thread wrapper -- libcando does not export its
  * cando_os_* sync helpers so binary modules cannot link them.  Same
@@ -78,7 +83,7 @@
 #  define WM_COND_BROADCAST(c) pthread_cond_broadcast(c)
 #endif
 
-#define WINDOW_MODULE_VERSION "0.0.4"
+#define WINDOW_MODULE_VERSION "0.0.5"
 
 /* =========================================================================
  * obj_set_* helpers (mirrors modules/sqlite).
@@ -274,6 +279,43 @@ static void mgr_drain_commands(void)
     WM_MUTEX_UNLOCK(&g_mgr_mutex);
 }
 
+/* Manager-thread helper: render one frame for every live window.
+ * For the moment this is just clear-to-black + swap; the next chunk
+ * will run user-supplied `w.draw` callbacks here.  Also reaps windows
+ * the user closed via the close button. */
+static void mgr_render_frame(void)
+{
+    for (int i = 0; i < WINDOW_MAX_SLOTS; i++) {
+        WindowSlot *s = &g_slots[i];
+        if (!s->alive || !s->handle) continue;
+
+        /* Honour the close button.  Don't free the slot here -- the
+         * script-side handle still holds a generation, and freeing
+         * would race with mgr_drain_commands; just destroy the GLFW
+         * window and mark the slot dormant.  isOpen() will then
+         * return FALSE. */
+        if (glfwWindowShouldClose(s->handle)) {
+            glfwDestroyWindow(s->handle);
+            s->handle = NULL;
+            s->alive  = 0;
+            continue;
+        }
+
+        glfwMakeContextCurrent(s->handle);
+
+        int fbw, fbh;
+        glfwGetFramebufferSize(s->handle, &fbw, &fbh);
+        if (fbw > 0 && fbh > 0) {
+            glViewport(0, 0, fbw, fbh);
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+
+        glfwSwapBuffers(s->handle);
+        glfwMakeContextCurrent(NULL);
+    }
+}
+
 /* Tear down every still-live window.  Called from the manager thread
  * during shutdown so we never leak GLFW state. */
 static void mgr_destroy_all_windows(void)
@@ -342,9 +384,10 @@ static void *manager_thread_main(void *arg)
     WM_COND_BROADCAST(&g_mgr_cond);
     WM_MUTEX_UNLOCK(&g_mgr_mutex);
 
-    /* Event loop -- drains command queue, polls glfw events, repeats. */
+    /* Event loop -- drain commands, render every alive window, poll. */
     while (!atomic_load(&g_mgr_should_stop)) {
         mgr_drain_commands();
+        mgr_render_frame();
         glfwWaitEventsTimeout(0.016); /* ~60 Hz wakeup */
     }
 
