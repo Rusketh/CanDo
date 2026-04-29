@@ -49,6 +49,40 @@ jobs:
       - name: Smoke-test modules (script integration -- draw)
         run: ./cando modules/draw/test_draw_smoke.cdo
 
+      - name: Generate test PNG for the draw script test
+        # The full draw test exercises stb_image; bake a 4x4 RGBA PNG
+        # so we have something deterministic to load.
+        run: |
+          python3 - <<'PY'
+          import struct, zlib
+          def png(w, h, rgba):
+              sig = b'\x89PNG\r\n\x1a\n'
+              def chunk(t, d):
+                  c = zlib.crc32(t + d) & 0xffffffff
+                  return struct.pack('>I', len(d)) + t + d + struct.pack('>I', c)
+              ihdr = struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)
+              raw = b''
+              for y in range(h):
+                  raw += b'\x00' + bytes(rgba[y*w*4:(y+1)*w*4])
+              return sig + chunk(b'IHDR', ihdr) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
+          pix = []
+          for y in range(4):
+              for x in range(4):
+                  if x < 2 and y < 2:    pix += [255, 0, 0, 255]
+                  elif x >=2 and y >= 2: pix += [0, 0, 255, 255]
+                  else:                   pix += [0, 255, 0, 255]
+          open('/tmp/test4x4.png', 'wb').write(png(4, 4, pix))
+          PY
+
+      - name: Full window script test (xvfb)
+        run: |
+          # cd into the module dir so include("./window.so") works.
+          cd modules/window && xvfb-run -a ../../cando test_window.cdo
+
+      - name: Full draw script test (xvfb)
+        run: |
+          cd modules/draw && xvfb-run -a ../../cando test_draw.cdo
+
       - name: Stage release artifact
         # actions/upload-artifact@v4 strips the lowest common ancestor of
         # the matched paths, so we collect everything in a dist/ directory

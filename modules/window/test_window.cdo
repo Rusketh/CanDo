@@ -1,0 +1,101 @@
+// modules/window/test_window.cdo -- end-to-end script test for the
+// window module.  Exercises window.create, every _meta.window method,
+// LOVE-style callbacks, and lifeline-driven shutdown.  Requires a
+// running X display; CI runs this under `xvfb-run -a`.
+//
+// Each test is bracketed by a print line so a failure points at the
+// offending step.
+
+VAR window = include("./window.so");
+
+VAR fails = 0;
+VAR passes = 0;
+
+VAR EXPECT = FUNCTION(name, ok) {
+    IF ok {
+        print(`  PASS  ${name}`);
+        passes = passes + 1;
+    } ELSE {
+        print(`  FAIL  ${name}`);
+        fails = fails + 1;
+    }
+};
+
+print("== window: namespace surface ==");
+EXPECT("VERSION is a string",      type(window.VERSION) == "string");
+EXPECT("glfwVersion is a string",  type(window.glfwVersion) == "string");
+EXPECT("keys is an object",        type(window.keys) == "object");
+EXPECT("mouse is an object",       type(window.mouse) == "object");
+EXPECT("keys.escape is a number",  type(window.keys.escape) == "number");
+EXPECT("keys.a is a number",       type(window.keys.a) == "number");
+EXPECT("mouse.left is a number",   type(window.mouse.left) == "number");
+
+print("== window: create + _meta.window ==");
+VAR w = window.create("TEST", 320, 240);
+EXPECT("type(w) == \"window\"",    type(w) == "window");
+EXPECT("w:isOpen() initially",     w:isOpen());
+EXPECT("w.title field set",        w.title == "TEST");
+EXPECT("w.width field set",        w.width == 320);
+EXPECT("w.height field set",       w.height == 240);
+
+print("== window: setTitle / getTitle ==");
+w:setTitle("renamed");
+EXPECT("setTitle reflected in getTitle",  w:getTitle() == "renamed");
+EXPECT("setTitle also updates w.title",   w.title == "renamed");
+
+print("== window: setSize / getSize ==");
+w:setSize(400, 300);
+VAR sw, sh = w:getSize();
+EXPECT("getSize width  after setSize",    sw == 400);
+EXPECT("getSize height after setSize",    sh == 300);
+EXPECT("instance .width after setSize",   w.width == 400);
+EXPECT("instance .height after setSize",  w.height == 300);
+
+print("== window: getPosition / getMouse / getDPIScale ==");
+VAR px, py = w:getPosition();
+EXPECT("getPosition multi-returns numbers",
+    type(px) == "number" && type(py) == "number");
+VAR mx, my = w:getMouse();
+EXPECT("getMouse multi-returns numbers",
+    type(mx) == "number" && type(my) == "number");
+VAR dx, dy = w:getDPIScale();
+EXPECT("getDPIScale > 0",
+    dx > 0 && dy > 0);
+VAR fbw, fbh = w:getFramebufferSize();
+EXPECT("getFramebufferSize > 0",
+    fbw > 0 && fbh > 0);
+
+print("== window: visibility + focus + vsync ==");
+EXPECT("isVisible returns bool",   type(w:isVisible()) == "bool");
+EXPECT("hasFocus returns bool",    type(w:hasFocus())  == "bool");
+w:setVSync(false);
+EXPECT("setVSync(false) returns",  true);
+
+print("== window: callbacks fire ==");
+VAR drew    = 0;
+VAR updates = 0;
+w.draw   = FUNCTION(self) { drew    = drew    + 1; };
+w.update = FUNCTION(self, dt) { updates = updates + 1; };
+
+// Spin a side thread that closes the window after a few frames.
+// Inside the thread, app.holds() includes both the window lifeline
+// AND the thread itself, so an open window means count == 2.
+thread {
+    thread.sleep(150);
+    EXPECT("draw fired during 150ms",   drew    > 0);
+    EXPECT("update fired during 150ms", updates > 0);
+    EXPECT("app.holds() while open",
+        app.holds() >= 2);   // 1 window + 1 thread
+
+    w:close();
+    thread.sleep(20);
+    EXPECT("isOpen() FALSE after close", w:isOpen() == false);
+    EXPECT("app.holds() after close",
+        app.holds() == 1);   // just this thread now
+
+    print(`Results: ${passes} passed, ${fails} failed`);
+    IF fails > 0 { os.exit(1); }
+};
+
+// Script ends; lifeline keeps process alive until the close-thread
+// has finished its assertions and dropped the count.
