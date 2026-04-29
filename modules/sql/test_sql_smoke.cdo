@@ -32,7 +32,7 @@ VAR methods = [
     "open", "openPostgres", "openMySQL",
     "close", "exec", "prepare",
     "begin", "commit", "rollback", "inTransaction", "transaction",
-    "bigintMode", "ping",
+    "bigintMode", "ping", "escape", "escapeIdentifier",
     "run", "get", "all", "finalize"
 ];
 VAR missing = 0;

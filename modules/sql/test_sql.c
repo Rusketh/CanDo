@@ -20,6 +20,7 @@
 #include "sql_buf.h"
 #include "sql_crypto.h"
 #include "sql_driver.h"
+#include "sql_escape.h"
 #include "sql_placeholder.h"
 
 #include <stdio.h>
@@ -367,6 +368,85 @@ static void test_placeholder_translator(void)
     EXPECT_STREQ("empty input",                out, "");
     EXPECT_INTEQ("empty count",                n, 0);
     free(out);
+
+    /* Native PostgreSQL $1, $2, ... must pass through untouched so
+     * scripts can use the engine's spec-mandated placeholder syntax
+     * directly when they prefer it. */
+    out = sql_translate_placeholders(
+        "SELECT id FROM t WHERE a = $1 AND b = $2", &n);
+    EXPECT_STREQ("native $1, $2 passthrough",  out,
+        "SELECT id FROM t WHERE a = $1 AND b = $2");
+    EXPECT_INTEQ("native $N translates 0",     n, 0);
+    free(out);
+}
+
+/* =========================================================================
+ * Escape helpers
+ * ===================================================================== */
+static void test_escape(void)
+{
+    printf("\n[escape]\n");
+
+    char *s;
+
+    /* PostgreSQL literals -- E'' form, single-quote doubled,
+     * backslash doubled, control characters expanded. */
+    s = sql_escape_pg_literal("Ada", 3);
+    EXPECT_STREQ("pg literal plain",        s, "E'Ada'");                   free(s);
+
+    s = sql_escape_pg_literal("o'brien", 7);
+    EXPECT_STREQ("pg literal apostrophe",   s, "E'o''brien'");               free(s);
+
+    s = sql_escape_pg_literal("a\\b", 3);
+    EXPECT_STREQ("pg literal backslash",    s, "E'a\\\\b'");                 free(s);
+
+    s = sql_escape_pg_literal("a\nb\tc", 5);
+    EXPECT_STREQ("pg literal control",      s, "E'a\\nb\\tc'");              free(s);
+
+    s = sql_escape_pg_literal(NULL, 0);
+    EXPECT_STREQ("pg literal null",         s, "NULL");                      free(s);
+
+    /* PG refuses NULs in text literals. */
+    s = sql_escape_pg_literal("a\0b", 3);
+    EXPECT("pg literal NUL refused",        s == NULL);
+
+    /* PostgreSQL identifiers -- "name" with embedded `"` doubled. */
+    s = sql_escape_pg_identifier("col", 3);
+    EXPECT_STREQ("pg ident plain",          s, "\"col\"");                   free(s);
+
+    s = sql_escape_pg_identifier("we\"ird", 6);
+    EXPECT_STREQ("pg ident with quote",     s, "\"we\"\"ird\"");             free(s);
+
+    /* MySQL literals -- '...' with backslash escapes. */
+    s = sql_escape_my_literal("Ada", 3);
+    EXPECT_STREQ("mysql literal plain",     s, "'Ada'");                     free(s);
+
+    s = sql_escape_my_literal("o'brien", 7);
+    EXPECT_STREQ("mysql literal apostrophe", s, "'o\\'brien'");              free(s);
+
+    s = sql_escape_my_literal("a\\b\nc\rd\"e", 9);
+    EXPECT_STREQ("mysql literal control",   s, "'a\\\\b\\nc\\rd\\\"e'");      free(s);
+
+    s = sql_escape_my_literal("a\0b", 3);
+    EXPECT_STREQ("mysql literal NUL",       s, "'a\\0b'");                   free(s);
+
+    /* MySQL identifiers -- `name` with embedded backtick doubled. */
+    s = sql_escape_my_identifier("col", 3);
+    EXPECT_STREQ("mysql ident plain",       s, "`col`");                     free(s);
+
+    s = sql_escape_my_identifier("ba`ck", 5);
+    EXPECT_STREQ("mysql ident backtick",    s, "`ba``ck`");                  free(s);
+
+    /* SQLite literals -- '...' with `'` doubled (no backslash escape). */
+    s = sql_escape_sqlite_literal("Ada", 3);
+    EXPECT_STREQ("sqlite literal plain",    s, "'Ada'");                     free(s);
+
+    s = sql_escape_sqlite_literal("o'brien", 7);
+    EXPECT_STREQ("sqlite literal apostrophe", s, "'o''brien'");              free(s);
+
+    /* Backslash passes through unchanged in SQLite (no escape). */
+    s = sql_escape_sqlite_literal("a\\b", 3);
+    EXPECT_STREQ("sqlite literal backslash", s, "'a\\b'");                   free(s);
 }
 
 /* =========================================================================
@@ -398,6 +478,7 @@ int main(void)
     test_crypto_b64_hex();
     test_my_native_password();
     test_placeholder_translator();
+    test_escape();
     test_opts_defaults();
 
     if (failures) {

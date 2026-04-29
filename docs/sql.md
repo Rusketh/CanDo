@@ -86,6 +86,49 @@ pick:finalize();
 > or PostgreSQL dollar-quoted body.  Use `??` to emit a literal `?`
 > (handy for PG's JSON `?`, `?|`, `?&` operators).
 
+PostgreSQL's spec-mandated `$1, $2, ...` placeholder syntax also
+works directly — the translator passes them through untouched:
+
+```cando
+VAR s = pg:prepare("SELECT * FROM users WHERE name = $1 AND active = $2");
+s:all("Ada", TRUE);
+```
+
+## Manual SQL building
+
+Prepared statements are always preferable, but when a script has to
+build SQL by hand the module exposes engine-aware escape helpers on
+every database handle:
+
+```cando
+VAR table = db:escapeIdentifier("user_profiles");
+//   PostgreSQL: "user_profiles"
+//   MySQL:      `user_profiles`
+
+VAR who = db:escape("o'brien");
+//   PostgreSQL: E'o''brien'
+//   MySQL:      'o\'brien'
+
+db:exec(`SELECT * FROM ${table} WHERE name = ${who}`);
+```
+
+`db:escape` accepts `null`, booleans, numbers, and strings:
+
+| Cando value      | PostgreSQL output     | MySQL output |
+|---|---|---|
+| `NULL`           | `NULL`                | `NULL`       |
+| `TRUE` / `FALSE` | `TRUE` / `FALSE`      | `1` / `0`    |
+| number           | decimal text          | decimal text |
+| string           | `E'...'` (`'` and `\` doubled, control characters expanded) | `'...'` with mysql backslash escapes |
+| any other type   | error                 | error        |
+
+`db:escapeIdentifier(name)` always returns a quoted identifier in the
+engine's syntax with the closing-quote character doubled.
+
+The same helpers are also available on the SQLite module as
+`sql.escape(value)` and `sql.escapeIdentifier(name)` (no driver-aware
+dispatch, since SQLite has one dialect).
+
 `stmt:run(...)` is for INSERT/UPDATE/DELETE; `stmt:get(...)` returns the
 first row (or `NULL`); `stmt:all(...)` returns the full result set as
 an array of objects keyed by column name.

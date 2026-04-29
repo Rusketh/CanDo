@@ -81,6 +81,54 @@ s:finalize();
 my:close();
 ```
 
+## Manual SQL building -- `db:escape` / `db:escapeIdentifier`
+
+Prepared statements are always preferable -- the bind path keeps
+values out of the parser entirely.  When you have to build SQL by
+hand (dynamic identifiers, IN-list builders, dialect-specific syntax
+that doesn't take placeholders) the module exposes engine-aware
+escape helpers:
+
+```cando
+VAR table = db:escapeIdentifier("user_profiles");
+//            -> "user_profiles" (PG) or `user_profiles` (MySQL)
+
+VAR who   = db:escape("o'brien");
+//            -> E'o''brien' (PG) or 'o\'brien' (MySQL)
+
+db:exec(`SELECT * FROM ${table} WHERE name = ${who}`);
+```
+
+`db:escape(value)` accepts:
+
+| Cando value      | PostgreSQL output     | MySQL output    |
+|---|---|---|
+| `NULL`           | `NULL`                | `NULL`          |
+| `TRUE` / `FALSE` | `TRUE` / `FALSE`      | `1` / `0`       |
+| number           | decimal text          | decimal text    |
+| string           | `E'...'` (`'` and `\` doubled, control chars expanded) | `'...'` (backslash escapes) |
+| anything else    | error                 | error           |
+
+`db:escapeIdentifier(name)` always wraps the name in `"..."` (PG) or
+`` `...` `` (MySQL) and doubles the closing-quote character.
+
+Strings containing a NUL byte (`\0`) cannot be embedded as a text
+literal under PostgreSQL — `db:escape` throws SQLSTATE `22021` so
+the caller can switch to a `bytea` bind instead.
+
+## Native `$N` placeholders
+
+PostgreSQL's spec-mandated `$1, $2, ...` placeholder syntax also
+works unchanged for scripts that prefer it over `?`:
+
+```cando
+VAR s = pg:prepare("SELECT id FROM users WHERE name = $1 AND active = $2");
+s:all("Ada", TRUE);
+```
+
+The `?` translator only rewrites placeholders that aren't already
+quoted; native `$N` tokens are left intact.
+
 ## Threading model
 
 Each connection has an internal mutex; methods serialise their wire
@@ -149,6 +197,8 @@ VAR n = await report;
 | `db:transaction(fn[, ...args])`           | `fn`'s return value   | `BEGIN`, run `fn(...args)`, then `COMMIT`.  Rolls back and re-throws on error.  Nests via `SAVEPOINT`. |
 | `db:bigintMode("number" | "string")`      | active mode           | Default is `"number"` (lossy past 2^53). `"string"` returns INTEGER overflows as decimal strings. |
 | `db:ping()`                               | `TRUE`                | Issues `SELECT 1` and throws if the connection is broken. |
+| `db:escape(value)`                        | quoted string literal | Escape a value for inline SQL (manual query building).  Driver-aware: PG uses `E'...'`, MySQL uses backslash escapes. |
+| `db:escapeIdentifier(name)`               | quoted identifier     | Escape a column / table / schema name.  PG uses `"..."`; MySQL uses `` `...` ``. |
 
 ### Statement handle (`stmt`)
 

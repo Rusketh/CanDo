@@ -31,6 +31,15 @@ print("-------------------------------");
 expect("method: open",         type(sql.open)  == "number");
 expect("method: close",        type(sql.close) == "number");
 expect("method: exec",         type(sql.exec)  == "number");
+expect("method: escape",            type(sql.escape)            == "number");
+expect("method: escapeIdentifier",  type(sql.escapeIdentifier)  == "number");
+
+// Escape helpers are static; verify them before opening any handle.
+expect("escape(\"o'brien\")",  sql.escape("o'brien") == "'o''brien'");
+expect("escape(NULL)",         sql.escape(NULL)     == "NULL");
+expect("escape(TRUE)",         sql.escape(TRUE)     == "1");
+expect("escape(42)",           sql.escape(42)       == "42");
+expect("escapeIdentifier",     sql.escapeIdentifier("we\"ird") == "\"we\"\"ird\"");
 
 expect("VERSION is a string",        type(sql.VERSION)        == "string");
 expect("SQLITE_VERSION is a string", type(sql.SQLITE_VERSION) == "string");

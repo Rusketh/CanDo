@@ -38,6 +38,7 @@
 #include "sql_driver.h"
 #include "sql_pg.h"
 #include "sql_mysql.h"
+#include "sql_escape.h"
 
 #include <math.h>
 #include <stdarg.h>
@@ -1374,6 +1375,127 @@ static int native_sql_ping(CandoVM *vm, int argc, CandoValue *args)
 }
 
 /* =========================================================================
+ * escape(value) / escapeIdentifier(name)
+ *
+ * For safe construction of SQL strings when prepared-statement binding
+ * isn't an option (dynamic identifiers, IN-list builders, dialect-specific
+ * syntax that doesn't accept placeholders).  Both functions are
+ * driver-aware: the PostgreSQL driver uses E'...' escape strings and
+ * "..." identifiers; MySQL uses '...' with backslash escapes and
+ * `...` identifiers.
+ *
+ * Accepted value kinds and their result:
+ *     null     -> "NULL"
+ *     bool     -> "TRUE" / "FALSE" (PG) or "1" / "0" (MySQL)
+ *     number   -> stringified (no quotes, no locale)
+ *     string   -> quoted literal in the engine's syntax
+ *     anything else -> error
+ * ===================================================================== */
+
+/* Helper: emit a number as a safe SQL literal.  Uses %.17g for floats
+ * (round-trip safe) and %lld for whole values within the safe range. */
+static char *escape_number(double d)
+{
+    char buf[48];
+    int n;
+    if (isfinite(d) && d == (double)(int64_t)d
+        && d >= -INTEGER_SAFE_MAX && d <= INTEGER_SAFE_MAX) {
+        n = snprintf(buf, sizeof(buf), "%lld", (long long)d);
+    } else if (!isfinite(d)) {
+        /* NaN / inf -- not valid SQL.  Stringify and let the server
+         * reject the query rather than silently succeed. */
+        n = snprintf(buf, sizeof(buf), "'NaN'::float");
+        if (d > 0)            n = snprintf(buf, sizeof(buf), "'Infinity'::float");
+        else if (d < 0)       n = snprintf(buf, sizeof(buf), "'-Infinity'::float");
+    } else {
+        n = snprintf(buf, sizeof(buf), "%.17g", d);
+    }
+    if (n < 0) return NULL;
+    char *s = (char *)malloc((size_t)n + 1);
+    if (!s) return NULL;
+    memcpy(s, buf, (size_t)n + 1);
+    return s;
+}
+
+static int native_sql_escape(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2) {
+        sql_throw(vm, 0, "", "sql.escape: (db, value) required");
+        return -1;
+    }
+    SqlSlot *slot = db_handle_unwrap(vm, args[0]);
+    if (!slot) return -1;
+    CandoValue v = args[1];
+    char *out = NULL;
+
+    if (cando_is_null(v)) {
+        out = strdup("NULL");
+    } else if (cando_is_bool(v)) {
+        if (slot->driver == SQL_DRIVER_POSTGRES) {
+            out = strdup(v.as.boolean ? "TRUE" : "FALSE");
+        } else {
+            out = strdup(v.as.boolean ? "1" : "0");
+        }
+    } else if (cando_is_number(v)) {
+        out = escape_number(v.as.number);
+    } else if (cando_is_string(v)) {
+        const char *s = v.as.string->data;
+        size_t       n = v.as.string->length;
+        if (slot->driver == SQL_DRIVER_POSTGRES)
+            out = sql_escape_pg_literal(s, n);
+        else
+            out = sql_escape_my_literal(s, n);
+        if (!out) {
+            sql_throw(vm, 0, "22021",
+                "sql.escape: input contains a NUL byte (PostgreSQL "
+                "text literals cannot carry one -- bind as bytea instead)");
+            return -1;
+        }
+    } else {
+        sql_throw(vm, 0, "",
+            "sql.escape: unsupported value type "
+            "(expected null, bool, number, or string)");
+        return -1;
+    }
+
+    if (!out) {
+        sql_throw(vm, 0, "HY001", "sql.escape: out of memory");
+        return -1;
+    }
+    libutil_push_cstr(vm, out);
+    free(out);
+    return 1;
+}
+
+static int native_sql_escape_identifier(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2) {
+        sql_throw(vm, 0, "", "sql.escapeIdentifier: (db, name) required");
+        return -1;
+    }
+    SqlSlot *slot = db_handle_unwrap(vm, args[0]);
+    if (!slot) return -1;
+    const char *s = libutil_arg_cstr_at(args, argc, 1);
+    if (!s) {
+        sql_throw(vm, 0, "",
+            "sql.escapeIdentifier: name must be a string");
+        return -1;
+    }
+    size_t n = args[1].as.string->length;
+    char *out = (slot->driver == SQL_DRIVER_POSTGRES)
+              ? sql_escape_pg_identifier(s, n)
+              : sql_escape_my_identifier(s, n);
+    if (!out) {
+        sql_throw(vm, 0, "22021",
+            "sql.escapeIdentifier: name contains a NUL byte");
+        return -1;
+    }
+    libutil_push_cstr(vm, out);
+    free(out);
+    return 1;
+}
+
+/* =========================================================================
  * Module init
  * ===================================================================== */
 
@@ -1409,6 +1531,8 @@ CandoValue cando_module_init(CandoVM *vm)
     register_method(vm, obj, "transaction",   native_sql_transaction,   METHOD_ON_DB);
     register_method(vm, obj, "bigintMode",    native_sql_bigint_mode,   METHOD_ON_DB);
     register_method(vm, obj, "ping",          native_sql_ping,          METHOD_ON_DB);
+    register_method(vm, obj, "escape",         native_sql_escape,         METHOD_ON_DB);
+    register_method(vm, obj, "escapeIdentifier", native_sql_escape_identifier, METHOD_ON_DB);
 
     /* Statement-handle methods. */
     register_method(vm, obj, "run",      native_sql_run,      METHOD_ON_STMT);

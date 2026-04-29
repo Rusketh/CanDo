@@ -33,4 +33,13 @@ IF type(sql.SQLITE_VERSION) != "string" {
 }
 print(`smoke: SQLITE_VERSION = ${sql.SQLITE_VERSION}`);
 
+IF type(sql.escape) != "number" OR type(sql.escapeIdentifier) != "number" {
+    print("smoke: escape helpers missing");
+    os.exit(1);
+}
+IF sql.escape("o'brien") != "'o''brien'" {
+    print(`smoke: escape produced unexpected output: ${sql.escape("o'brien")}`);
+    os.exit(1);
+}
+
 print("OK");

@@ -2159,6 +2159,90 @@ static int native_sqlite_backup(CandoVM *vm, int argc, CandoValue *args)
 }
 
 /* =========================================================================
+ * escape(value) / escapeIdentifier(name)
+ *
+ * Manual SQL building -- prefer prepared statements when you can,
+ * but for dynamic identifiers and IN-list builders these helpers
+ * produce safely-quoted SQLite literals using the same single-quote-
+ * doubling rules as `sqlite3_mprintf("%Q", ...)`.
+ * ===================================================================== */
+
+static int native_sqlite_escape(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.escape: (value) required");
+        return -1;
+    }
+    CandoValue v = args[0];
+    char buf[48];
+
+    if (cando_is_null(v)) {
+        libutil_push_cstr(vm, "NULL");
+        return 1;
+    }
+    if (cando_is_bool(v)) {
+        libutil_push_cstr(vm, v.as.boolean ? "1" : "0");
+        return 1;
+    }
+    if (cando_is_number(v)) {
+        f64 d = v.as.number;
+        int n;
+        if (isfinite(d) && d == (f64)(sqlite3_int64)d
+            && fabs(d) <= INTEGER_SAFE_MAX) {
+            n = snprintf(buf, sizeof(buf), "%lld", (long long)d);
+        } else {
+            n = snprintf(buf, sizeof(buf), "%.17g", d);
+        }
+        libutil_push_str(vm, buf, (u32)n);
+        return 1;
+    }
+    if (cando_is_string(v)) {
+        const char *s = v.as.string->data;
+        u32         n = v.as.string->length;
+        /* sqlite3_mprintf("%Q", ...) handles NULL specially and
+         * doubles `'`.  Use it directly so the output matches what
+         * SQLite itself would produce. */
+        char *out = sqlite3_mprintf("%.*Q", (int)n, s);
+        if (!out) {
+            sqlite_throw(vm, NULL, 0, "sqlite.escape: out of memory");
+            return -1;
+        }
+        libutil_push_cstr(vm, out);
+        sqlite3_free(out);
+        return 1;
+    }
+    sqlite_throw(vm, NULL, 0,
+        "sqlite.escape: unsupported value type "
+        "(expected null, bool, number, or string)");
+    return -1;
+}
+
+static int native_sqlite_escape_identifier(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.escapeIdentifier: (name) required");
+        return -1;
+    }
+    const char *s = libutil_arg_cstr_at(args, argc, 0);
+    if (!s) {
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.escapeIdentifier: name must be a string");
+        return -1;
+    }
+    /* sqlite3_mprintf("%w", ...) doubles embedded `"` characters --
+     * exactly the identifier-quoting rule we need. */
+    char *out = sqlite3_mprintf("\"%w\"", s);
+    if (!out) {
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.escapeIdentifier: out of memory");
+        return -1;
+    }
+    libutil_push_cstr(vm, out);
+    sqlite3_free(out);
+    return 1;
+}
+
+/* =========================================================================
  * Module init
  * ======================================================================= */
 
@@ -2178,6 +2262,13 @@ CandoValue cando_module_init(CandoVM *vm)
     /* `open` lives only on the module -- there's no handle to attach
      * it to, since the caller is creating one. */
     register_method(vm, obj, "open",          native_sqlite_open,
+                    METHOD_MODULE_ONLY);
+
+    /* Module-level escape helpers (no handle needed -- SQLite has one
+     * dialect, no driver dispatch required). */
+    register_method(vm, obj, "escape",            native_sqlite_escape,
+                    METHOD_MODULE_ONLY);
+    register_method(vm, obj, "escapeIdentifier",  native_sqlite_escape_identifier,
                     METHOD_MODULE_ONLY);
 
     /* db handle methods: callable as both `sql.close(db)` and `db:close()`. */
