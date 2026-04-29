@@ -3,3 +3,5 @@ window.dylib
 window.dll
 window.lib
 test_window
+vendor/glfw/libglfw.a
+vendor/glfw/src/*.o
