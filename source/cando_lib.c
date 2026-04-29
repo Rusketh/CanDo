@@ -46,6 +46,7 @@
 #include "lib/include.h"
 #include "lib/json.h"
 #include "lib/csv.h"
+#include "lib/yaml.h"
 #include "lib/thread.h"
 #include "lib/os.h"
 #include "lib/app.h"
@@ -174,6 +175,7 @@ CANDO_API void cando_openlibs(CandoVM *vm)
     cando_lib_include_register(vm);
     cando_lib_json_register(vm);
     cando_lib_csv_register(vm);
+    cando_lib_yaml_register(vm);
     cando_lib_thread_register(vm);
     cando_lib_os_register(vm);
     cando_lib_app_register(vm);
@@ -205,6 +207,7 @@ CANDO_API void cando_open_arraylib(CandoVM *vm)    { cando_lib_array_register(vm
 CANDO_API void cando_open_objectlib(CandoVM *vm)   { cando_lib_object_register(vm);   }
 CANDO_API void cando_open_jsonlib(CandoVM *vm)     { cando_lib_json_register(vm);     }
 CANDO_API void cando_open_csvlib(CandoVM *vm)      { cando_lib_csv_register(vm);      }
+CANDO_API void cando_open_yamllib(CandoVM *vm)     { cando_lib_yaml_register(vm);     }
 CANDO_API void cando_open_threadlib(CandoVM *vm)   { cando_lib_thread_register(vm);   }
 CANDO_API void cando_open_oslib(CandoVM *vm)       { cando_lib_os_register(vm);       }
 CANDO_API void cando_open_datetimelib(CandoVM *vm) { cando_lib_datetime_register(vm); }

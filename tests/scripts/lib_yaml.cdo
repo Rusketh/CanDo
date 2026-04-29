@@ -1,0 +1,135 @@
+/* lib_yaml.cdo -- Integration tests for the yaml standard library.
+ *
+ * Each test prints a labelled result to stdout.  Expected output is
+ * registered in tests/integration/run_tests.sh.
+ *
+ * Note: cdo string literals do not process backslash escapes, so YAML
+ * source strings use real (multi-line) text in single- and double-quoted
+ * cdo strings.
+ */
+
+/* ----- yaml.parse: scalar typing ----------------------------------------- */
+print(yaml.parse("42"));            /* 42         */
+print(yaml.parse("3.5"));           /* 3.5        */
+print(yaml.parse("true"));          /* true       */
+print(yaml.parse("false"));         /* false      */
+print(yaml.parse("null"));          /* null       */
+print(yaml.parse("~"));             /* null       */
+print(yaml.parse("yes"));           /* true       */
+print(yaml.parse("NO"));            /* false      */
+print(yaml.parse("hello"));         /* hello      */
+print(yaml.parse("'42'"));          /* 42 (string, but printed without quotes) */
+
+/* ----- yaml.parse: block mapping ----------------------------------------- */
+var m = yaml.parse("name: Alice
+age: 30
+admin: true
+");
+print(m.name);                      /* Alice      */
+print(m.age);                       /* 30         */
+print(m.admin);                     /* true       */
+
+/* ----- yaml.parse: block sequence ---------------------------------------- */
+var s = yaml.parse("- one
+- 2
+- true
+- null
+");
+print(s[0]);                        /* one        */
+print(s[1]);                        /* 2          */
+print(s[2]);                        /* true       */
+print(s[3]);                        /* null       */
+
+/* ----- yaml.parse: nested ------------------------------------------------ */
+var nested = yaml.parse("config:
+  host: localhost
+  port: 8080
+  flags:
+    - debug
+    - verbose
+");
+print(nested.config.host);          /* localhost  */
+print(nested.config.port);          /* 8080       */
+print(nested.config.flags[0]);      /* debug      */
+print(nested.config.flags[1]);      /* verbose    */
+
+/* ----- yaml.parse: sequence of mappings ---------------------------------- */
+var people = yaml.parse("- name: alice
+  age: 30
+- name: bob
+  age: 25
+");
+print(people[0].name);              /* alice      */
+print(people[0].age);               /* 30         */
+print(people[1].name);              /* bob        */
+print(people[1].age);               /* 25         */
+
+/* ----- yaml.parse: flow style -------------------------------------------- */
+var flow = yaml.parse("nums: [1, 2, 3]
+obj: {a: 1, b: hello, c: true}
+");
+print(flow.nums[0]);                /* 1          */
+print(flow.nums[2]);                /* 3          */
+print(flow.obj.a);                  /* 1          */
+print(flow.obj.b);                  /* hello      */
+print(flow.obj.c);                  /* true       */
+
+/* ----- yaml.parse: literal block scalar (multi-line string preserved) ---- */
+var lit = yaml.parse("text: |
+  hello
+  world
+");
+print(lit.text:length());           /* 12 (hello\nworld\n) */
+
+/* ----- yaml.parse: folded block scalar ----------------------------------- */
+var fold = yaml.parse("text: >
+  one two
+  three
+");
+print(fold.text:length());          /* 14 (one two three\n) */
+
+/* ----- yaml.parse: comments stripped ------------------------------------- */
+var c = yaml.parse("# header
+key: value  # inline
+list:
+  - a   # first
+  - b   # second
+");
+print(c.key);                       /* value      */
+print(c.list[0]);                   /* a          */
+print(c.list[1]);                   /* b          */
+
+/* ----- yaml.parse: leading --- separator --------------------------------- */
+var d = yaml.parse("---
+ok: true
+");
+print(d.ok);                        /* true       */
+
+/* ----- yaml.stringify: scalars ------------------------------------------- */
+print(yaml.stringify(42):length());        /* "42\n"    -> 3 */
+print(yaml.stringify(true):length());      /* "true\n"  -> 5 */
+print(yaml.stringify(null):length());      /* "null\n"  -> 5 */
+print(yaml.stringify("true"):length());    /* '"true"\n' -> 7  (quoted) */
+print(yaml.stringify("hello"):length());   /* "hello\n" -> 6 */
+
+/* ----- yaml.stringify round-trip ----------------------------------------- */
+var orig = { name: "Cando", version: 1, tags: ["a", "b"], on: true };
+var text = yaml.stringify(orig);
+var back = yaml.parse(text);
+print(back.name);                   /* Cando      */
+print(back.version);                /* 1          */
+print(back.tags[0]);                /* a          */
+print(back.tags[1]);                /* b          */
+print(back.on);                     /* true       */
+
+/* ----- yaml.stringify: empty containers ---------------------------------- */
+print(yaml.stringify([]):length());        /* "[]\n" -> 3 */
+print(yaml.stringify({}):length());        /* "{}\n" -> 3 */
+
+/* ----- yaml.parse: error path ------------------------------------------- */
+try {
+    yaml.parse("[1, 2");                  /* unterminated flow seq */
+    print("no_error");
+} catch (e) {
+    print("flow_error_caught");
+}

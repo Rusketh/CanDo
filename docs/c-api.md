@@ -59,6 +59,7 @@ void cando_open_arraylib(CandoVM *vm);            /* array prototype       */
 void cando_open_objectlib(CandoVM *vm);           /* object.*              */
 void cando_open_jsonlib(CandoVM *vm);             /* json.*                */
 void cando_open_csvlib(CandoVM *vm);              /* csv.*                 */
+void cando_open_yamllib(CandoVM *vm);             /* yaml.*                */
 void cando_open_threadlib(CandoVM *vm);           /* thread.*              */
 void cando_open_oslib(CandoVM *vm);               /* os.*                  */
 void cando_open_datetimelib(CandoVM *vm);         /* datetime.*            */

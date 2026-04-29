@@ -13,6 +13,7 @@ tests/test_parser
 tests/test_thread
 tests/test_vm
 tests/test_sockutil
+tests/test_yaml
 
 # Library build artifacts (CMake and Makefile)
 build/

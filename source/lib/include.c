@@ -4,10 +4,11 @@
  * include(path)
  *
  *   Loads a script (.cdo), binary extension (.so/.dylib/.dll), JSON
- *   document (.json) or CSV document (.csv) by path.  The first load
- *   executes/parses the module and caches the result; every subsequent
- *   call with the same canonical path returns the cached value without
- *   re-running the loader (Node.js require() semantics).
+ *   document (.json), CSV document (.csv) or YAML document (.yaml/.yml)
+ *   by path.  The first load executes/parses the module and caches the
+ *   result; every subsequent call with the same canonical path returns
+ *   the cached value without re-running the loader (Node.js require()
+ *   semantics).
  *
  * Path resolution
  *   - Absolute paths  ("/…")        → used as-is then canonicalised.
@@ -18,8 +19,8 @@
  *
  * Extension handling
  *   - If the path ends in a recognised extension (.cdo, .so, .dylib,
- *     .dll, .json, .csv) the file is loaded with the matching loader and
- *     a missing file is an error.
+ *     .dll, .json, .csv, .yaml, .yml) the file is loaded with the
+ *     matching loader and a missing file is an error.
  *   - If the path has no extension at all, include() probes the
  *     filesystem in order and uses the first existing match:
  *         <path>.so  →  <path>.dylib  →  <path>.dll  →  <path>.cdo
@@ -33,7 +34,9 @@
  *   .json files are parsed with cando_lib_json_parse_buffer() and the
  *   resulting Cando value is returned.  .csv files are parsed with
  *   cando_lib_csv_parse_buffer() (default comma delimiter, no header
- *   row) and the resulting array of arrays is returned.
+ *   row) and the resulting array of arrays is returned.  .yaml / .yml
+ *   files are parsed with cando_lib_yaml_parse_buffer() and the
+ *   resulting Cando value is returned.
  *
  * Must compile with gcc -std=c11.
  */
@@ -42,6 +45,7 @@
 #include "libutil.h"
 #include "json.h"
 #include "csv.h"
+#include "yaml.h"
 #include "../parser/parser.h"
 #include "../vm/chunk.h"
 
@@ -347,6 +351,7 @@ typedef enum {
     INC_KIND_BINARY,
     INC_KIND_JSON,
     INC_KIND_CSV,
+    INC_KIND_YAML,
 } IncludeKind;
 
 /* Case-sensitive suffix match. */
@@ -365,6 +370,8 @@ static IncludeKind path_kind(const char *p)
     if (ends_with(p, n, ".cdo"))   return INC_KIND_CDO;
     if (ends_with(p, n, ".json"))  return INC_KIND_JSON;
     if (ends_with(p, n, ".csv"))   return INC_KIND_CSV;
+    if (ends_with(p, n, ".yaml"))  return INC_KIND_YAML;
+    if (ends_with(p, n, ".yml"))   return INC_KIND_YAML;
     return INC_KIND_NONE;
 }
 
@@ -441,6 +448,17 @@ static bool load_csv(CandoVM *vm, const char *canonical_path,
     return ok;
 }
 
+static bool load_yaml(CandoVM *vm, const char *canonical_path,
+                      CandoValue *result_out)
+{
+    char  *src = NULL;
+    usize  len = 0;
+    if (!read_whole_file(vm, canonical_path, &src, &len)) return false;
+    bool ok = cando_lib_yaml_parse_buffer(vm, src, len, "include", result_out);
+    cando_free(src);
+    return ok;
+}
+
 static int native_include(CandoVM *vm, int argc, CandoValue *args)
 {
     if (argc < 1 || !cando_is_string(args[0])) {
@@ -503,6 +521,16 @@ static int native_include(CandoVM *vm, int argc, CandoValue *args)
             if (ok) {
                 results = (CandoValue *)cando_alloc(sizeof(CandoValue));
                 results[0]   = csv_res;
+                result_count = 1;
+            }
+            break;
+        }
+        case INC_KIND_YAML: {
+            CandoValue yaml_res = cando_null();
+            ok = load_yaml(vm, canonical, &yaml_res);
+            if (ok) {
+                results = (CandoValue *)cando_alloc(sizeof(CandoValue));
+                results[0]   = yaml_res;
                 result_count = 1;
             }
             break;
