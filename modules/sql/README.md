@@ -64,7 +64,7 @@ pg:exec("INSERT INTO users (name) VALUES ('Ada')");
 
 VAR stmt = pg:prepare("SELECT id, name FROM users WHERE id >= ?");
 VAR rows = stmt:all(1);
-FOR (r IN rows) { print(`${r.id} ${r.name}`); }
+FOR r OF rows { print(`${r.id} ${r.name}`); }
 stmt:finalize();
 
 pg:close();

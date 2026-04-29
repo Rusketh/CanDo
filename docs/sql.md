@@ -77,7 +77,7 @@ insert:finalize();
 
 VAR pick = my:prepare("SELECT id, name FROM users WHERE id >= ? ORDER BY id");
 VAR rows = pick:all(1);
-FOR (r IN rows) { print(r.id + " " + r.name); }
+FOR r OF rows { print(r.id + " " + r.name); }
 pick:finalize();
 ```
 
@@ -247,15 +247,15 @@ one handle per thread and let the server pool concurrent work.
 ```cando
 VAR results = [];
 VAR threads = [];
-FOR (i IN 0..10) {
+FOR i IN 0 -> 10 {
     threads:push(thread {
         VAR conn = sql.openPostgres({ host: "...", ... });
-        VAR row  = conn:prepare("SELECT pg_sleep(1), $1::int AS id"):get(i);
+        VAR row  = conn:prepare("SELECT pg_sleep(1), ?::int AS id"):get(i);
         conn:close();
         return row.id;
     });
 }
-FOR (t IN threads) { results:push(await t); }
+FOR t OF threads { results:push(await t); }
 ```
 
 ## Limitations

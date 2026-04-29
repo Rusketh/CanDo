@@ -39,7 +39,9 @@ expect("escape(\"o'brien\")",  sql.escape("o'brien") == "'o''brien'");
 expect("escape(NULL)",         sql.escape(NULL)     == "NULL");
 expect("escape(TRUE)",         sql.escape(TRUE)     == "1");
 expect("escape(42)",           sql.escape(42)       == "42");
-expect("escapeIdentifier",     sql.escapeIdentifier("we\"ird") == "\"we\"\"ird\"");
+// Cando string literals don't process backslash escapes; backticks
+// give us a way to embed `"` cleanly.
+expect("escapeIdentifier",     sql.escapeIdentifier(`we"ird`) == `"we""ird"`);
 
 expect("VERSION is a string",        type(sql.VERSION)        == "string");
 expect("SQLITE_VERSION is a string", type(sql.SQLITE_VERSION) == "string");

@@ -31,7 +31,7 @@ FUNCTION expect(name, ok) {
 
 FUNCTION env_or(name, def) {
     VAR v = os.getenv(name);
-    IF type(v) != "string" OR v == "" { return def; }
+    IF type(v) != "string" || v == "" { return def; }
     return v;
 }
 
@@ -75,7 +75,7 @@ expect("exec(non-handle) throws", caught != "");
 FUNCTION run_pg_tests() {
     VAR opts = {
         host:     env_or("PG_HOST", "127.0.0.1"),
-        port:     1 * env_or("PG_PORT", "5432"),
+        port:     5432,
         user:     env_or("PG_USER",     "postgres"),
         password: env_or("PG_PASSWORD", "postgres"),
         database: env_or("PG_DATABASE", "postgres"),
@@ -107,7 +107,7 @@ FUNCTION run_pg_tests() {
     expect("postgres: prepare returns object", type(s) == "object");
     VAR rows = s:all(1);
     expect("postgres: all returns array", type(rows) == "array");
-    expect("postgres: all length = 2",     len(rows) == 2);
+    expect("postgres: all length = 2",     #rows == 2);
     expect("postgres: row[0].id = 1",      rows[0].id == 1);
     expect("postgres: row[0].name = Ada",  rows[0].name == "Ada");
     s:finalize();
@@ -149,7 +149,7 @@ run_pg_tests();
 FUNCTION run_my_tests() {
     VAR opts = {
         host:     env_or("MYSQL_HOST", "127.0.0.1"),
-        port:     1 * env_or("MYSQL_PORT", "3306"),
+        port:     3306,
         user:     env_or("MYSQL_USER",     "root"),
         password: env_or("MYSQL_PASSWORD", ""),
         database: env_or("MYSQL_DATABASE", "test"),
@@ -176,7 +176,7 @@ FUNCTION run_my_tests() {
     expect("mysql: prepare returns object", type(s) == "object");
     VAR rows = s:all(1);
     expect("mysql: all returns array", type(rows) == "array");
-    expect("mysql: all length = 2",     len(rows) == 2);
+    expect("mysql: all length = 2",     #rows == 2);
     expect("mysql: row[0].id = 1",      rows[0].id == 1);
     s:finalize();
 
