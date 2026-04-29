@@ -86,7 +86,7 @@
 #  define WM_COND_BROADCAST(c) pthread_cond_broadcast(c)
 #endif
 
-#define WINDOW_MODULE_VERSION "0.0.9"
+#define WINDOW_MODULE_VERSION "0.0.10"
 
 /* =========================================================================
  * obj_set_* helpers (mirrors modules/sqlite).
@@ -1658,6 +1658,84 @@ CandoValue cando_module_init(CandoVM *vm)
 
     libutil_set_method(vm, obj, "create",     native_window_create);
     libutil_set_method(vm, obj, "_managerOk", native_window_manager_ok);
+
+    /* window.keys -- LOVE-style key-code constants.  Keys arrive at
+     * w.keypressed / w.keyreleased as integers; users compare against
+     * `window.keys.escape`, `window.keys.left`, etc. */
+    {
+        CandoValue keys_val = cando_bridge_new_object(vm);
+        CdoObject *keys     = cando_bridge_resolve(vm, keys_val.as.handle);
+
+        /* Letters */
+        for (int c = 0; c < 26; c++) {
+            char name[2] = { (char)('a' + c), '\0' };
+            obj_set_number(keys, name, (f64)(GLFW_KEY_A + c));
+        }
+        /* Digits */
+        for (int d = 0; d < 10; d++) {
+            char name[3] = { '_', (char)('0' + d), '\0' };
+            /* Cando identifiers can't start with a digit, so prefix
+             * digit keys with `_`: window.keys._0 .. window.keys._9. */
+            obj_set_number(keys, name, (f64)(GLFW_KEY_0 + d));
+        }
+        /* Function keys */
+        for (int f = 1; f <= 12; f++) {
+            char name[4]; snprintf(name, sizeof(name), "f%d", f);
+            obj_set_number(keys, name, (f64)(GLFW_KEY_F1 + (f - 1)));
+        }
+        /* Named keys (LOVE love.keyboard.isDown spellings) */
+        obj_set_number(keys, "space",      (f64)GLFW_KEY_SPACE);
+        obj_set_number(keys, "escape",     (f64)GLFW_KEY_ESCAPE);
+        obj_set_number(keys, "return",     (f64)GLFW_KEY_ENTER);
+        obj_set_number(keys, "enter",      (f64)GLFW_KEY_ENTER);
+        obj_set_number(keys, "tab",        (f64)GLFW_KEY_TAB);
+        obj_set_number(keys, "backspace",  (f64)GLFW_KEY_BACKSPACE);
+        obj_set_number(keys, "delete",     (f64)GLFW_KEY_DELETE);
+        obj_set_number(keys, "insert",     (f64)GLFW_KEY_INSERT);
+        obj_set_number(keys, "home",       (f64)GLFW_KEY_HOME);
+        obj_set_number(keys, "end",        (f64)GLFW_KEY_END);
+        obj_set_number(keys, "pageup",     (f64)GLFW_KEY_PAGE_UP);
+        obj_set_number(keys, "pagedown",   (f64)GLFW_KEY_PAGE_DOWN);
+        obj_set_number(keys, "left",       (f64)GLFW_KEY_LEFT);
+        obj_set_number(keys, "right",      (f64)GLFW_KEY_RIGHT);
+        obj_set_number(keys, "up",         (f64)GLFW_KEY_UP);
+        obj_set_number(keys, "down",       (f64)GLFW_KEY_DOWN);
+        obj_set_number(keys, "lshift",     (f64)GLFW_KEY_LEFT_SHIFT);
+        obj_set_number(keys, "rshift",     (f64)GLFW_KEY_RIGHT_SHIFT);
+        obj_set_number(keys, "lctrl",      (f64)GLFW_KEY_LEFT_CONTROL);
+        obj_set_number(keys, "rctrl",      (f64)GLFW_KEY_RIGHT_CONTROL);
+        obj_set_number(keys, "lalt",       (f64)GLFW_KEY_LEFT_ALT);
+        obj_set_number(keys, "ralt",       (f64)GLFW_KEY_RIGHT_ALT);
+        obj_set_number(keys, "lsuper",     (f64)GLFW_KEY_LEFT_SUPER);
+        obj_set_number(keys, "rsuper",     (f64)GLFW_KEY_RIGHT_SUPER);
+        obj_set_number(keys, "capslock",   (f64)GLFW_KEY_CAPS_LOCK);
+        obj_set_number(keys, "minus",      (f64)GLFW_KEY_MINUS);
+        obj_set_number(keys, "equals",     (f64)GLFW_KEY_EQUAL);
+        obj_set_number(keys, "comma",      (f64)GLFW_KEY_COMMA);
+        obj_set_number(keys, "period",     (f64)GLFW_KEY_PERIOD);
+        obj_set_number(keys, "slash",      (f64)GLFW_KEY_SLASH);
+        obj_set_number(keys, "backslash",  (f64)GLFW_KEY_BACKSLASH);
+        obj_set_number(keys, "semicolon",  (f64)GLFW_KEY_SEMICOLON);
+        obj_set_number(keys, "apostrophe", (f64)GLFW_KEY_APOSTROPHE);
+        obj_set_number(keys, "lbracket",   (f64)GLFW_KEY_LEFT_BRACKET);
+        obj_set_number(keys, "rbracket",   (f64)GLFW_KEY_RIGHT_BRACKET);
+
+        CdoString *kkeys = cdo_string_intern("keys", 4);
+        cdo_object_rawset(obj, kkeys, cdo_object_value(keys), FIELD_NONE);
+        cdo_string_release(kkeys);
+    }
+
+    /* window.mouse -- mouse-button constants. */
+    {
+        CandoValue mouse_val = cando_bridge_new_object(vm);
+        CdoObject *mouse     = cando_bridge_resolve(vm, mouse_val.as.handle);
+        obj_set_number(mouse, "left",   (f64)GLFW_MOUSE_BUTTON_LEFT);
+        obj_set_number(mouse, "right",  (f64)GLFW_MOUSE_BUTTON_RIGHT);
+        obj_set_number(mouse, "middle", (f64)GLFW_MOUSE_BUTTON_MIDDLE);
+        CdoString *kmouse = cdo_string_intern("mouse", 5);
+        cdo_object_rawset(obj, kmouse, cdo_object_value(mouse), FIELD_NONE);
+        cdo_string_release(kmouse);
+    }
 
     return tbl;
 }
