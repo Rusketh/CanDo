@@ -245,3 +245,64 @@ jobs:
         with:
           name: vscode-cando-extension
           path: editors/vscode-cando/vscode-cando.vsix
+
+  # ---------------------------------------------------------------------------
+  # Publish release zips
+  #
+  # Runs only on pushes to the trunk branches (skipped for PRs) once both the
+  # Linux and Windows build jobs succeed.  Each platform is published to its
+  # own rolling release ("channel"): the `linux-latest` and `windows-latest`
+  # tags are force-moved to the just-built commit, so users always have a
+  # stable URL for the most recent green build.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish release zips
+    needs: [linux, windows]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cando-linux-x86_64
+          path: cando-linux-x86_64
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cando-windows-x86_64
+          path: cando-windows-x86_64
+
+      - name: Zip platform artifacts
+        run: |
+          set -e
+          (cd cando-linux-x86_64   && zip -r ../cando-linux-x86_64.zip   .)
+          (cd cando-windows-x86_64 && zip -r ../cando-windows-x86_64.zip .)
+          ls -l cando-linux-x86_64.zip cando-windows-x86_64.zip
+
+      - name: Publish Linux release channel
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: linux-latest
+          name: CanDo (Linux, latest)
+          body: |
+            Rolling release of the latest green Linux build.
+            Built from commit ${{ github.sha }} on `${{ github.ref_name }}`.
+          files: cando-linux-x86_64.zip
+          prerelease: true
+          make_latest: false
+
+      - name: Publish Windows release channel
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: windows-latest
+          name: CanDo (Windows, latest)
+          body: |
+            Rolling release of the latest green Windows build.
+            Built from commit ${{ github.sha }} on `${{ github.ref_name }}`.
+          files: cando-windows-x86_64.zip
+          prerelease: true
+          make_latest: false
