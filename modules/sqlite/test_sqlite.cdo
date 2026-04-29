@@ -313,6 +313,154 @@ expect("bigintMode unknown mode throws", caught != "");
 
 pdb:close();
 
+// ===========================================================================
+// Chunk 4: transactions / iterate / pragma / columns / expandedSQL
+// ===========================================================================
+print("");
+print("-- transactions / iterate / pragma --");
+
+VAR tdb = sql.open(":memory:");
+tdb:exec("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
+
+// ---- Module surface
+expect("method: prepare",       type(sql.prepare)       == "number");
+expect("method: begin",         type(sql.begin)         == "number");
+expect("method: commit",        type(sql.commit)        == "number");
+expect("method: rollback",      type(sql.rollback)      == "number");
+expect("method: inTransaction", type(sql.inTransaction) == "number");
+expect("method: transaction",   type(sql.transaction)   == "number");
+expect("method: pragma",        type(sql.pragma)        == "number");
+expect("method: expandedSQL",   type(sql.expandedSQL)   == "number");
+expect("method: columns",       type(sql.columns)       == "number");
+expect("method: iterate",       type(sql.iterate)       == "number");
+expect("method: next",          type(sql.next)          == "number");
+
+// ---- begin / commit / rollback
+expect("inTransaction false at start", tdb:inTransaction() == FALSE);
+tdb:begin();
+expect("inTransaction true after begin", tdb:inTransaction() == TRUE);
+tdb:exec("INSERT INTO t (id, name) VALUES (1, 'A')");
+tdb:commit();
+expect("inTransaction false after commit", tdb:inTransaction() == FALSE);
+
+VAR cnt = tdb:prepare("SELECT count(*) AS n FROM t");
+expect("commit persisted",  cnt:get().n == 1);
+
+tdb:begin();
+tdb:exec("INSERT INTO t (id, name) VALUES (2, 'B')");
+tdb:rollback();
+expect("rollback discarded",  cnt:get().n == 1);
+
+// nested savepoints
+tdb:begin();
+tdb:exec("INSERT INTO t (id, name) VALUES (2, 'B')");
+tdb:begin();
+tdb:exec("INSERT INTO t (id, name) VALUES (3, 'C')");
+tdb:rollback();
+// outer remains, inner gone
+expect("nested rollback drops only inner", cnt:get().n == 2);
+tdb:commit();
+expect("after outer commit count == 2", cnt:get().n == 2);
+cnt:finalize();
+
+// errors
+VAR caught_t = "";
+TRY { tdb:commit(); } CATCH (m) { caught_t = m; }
+expect("commit without begin throws", caught_t != "");
+
+caught_t = "";
+TRY { tdb:rollback(); } CATCH (m) { caught_t = m; }
+expect("rollback without begin throws", caught_t != "");
+
+// ---- transaction(fn) helper: rollback-on-throw, return-value passthrough
+VAR txr = tdb:transaction(FUNCTION(name) {
+    tdb:exec("INSERT INTO t (id, name) VALUES (10, 'X')");
+    return 99;
+}, "ignored");
+expect("transaction(fn) returns fn's return value", txr == 99);
+expect("transaction(fn) committed",
+    tdb:prepare("SELECT count(*) AS n FROM t WHERE id = 10"):get().n == 1);
+
+caught_t = "";
+TRY {
+    tdb:transaction(FUNCTION() {
+        tdb:exec("INSERT INTO t (id, name) VALUES (11, 'Y')");
+        throw "boom";
+    });
+} CATCH (m) { caught_t = m; }
+expect("transaction(fn) rolls back on throw", caught_t == "boom");
+expect("transaction(fn) rollback discarded the row",
+    tdb:prepare("SELECT count(*) AS n FROM t WHERE id = 11"):get().n == 0);
+expect("transaction(fn) cleared inTransaction flag",
+    tdb:inTransaction() == FALSE);
+
+// ---- pragma reads + writes
+VAR pj = tdb:pragma("journal_mode");
+expect("pragma returns array",            type(pj) == "object");
+expect("pragma returned 1+ row(s)",       pj:length() >= 1);
+expect("pragma row has journal_mode key", type(pj[0].journal_mode) == "string");
+
+VAR pfk = tdb:pragma("foreign_keys");
+expect("foreign_keys query returned",  pfk:length() == 1);
+
+// setter: numeric
+tdb:pragma("cache_size", 2000);
+VAR cs = tdb:pragma("cache_size");
+expect("pragma setter applied",  cs[0].cache_size == 2000);
+
+// setter: bool
+tdb:pragma("foreign_keys", FALSE);
+expect("pragma bool setter",  tdb:pragma("foreign_keys")[0].foreign_keys == 0);
+
+// setter: bad name
+caught_t = "";
+TRY { tdb:pragma("bad name"); } CATCH (m) { caught_t = m; }
+expect("pragma rejects unsafe name", caught_t != "");
+
+// ---- expandedSQL + columns
+VAR es = tdb:prepare("SELECT id, name FROM t WHERE id = ?");
+es:bind([1]);
+VAR esql = es:expandedSQL();
+expect("expandedSQL returns string", type(esql) == "string");
+expect("expandedSQL includes the bound 1",
+    esql:find("1") != NULL || esql:find("WHERE id = 1") != NULL);
+
+VAR cols = es:columns();
+expect("columns returns array",       type(cols) == "object");
+expect("columns has 2 entries",       cols:length() == 2);
+expect("columns[0].name == 'id'",     cols[0].name   == "id");
+expect("columns[0].column == 'id'",   cols[0].column == "id");
+expect("columns[0].table == 't'",     cols[0].table  == "t");
+expect("columns[1].name == 'name'",   cols[1].name   == "name");
+es:finalize();
+
+// ---- iterate: stream rows one at a time
+tdb:exec("INSERT INTO t (id, name) VALUES (4, 'D')");
+tdb:exec("INSERT INTO t (id, name) VALUES (5, 'E')");
+
+VAR ist = tdb:prepare("SELECT id, name FROM t ORDER BY id");
+VAR it  = ist:iterate();
+expect("iterate returns object",  type(it) == "object");
+expect("it.done = FALSE initially", it.done == FALSE);
+
+VAR seen = 0;
+VAR last = NULL;
+WHILE TRUE {
+    VAR r = it:next();
+    IF r == NULL { break; }
+    seen = seen + 1;
+    last = r;
+}
+expect("iterate visited every row",  seen >= 4);
+expect("last row is 'X' (id=10)",    last.name == "X");
+expect("it.done = TRUE at end",      it.done == TRUE);
+
+// next() after done returns null
+expect("next() after done is NULL",  it:next() == NULL);
+ist:finalize();
+
+tdb:close();
+
 // ---- Summary --------------------------------------------------------------
 print("");
 print(`pass: ${pass}    fail: ${fail}`);

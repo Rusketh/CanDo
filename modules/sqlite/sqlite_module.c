@@ -71,7 +71,7 @@
 #include "vendor/sqlite3.h"
 #include "sqlite_helpers.h"
 
-#define SQLITE_MODULE_VERSION "0.3.0"
+#define SQLITE_MODULE_VERSION "0.4.0"
 
 /* =========================================================================
  * Connection pool
@@ -90,6 +90,7 @@ typedef struct SqliteSlot {
     sqlite3 *db;
     bool     in_use;
     bool     bigint_string;  /* true => return INTEGERs > 2^53 as decimal strings */
+    int      tx_depth;       /* 0 = none; 1 = BEGIN; >1 = SAVEPOINT cdo_sp_N */
 } SqliteSlot;
 
 #define SQLITE_MAX_STMTS    1024
@@ -118,6 +119,7 @@ static void ensure_pool_inited(void)
             g_db_pool[i].db            = NULL;
             g_db_pool[i].in_use        = false;
             g_db_pool[i].bigint_string = false;
+            g_db_pool[i].tx_depth      = 0;
         }
         for (int i = 0; i < SQLITE_MAX_STMTS; i++) {
             g_stmt_pool[i].st      = NULL;
@@ -158,6 +160,7 @@ static void db_pool_release(int idx)
     g_db_pool[idx].db            = NULL;
     g_db_pool[idx].in_use        = false;
     g_db_pool[idx].bigint_string = false;
+    g_db_pool[idx].tx_depth      = 0;
     SQLITE_MUTEX_UNLOCK(&g_db_pool_mutex);
 }
 
@@ -306,6 +309,13 @@ static void obj_set_number(CdoObject *obj, const char *key, f64 value)
     cdo_string_release(k);
 }
 
+static void obj_set_bool_field(CdoObject *obj, const char *key, bool value)
+{
+    CdoString *k = cdo_string_intern(key, (u32)strlen(key));
+    cdo_object_rawset(obj, k, cdo_bool(value), FIELD_NONE);
+    cdo_string_release(k);
+}
+
 /* =========================================================================
  * Method sentinel registry
  *
@@ -320,6 +330,7 @@ typedef enum {
     METHOD_MODULE_ONLY = 0,
     METHOD_ON_DB       = 1,
     METHOD_ON_STMT     = 2,
+    METHOD_ON_ITER     = 3,
 } MethodTarget;
 
 typedef struct MethodEntry {
@@ -1111,6 +1122,494 @@ static int native_sqlite_exec(CandoVM *vm, int argc, CandoValue *args)
 }
 
 /* =========================================================================
+ * native_sqlite_expanded_sql(stmt) -> string
+ *
+ * Returns the prepared SQL with currently-bound parameters substituted
+ * (sqlite3_expanded_sql).  Useful for logging.
+ * ======================================================================= */
+
+static int native_sqlite_expanded_sql(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.expandedSQL: (stmt) required");
+        return -1;
+    }
+    sqlite3 *db = NULL;
+    SqliteStmtSlot *s = stmt_handle_unwrap(vm, args[0], &db);
+    if (!s) return -1;
+    char *out = sqlite3_expanded_sql(s->st);
+    if (!out) {
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.expandedSQL: out of memory or unbound parameter");
+        return -1;
+    }
+    libutil_push_cstr(vm, out);
+    sqlite3_free(out);
+    return 1;
+}
+
+/* =========================================================================
+ * native_sqlite_columns(stmt) -> [ { name, type, table, column, database }, ... ]
+ *
+ * Each element describes the schema-side origin of a result column when
+ * available (requires SQLITE_ENABLE_COLUMN_METADATA, which our build
+ * enables).  Computed columns and aggregates have null table / column /
+ * database fields.
+ * ======================================================================= */
+
+static int native_sqlite_columns(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.columns: (stmt) required");
+        return -1;
+    }
+    sqlite3 *db = NULL;
+    SqliteStmtSlot *s = stmt_handle_unwrap(vm, args[0], &db);
+    if (!s) return -1;
+
+    int n = sqlite3_column_count(s->st);
+    CandoValue av = cando_bridge_new_array(vm);
+    CdoObject *a  = cando_bridge_resolve(vm, av.as.handle);
+
+    for (int i = 0; i < n; i++) {
+        CandoValue ov = cando_bridge_new_object(vm);
+        CdoObject *o  = cando_bridge_resolve(vm, ov.as.handle);
+
+        const char *name = sqlite3_column_name(s->st, i);
+        if (name) obj_set_string(o, "name", name, (u32)strlen(name));
+
+        const char *decl = sqlite3_column_decltype(s->st, i);
+        if (decl) obj_set_string(o, "type", decl, (u32)strlen(decl));
+
+        const char *tbl  = sqlite3_column_table_name(s->st, i);
+        if (tbl)  obj_set_string(o, "table",   tbl,  (u32)strlen(tbl));
+
+        const char *orig = sqlite3_column_origin_name(s->st, i);
+        if (orig) obj_set_string(o, "column",  orig, (u32)strlen(orig));
+
+        const char *dbn  = sqlite3_column_database_name(s->st, i);
+        if (dbn)  obj_set_string(o, "database", dbn, (u32)strlen(dbn));
+
+        cdo_array_push(a, cando_bridge_to_cdo(vm, ov));
+    }
+    cando_vm_push(vm, av);
+    return 1;
+}
+
+/* =========================================================================
+ * Iterator handle (used by stmt:iterate)
+ *
+ * The iterator borrows the parent stmt slot.  Each :next() call steps
+ * the cursor and returns a row, or NULL when the cursor is exhausted.
+ * The iterator does not finalise the stmt; the caller still owns it.
+ * ======================================================================= */
+
+#define SQLITE_ITER_STMT_KEY "__sqlite_iter_stmt_slot"
+/* Public-facing iterator field: set to TRUE once the cursor is
+ * exhausted (or an error has been thrown).  Inspect with `iter.done`. */
+#define SQLITE_ITER_DONE_KEY "done"
+
+static CandoValue make_iterator(CandoVM *vm, int stmt_slot)
+{
+    CandoValue v   = cando_bridge_new_object(vm);
+    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    obj_set_number(obj, SQLITE_ITER_STMT_KEY, (f64)stmt_slot);
+    obj_set_bool_field(obj, SQLITE_ITER_DONE_KEY, false);
+    attach_methods_for(obj, METHOD_ON_ITER);
+    return v;
+}
+
+static int native_sqlite_iterate(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.iterate: (stmt, params...) required");
+        return -1;
+    }
+    int stmt_slot = stmt_handle_slot(vm, args[0]);
+    sqlite3 *db = NULL;
+    SqliteStmtSlot *s = stmt_handle_unwrap(vm, args[0], &db);
+    if (!s) return -1;
+    if (!bind_params(vm, s->st, argc, args, 1, "sqlite.iterate")) return -1;
+    cando_vm_push(vm, make_iterator(vm, stmt_slot));
+    return 1;
+}
+
+static int native_sqlite_iter_next(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1 || !cando_is_object(args[0])) {
+        sqlite_throw(vm, NULL, 0, "sqlite.next: (iterator) required");
+        return -1;
+    }
+    CdoObject *iobj = cando_bridge_resolve(vm, args[0].as.handle);
+    f64 fslot = -1.0;
+    if (!obj_get_number(iobj, SQLITE_ITER_STMT_KEY, &fslot)) {
+        sqlite_throw(vm, NULL, 0, "sqlite.next: not an iterator handle");
+        return -1;
+    }
+    int slot = (int)fslot;
+    SqliteStmtSlot *s = stmt_pool_get(slot);
+    if (!s || !s->st) {
+        sqlite_throw(vm, NULL, 0, "sqlite.next: parent statement is gone");
+        return -1;
+    }
+    sqlite3 *db = db_pool_get(s->db_slot);
+    if (!db) {
+        sqlite_throw(vm, NULL, 0, "sqlite.next: parent database is closed");
+        return -1;
+    }
+
+    bool done = false;
+    obj_get_bool(iobj, SQLITE_ITER_DONE_KEY, &done);
+    if (done) {
+        cando_vm_push(vm, cando_null());
+        return 1;
+    }
+
+    int rc = sqlite3_step(s->st);
+    if (rc == SQLITE_ROW) {
+        bool bs = g_db_pool[s->db_slot].bigint_string;
+        cando_vm_push(vm, build_row(vm, s->st, bs));
+        return 1;
+    }
+    if (rc == SQLITE_DONE) {
+        sqlite3_reset(s->st);
+        obj_set_bool_field(iobj, SQLITE_ITER_DONE_KEY, true);
+        cando_vm_push(vm, cando_null());
+        return 1;
+    }
+
+    char tmp[480];
+    snprintf(tmp, sizeof(tmp), "%s", sqlite3_errmsg(db));
+    sqlite3_reset(s->st);
+    obj_set_bool_field(iobj, SQLITE_ITER_DONE_KEY, true);
+    sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                 "sqlite.next: %s", tmp);
+    return -1;
+}
+
+/* =========================================================================
+ * Transactions: begin / commit / rollback / inTransaction / transaction
+ *
+ * begin / commit / rollback nest via SAVEPOINT.  The slot's tx_depth
+ * tracks the nesting level so the caller can ROLLBACK the outermost
+ * transaction or just the inner SAVEPOINT.  This mirrors better-sqlite3
+ * semantics; node:sqlite's DatabaseSync exposes the same lower-level
+ * primitives indirectly.
+ * ======================================================================= */
+
+static int native_sqlite_begin(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.begin: (db) required");
+        return -1;
+    }
+    int slot = db_handle_slot(vm, args[0]);
+    sqlite3 *db = db_handle_unwrap(vm, args[0]);
+    if (!db) return -1;
+    int depth = g_db_pool[slot].tx_depth;
+    char buf[64];
+    if (depth == 0) {
+        snprintf(buf, sizeof(buf), "BEGIN");
+    } else {
+        snprintf(buf, sizeof(buf), "SAVEPOINT cdo_sp_%d", depth);
+    }
+    char *err = NULL;
+    int rc = sqlite3_exec(db, buf, NULL, NULL, &err);
+    if (rc != SQLITE_OK) {
+        char tmp[480];
+        snprintf(tmp, sizeof(tmp), "%s", err ? err : sqlite3_errstr(rc));
+        if (err) sqlite3_free(err);
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.begin: %s", tmp);
+        return -1;
+    }
+    if (err) sqlite3_free(err);
+    g_db_pool[slot].tx_depth = depth + 1;
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+static int native_sqlite_commit(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.commit: (db) required");
+        return -1;
+    }
+    int slot = db_handle_slot(vm, args[0]);
+    sqlite3 *db = db_handle_unwrap(vm, args[0]);
+    if (!db) return -1;
+    int depth = g_db_pool[slot].tx_depth;
+    if (depth <= 0) {
+        sqlite_throw(vm, NULL, 0, "sqlite.commit: no active transaction");
+        return -1;
+    }
+    char buf[64];
+    if (depth == 1) {
+        snprintf(buf, sizeof(buf), "COMMIT");
+    } else {
+        snprintf(buf, sizeof(buf), "RELEASE cdo_sp_%d", depth - 1);
+    }
+    char *err = NULL;
+    int rc = sqlite3_exec(db, buf, NULL, NULL, &err);
+    if (rc != SQLITE_OK) {
+        char tmp[480];
+        snprintf(tmp, sizeof(tmp), "%s", err ? err : sqlite3_errstr(rc));
+        if (err) sqlite3_free(err);
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.commit: %s", tmp);
+        return -1;
+    }
+    if (err) sqlite3_free(err);
+    g_db_pool[slot].tx_depth = depth - 1;
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+static int native_sqlite_rollback(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.rollback: (db) required");
+        return -1;
+    }
+    int slot = db_handle_slot(vm, args[0]);
+    sqlite3 *db = db_handle_unwrap(vm, args[0]);
+    if (!db) return -1;
+    int depth = g_db_pool[slot].tx_depth;
+    if (depth <= 0) {
+        sqlite_throw(vm, NULL, 0, "sqlite.rollback: no active transaction");
+        return -1;
+    }
+    char buf[96];
+    if (depth == 1) {
+        snprintf(buf, sizeof(buf), "ROLLBACK");
+    } else {
+        /* Roll the savepoint back AND release it -- otherwise the next
+         * BEGIN/SAVEPOINT call collides with the still-open one and
+         * the depth counter drifts.  This matches the standard
+         * "ROLLBACK TO sp; RELEASE sp" idiom. */
+        snprintf(buf, sizeof(buf),
+                 "ROLLBACK TO cdo_sp_%d; RELEASE cdo_sp_%d",
+                 depth - 1, depth - 1);
+    }
+    char *err = NULL;
+    int rc = sqlite3_exec(db, buf, NULL, NULL, &err);
+    if (rc != SQLITE_OK) {
+        char tmp[480];
+        snprintf(tmp, sizeof(tmp), "%s", err ? err : sqlite3_errstr(rc));
+        if (err) sqlite3_free(err);
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.rollback: %s", tmp);
+        return -1;
+    }
+    if (err) sqlite3_free(err);
+    g_db_pool[slot].tx_depth = depth - 1;
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+static int native_sqlite_in_transaction(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) {
+        sqlite_throw(vm, NULL, 0, "sqlite.inTransaction: (db) required");
+        return -1;
+    }
+    int slot = db_handle_slot(vm, args[0]);
+    if (slot < 0 || !db_pool_get(slot)) {
+        cando_vm_push(vm, cando_bool(false));
+        return 1;
+    }
+    cando_vm_push(vm, cando_bool(g_db_pool[slot].tx_depth > 0));
+    return 1;
+}
+
+/* db:transaction(fn[, ...args]) -> whatever fn returned
+ *
+ * Runs fn(...args) inside BEGIN ... COMMIT.  If fn throws, the
+ * transaction is rolled back and the same throw is re-raised.  Nested
+ * calls use SAVEPOINT.  Differs from node:sqlite's curried form
+ * (`db.transaction(fn)` returns a function); the curried form was
+ * dropped to keep the binding free of script-side closures.  Wrap if
+ * you want the curried sugar:
+ *     FUNCTION wrap(fn) { return FUNCTION (...a) { db:transaction(fn, ...a); }; }
+ */
+static int native_sqlite_transaction(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2) {
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.transaction: (db, fn[, args...]) required");
+        return -1;
+    }
+    int slot = db_handle_slot(vm, args[0]);
+    sqlite3 *db = db_handle_unwrap(vm, args[0]);
+    if (!db) return -1;
+
+    int depth = g_db_pool[slot].tx_depth;
+    char open_sql[64];
+    if (depth == 0) {
+        snprintf(open_sql, sizeof(open_sql), "BEGIN");
+    } else {
+        snprintf(open_sql, sizeof(open_sql), "SAVEPOINT cdo_sp_%d", depth);
+    }
+    int rc = sqlite3_exec(db, open_sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.transaction: %s", sqlite3_errmsg(db));
+        return -1;
+    }
+    g_db_pool[slot].tx_depth = depth + 1;
+
+    /* Invoke the user's function with args[2..argc-1].  Hide the
+     * outer try frames so a throw inside fn cannot be caught above us
+     * before our rollback runs -- the throw must reach OUR frame so
+     * we can roll back and re-raise.  Restored before we return. */
+    u32 saved_try_depth = vm->try_depth;
+    vm->try_depth = 0;
+    int  ret_count = cando_vm_call_value(vm, args[1],
+                                          argc > 2 ? &args[2] : NULL,
+                                          (u32)(argc > 2 ? argc - 2 : 0));
+    vm->try_depth = saved_try_depth;
+
+    /* If the call propagated an error, roll back and bubble. */
+    if (vm->has_error) {
+        char rb_sql[96];
+        if (depth == 0) {
+            snprintf(rb_sql, sizeof(rb_sql), "ROLLBACK");
+        } else {
+            snprintf(rb_sql, sizeof(rb_sql),
+                     "ROLLBACK TO cdo_sp_%d; RELEASE cdo_sp_%d",
+                     depth, depth);
+        }
+        sqlite3_exec(db, rb_sql, NULL, NULL, NULL);
+        g_db_pool[slot].tx_depth = depth;
+        return -1;       /* propagate the existing error */
+    }
+
+    char close_sql[64];
+    if (depth == 0) {
+        snprintf(close_sql, sizeof(close_sql), "COMMIT");
+    } else {
+        snprintf(close_sql, sizeof(close_sql), "RELEASE cdo_sp_%d", depth);
+    }
+    rc = sqlite3_exec(db, close_sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.transaction: commit failed: %s",
+                     sqlite3_errmsg(db));
+        g_db_pool[slot].tx_depth = depth;
+        return -1;
+    }
+    g_db_pool[slot].tx_depth = depth;
+
+    /* Forward the user fn's return values: ret_count are already on
+     * the stack thanks to cando_vm_call_value. */
+    return ret_count;
+}
+
+/* =========================================================================
+ * native_sqlite_pragma(db, name[, value]) -> [row, ...]
+ *
+ * Always returns an array of row objects -- scripts that want the
+ * scalar form do `db:pragma("journal_mode")[0].journal_mode`.  Setter
+ * form `db:pragma("foo", val)` accepts numbers, booleans, and a
+ * restricted subset of strings (alphanumeric / underscore / hyphen)
+ * so the value can be safely interpolated into the PRAGMA statement.
+ * ======================================================================= */
+
+static bool pragma_value_safe(const char *s, size_t n)
+{
+    if (n == 0) return false;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= 'a' && c <= 'z') ||
+              (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') ||
+              c == '_' || c == '-' || c == '.')) return false;
+    }
+    return true;
+}
+
+static int native_sqlite_pragma(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2) {
+        sqlite_throw(vm, NULL, 0, "sqlite.pragma: (db, name[, value]) required");
+        return -1;
+    }
+    sqlite3 *db = db_handle_unwrap(vm, args[0]);
+    if (!db) return -1;
+
+    const char *name = libutil_arg_cstr_at(args, argc, 1);
+    if (!name || !pragma_value_safe(name, strlen(name))) {
+        sqlite_throw(vm, NULL, 0,
+            "sqlite.pragma: name must be alphanumeric / underscore");
+        return -1;
+    }
+    int slot = db_handle_slot(vm, args[0]);
+    bool bigint_string = (slot >= 0) ? g_db_pool[slot].bigint_string : false;
+
+    char sql[256];
+    if (argc >= 3) {
+        /* Setter: PRAGMA <name> = <value> */
+        char value_buf[64];
+        if (cando_is_bool(args[2])) {
+            snprintf(value_buf, sizeof(value_buf),
+                     args[2].as.boolean ? "ON" : "OFF");
+        } else if (cando_is_number(args[2])) {
+            f64 d = args[2].as.number;
+            if (d == (f64)(int64_t)d) {
+                snprintf(value_buf, sizeof(value_buf), "%lld",
+                         (long long)d);
+            } else {
+                snprintf(value_buf, sizeof(value_buf), "%g", d);
+            }
+        } else if (cando_is_string(args[2])) {
+            const char *vs = args[2].as.string->data;
+            size_t      vn = args[2].as.string->length;
+            if (!pragma_value_safe(vs, vn) || vn >= sizeof(value_buf)) {
+                sqlite_throw(vm, NULL, 0,
+                    "sqlite.pragma: value must be alphanumeric / underscore");
+                return -1;
+            }
+            memcpy(value_buf, vs, vn);
+            value_buf[vn] = '\0';
+        } else {
+            sqlite_throw(vm, NULL, 0,
+                "sqlite.pragma: value must be number, bool, or simple string");
+            return -1;
+        }
+        snprintf(sql, sizeof(sql), "PRAGMA %s = %s", name, value_buf);
+    } else {
+        snprintf(sql, sizeof(sql), "PRAGMA %s", name);
+    }
+
+    sqlite3_stmt *st = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &st, NULL);
+    if (rc != SQLITE_OK || !st) {
+        if (st) sqlite3_finalize(st);
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.pragma: %s", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    CandoValue av = cando_bridge_new_array(vm);
+    CdoObject *a  = cando_bridge_resolve(vm, av.as.handle);
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        cdo_array_push(a, cando_bridge_to_cdo(vm,
+            build_row(vm, st, bigint_string)));
+    }
+    if (rc != SQLITE_DONE) {
+        char tmp[480];
+        snprintf(tmp, sizeof(tmp), "%s", sqlite3_errmsg(db));
+        sqlite3_finalize(st);
+        sqlite_throw(vm, db, sqlite3_extended_errcode(db),
+                     "sqlite.pragma: %s", tmp);
+        return -1;
+    }
+    sqlite3_finalize(st);
+    cando_vm_push(vm, av);
+    return 1;
+}
+
+/* =========================================================================
  * Module init
  * ======================================================================= */
 
@@ -1145,12 +1644,27 @@ CandoValue cando_module_init(CandoVM *vm)
                     METHOD_ON_DB);
 
     /* stmt handle methods: callable as `sql.run(stmt, ...)` or `stmt:run(...)`. */
-    register_method(vm, obj, "run",      native_sqlite_run,      METHOD_ON_STMT);
-    register_method(vm, obj, "get",      native_sqlite_get,      METHOD_ON_STMT);
-    register_method(vm, obj, "all",      native_sqlite_all,      METHOD_ON_STMT);
-    register_method(vm, obj, "bind",     native_sqlite_bind,     METHOD_ON_STMT);
-    register_method(vm, obj, "reset",    native_sqlite_reset,    METHOD_ON_STMT);
-    register_method(vm, obj, "finalize", native_sqlite_finalize, METHOD_ON_STMT);
+    register_method(vm, obj, "run",         native_sqlite_run,          METHOD_ON_STMT);
+    register_method(vm, obj, "get",         native_sqlite_get,          METHOD_ON_STMT);
+    register_method(vm, obj, "all",         native_sqlite_all,          METHOD_ON_STMT);
+    register_method(vm, obj, "bind",        native_sqlite_bind,         METHOD_ON_STMT);
+    register_method(vm, obj, "reset",       native_sqlite_reset,        METHOD_ON_STMT);
+    register_method(vm, obj, "finalize",    native_sqlite_finalize,     METHOD_ON_STMT);
+    register_method(vm, obj, "expandedSQL", native_sqlite_expanded_sql, METHOD_ON_STMT);
+    register_method(vm, obj, "columns",     native_sqlite_columns,      METHOD_ON_STMT);
+    register_method(vm, obj, "iterate",     native_sqlite_iterate,      METHOD_ON_STMT);
+
+    /* Iterator handle method.  Only `next` is attached so iter:next()
+     * works; the iterator's `done` field is a plain boolean property. */
+    register_method(vm, obj, "next",        native_sqlite_iter_next,    METHOD_ON_ITER);
+
+    /* Transaction primitives + pragma helper -- on db handles. */
+    register_method(vm, obj, "begin",         native_sqlite_begin,         METHOD_ON_DB);
+    register_method(vm, obj, "commit",        native_sqlite_commit,        METHOD_ON_DB);
+    register_method(vm, obj, "rollback",      native_sqlite_rollback,      METHOD_ON_DB);
+    register_method(vm, obj, "inTransaction", native_sqlite_in_transaction, METHOD_ON_DB);
+    register_method(vm, obj, "transaction",   native_sqlite_transaction,   METHOD_ON_DB);
+    register_method(vm, obj, "pragma",        native_sqlite_pragma,        METHOD_ON_DB);
 
     /* Module-version string. */
     obj_set_string(obj, "VERSION",
