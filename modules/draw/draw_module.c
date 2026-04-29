@@ -45,6 +45,11 @@
 #  define M_PI 3.14159265358979323846
 #endif
 
+/* stb_image -- vendored, header-only.  We instantiate the impl here. */
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_NO_STDIO_HACKS
+#include "stb_image.h"
+
 #if defined(_WIN32) || defined(_WIN64)
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -53,7 +58,7 @@
 #endif
 #include <GL/gl.h>
 
-#define DRAW_MODULE_VERSION "0.1.0"
+#define DRAW_MODULE_VERSION "0.2.0"
 
 /* =========================================================================
  * Module state -- current colour / line width.  Shared by all windows
@@ -347,14 +352,309 @@ static int draw_origin(CandoVM *vm, int argc, CandoValue *args)
 }
 
 /* =========================================================================
+ * Image objects (`draw.newImage` / `_meta.draw_image`).
+ *
+ * Pixel data is decoded by stb_image and uploaded to a GL texture
+ * lazily on the first draw call (must run on the thread that owns
+ * the GL context, i.e. inside w.draw).  The CanDo-side instance
+ * carries `__draw_image_slot` + `__draw_image_gen` so methods can
+ * find their backing struct.
+ * ===================================================================== */
+
+#define DRAW_MAX_IMAGES 256
+
+typedef struct ImageSlot {
+    int           alive;
+    int           generation;
+    unsigned char *pixels;       /* RGBA8 from stb_image, owned        */
+    int           width;
+    int           height;
+    GLuint        texture;       /* 0 until uploaded                   */
+    int           filter_linear; /* 0 = nearest, 1 = linear           */
+    int           uploaded;
+} ImageSlot;
+
+static ImageSlot g_images[DRAW_MAX_IMAGES];
+
+static int img_alloc(void)
+{
+    for (int i = 0; i < DRAW_MAX_IMAGES; i++) {
+        if (!g_images[i].alive) {
+            g_images[i].alive       = 1;
+            g_images[i].generation++;
+            g_images[i].pixels      = NULL;
+            g_images[i].texture     = 0;
+            g_images[i].uploaded    = 0;
+            g_images[i].filter_linear = 1;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void img_release(ImageSlot *s)
+{
+    if (!s || !s->alive) return;
+    if (s->pixels)  { stbi_image_free(s->pixels); s->pixels = NULL; }
+    if (s->texture) { glDeleteTextures(1, &s->texture); s->texture = 0; }
+    s->uploaded = 0;
+    s->alive    = 0;
+}
+
+#define IMAGE_SLOT_KEY "__draw_image_slot"
+#define IMAGE_GEN_KEY  "__draw_image_gen"
+
+static ImageSlot *resolve_image(CandoVM *vm, CandoValue v, const char *fn)
+{
+    if (!cando_is_object(v)) {
+        cando_vm_error(vm, "%s: expected image instance", fn);
+        return NULL;
+    }
+    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    f64 fslot = -1.0, fgen = -1.0;
+    CdoString *kslot = cdo_string_intern(IMAGE_SLOT_KEY,
+                                         (u32)strlen(IMAGE_SLOT_KEY));
+    CdoString *kgen  = cdo_string_intern(IMAGE_GEN_KEY,
+                                         (u32)strlen(IMAGE_GEN_KEY));
+    CdoValue  vv;
+    if (cdo_object_rawget(obj, kslot, &vv) && vv.tag == CDO_NUMBER)
+        fslot = vv.as.number;
+    if (cdo_object_rawget(obj, kgen, &vv) && vv.tag == CDO_NUMBER)
+        fgen = vv.as.number;
+    cdo_string_release(kslot);
+    cdo_string_release(kgen);
+    int idx = (int)fslot;
+    int gen = (int)fgen;
+    if (idx < 0 || idx >= DRAW_MAX_IMAGES) {
+        cando_vm_error(vm, "%s: not an image instance", fn);
+        return NULL;
+    }
+    ImageSlot *s = &g_images[idx];
+    if (!s->alive || s->generation != gen) {
+        cando_vm_error(vm, "%s: image has been released", fn);
+        return NULL;
+    }
+    return s;
+}
+
+static void obj_set_number_local(CdoObject *obj, const char *key, f64 value)
+{
+    CdoString *k = cdo_string_intern(key, (u32)strlen(key));
+    cdo_object_rawset(obj, k, cdo_number(value), FIELD_NONE);
+    cdo_string_release(k);
+}
+
+/* draw.newImage(path) -- decode via stb_image and return an image
+ * instance.  Decoding happens on the calling thread.  The GL upload
+ * is deferred to the first draw.draw() so we don't need a current
+ * context here. */
+static int draw_new_image(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1 || args[0].tag != CDO_STRING || !args[0].as.string) {
+        cando_vm_error(vm, "draw.newImage: (path) required");
+        return -1;
+    }
+    /* Copy path to a NUL-terminated buffer. */
+    u32 plen = args[0].as.string->length;
+    if (plen >= 1024) plen = 1023;
+    char path[1024];
+    memcpy(path, args[0].as.string->data, plen);
+    path[plen] = '\0';
+
+    int w = 0, h = 0, n = 0;
+    unsigned char *pixels = stbi_load(path, &w, &h, &n, 4);
+    if (!pixels) {
+        cando_vm_error(vm, "draw.newImage: %s: %s", path, stbi_failure_reason());
+        return -1;
+    }
+
+    int idx = img_alloc();
+    if (idx < 0) {
+        stbi_image_free(pixels);
+        cando_vm_error(vm, "draw.newImage: too many images (max %d)",
+                       DRAW_MAX_IMAGES);
+        return -1;
+    }
+    g_images[idx].pixels = pixels;
+    g_images[idx].width  = w;
+    g_images[idx].height = h;
+
+    CandoValue inst = cando_bridge_new_object(vm);
+    CdoObject *o    = cando_bridge_resolve(vm, inst.as.handle);
+    obj_set_number_local(o, IMAGE_SLOT_KEY, (f64)idx);
+    obj_set_number_local(o, IMAGE_GEN_KEY,  (f64)g_images[idx].generation);
+    obj_set_number_local(o, "width",  (f64)w);
+    obj_set_number_local(o, "height", (f64)h);
+    cando_lib_meta_attach(vm, o, "draw_image");
+
+    cando_vm_push(vm, inst);
+    return 1;
+}
+
+/* Lazily upload the slot's pixels to a GL texture.  Must be called
+ * from the thread that owns the GL context (inside w.draw). */
+static void img_ensure_uploaded(ImageSlot *s)
+{
+    if (s->uploaded) return;
+    glGenTextures(1, &s->texture);
+    glBindTexture(GL_TEXTURE_2D, s->texture);
+    GLint filt = s->filter_linear ? GL_LINEAR : GL_NEAREST;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filt);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, s->width, s->height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, s->pixels);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    s->uploaded = 1;
+}
+
+/* draw.draw(image, x, y[, r, sx, sy, ox, oy])
+ * Mirrors love.graphics.draw exactly: rotate then scale around (ox, oy)
+ * on the source image, then place at (x, y).  Defaults: r=0, sx=1, sy=sx,
+ * ox=0, oy=0.  Color modulation uses the current draw color. */
+static int draw_draw(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 3) {
+        cando_vm_error(vm, "draw.draw: (image, x, y) required");
+        return -1;
+    }
+    ImageSlot *s = resolve_image(vm, args[0], "draw.draw");
+    if (!s) return -1;
+
+    float x  = (float)argd(args[1], 0.0);
+    float y  = (float)argd(args[2], 0.0);
+    float r  = (float)(argc >= 4 ? argd(args[3], 0.0) : 0.0);
+    float sx = (float)(argc >= 5 ? argd(args[4], 1.0) : 1.0);
+    float sy = (float)(argc >= 6 ? argd(args[5], (double)sx) : (double)sx);
+    float ox = (float)(argc >= 7 ? argd(args[6], 0.0) : 0.0);
+    float oy = (float)(argc >= 8 ? argd(args[7], 0.0) : 0.0);
+
+    img_ensure_uploaded(s);
+
+    glPushMatrix();
+    glTranslatef(x, y, 0.0f);
+    if (r != 0.0f) glRotatef(r * 180.0f / (float)M_PI, 0.0f, 0.0f, 1.0f);
+    if (sx != 1.0f || sy != 1.0f) glScalef(sx, sy, 1.0f);
+    if (ox != 0.0f || oy != 0.0f) glTranslatef(-ox, -oy, 0.0f);
+
+    float w = (float)s->width;
+    float h = (float)s->height;
+
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, s->texture);
+    glColor4f(g_color_r, g_color_g, g_color_b, g_color_a);
+    glBegin(GL_TRIANGLE_STRIP);
+        glTexCoord2f(0.0f, 0.0f); glVertex2f(0.0f, 0.0f);
+        glTexCoord2f(1.0f, 0.0f); glVertex2f(w,    0.0f);
+        glTexCoord2f(0.0f, 1.0f); glVertex2f(0.0f, h);
+        glTexCoord2f(1.0f, 1.0f); glVertex2f(w,    h);
+    glEnd();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
+
+    glPopMatrix();
+
+    cando_vm_push(vm, cando_null());
+    return 1;
+}
+
+/* image:getWidth() / image:getHeight() / image:getDimensions() */
+
+static int image_get_width(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) { cando_vm_error(vm, "image.getWidth: (image) required"); return -1; }
+    ImageSlot *s = resolve_image(vm, args[0], "image.getWidth");
+    if (!s) return -1;
+    cando_vm_push(vm, cando_number((f64)s->width));
+    return 1;
+}
+
+static int image_get_height(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) { cando_vm_error(vm, "image.getHeight: (image) required"); return -1; }
+    ImageSlot *s = resolve_image(vm, args[0], "image.getHeight");
+    if (!s) return -1;
+    cando_vm_push(vm, cando_number((f64)s->height));
+    return 1;
+}
+
+static int image_get_dimensions(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) { cando_vm_error(vm, "image.getDimensions: (image) required"); return -1; }
+    ImageSlot *s = resolve_image(vm, args[0], "image.getDimensions");
+    if (!s) return -1;
+    cando_vm_push(vm, cando_number((f64)s->width));
+    cando_vm_push(vm, cando_number((f64)s->height));
+    return 2;
+}
+
+/* image:setFilter("nearest" | "linear") */
+static int image_set_filter(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2) {
+        cando_vm_error(vm, "image.setFilter: (image, mode) required");
+        return -1;
+    }
+    ImageSlot *s = resolve_image(vm, args[0], "image.setFilter");
+    if (!s) return -1;
+    if (arg_streq(args[1], "linear"))      s->filter_linear = 1;
+    else if (arg_streq(args[1], "nearest")) s->filter_linear = 0;
+    else {
+        cando_vm_error(vm, "image.setFilter: mode must be \"nearest\" or \"linear\"");
+        return -1;
+    }
+    /* If already uploaded, update GL state (deferred until next draw
+     * if no current context). */
+    if (s->uploaded && s->texture) {
+        glBindTexture(GL_TEXTURE_2D, s->texture);
+        GLint filt = s->filter_linear ? GL_LINEAR : GL_NEAREST;
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filt);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+/* image:release() */
+static int image_release(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1) { cando_vm_error(vm, "image.release: (image) required"); return -1; }
+    if (!cando_is_object(args[0])) { cando_vm_push(vm, cando_bool(false)); return 1; }
+    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    f64 fslot = -1.0;
+    CdoString *kslot = cdo_string_intern(IMAGE_SLOT_KEY,
+                                         (u32)strlen(IMAGE_SLOT_KEY));
+    CdoValue v;
+    if (cdo_object_rawget(obj, kslot, &v) && v.tag == CDO_NUMBER)
+        fslot = v.as.number;
+    cdo_string_release(kslot);
+    int idx = (int)fslot;
+    if (idx >= 0 && idx < DRAW_MAX_IMAGES) {
+        img_release(&g_images[idx]);
+    }
+    cando_vm_push(vm, cando_bool(true));
+    return 1;
+}
+
+/* =========================================================================
  * Module entry point.
  * ===================================================================== */
 
 CandoValue cando_module_init(CandoVM *vm)
 {
     cando_lib_meta_register(vm);
-    (void)cando_lib_meta_table(vm, "draw_image");
+    CdoObject *image_meta = cando_lib_meta_table(vm, "draw_image");
     (void)cando_lib_meta_table(vm, "draw_font");
+
+    /* Image instance methods. */
+    cando_lib_meta_define(vm, image_meta, "getWidth",      image_get_width);
+    cando_lib_meta_define(vm, image_meta, "getHeight",     image_get_height);
+    cando_lib_meta_define(vm, image_meta, "getDimensions", image_get_dimensions);
+    cando_lib_meta_define(vm, image_meta, "setFilter",     image_set_filter);
+    cando_lib_meta_define(vm, image_meta, "release",       image_release);
 
     CandoValue tbl = cando_bridge_new_object(vm);
     CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
@@ -383,6 +683,10 @@ CandoValue cando_module_init(CandoVM *vm)
     libutil_set_method(vm, obj, "scale",         draw_scale);
     libutil_set_method(vm, obj, "rotate",        draw_rotate);
     libutil_set_method(vm, obj, "origin",        draw_origin);
+
+    /* Image */
+    libutil_set_method(vm, obj, "newImage",      draw_new_image);
+    libutil_set_method(vm, obj, "draw",          draw_draw);
 
     return tbl;
 }

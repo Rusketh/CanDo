@@ -3,3 +3,4 @@ draw.dylib
 draw.dll
 draw.lib
 test_draw
+*.o
