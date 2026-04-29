@@ -830,13 +830,20 @@ static void mgr_render_frame(void)
         WindowSlot *s = &g_slots[i];
         if (!s->alive || !s->handle) continue;
 
-        /* Note: we deliberately do NOT auto-tear-down on
-         * glfwWindowShouldClose yet.  The close-button -> w.quit ->
-         * w:close() chain is wired up alongside the GLFW input
-         * callbacks in the next chunk.  Keeping this off avoids xvfb
-         * spuriously reporting should-close at startup when there is
-         * no WM to handle WM_PROTOCOLS / WM_DELETE_WINDOW. */
-        glfwSetWindowShouldClose(s->handle, GLFW_FALSE);
+        /* Reap windows whose close button (X / WM_DELETE_WINDOW) was
+         * pressed.  Without this, WM_CLOSE is acknowledged by GLFW but
+         * never acted on, so the OS pump on Windows treats the window
+         * as non-responsive and eventually force-kills the app.  The
+         * spurious should-close that xvfb sets at construction is
+         * cleared once in CMD_CREATE; on a real WM nothing else sets
+         * the flag, so checking it per frame is safe. */
+        if (glfwWindowShouldClose(s->handle)) {
+            if (g_dispatch_vm_inited && s->inst_val_held) {
+                dispatch_call(s, "quit", NULL, 0);
+            }
+            slot_teardown(s);
+            continue;
+        }
 
         double dt = (s->last_frame_time > 0.0)
                     ? (now - s->last_frame_time)
