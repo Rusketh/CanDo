@@ -193,6 +193,26 @@ CANDO_API int cando_dofile(CandoVM *vm, const char *path);
 CANDO_API int cando_dostring(CandoVM *vm, const char *src, const char *name);
 
 /**
+ * cando_set_args — expose command-line arguments to the script.
+ *
+ * Registers a global named `args` containing an array of strings.  By
+ * convention `argv` is the list of arguments passed to the script (the
+ * caller decides whether to include the script path itself); the strings
+ * are copied, so the source buffer may be freed or reused after this call.
+ *
+ * The global is registered with const semantics — scripts cannot rebind
+ * `args` to a different value.  Calling cando_set_args() more than once
+ * on the same VM is a no-op after the first call.
+ *
+ * Typical usage from a host:
+ *   cando_set_args(vm, argc - 2, (const char *const *)&argv[2]);
+ *
+ * From inside a script:
+ *   IF args.length() > 0 { print(args[0]); }
+ */
+CANDO_API void cando_set_args(CandoVM *vm, int argc, const char *const *argv);
+
+/**
  * cando_loadstring — compile a source string without executing it.
  *
  * On success stores the compiled CandoChunk* in *chunk_out and returns

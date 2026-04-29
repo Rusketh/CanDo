@@ -29,10 +29,13 @@
 #include "core/common.h"
 #include "core/thread_platform.h"
 #include "vm/vm.h"
+#include "vm/bridge.h"
 #include "vm/chunk.h"
 #include "vm/debug.h"
 #include "parser/parser.h"
 #include "object/object.h"
+#include "object/array.h"
+#include "object/string.h"
 #include "natives.h"
 
 /* Library registration headers */
@@ -328,6 +331,27 @@ CANDO_API int cando_loadstring(CandoVM *vm, const char *src, const char *name,
                                 CandoChunk **chunk_out)
 {
     return compile_source(vm, src, strlen(src), name, chunk_out);
+}
+
+/* =========================================================================
+ * Command-line arguments
+ * ====================================================================== */
+
+CANDO_API void cando_set_args(CandoVM *vm, int argc, const char *const *argv)
+{
+    if (!vm) return;
+
+    CandoValue arr_val = cando_bridge_new_array(vm);
+    CdoObject *arr     = cando_bridge_resolve(vm, arr_val.as.handle);
+
+    for (int i = 0; i < argc; i++) {
+        const char *s = (argv && argv[i]) ? argv[i] : "";
+        CdoString *cs = cdo_string_new(s, (u32)strlen(s));
+        cdo_array_push(arr, cdo_string_value(cs));
+        cdo_string_release(cs);
+    }
+
+    cando_vm_set_global(vm, "args", arr_val, true);
 }
 
 /* =========================================================================
