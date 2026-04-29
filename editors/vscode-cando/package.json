@@ -1,0 +1,113 @@
+{
+  "name": "vscode-cando",
+  "displayName": "CanDo Language",
+  "description": "Syntax highlighting, snippets and IntelliSense for the CanDo scripting language (.cdo).",
+  "version": "0.1.0",
+  "publisher": "CandoProject",
+  "license": "SEE LICENSE IN LICENSE",
+  "icon": "icons/cando.png",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "keywords": [
+    "cando",
+    "cdo",
+    "scripting"
+  ],
+  "main": "./client/out/extension.js",
+  "activationEvents": [
+    "onLanguage:cando"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "cando",
+        "aliases": [
+          "CanDo",
+          "cando"
+        ],
+        "extensions": [
+          ".cdo"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/cando.png",
+          "dark": "./icons/cando.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "cando",
+        "scopeName": "source.cando",
+        "path": "./syntaxes/cando.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "cando",
+        "path": "./snippets/cando.code-snippets"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "CanDo",
+      "properties": {
+        "cando.diagnostics.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable lightweight syntax diagnostics for .cdo files."
+        },
+        "cando.completion.includeBuiltins": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include built-in standard library functions in completion suggestions."
+        },
+        "cando.keywordCase": {
+          "type": "string",
+          "enum": [
+            "upper",
+            "lower"
+          ],
+          "default": "upper",
+          "description": "Case used when inserting keywords from autocomplete (CanDo accepts pure-upper or pure-lower)."
+        },
+        "cando.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace communication between VS Code and the CanDo language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -b",
+    "watch": "tsc -b -w",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.4.0",
+    "@vscode/vsce": "^2.24.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.11"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rusketh/cando"
+  }
+}

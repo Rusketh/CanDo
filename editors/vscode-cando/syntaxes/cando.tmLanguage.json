@@ -1,0 +1,303 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "CanDo",
+  "scopeName": "source.cando",
+  "fileTypes": ["cdo"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#constants" },
+    { "include": "#class-declaration" },
+    { "include": "#function-declaration" },
+    { "include": "#function-call" },
+    { "include": "#method-call" },
+    { "include": "#operators" },
+    { "include": "#punctuation" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.cando",
+          "begin": "//",
+          "end": "$",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.cando" }
+          }
+        },
+        {
+          "name": "comment.block.cando",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.begin.cando" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.comment.end.cando" }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        { "include": "#string-double" },
+        { "include": "#string-single" },
+        { "include": "#string-backtick" }
+      ]
+    },
+    "string-double": {
+      "name": "string.quoted.double.cando",
+      "begin": "\"",
+      "end": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.cando" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.cando" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.cando",
+          "match": "\\\\([nrtbf0\"'\\\\]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4})"
+        },
+        {
+          "name": "invalid.illegal.unknown-escape.cando",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "string-single": {
+      "name": "string.quoted.single.cando",
+      "begin": "'",
+      "end": "'",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.cando" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.cando" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.cando",
+          "match": "\\\\([nrtbf0\"'\\\\]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4})"
+        }
+      ]
+    },
+    "string-backtick": {
+      "name": "string.template.cando",
+      "begin": "`",
+      "end": "`",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.cando" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.cando" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.cando",
+          "match": "\\\\([nrtbf0\"'`\\\\$]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4})"
+        },
+        {
+          "name": "meta.template.expression.cando",
+          "begin": "\\$\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.template-expression.begin.cando" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.template-expression.end.cando" }
+          },
+          "patterns": [
+            { "include": "$self" }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.cando",
+          "match": "\\b0[xX][0-9A-Fa-f]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.cando",
+          "match": "\\b\\d+\\.\\d+([eE][+-]?\\d+)?\\b"
+        },
+        {
+          "name": "constant.numeric.exponent.cando",
+          "match": "\\b\\d+[eE][+-]?\\d+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.cando",
+          "match": "\\b\\d+\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.flow.cando",
+          "match": "\\b(IF|ELSE|WHILE|FOR|RETURN|THROW|TRY|CATCH|FINALY|CONTINUE|BREAK|IN|OF|OVER)\\b"
+        },
+        {
+          "name": "keyword.control.flow.cando",
+          "match": "\\b(if|else|while|for|return|throw|try|catch|finaly|continue|break|in|of|over)\\b"
+        },
+        {
+          "name": "storage.type.cando",
+          "match": "\\b(FUNCTION|CLASS|EXTENDS)\\b"
+        },
+        {
+          "name": "storage.type.cando",
+          "match": "\\b(function|class|extends)\\b"
+        },
+        {
+          "name": "storage.modifier.cando",
+          "match": "\\b(VAR|CONST|GLOBAL|STATIC|PRIVATE|ASYNC|AWAIT|THREAD)\\b"
+        },
+        {
+          "name": "storage.modifier.cando",
+          "match": "\\b(var|const|global|static|private|async|await|thread)\\b"
+        },
+        {
+          "name": "variable.language.pipe.cando",
+          "match": "\\bpipe\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.true.cando",
+          "match": "\\b(TRUE|true)\\b"
+        },
+        {
+          "name": "constant.language.boolean.false.cando",
+          "match": "\\b(FALSE|false)\\b"
+        },
+        {
+          "name": "constant.language.null.cando",
+          "match": "\\b(NULL|null)\\b"
+        }
+      ]
+    },
+    "class-declaration": {
+      "match": "\\b(CLASS|class)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s+(EXTENDS|extends)\\s+([A-Za-z_][A-Za-z0-9_]*))?",
+      "captures": {
+        "1": { "name": "storage.type.class.cando" },
+        "2": { "name": "entity.name.type.class.cando" },
+        "3": { "name": "storage.modifier.extends.cando" },
+        "4": { "name": "entity.other.inherited-class.cando" }
+      }
+    },
+    "function-declaration": {
+      "match": "\\b(FUNCTION|function)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.type.function.cando" },
+        "2": { "name": "entity.name.function.cando" }
+      }
+    },
+    "function-call": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.call.cando" }
+      }
+    },
+    "method-call": {
+      "match": "(:|::)\\s*([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "punctuation.accessor.cando" },
+        "2": { "name": "entity.name.function.method.cando" }
+      }
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.pipe.cando",
+          "match": "~&>|~!>|~>"
+        },
+        {
+          "name": "keyword.operator.range.cando",
+          "match": "->|<-"
+        },
+        {
+          "name": "keyword.operator.fluent.cando",
+          "match": "::"
+        },
+        {
+          "name": "keyword.operator.spread.cando",
+          "match": "\\.\\.\\."
+        },
+        {
+          "name": "keyword.operator.lambda.cando",
+          "match": "=>"
+        },
+        {
+          "name": "keyword.operator.optional.cando",
+          "match": "\\?\\.|\\?\\["
+        },
+        {
+          "name": "keyword.operator.comparison.cando",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.logical.cando",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.bitwise.cando",
+          "match": "<<|>>|\\|&|&|\\||\\^|~"
+        },
+        {
+          "name": "keyword.operator.assignment.compound.cando",
+          "match": "\\+=|-=|\\*=|/=|%=|\\^="
+        },
+        {
+          "name": "keyword.operator.increment.cando",
+          "match": "\\+\\+|--"
+        },
+        {
+          "name": "keyword.operator.assignment.cando",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.arithmetic.cando",
+          "match": "[+\\-*/%]"
+        },
+        {
+          "name": "keyword.operator.ternary.cando",
+          "match": "\\?|:"
+        },
+        {
+          "name": "keyword.operator.length.cando",
+          "match": "#"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.terminator.statement.cando", "match": ";" },
+        { "name": "punctuation.separator.comma.cando", "match": "," },
+        { "name": "punctuation.accessor.cando", "match": "\\." },
+        { "name": "punctuation.section.brace.begin.cando", "match": "\\{" },
+        { "name": "punctuation.section.brace.end.cando", "match": "\\}" },
+        { "name": "punctuation.section.bracket.begin.cando", "match": "\\[" },
+        { "name": "punctuation.section.bracket.end.cando", "match": "\\]" },
+        { "name": "punctuation.section.parens.begin.cando", "match": "\\(" },
+        { "name": "punctuation.section.parens.end.cando", "match": "\\)" }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.cando",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}
