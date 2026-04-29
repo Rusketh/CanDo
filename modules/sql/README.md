@@ -62,7 +62,7 @@ VAR pg = sql.openPostgres({
 pg:exec("CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT)");
 pg:exec("INSERT INTO users (name) VALUES ('Ada')");
 
-VAR stmt = pg:prepare("SELECT id, name FROM users WHERE id >= $1");
+VAR stmt = pg:prepare("SELECT id, name FROM users WHERE id >= ?");
 VAR rows = stmt:all(1);
 FOR (r IN rows) { print(`${r.id} ${r.name}`); }
 stmt:finalize();
@@ -141,7 +141,7 @@ VAR n = await report;
 |---|---|---|
 | `db:close()`                              | `TRUE`                | Closes the connection. Idempotent. |
 | `db:exec(sql)`                            | `{ affected, insertId, tag }` | Run a SQL statement (no parameters). Multiple semicolon-separated statements are supported on PostgreSQL. |
-| `db:prepare(sql)`                         | `stmt`                | Compile a statement; returns a statement handle. PostgreSQL placeholders are `$1, $2, …`; MySQL placeholders are `?`. |
+| `db:prepare(sql)`                         | `stmt`                | Compile a statement; returns a statement handle.  Use `?` placeholders for both engines (the PG driver translates them to `$1, $2, …` automatically).  `??` is the literal-`?` escape for the rare PG operators that take one. |
 | `db:begin()`                              | `TRUE`                | `BEGIN`, or `SAVEPOINT cdo_sp_<n>` if already inside a transaction. |
 | `db:commit()`                             | `TRUE`                | `COMMIT`, or `RELEASE SAVEPOINT` for nested savepoints. |
 | `db:rollback()`                           | `TRUE`                | `ROLLBACK`, or `ROLLBACK TO ... ; RELEASE` for nested savepoints. |

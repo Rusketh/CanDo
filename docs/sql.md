@@ -66,18 +66,25 @@ For parameterised queries, prepare the SQL once and execute many
 times:
 
 ```cando
-// PostgreSQL placeholders are $1, $2, ...
-VAR insert = pg:prepare("INSERT INTO users (id, name) VALUES ($1, $2)");
+// Both engines use the same `?` placeholder syntax (matches node:sqlite
+// and modules/sqlite).  The PostgreSQL driver translates `?` into the
+// `$1, $2, ...` form Postgres expects; the MySQL driver passes `?`
+// straight through to the binary protocol.
+VAR insert = pg:prepare("INSERT INTO users (id, name) VALUES (?, ?)");
 insert:run(1, "Ada");
 insert:run(2, "Grace");
 insert:finalize();
 
-// MySQL placeholders are ?
 VAR pick = my:prepare("SELECT id, name FROM users WHERE id >= ? ORDER BY id");
 VAR rows = pick:all(1);
 FOR (r IN rows) { print(r.id + " " + r.name); }
 pick:finalize();
 ```
+
+> The translator only rewrites `?` characters that aren't inside a
+> single-quoted string, double-quoted identifier, line/block comment,
+> or PostgreSQL dollar-quoted body.  Use `??` to emit a literal `?`
+> (handy for PG's JSON `?`, `?|`, `?&` operators).
 
 `stmt:run(...)` is for INSERT/UPDATE/DELETE; `stmt:get(...)` returns the
 first row (or `NULL`); `stmt:all(...)` returns the full result set as

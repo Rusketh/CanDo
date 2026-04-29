@@ -103,7 +103,7 @@ FUNCTION run_pg_tests() {
     expect("postgres: exec affected = 2", ins.affected == 2);
 
     // Prepared statement with params (text-protocol $1, $2 placeholders).
-    VAR s = db:prepare("SELECT id, name FROM cdo_t WHERE id >= $1 ORDER BY id");
+    VAR s = db:prepare("SELECT id, name FROM cdo_t WHERE id >= ? ORDER BY id");
     expect("postgres: prepare returns object", type(s) == "object");
     VAR rows = s:all(1);
     expect("postgres: all returns array", type(rows) == "array");

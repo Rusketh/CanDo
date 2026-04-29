@@ -20,6 +20,7 @@
 #include "sql_buf.h"
 #include "sql_crypto.h"
 #include "sql_driver.h"
+#include "sql_placeholder.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -289,6 +290,86 @@ static void test_my_native_password(void)
 }
 
 /* =========================================================================
+ * Placeholder translator -- ? -> $N
+ * ===================================================================== */
+static void test_placeholder_translator(void)
+{
+    printf("\n[placeholder_translator]\n");
+
+    int n = 0;
+    char *out;
+
+    out = sql_translate_placeholders("SELECT ?", &n);
+    EXPECT_STREQ("simple ?",         out, "SELECT $1");
+    EXPECT_INTEQ("simple ? count",   n, 1);
+    free(out);
+
+    out = sql_translate_placeholders("SELECT ?, ?, ? FROM t WHERE id = ?", &n);
+    EXPECT_STREQ("multiple ?",       out,
+        "SELECT $1, $2, $3 FROM t WHERE id = $4");
+    EXPECT_INTEQ("multiple ? count", n, 4);
+    free(out);
+
+    out = sql_translate_placeholders("INSERT INTO t (a) VALUES ('?')", &n);
+    EXPECT_STREQ("? inside string is ignored", out,
+        "INSERT INTO t (a) VALUES ('?')");
+    EXPECT_INTEQ("string-? count = 0",         n, 0);
+    free(out);
+
+    out = sql_translate_placeholders("SELECT '?''?', ?", &n);
+    EXPECT_STREQ("escaped '' inside string",   out, "SELECT '?''?', $1");
+    EXPECT_INTEQ("'' string count",            n, 1);
+    free(out);
+
+    out = sql_translate_placeholders("SELECT \"weird?col\", ?", &n);
+    EXPECT_STREQ("? inside identifier is ignored", out,
+        "SELECT \"weird?col\", $1");
+    EXPECT_INTEQ("identifier count",           n, 1);
+    free(out);
+
+    out = sql_translate_placeholders("-- has ?\nSELECT ?", &n);
+    EXPECT_STREQ("? inside line comment ignored", out,
+        "-- has ?\nSELECT $1");
+    EXPECT_INTEQ("line-comment count",         n, 1);
+    free(out);
+
+    out = sql_translate_placeholders("/* ?? */ SELECT ?", &n);
+    EXPECT_STREQ("? inside block comment ignored", out,
+        "/* ?? */ SELECT $1");
+    EXPECT_INTEQ("block-comment count",        n, 1);
+    free(out);
+
+    /* Postgres dollar-quoted body must be left alone, even when it
+     * contains text that looks like a placeholder. */
+    out = sql_translate_placeholders(
+        "SELECT $$has ? inside$$, ?", &n);
+    EXPECT_STREQ("dollar-quoted body ignored",  out,
+        "SELECT $$has ? inside$$, $1");
+    EXPECT_INTEQ("dollar-quoted count",         n, 1);
+    free(out);
+
+    out = sql_translate_placeholders(
+        "SELECT $tag$has ? inside$tag$, ?", &n);
+    EXPECT_STREQ("named dollar-quoted body ignored", out,
+        "SELECT $tag$has ? inside$tag$, $1");
+    EXPECT_INTEQ("named dollar-quoted count",   n, 1);
+    free(out);
+
+    /* `??` is the literal-? escape -- emit one ? and don't bind. */
+    out = sql_translate_placeholders(
+        "SELECT data->'k' ?? 'v', ?", &n);
+    EXPECT_STREQ("?? -> ? escape",             out,
+        "SELECT data->'k' ? 'v', $1");
+    EXPECT_INTEQ("?? escape doesn't bind",     n, 1);
+    free(out);
+
+    out = sql_translate_placeholders("", &n);
+    EXPECT_STREQ("empty input",                out, "");
+    EXPECT_INTEQ("empty count",                n, 0);
+    free(out);
+}
+
+/* =========================================================================
  * Connection-options structure smoke -- defaults
  * ===================================================================== */
 static void test_opts_defaults(void)
@@ -316,6 +397,7 @@ int main(void)
     test_crypto_pbkdf2();
     test_crypto_b64_hex();
     test_my_native_password();
+    test_placeholder_translator();
     test_opts_defaults();
 
     if (failures) {

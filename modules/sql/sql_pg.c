@@ -26,6 +26,7 @@
 #include "sql_buf.h"
 #include "sql_crypto.h"
 #include "sql_net.h"
+#include "sql_placeholder.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -1087,13 +1088,25 @@ bool pg_prepare(PgConn *c, const char *sql,
     char name[32];
     snprintf(name, sizeof(name), "cdo_pg_%d", ++c->prepared_id_seq);
 
+    /* Translate node:sqlite-style `?` placeholders into PostgreSQL's
+     * native `$1, $2, ...` form so scripts can use one syntax across
+     * both sqlite.so and sql.so.  See sql_placeholder.h for the
+     * (string-literal / comment / dollar-quote)-aware rules. */
+    int placeholder_count = 0;
+    char *translated = sql_translate_placeholders(sql, &placeholder_count);
+    if (!translated) {
+        pg_set_error(c, 0, "HY001", "postgres: out of memory translating placeholders");
+        return false;
+    }
+
     /* Parse: name\0, sql\0, Int16 nParamTypes (0). */
     SqlBuf p = {0};
     sql_buf_put_cstr(&p, name);
-    sql_buf_put_cstr(&p, sql);
+    sql_buf_put_cstr(&p, translated);
     sql_buf_put_be16(&p, 0);
     bool ok = pg_send_msg(c, 'P', p.data, (int)p.len);
     sql_buf_free(&p);
+    free(translated);
     if (!ok) return false;
 
     /* Describe: 'S' name\0  (statement, not portal) */
