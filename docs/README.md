@@ -14,6 +14,7 @@ compiled to bytecode for a stack-based VM.
 | [language-reference.md](language-reference.md) | Complete syntax: types, expressions, statements, functions, classes |
 | [standard-library.md](standard-library.md) | Every built-in library module, function-by-function |
 | [socket.md](socket.md) | Long-form guide to the `socket` and `secure_socket` libraries |
+| [streaming.md](streaming.md) | Unified `stream` API: pipe between files, sockets, HTTP, processes, threads |
 | [threading.md](threading.md) | `thread` / `await`, the `thread` library, shared state |
 
 ## For C embedders

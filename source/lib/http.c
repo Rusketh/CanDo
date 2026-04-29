@@ -19,6 +19,7 @@
 #include "httputil.h"
 #include "libutil.h"
 #include "meta.h"
+#include "stream.h"
 #include "../vm/bridge.h"
 #include "../vm/vm.h"
 #include "../object/object.h"
@@ -670,6 +671,139 @@ static int res_send_fn(CandoVM *vm, int argc, CandoValue *args)
     return 1;
 }
 
+/* res:stream() -> writable stream that buffers body bytes and sends the
+ * full response on `:end()`.
+ *
+ * Like `res:send()`, this is a one-shot — calling :end() (or :close()
+ * after writes) flushes whatever was buffered as a single Content-Length
+ * response.  True chunked sending is deferred to a follow-up; the win
+ * here is the unified API so callers can `file:pipeTo(res:stream())` to
+ * stream a download out without manually slurping the file first.
+ */
+typedef struct ResStreamCtx {
+    HttpResCtx *res;
+    HttpBuf     buf;
+    StreamSlot *owner;
+} ResStreamCtx;
+
+static StreamStatus res_stream_write(void *vctx, const u8 *buf, usize len,
+                                     usize *n_out)
+{
+    ResStreamCtx *rs = (ResStreamCtx *)vctx;
+    if (rs->res->sent) {
+        *n_out = 0;
+        stream_set_error(rs->owner, "response already sent");
+        return STREAM_ERR;
+    }
+    httpbuf_append(&rs->buf, (const char *)buf, len);
+    *n_out = len;
+    return STREAM_OK;
+}
+
+static StreamStatus res_stream_end(void *vctx)
+{
+    ResStreamCtx *rs = (ResStreamCtx *)vctx;
+    if (rs->res->sent) return STREAM_OK;
+    if (!res_send_impl(rs->res, rs->buf.data, rs->buf.len)) {
+        stream_set_error(rs->owner, "response send failed");
+        return STREAM_ERR;
+    }
+    return STREAM_OK;
+}
+
+static void res_stream_destroy(void *vctx)
+{
+    ResStreamCtx *rs = (ResStreamCtx *)vctx;
+    if (!rs) return;
+    /* If the script closed without :end(), don't auto-send — they may
+     * have intentionally abandoned the response.  The connection thread
+     * is still blocked in res_wait_until_sent and will eventually pick up
+     * any explicit res:send call. */
+    httpbuf_free(&rs->buf);
+    cando_free(rs);
+}
+
+static const StreamVTable g_res_stream_vt = {
+    .read       = NULL,
+    .write      = res_stream_write,
+    .flush      = NULL,
+    .end        = res_stream_end,
+    .destroy    = res_stream_destroy,
+    .seek       = NULL,
+    .tell       = NULL,
+    .kind_name  = "http_response",
+};
+
+static int res_stream_fn(CandoVM *vm, int argc, CandoValue *args)
+{
+    HttpResCtx *ctx = res_get_ctx_from(vm,
+                          argc > 0 ? args[0] : cando_null());
+    if (!ctx) {
+        cando_vm_error(vm, "res:stream: invalid receiver");
+        return -1;
+    }
+    ResStreamCtx *rs = (ResStreamCtx *)cando_alloc(sizeof(ResStreamCtx));
+    memset(rs, 0, sizeof(*rs));
+    rs->res = ctx;
+    httpbuf_init(&rs->buf);
+
+    int idx = stream_pool_alloc(&g_res_stream_vt, rs, STREAM_CAP_WRITABLE);
+    if (idx < 0) {
+        httpbuf_free(&rs->buf);
+        cando_free(rs);
+        cando_vm_error(vm, "res:stream: too many active streams");
+        return -1;
+    }
+    rs->owner = stream_pool_get(idx);
+    cando_vm_push(vm, stream_create_instance(vm, idx));
+    return 1;
+}
+
+/* clientResponse:stream() -> readable stream over the buffered body
+ *
+ * The HTTP client buffers the full response body before returning, so this
+ * adapter presents it as a pre-filled, write-ended memory stream.  The
+ * point is uniformity: downstream code can `:pipeTo(file)` /
+ * `:pipeTo(channel)` on an HTTP body the same way it does on any other
+ * source.
+ *
+ * On-the-fly streaming (skip the body buffer entirely) requires teaching
+ * `http_read_response` to hand back an unread `HttpConn`; that's deferred
+ * to a follow-up because it touches the parser surface area.
+ */
+static int http_client_response_stream_fn(CandoVM *vm, int argc,
+                                          CandoValue *args)
+{
+    if (argc < 1 || !cando_is_object(args[0])) {
+        cando_vm_error(vm, "clientResponse:stream: invalid receiver");
+        return -1;
+    }
+    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    if (!obj) {
+        cando_vm_error(vm, "clientResponse:stream: invalid receiver");
+        return -1;
+    }
+    CdoString *kbody = cdo_string_intern("body", 4);
+    CdoValue   bv    = cdo_null();
+    bool       have  = cdo_object_get(obj, kbody, &bv);
+    cdo_string_release(kbody);
+
+    const void *data = "";
+    usize       len  = 0;
+    if (have && bv.tag == CDO_STRING && bv.as.string) {
+        data = bv.as.string->data;
+        len  = bv.as.string->length;
+    }
+
+    CandoValue sv = cando_stream_from_bytes(vm, data, len);
+    if (cando_is_null(sv)) {
+        cando_vm_error(vm, "clientResponse:stream: too many active streams");
+        return -1;
+    }
+    cando_vm_push(vm, sv);
+    return 1;
+}
+
 /* res.json(value) — uses the `json` global's stringify method. */
 static int res_json_fn(CandoVM *vm, int argc, CandoValue *args)
 {
@@ -1086,11 +1220,17 @@ void http_register_meta_tables(CandoVM *vm)
         cando_lib_meta_define(vm, res_meta, "setHeader", res_setHeader_fn);
         cando_lib_meta_define(vm, res_meta, "send",      res_send_fn);
         cando_lib_meta_define(vm, res_meta, "json",      res_json_fn);
+        cando_lib_meta_define(vm, res_meta, "stream",    res_stream_fn);
     }
     /* http_request currently has no native methods.  The table is created
      * eagerly so user code can attach methods reliably at script startup. */
     (void)cando_lib_meta_table(vm, "http_request");
-    (void)cando_lib_meta_table(vm, "http_client_response");
+
+    CdoObject *cres_meta = cando_lib_meta_table(vm, "http_client_response");
+    if (cres_meta) {
+        cando_lib_meta_define(vm, cres_meta, "stream",
+                              http_client_response_stream_fn);
+    }
 
     CdoObject *server_meta = cando_lib_meta_table(vm, "http_server");
     if (server_meta) {

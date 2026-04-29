@@ -45,10 +45,10 @@ source/
     vm.h/.c           CandoVM -- interpreter, call frames, threading
     debug.h/.c        cando_chunk_disasm
 
-  lib/                19 standard library modules
+  lib/                20 standard library modules
     math, file, string, array, object, json, csv,
     thread, os, datetime, crypto, process, net,
-    eval, include, http, https
+    eval, include, http, https, stream
     libutil.c/h       Internal helpers
 
   compat/

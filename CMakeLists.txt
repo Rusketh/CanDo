@@ -94,6 +94,7 @@ set(LIB_SRCS
     source/lib/http.c
     source/lib/https.c
     source/lib/meta.c
+    source/lib/stream.c
 )
 
 # Windows compatibility shim (POSIX regex replacement)

@@ -161,6 +161,7 @@ CANDO_API void cando_open_includelib(CandoVM *vm);   /**< include()         */
 CANDO_API void cando_open_httplib(CandoVM *vm);      /**< http.* + fetch()  */
 CANDO_API void cando_open_httpslib(CandoVM *vm);     /**< https.*           */
 CANDO_API void cando_open_metalib(CandoVM *vm);      /**< _meta registry    */
+CANDO_API void cando_open_streamlib(CandoVM *vm);    /**< stream.*          */
 
 /* =========================================================================
  * Load and execute
