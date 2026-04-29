@@ -175,28 +175,18 @@ static CandoValue csv_parse_row(CsvParser *p)
 /* =========================================================================
  * csv.parse(str, delim?, header?) → array of arrays | array of objects
  * ======================================================================= */
-static int csv_parse(CandoVM *vm, int argc, CandoValue *args)
+
+bool cando_lib_csv_parse_buffer(CandoVM *vm,
+                                const char *src, usize len,
+                                char delim, bool header_mode,
+                                const char *where,
+                                CandoValue *out)
 {
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "csv.parse: expected a string argument");
-        return -1;
-    }
-
-    /* delimiter (default ',') */
-    char delim = ',';
-    if (argc >= 2 && cando_is_string(args[1]) && args[1].as.string->length > 0) {
-        delim = args[1].as.string->data[0];
-    }
-
-    /* header mode */
-    bool header_mode = false;
-    if (argc >= 3 && cando_is_bool(args[2])) {
-        header_mode = args[2].as.boolean;
-    }
+    (void)where; /* CSV parser does not currently emit prefixed errors */
 
     CsvParser p;
-    p.src   = args[0].as.string->data;
-    p.len   = (usize)args[0].as.string->length;
+    p.src   = src;
+    p.len   = len;
     p.pos   = 0;
     p.delim = delim;
     p.vm    = vm;
@@ -253,7 +243,41 @@ static int csv_parse(CandoVM *vm, int argc, CandoValue *args)
         }
     }
 
-    cando_vm_push(vm, result_val);
+    if (out) *out = result_val;
+    else     cando_value_release(result_val);
+    return true;
+}
+
+static int csv_parse(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1 || !cando_is_string(args[0])) {
+        cando_vm_error(vm, "csv.parse: expected a string argument");
+        return -1;
+    }
+
+    /* delimiter (default ',') */
+    char delim = ',';
+    if (argc >= 2 && cando_is_string(args[1]) && args[1].as.string->length > 0) {
+        delim = args[1].as.string->data[0];
+    }
+
+    /* header mode */
+    bool header_mode = false;
+    if (argc >= 3 && cando_is_bool(args[2])) {
+        header_mode = args[2].as.boolean;
+    }
+
+    CandoValue result = cando_null();
+    if (!cando_lib_csv_parse_buffer(vm,
+                                    args[0].as.string->data,
+                                    (usize)args[0].as.string->length,
+                                    delim, header_mode,
+                                    "csv.parse",
+                                    &result)) {
+        return -1;
+    }
+
+    cando_vm_push(vm, result);
     return 1;
 }
 

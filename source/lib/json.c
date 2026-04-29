@@ -429,16 +429,15 @@ static CandoValue jp_parse_value(JParser *p)
 /* =========================================================================
  * json.parse(str) → value | null
  * ======================================================================= */
-static int json_parse(CandoVM *vm, int argc, CandoValue *args)
-{
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "json.parse: expected a string argument");
-        return -1;
-    }
 
+bool cando_lib_json_parse_buffer(CandoVM *vm,
+                                 const char *src, usize len,
+                                 const char *where,
+                                 CandoValue *out)
+{
     JParser p;
-    p.src       = args[0].as.string->data;
-    p.len       = (usize)args[0].as.string->length;
+    p.src       = src;
+    p.len       = len;
     p.pos       = 0;
     p.vm        = vm;
     p.has_error = false;
@@ -448,7 +447,29 @@ static int json_parse(CandoVM *vm, int argc, CandoValue *args)
 
     if (p.has_error) {
         cando_value_release(result);
-        cando_vm_error(vm, "json.parse: %s", p.error);
+        if (out) *out = cando_null();
+        cando_vm_error(vm, "%s: %s", where ? where : "json.parse", p.error);
+        return false;
+    }
+
+    if (out) *out = result;
+    else     cando_value_release(result);
+    return true;
+}
+
+static int json_parse(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1 || !cando_is_string(args[0])) {
+        cando_vm_error(vm, "json.parse: expected a string argument");
+        return -1;
+    }
+
+    CandoValue result = cando_null();
+    if (!cando_lib_json_parse_buffer(vm,
+                                     args[0].as.string->data,
+                                     (usize)args[0].as.string->length,
+                                     "json.parse",
+                                     &result)) {
         return -1;
     }
 
