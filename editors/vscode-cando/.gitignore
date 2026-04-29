@@ -3,4 +3,5 @@ client/out/
 server/out/
 *.vsix
 *.tsbuildinfo
+package-lock.json
 .DS_Store
