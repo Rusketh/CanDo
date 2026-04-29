@@ -98,6 +98,7 @@ static void test_slot_allocator(void)
     int c = forms_test_slot_alloc(3 /*KIND_LABEL*/,  a);
 
     EXPECT("slot_alloc returns >= 1", a >= 1);
+    EXPECT("slot index 0 is reserved (never returned)", a > 0 && b > 0 && c > 0);
     EXPECT("slots are unique",        a != b && b != c && a != c);
     EXPECT("slot kind FORM",          forms_test_slot_kind(a) == 1);
     EXPECT("slot kind BUTTON",        forms_test_slot_kind(b) == 2);
@@ -112,6 +113,82 @@ static void test_slot_allocator(void)
     forms_test_slot_free(d);
 }
 
+/* Generation must advance on every (re)allocation so a stale handle to
+ * a recycled slot is rejected when slot_from_inst checks it. */
+static void test_slot_generation_advances(void)
+{
+    int s1 = forms_test_slot_alloc(1, -1);
+    int g1 = forms_test_slot_generation(s1);
+    forms_test_slot_free(s1);
+
+    int s2 = forms_test_slot_alloc(2, -1);
+    int g2 = forms_test_slot_generation(s2);
+
+    EXPECT("recycled slot index matches",       s1 == s2);
+    EXPECT("generation advances on recycle",    g2 > g1);
+    EXPECT("generation difference is exactly 1",g2 - g1 == 1);
+
+    forms_test_slot_free(s2);
+}
+
+/* Round-trip every payload field through the queue.  The dispatcher
+ * uses these to populate callback args (e.g. mouse X/Y, key code), so
+ * preservation across push/pop matters. */
+static void test_event_payload_preservation(void)
+{
+    forms_test_event_queue_reset();
+    forms_test_event_push_full(2 /*EV_CLICK*/, 11, 7,  /* slot, gen */
+                               1, 22, 33,              /* button, key extras */
+                               123.5, 456.75);
+
+    int kind, slot, gen, i0, i1, i2;
+    double d0, d1;
+    int ok = forms_test_event_pop_full(&kind, &slot, &gen,
+                                       &i0, &i1, &i2, &d0, &d1);
+    EXPECT("payload pop ok",                    ok == 1);
+    EXPECT("payload kind preserved",            kind == 2);
+    EXPECT("payload slot preserved",            slot == 11);
+    EXPECT("payload generation preserved",      gen == 7);
+    EXPECT("payload i0 preserved",              i0 == 1);
+    EXPECT("payload i1 preserved",              i1 == 22);
+    EXPECT("payload i2 preserved",              i2 == 33);
+    EXPECT("payload d0 preserved",              d0 == 123.5);
+    EXPECT("payload d1 preserved",              d1 == 456.75);
+}
+
+/* Repeated free + alloc must converge on the same slot index forever
+ * (no leak), and the queue head/tail must keep wrapping cleanly across
+ * many cycles -- this catches off-by-one bugs in modulo arithmetic
+ * that only surface at the wrap boundary. */
+static void test_long_running_stability(void)
+{
+    /* 10x the queue capacity, to wrap the ring head several times. */
+    forms_test_event_queue_reset();
+    for (int cycle = 0; cycle < 10; cycle++) {
+        for (int i = 0; i < 100; i++) forms_test_event_push(1, i);
+        for (int i = 0; i < 100; i++) {
+            int k, s;
+            if (!forms_test_event_pop(&k, &s)) {
+                EXPECT("ring stability: pop succeeded", 0);
+                return;
+            }
+        }
+    }
+    EXPECT("ring stability: empty after 1000 push/pop cycles",
+           forms_test_event_queue_is_empty());
+
+    /* Slot churn -- alloc/free 1024 times, the slot index must remain
+     * bounded (i.e. we don't lose slots). */
+    int seen_max = 0;
+    for (int i = 0; i < 1024; i++) {
+        int s = forms_test_slot_alloc(1, -1);
+        if (s > seen_max) seen_max = s;
+        forms_test_slot_free(s);
+    }
+    EXPECT("slot churn: never grew past index 1 (single-slot reuse)",
+           seen_max == 1);
+}
+
 int main(void)
 {
     printf("== modules/forms: C tests ==\n");
@@ -120,7 +197,10 @@ int main(void)
     test_event_queue_basic();
     test_event_queue_fifo_order();
     test_event_queue_overflow_drops_newest();
+    test_event_payload_preservation();
     test_slot_allocator();
+    test_slot_generation_advances();
+    test_long_running_stability();
 
     if (failures == 0) {
         printf("All forms C tests passed.\n");

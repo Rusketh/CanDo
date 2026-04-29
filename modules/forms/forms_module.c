@@ -1923,4 +1923,40 @@ int forms_test_slot_kind(int slot)
     if (slot < 0 || slot >= FORMS_MAX_SLOTS) return KIND_NONE;
     return (int)g_slots[slot].kind;
 }
+int forms_test_slot_generation(int slot)
+{
+    if (slot < 0 || slot >= FORMS_MAX_SLOTS) return -1;
+    return g_slots[slot].generation;
+}
+void forms_test_event_push_full(int kind, int slot, int gen,
+                                int i0, int i1, int i2,
+                                double d0, double d1)
+{
+    FormsEvent ev; memset(&ev, 0, sizeof(ev));
+    ev.kind       = (EventKind)kind;
+    ev.slot       = slot;
+    ev.generation = gen;
+    ev.i0         = i0;
+    ev.i1         = i1;
+    ev.i2         = i2;
+    ev.d0         = d0;
+    ev.d1         = d1;
+    event_queue_push(ev);
+}
+int forms_test_event_pop_full(int *kind_out, int *slot_out, int *gen_out,
+                              int *i0_out, int *i1_out, int *i2_out,
+                              double *d0_out, double *d1_out)
+{
+    FormsEvent ev;
+    if (!event_queue_try_pop(&ev)) return 0;
+    if (kind_out) *kind_out = (int)ev.kind;
+    if (slot_out) *slot_out = ev.slot;
+    if (gen_out)  *gen_out  = ev.generation;
+    if (i0_out)   *i0_out   = ev.i0;
+    if (i1_out)   *i1_out   = ev.i1;
+    if (i2_out)   *i2_out   = ev.i2;
+    if (d0_out)   *d0_out   = ev.d0;
+    if (d1_out)   *d1_out   = ev.d1;
+    return 1;
+}
 #endif /* FORMS_MODULE_TEST_BUILD */

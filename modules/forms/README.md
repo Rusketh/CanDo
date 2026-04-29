@@ -128,6 +128,29 @@ has been destroyed (or closed via the X button — the default `onClose`
 hides; call `self:destroy()` to actually free it) the lifelines drop
 and the process exits.
 
+## Runtime dependencies
+
+`forms.dll` is **fully self-contained** apart from the Windows operating
+system itself.  Specifically:
+
+| Dependency       | How it's satisfied                                |
+| ---------------- | ------------------------------------------------- |
+| libgcc           | statically linked (`-static-libgcc`)              |
+| winpthread       | statically linked (`--whole-archive -lwinpthread`)|
+| `user32.dll`, `gdi32.dll`, `comctl32.dll`, `comdlg32.dll`, `ole32.dll`, `uuid.dll` | shipped with every Windows install |
+| `libcando.dll`   | ships next to `cando.exe` in the cando distro     |
+
+There is **no .NET runtime requirement, no MSVC redistributable, no
+OpenSSL**.  The "WinForms-shaped" API is implemented directly on top of
+the Win32 controls (`BUTTON`, `EDIT`, `STATIC`, common controls, ...)
+that WinForms wraps internally — same surface, none of the managed
+runtime baggage.
+
+The CI workflow's `Verify no MinGW runtime DLL deps` step explicitly
+checks `forms.dll` and fails the build if it accidentally picks up
+`libwinpthread-1.dll`, `libgcc_s_seh-1.dll`, `libstdc++-6.dll`,
+`libssl-3-x64.dll`, or `libcrypto-3-x64.dll` as imports.
+
 ## Building
 
 ```bash

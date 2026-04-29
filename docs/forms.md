@@ -210,6 +210,32 @@ the manager doesn't hold any locks while a callback runs.
   build)"`.  Feature-detect with `forms.supported` to skip the GUI
   path entirely.
 
+## Runtime dependencies
+
+`forms.dll` is **fully self-contained** apart from the Windows OS
+itself.  Specifically:
+
+| Dependency       | How it's satisfied                                |
+| ---------------- | ------------------------------------------------- |
+| libgcc           | statically linked (`-static-libgcc`)              |
+| winpthread       | statically linked (`--whole-archive -lwinpthread`)|
+| `user32.dll`, `gdi32.dll`, `comctl32.dll`, `comdlg32.dll`, `ole32.dll`, `uuid.dll` | shipped with every Windows install |
+| `libcando.dll`   | ships next to `cando.exe` in the cando distro     |
+
+No .NET runtime is required.  The "WinForms-shaped" API is implemented
+directly on top of the Win32 common controls that WinForms itself
+wraps internally — `BUTTON`, `EDIT`, `STATIC`, `LISTBOX`, `COMBOBOX`,
+`msctls_progress32`, `msctls_trackbar32`.  This means the module:
+
+- works on every Windows version supported by `cando.exe` (Vista+),
+- has no MSVC redistributable requirement,
+- has no OpenSSL or other third-party DLL requirement,
+- has no managed runtime requirement.
+
+The CI workflow's `Verify no MinGW runtime DLL deps` step explicitly
+checks `forms.dll` against an allow-list and fails the build if any
+MinGW or OpenSSL runtime DLLs sneak in as imports.
+
 ## Building
 
 ```bash
