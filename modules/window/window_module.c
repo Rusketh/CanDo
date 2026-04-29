@@ -86,7 +86,7 @@
 #  define WM_COND_BROADCAST(c) pthread_cond_broadcast(c)
 #endif
 
-#define WINDOW_MODULE_VERSION "0.0.10"
+#define WINDOW_MODULE_VERSION "0.0.11"
 
 /* =========================================================================
  * obj_set_* helpers (mirrors modules/sqlite).
@@ -959,6 +959,15 @@ static void *manager_thread_main(void *arg)
      * the sleep interval. */
     while (!atomic_load(&g_mgr_should_stop)) {
         mgr_drain_commands();
+        /* Honour app.quit() -- once requested, tear down every alive
+         * window so their lifelines release and the script's
+         * cando_vm_wait_all_lifelines can return.  Idempotent: once
+         * a slot is dead this is a no-op. */
+        if (g_root_vm && cando_vm_quit_requested(g_root_vm)) {
+            for (int i = 0; i < WINDOW_MAX_SLOTS; i++) {
+                if (g_slots[i].alive) slot_teardown(&g_slots[i]);
+            }
+        }
         mgr_render_frame();
         glfwPollEvents();
 #if defined(_WIN32) || defined(_WIN64)

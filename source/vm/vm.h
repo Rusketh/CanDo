@@ -195,6 +195,9 @@ typedef struct CandoThreadRegistry {
     cando_mutex_t mutex;
     cando_cond_t  cond;     /* signalled each time a thread finishes       */
     u32           count;    /* number of threads currently alive           */
+    /* Quit signalling -- accessed under `mutex`. */
+    int           quit_requested;
+    int           exit_code;
 } CandoThreadRegistry;
 
 /* =========================================================================
@@ -531,6 +534,26 @@ CANDO_API void cando_vm_wait_all_threads(CandoVM *vm);
 CANDO_API void cando_vm_lifeline_acquire(CandoVM *vm, const char *kind);
 CANDO_API void cando_vm_lifeline_release(CandoVM *vm);
 CANDO_API void cando_vm_wait_all_lifelines(CandoVM *vm);
+
+/*
+ * Quit signalling -- backs the `app` builtin's app.quit() / app.exit() /
+ * app.isQuitting() / app.exitCode().  A subsystem that wants to react to
+ * app.quit() (e.g. close its windows so its lifelines release) polls
+ * cando_vm_quit_requested from its loop.
+ *
+ * cando_vm_request_quit is safe to call from any thread; it sets an
+ * atomic flag and broadcasts on the lifeline registry's condition
+ * variable so any thread blocked in cando_vm_wait_all_lifelines wakes
+ * once subsystems have released their holds.
+ *
+ * The exit code is stored on the registry as well; cando_vm_get_exit_code
+ * returns the most recent value set (default 0).
+ */
+CANDO_API void cando_vm_request_quit(CandoVM *vm, int exit_code);
+CANDO_API bool cando_vm_quit_requested(CandoVM *vm);
+CANDO_API int  cando_vm_get_exit_code(CandoVM *vm);
+CANDO_API void cando_vm_set_exit_code(CandoVM *vm, int exit_code);
+CANDO_API u32  cando_vm_lifeline_count(CandoVM *vm);
 
 /*
  * cando_vm_call_value -- call a Cando function value with argc arguments.

@@ -45,6 +45,7 @@
 #include "lib/csv.h"
 #include "lib/thread.h"
 #include "lib/os.h"
+#include "lib/app.h"
 #include "lib/datetime.h"
 #include "lib/array.h"
 #include "lib/object.h"
@@ -171,6 +172,7 @@ CANDO_API void cando_openlibs(CandoVM *vm)
     cando_lib_csv_register(vm);
     cando_lib_thread_register(vm);
     cando_lib_os_register(vm);
+    cando_lib_app_register(vm);
     cando_lib_datetime_register(vm);
     cando_lib_array_register(vm);
     cando_lib_object_register(vm);
