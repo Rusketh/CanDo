@@ -1,0 +1,211 @@
+/* lib_stream.cdo -- Integration tests for the unified `stream` library
+ * (step 1: in-memory adapter only).
+ *
+ * Verifies the minimal contract every adapter must satisfy:
+ *   - duplex read/write round-trip
+ *   - growth past initial capacity
+ *   - byte counters
+ *   - `:end()` flips reads from "would-block" (empty) to clean EOF
+ *   - `:close()` is idempotent and flips `:isClosed()`
+ *   - `:kind()` reports the adapter name
+ *
+ * Expected output is registered in tests/integration/run_tests.sh.
+ */
+
+/* ---- 1. Round-trip: write then read --------------------------------- */
+VAR s = stream.memory();
+print(s:kind());                    /* expected: memory */
+s:writeAll("hello, ");
+s:writeAll("world");
+print(s:read(64));                  /* expected: hello, world */
+
+/* ---- 2. Reading an empty (still-open) stream returns "" ------------- */
+print("'" + s:read(64) + "'");      /* expected: '' */
+print(s:isClosed());                /* expected: false */
+
+/* ---- 3. Growth past initial capacity -------------------------------- */
+VAR big = stream.memory(64);
+VAR chunk = "0123456789ABCDEF";    /* 16 bytes */
+FOR i OF 1 -> 100 { big:writeAll(chunk); }
+VAR drained = big:readAll();
+print(drained:length());            /* expected: 1600 */
+
+/* ---- 4. Byte counters -- bytesIn counts reads, bytesOut counts writes */
+print(big:bytesIn());               /* expected: 1600 */
+print(big:bytesOut());              /* expected: 1600 */
+
+/* ---- 5. :end() makes the next empty read return EOF -- here the script
+ *        observes EOF as readAll returning the rest and not blocking.    */
+VAR done = stream.memory();
+done:writeAll("final");
+done:end();
+print(done:readAll());              /* expected: final */
+/* After EOF a subsequent readAll still returns "" without throwing. */
+print("'" + done:readAll() + "'");  /* expected: '' */
+
+/* ---- 6. close() is idempotent -------------------------------------- */
+s:close();
+s:close();                          /* second call must be a no-op */
+print(s:isClosed());                /* expected: true */
+
+/* ---- 7. file.open round-trip --------------------------------------- */
+VAR tmpath = "/tmp/cando_stream_test.bin";
+file.delete(tmpath);
+
+VAR w = file.open(tmpath, "wb");
+print(w:kind());                    /* expected: file */
+w:writeAll("alpha-");
+w:writeAll("bravo");
+w:close();
+
+VAR r = file.open(tmpath, "rb");
+print(r:read(64));                  /* expected: alpha-bravo */
+print("'" + r:read(64) + "'");      /* expected: '' (EOF -> "") */
+r:close();
+
+/* ---- 8. file write throws after close ------------------------------ */
+VAR w2 = file.open(tmpath, "wb");
+w2:close();
+TRY {
+    w2:write("nope");
+    print("no-throw");
+} CATCH (e) {
+    print("threw");                 /* expected: threw */
+}
+
+file.delete(tmpath);
+
+/* ---- 9. mem -> mem pipe -------------------------------------------- */
+VAR p_src = stream.memory();
+VAR p_dst = stream.memory();
+p_src:writeAll("piped through memory");
+p_src:end();
+print(p_src:pipeTo(p_dst));           /* expected: 21 */
+print(p_dst:readAll());             /* expected: piped through memory */
+
+/* ---- 10. file -> mem pipe with custom chunk size ------------------- */
+VAR fpath = "/tmp/cando_stream_pipe.bin";
+file.delete(fpath);
+VAR fw = file.open(fpath, "wb");
+fw:writeAll("CanDo streams compose nicely.");
+fw:close();
+
+VAR fr = file.open(fpath, "rb");
+VAR sink = stream.memory();
+print(fr:pipeTo(sink, { chunk: 8 })); /* expected: 29 */
+fr:close();
+print(sink:readAll());              /* expected: CanDo streams compose nicely. */
+file.delete(fpath);
+
+/* ---- 11. pipe in a thread (off-main using existing thread syntax) -- */
+VAR src2 = stream.memory();
+VAR dst2 = stream.memory();
+src2:writeAll("from thread");
+src2:end();
+VAR t = thread { src2:pipeTo(dst2); };
+thread.join(t);
+print(dst2:readAll());              /* expected: from thread */
+
+/* ---- 12. channel: producer thread -> main thread reader ------------ */
+VAR ch = stream.channel(64);
+print(ch:kind());                   /* expected: channel */
+VAR producer = thread {
+    ch:writeAll("hello-from-channel");
+    ch:end();
+};
+print(ch:readAll());                /* expected: hello-from-channel */
+thread.join(producer);
+
+/* ---- 13a. tcp socket adapter: client send → server stream → echo back ---
+ *         Server reads via :stream():read into a sink buffer, then echoes
+ *         the bytes back over the same socket stream.  Verifies the
+ *         tcp_socket:stream() adapter is full-duplex (self-locked).      */
+VAR srv = socket.createServer(FUNCTION(conn) {
+    VAR cs   = conn:stream();
+    VAR sink = stream.memory();
+    /* Read until the client half-closes via shutdown of its side.  Since
+     * we don't have shutdown() in scripts, use a length-prefixed protocol
+     * instead: read exactly 5 bytes, echo them back. */
+    VAR data = cs:read(5);
+    cs:write("ECHO:" + data);
+    conn:close();
+});
+srv:listen(18901);
+thread.sleep(50);
+
+VAR cli  = socket.connect("127.0.0.1", 18901);
+VAR cls  = cli:stream();
+print(cls:kind());                  /* expected: tcp */
+cls:write("hello");
+print(cli:recvAll());               /* expected: ECHO:hello */
+cli:close();
+srv:close();
+
+/* ---- 13c. server `res:stream()` writes accumulated body on :end() --
+ *         Server reads a file via stream and pipes it directly into the
+ *         response stream — never materialising the body as a script
+ *         string.  Verifies the duplex http_response adapter.          */
+VAR src_path = "/tmp/cando_stream_src.bin";
+file.delete(src_path);
+VAR fw_src = file.open(src_path, "wb");
+fw_src:writeAll("file-piped-as-response");
+fw_src:close();
+
+VAR ssrv = http.createServer(FUNCTION(req, res) {
+    VAR f  = file.open(src_path, "rb");
+    VAR rs = res:stream();          /* one stream, reused for end()  */
+    f:pipeTo(rs);
+    rs:end();                       /* flush the buffered response   */
+    f:close();
+});
+ssrv:listen(18793);
+
+VAR resp2 = fetch("http://127.0.0.1:18793/");
+print(resp2.body);                  /* expected: file-piped-as-response */
+ssrv:close();
+file.delete(src_path);
+
+/* ---- 13b. http client response :stream() into a file ---------------
+ *         Server returns a fixed body; client pipes it via stream into
+ *         a file, then reads the file back to verify.                  */
+VAR hsrv = http.createServer(FUNCTION(req, res) {
+    res:status(200);
+    res:send("payload-from-http");
+});
+hsrv:listen(18792);
+
+VAR resp = fetch("http://127.0.0.1:18792/");
+VAR sink_path = "/tmp/cando_stream_http.bin";
+file.delete(sink_path);
+VAR fout = file.open(sink_path, "wb");
+resp:stream():pipeTo(fout);
+fout:close();
+print(file.read(sink_path));        /* expected: payload-from-http */
+file.delete(sink_path);
+hsrv:close();
+
+/* ---- 13d. process.spawn: pipe a child's stdout into a memory stream ---
+ *         `printf` (POSIX) writes deterministic bytes; we capture them
+ *         via the proc:stdout() stream and verify the round-trip.      */
+VAR proc = process.spawn(["printf", "spawned-output"],
+                         { stdout: "pipe" });
+VAR captured = stream.memory();
+proc:stdout():pipeTo(captured);
+VAR rc = proc:wait();
+print(rc);                          /* expected: 0 */
+print(captured:readAll());          /* expected: spawned-output */
+
+/* ---- 13. channel backpressure: small cap forces producer to block --
+ *        Total payload is 800 bytes; cap is 64 -- producer must block
+ *        repeatedly until reader drains.                              */
+VAR small = stream.channel(64);
+VAR collected = stream.memory();
+VAR p2 = thread {
+    FOR i OF 1 -> 50 { small:writeAll("0123456789ABCDEF"); }
+    small:end();
+};
+small:pipeTo(collected);
+thread.join(p2);
+print(collected:readAll():length());   /* expected: 800 */
+
+print("ok");                        /* expected: ok */

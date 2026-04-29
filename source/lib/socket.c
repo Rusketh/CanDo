@@ -20,6 +20,7 @@
 #include "sockutil.h"
 #include "libutil.h"
 #include "meta.h"
+#include "stream.h"
 #include "../vm/bridge.h"
 #include "../vm/vm.h"
 #include "../object/object.h"
@@ -32,6 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <limits.h>
 
 /* =========================================================================
  * Pool
@@ -650,6 +652,113 @@ static int tcp_remoteAddress_fn(CandoVM *vm, int argc, CandoValue *args)
     return push_addr_object(vm, &sa, len);
 }
 
+/* =========================================================================
+ * Stream adapter (registered as `tcp_socket:stream()`)
+ *
+ * Wraps an existing SocketSlot fd (and SSL*, for TLS) behind the unified
+ * stream vtable.  The stream does NOT own the underlying socket — the
+ * tcp_socket script object retains ownership.  When the user closes the
+ * socket independently the next read/write on the stream surfaces a
+ * STREAM_ERR with "socket closed".
+ *
+ * `self_locked = true` because sockets are full-duplex and a blocked
+ * recv() must not hold the slot lock against a concurrent send().
+ * ===================================================================== */
+
+typedef struct SockStreamCtx {
+    int  socket_idx;        /* index into the socket pool                 */
+} SockStreamCtx;
+
+static StreamStatus sock_stream_read(void *vctx, u8 *out, usize cap, usize *n_out)
+{
+    SockStreamCtx *sc = (SockStreamCtx *)vctx;
+    SocketSlot    *s  = socket_pool_get(sc->socket_idx);
+    if (!s || s->fd == SOCKUTIL_INVALID_SOCKET || !s->connected) {
+        *n_out = 0;
+        return STREAM_EOF;
+    }
+    int ilen = (int)(cap > (usize)INT_MAX ? INT_MAX : cap);
+    int n = s->ssl ? sockutil_tls_recv(s->ssl, out, ilen)
+                   : sockutil_recv_raw(s->fd,  out, ilen);
+    if (n < 0)  { *n_out = 0; return STREAM_ERR; }
+    if (n == 0) { *n_out = 0; return STREAM_EOF; }
+    *n_out = (usize)n;
+    return STREAM_OK;
+}
+
+static StreamStatus sock_stream_write(void *vctx, const u8 *buf, usize len,
+                                      usize *n_out)
+{
+    SockStreamCtx *sc = (SockStreamCtx *)vctx;
+    SocketSlot    *s  = socket_pool_get(sc->socket_idx);
+    if (!s || s->fd == SOCKUTIL_INVALID_SOCKET || !s->connected) {
+        *n_out = 0;
+        return STREAM_ERR;
+    }
+    /* sockutil_send_all loops until done; that gives the caller the same
+     * "writeAll succeeds in one hop" semantics they get from
+     * tcp_socket:sendAll, which is what the stream contract expects. */
+    if (!sockutil_send_all(s->fd, s->ssl, (const char *)buf, len)) {
+        *n_out = 0;
+        return STREAM_ERR;
+    }
+    *n_out = len;
+    return STREAM_OK;
+}
+
+static void sock_stream_destroy(void *vctx)
+{
+    /* We do NOT close the underlying socket — the tcp_socket script object
+     * still owns it.  Just free our wrapper. */
+    cando_free(vctx);
+}
+
+static const StreamVTable g_sock_stream_vt = {
+    .read        = sock_stream_read,
+    .write       = sock_stream_write,
+    .flush       = NULL,
+    .end         = NULL,
+    .destroy     = sock_stream_destroy,
+    .seek        = NULL,
+    .tell        = NULL,
+    .kind_name   = "tcp",
+    .self_locked = true,
+};
+
+static const StreamVTable g_tls_stream_vt = {
+    .read        = sock_stream_read,
+    .write       = sock_stream_write,
+    .flush       = NULL,
+    .end         = NULL,
+    .destroy     = sock_stream_destroy,
+    .seek        = NULL,
+    .tell        = NULL,
+    .kind_name   = "tls",
+    .self_locked = true,
+};
+
+/* tcp_socket:stream() -> stream */
+static int tcp_stream_fn(CandoVM *vm, int argc, CandoValue *args)
+{
+    SocketSlot *s = conn_check(vm, argc > 0 ? args[0] : cando_null(),
+                               "socket:stream", true);
+    if (!s) return -1;
+    int sock_idx = (int)(s - g_socket_pool);
+
+    SockStreamCtx *ctx = (SockStreamCtx *)cando_alloc(sizeof(SockStreamCtx));
+    ctx->socket_idx = sock_idx;
+
+    const StreamVTable *vt = s->ssl ? &g_tls_stream_vt : &g_sock_stream_vt;
+    int idx = stream_pool_alloc(vt, ctx, STREAM_CAP_DUPLEX);
+    if (idx < 0) {
+        cando_free(ctx);
+        cando_vm_error(vm, "socket:stream: too many active streams");
+        return -1;
+    }
+    cando_vm_push(vm, stream_create_instance(vm, idx));
+    return 1;
+}
+
 void socket_meta_define_common(CandoVM *vm, CdoObject *tbl)
 {
     if (!tbl) return;
@@ -667,6 +776,7 @@ void socket_meta_define_common(CandoVM *vm, CdoObject *tbl)
     cando_lib_meta_define(vm, tbl, "fd",            tcp_fd_fn);
     cando_lib_meta_define(vm, tbl, "localAddress",  tcp_localAddress_fn);
     cando_lib_meta_define(vm, tbl, "remoteAddress", tcp_remoteAddress_fn);
+    cando_lib_meta_define(vm, tbl, "stream",        tcp_stream_fn);
 }
 
 

@@ -56,6 +56,7 @@
 #include "lib/secure_socket.h"
 #include "lib/http.h"
 #include "lib/https.h"
+#include "lib/stream.h"
 #include "lib/meta.h"
 
 /* cando.h error codes and CANDO_API */
@@ -188,6 +189,10 @@ CANDO_API void cando_openlibs(CandoVM *vm)
      * the json.stringify method on the child VM's shared globals. */
     cando_lib_http_register(vm);
     cando_lib_https_register(vm);
+    /* Stream registers last so any earlier library can later expose
+     * `:stream()` accessors that build on it without registration ordering
+     * concerns. */
+    cando_lib_stream_register(vm);
 }
 
 CANDO_API void cando_open_mathlib(CandoVM *vm)     { cando_lib_math_register(vm);     }
@@ -210,6 +215,7 @@ CANDO_API void cando_open_includelib(CandoVM *vm)  { cando_lib_include_register(
 CANDO_API void cando_open_httplib(CandoVM *vm)     { cando_lib_http_register(vm);     }
 CANDO_API void cando_open_httpslib(CandoVM *vm)    { cando_lib_https_register(vm);    }
 CANDO_API void cando_open_metalib(CandoVM *vm)     { cando_lib_meta_register(vm);     }
+CANDO_API void cando_open_streamlib(CandoVM *vm)   { cando_lib_stream_register(vm);   }
 
 /* =========================================================================
  * Internal: compile source into a chunk

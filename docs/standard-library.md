@@ -260,6 +260,7 @@ functions and currently may be `"utf8"` (default) or `"binary"`.
 | `file.lines(path, encoding*) → array` | Array of lines, without newline terminators. |
 | `file.mkdir(path) → bool` | Create a directory.  Non-recursive. |
 | `file.list(path) → array` | Array of directory entry names. |
+| `file.open(path, mode) → stream` | Open a file as a `stream` (modes: `r`/`w`/`a`, optional `b`/`+`).  See [streaming.md](streaming.md). |
 
 ---
 
@@ -329,6 +330,66 @@ proper `strptime` shim is available.
 |---|---|
 | `process.pid() → number` | Current process ID. |
 | `process.ppid() → number` | Parent process ID. |
+| `process.spawn(argv [, opts]) → proc` | Spawn a child process (POSIX only).  `opts.stdin` / `opts.stdout` / `opts.stderr` are `"inherit"` (default), `"pipe"`, or `"null"`.  `opts.cwd` sets the child's working directory. |
+
+### Methods on a spawned `proc`
+
+| Method | Description |
+|---|---|
+| `proc:pid() → number` | Child's process ID. |
+| `proc:stdin() → stream \| null` | Writable stream over the child's stdin (when opened with `pipe`). |
+| `proc:stdout() → stream \| null` | Readable stream over the child's stdout. |
+| `proc:stderr() → stream \| null` | Readable stream over the child's stderr. |
+| `proc:wait() → number` | Block until exit; returns the exit code (or `-signal` for signal termination). |
+| `proc:kill([sig]) → self` | Send a signal (default `SIGTERM`). |
+
+---
+
+## `stream`
+
+The `stream` library is a single byte-oriented I/O abstraction shared by
+files, sockets, HTTP bodies, subprocess pipes, in-memory buffers, and
+thread channels.  See [streaming.md](streaming.md) for the long-form
+guide.
+
+### Constructors
+
+| Function | Description |
+|---|---|
+| `stream.memory([initialBytes]) → stream` | Duplex in-memory buffer; auto-compacts as the reader drains. |
+| `stream.channel([capacity]) → stream` | Bounded thread channel; reads block while empty, writes block while full. |
+
+### Methods (`_meta.stream`)
+
+| Method | Description |
+|---|---|
+| `s:read(maxLen [, timeoutMs])` | Read up to `maxLen` bytes; `""` on clean EOF. |
+| `s:readAll()` | Drain to EOF and return everything. |
+| `s:write(data) → number` | Write; returns bytes consumed. |
+| `s:writeAll(data) → self` | Loop until all bytes are written. |
+| `s:flush() → self` | Adapter-defined.  No-op for memory/channel/socket. |
+| `s:end() → self` | Half-close the write side (signals EOF to readers). |
+| `s:close() → self` | Full close.  Idempotent. |
+| `s:pipeTo(dst [, opts]) → number` | Blocking copy to `dst`; returns total bytes copied. `opts.chunk` overrides the 64 KiB transfer block.  Wrap in `thread { … }` to run off-thread. |
+| `s:isClosed() → bool` | True after `:close()` or once the underlying transport is gone. |
+| `s:error() → string` | Last error message reported by the adapter; `""` if none. |
+| `s:bytesIn() → number` | Bytes read so far through any method. |
+| `s:bytesOut() → number` | Bytes written so far through any method. |
+| `s:kind() → string` | Adapter name: `"memory"`, `"file"`, `"tcp"`, `"tls"`, `"channel"`, `"http_response"`. |
+
+> **Naming note:** the method is `:pipeTo`, not `:pipe`, because `pipe`
+> is reserved as the implicit loop variable in CanDo's `~>` pipe
+> expressions.
+
+### Adapter accessors on existing handles
+
+| Call | Returns |
+|---|---|
+| `file.open(path, mode)` | File-backed stream. |
+| `tcp_socket:stream()` / `tls_socket:stream()` | Duplex view of a connected TCP / TLS socket.  Does not own the socket. |
+| `res:stream()` | Writable view of a server `http_response`; `:end()` flushes the buffered response. |
+| `clientResponse:stream()` | Readable view of an HTTP client response body. |
+| `proc:stdin()` / `:stdout()` / `:stderr()` | Pipes for a spawned subprocess. |
 
 ---
 
