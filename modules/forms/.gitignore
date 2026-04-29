@@ -1,0 +1,6 @@
+forms.so
+forms.dylib
+forms.dll
+forms.lib
+test_forms
+*.o
