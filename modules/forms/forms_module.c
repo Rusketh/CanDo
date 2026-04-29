@@ -504,6 +504,7 @@ static UINT        g_dispatch_timer_id = 0;
 static LRESULT CALLBACK mgr_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l);
 static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l);
 static void              dispatch_drain(void);
+static void              layout_dock_children(int parent_slot);
 
 /* Convert a UTF-8 string to a freshly-allocated wide string.  Caller
  * frees with free().  Returns NULL on alloc failure. */
@@ -2041,9 +2042,12 @@ static unsigned int parse_color_args(CandoValue *args, int argc, int start,
     int r = (argc > start     && args[start].tag     == CDO_NUMBER) ? (int)args[start].as.number     : 0;
     int g = (argc > start + 1 && args[start + 1].tag == CDO_NUMBER) ? (int)args[start + 1].as.number : 0;
     int b = (argc > start + 2 && args[start + 2].tag == CDO_NUMBER) ? (int)args[start + 2].as.number : 0;
-    if (r < 0) r = 0; if (r > 255) r = 255;
-    if (g < 0) g = 0; if (g > 255) g = 255;
-    if (b < 0) b = 0; if (b > 255) b = 255;
+    if (r < 0) r = 0;
+    if (g < 0) g = 0;
+    if (b < 0) b = 0;
+    if (r > 255) r = 255;
+    if (g > 255) g = 255;
+    if (b > 255) b = 255;
     return (unsigned int)(((unsigned)b << 16) | ((unsigned)g << 8) | (unsigned)r);
 }
 
