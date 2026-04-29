@@ -1,0 +1,37 @@
+// modules/window/test_window_smoke.cdo -- minimal smoke test that the
+// window module loads on either Linux (.so) or Windows (.dll), exposes
+// VERSION, and reserves the `_meta.window` prototype.  No actual window
+// is created -- this runs cleanly on headless CI hosts.
+
+print("smoke: starting");
+
+VAR window = NULL;
+TRY {
+    window = include("./window.dll");
+    print("smoke: loaded window.dll");
+} CATCH (e) {
+    print(`smoke: window.dll load failed: ${e}`);
+    TRY {
+        window = include("./window.so");
+        print("smoke: loaded window.so");
+    } CATCH (e2) {
+        print(`smoke: window.so load failed: ${e2}`);
+        os.exit(1);
+    }
+}
+
+IF type(window.VERSION) != "string" {
+    print("smoke: VERSION missing or not a string");
+    os.exit(1);
+}
+print(`smoke: module VERSION = ${window.VERSION}`);
+
+// _meta.<name> tables stamp their __type to <name>, so type(_meta.window)
+// is "window" (see source/lib/meta.c:62-68).
+IF type(_meta.window) != "window" {
+    print(`smoke: _meta.window not registered (type = ${type(_meta.window)})`);
+    os.exit(1);
+}
+print("smoke: _meta.window prototype is present");
+
+print("smoke: all checks passed");
