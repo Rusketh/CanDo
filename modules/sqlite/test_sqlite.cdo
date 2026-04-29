@@ -1,0 +1,149 @@
+// modules/sqlite/test_sqlite.cdo -- Script-level integration tests for
+// the SQLite module.  Run with:
+//
+//     ./cando modules/sqlite/test_sqlite.cdo
+//
+// Verifies the public API surface, both calling styles
+// (sql.exec(db, sql) AND db:exec(sql)), the multi-value TRY/CATCH
+// error contract, and every error path that does not require external
+// state.  Database operations run against :memory: so the tests are
+// hermetic and survive a read-only working directory.
+
+VAR sql = include("./sqlite.so");
+
+VAR pass = 0;
+VAR fail = 0;
+
+FUNCTION expect(name, ok) {
+    IF ok {
+        print(`  PASS  ${name}`);
+        pass = pass + 1;
+    } ELSE {
+        print(`  FAIL  ${name}`);
+        fail = fail + 1;
+    }
+}
+
+print("sqlite module integration tests");
+print("-------------------------------");
+
+// ---- Module surface --------------------------------------------------------
+expect("method: open",         type(sql.open)  == "number");
+expect("method: close",        type(sql.close) == "number");
+expect("method: exec",         type(sql.exec)  == "number");
+
+expect("VERSION is a string",        type(sql.VERSION)        == "string");
+expect("SQLITE_VERSION is a string", type(sql.SQLITE_VERSION) == "string");
+
+expect("OPEN_READONLY  is a number", type(sql.OPEN_READONLY)  == "number");
+expect("OPEN_READWRITE is a number", type(sql.OPEN_READWRITE) == "number");
+expect("OPEN_CREATE    is a number", type(sql.OPEN_CREATE)    == "number");
+expect("OPEN_URI       is a number", type(sql.OPEN_URI)       == "number");
+expect("OPEN_MEMORY    is a number", type(sql.OPEN_MEMORY)    == "number");
+
+// ---- open: argument validation --------------------------------------------
+VAR caught_msg = "";
+TRY { sql.open(); } CATCH (m) { caught_msg = m; }
+expect("open(): missing path throws", caught_msg != "");
+
+caught_msg = "";
+TRY { sql.open(123); } CATCH (m) { caught_msg = m; }
+expect("open(non-string): throws", caught_msg != "");
+
+// ---- open + close: round-trip ---------------------------------------------
+VAR db = sql.open(":memory:");
+expect("open(\":memory:\") returns object", type(db) == "object");
+expect("db has __sqlite_db_slot", type(db.__sqlite_db_slot) == "number");
+
+// Both methods are reachable on the handle for `db:method()` style.
+expect("db:close   sentinel attached", type(db.close) == "number");
+expect("db:exec    sentinel attached", type(db.exec)  == "number");
+
+// ---- exec: function-style and method-style --------------------------------
+sql.exec(db, "CREATE TABLE t(x INTEGER PRIMARY KEY, name TEXT)");
+db:exec("INSERT INTO t (x, name) VALUES (1, 'Ada')");
+db:exec("INSERT INTO t (x, name) VALUES (2, 'Grace')");
+expect("exec accepted via both styles", TRUE);
+
+// ---- exec: error path ------------------------------------------------------
+VAR caught_code     = -1;
+VAR caught_sqlstate = "";
+TRY {
+    db:exec("INSERT INTO t (x, name) VALUES (1, 'duplicate')");
+} CATCH (msg, code, sqlstate) {
+    caught_msg      = msg;
+    caught_code     = code;
+    caught_sqlstate = sqlstate;
+}
+expect("UNIQUE violation throws message",  caught_msg != "");
+expect("UNIQUE violation passes a code",   caught_code != 0);
+expect("UNIQUE violation -> SQLITE_CONSTRAINT_PRIMARYKEY",
+    caught_sqlstate == "SQLITE_CONSTRAINT_PRIMARYKEY");
+
+caught_msg = ""; caught_code = -1; caught_sqlstate = "";
+TRY {
+    db:exec("THIS IS NOT VALID SQL");
+} CATCH (msg, code, sqlstate) {
+    caught_msg      = msg;
+    caught_code     = code;
+    caught_sqlstate = sqlstate;
+}
+expect("syntax error throws message",            caught_msg != "");
+expect("syntax error sqlstate is SQLITE_ERROR",  caught_sqlstate == "SQLITE_ERROR");
+
+// ---- exec: missing args / bad types ---------------------------------------
+caught_msg = "";
+TRY { db:exec(); } CATCH (m) { caught_msg = m; }
+expect("exec with no sql throws", caught_msg != "");
+
+caught_msg = "";
+TRY { sql.exec(db, 42); } CATCH (m) { caught_msg = m; }
+expect("exec(non-string sql) throws", caught_msg != "");
+
+caught_msg = "";
+TRY { sql.exec("not a db handle", "SELECT 1"); } CATCH (m) { caught_msg = m; }
+expect("exec(non-handle) throws", caught_msg != "");
+
+// ---- close: idempotent ----------------------------------------------------
+db:close();
+expect("close() returns without throwing", TRUE);
+
+caught_msg = "";
+TRY { db:exec("SELECT 1"); } CATCH (m, code, sqlstate) {
+    caught_msg = m;
+    caught_sqlstate = sqlstate;
+}
+expect("exec after close throws",                      caught_msg != "");
+expect("exec after close has empty sqlstate",          caught_sqlstate == "");
+
+// Double-close is a no-op (matches node:sqlite leniency).
+caught_msg = "";
+TRY { db:close(); } CATCH (m) { caught_msg = m; }
+expect("close() on already-closed handle is a no-op",  caught_msg == "");
+
+// ---- open: options flags --------------------------------------------------
+VAR ro = sql.open(":memory:", { readonly: TRUE, create: FALSE });
+expect("open with readonly opens", type(ro) == "object");
+
+caught_msg = "";
+TRY {
+    ro:exec("CREATE TABLE x(y INTEGER)");
+} CATCH (m, code, sqlstate) {
+    caught_msg = m;
+    caught_sqlstate = sqlstate;
+}
+expect("write on readonly db throws", caught_msg != "");
+expect("write on readonly db -> SQLITE_READONLY",
+    caught_sqlstate == "SQLITE_READONLY");
+ro:close();
+
+// ---- open with custom timeout (just verify it doesn't fault) --------------
+VAR fast = sql.open(":memory:", { timeout: 100 });
+fast:exec("CREATE TABLE z(a INTEGER)");
+fast:close();
+expect("custom timeout option accepted", TRUE);
+
+// ---- Summary --------------------------------------------------------------
+print("");
+print(`pass: ${pass}    fail: ${fail}`);
+IF fail > 0 { os.exit(1); }
