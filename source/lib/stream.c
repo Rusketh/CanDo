@@ -796,6 +796,204 @@ static const StreamVTable g_chan_vt = {
     .self_locked = true,
 };
 
+/* =========================================================================
+ * Transform adapter (`stream.transform(fn)`)
+ *
+ * Duplex stream that pipes every chunk through a user-supplied CanDo
+ * function:  write(bytes) → fn(bytes) → output buffer ← read(bytes).
+ *
+ * The transform owns a child VM (cando_vm_init_child) so the function
+ * can be invoked from non-script threads (e.g. inside a pipe driver) the
+ * same way socket/http server callbacks already do.  The internal mutex
+ * serialises `fn` calls — only one write may be in flight at a time —
+ * which keeps the child VM single-consumer and matches the user's
+ * mental model that a transform is sequential.
+ *
+ * Contract for `fn`:
+ *   - takes one string argument (the input chunk; may be partial)
+ *   - returns a string (the transformed bytes; may be empty to drop the
+ *     chunk) — non-string returns are ignored
+ *
+ * Backpressure: writes block other writers via the mutex but never the
+ * reader.  Readers block when the output buffer is empty until either a
+ * new write fills it or `:end()` is called.
+ * ===================================================================== */
+
+typedef struct TransformCtx {
+    CandoVM         child_vm;
+    bool            vm_inited;
+    CandoValue      fn;
+    /* Output buffer: append-only growing byte buffer with a read cursor.
+     * Compacts when fully drained, mirroring MemCtx. */
+    u8             *out_buf;
+    usize           out_cap;
+    usize           out_len;        /* bytes available to read */
+    bool            write_ended;
+    cando_mutex_t   mu;
+    cando_cond_t    not_empty;
+    StreamSlot     *owner;
+} TransformCtx;
+
+static void transform_out_append(TransformCtx *t, const u8 *data, usize len)
+{
+    if (len == 0) return;
+    if (t->out_len + len > t->out_cap) {
+        usize ncap = t->out_cap ? t->out_cap : 4096;
+        while (t->out_len + len > ncap) ncap *= 2;
+        t->out_buf = (u8 *)cando_realloc(t->out_buf, ncap);
+        t->out_cap = ncap;
+    }
+    memcpy(t->out_buf + t->out_len, data, len);
+    t->out_len += len;
+}
+
+static StreamStatus transform_write(void *vctx, const u8 *buf, usize len,
+                                    usize *n_out)
+{
+    TransformCtx *t = (TransformCtx *)vctx;
+    if (len == 0) { *n_out = 0; return STREAM_OK; }
+
+    cando_os_mutex_lock(&t->mu);
+    if (t->write_ended) {
+        cando_os_mutex_unlock(&t->mu);
+        *n_out = 0;
+        stream_set_error(t->owner, "transform: write after end");
+        return STREAM_ERR;
+    }
+
+    /* Build the input string and call the user transform.  The mutex is
+     * held for the duration so the child VM is exclusively ours; the
+     * function body cannot race against another write on this stream. */
+    CandoString *in_s = cando_string_new((const char *)buf, (u32)len);
+    CandoValue   arg  = cando_string_value(in_s);
+
+    int n_ret = cando_vm_call_value(&t->child_vm, t->fn, &arg, 1);
+    cando_string_release(in_s);
+
+    /* Drain returned values; only the first string is appended to the
+     * output buffer.  Anything else is silently dropped — matches the
+     * "filter chunk" semantics where returning null/non-string skips. */
+    if (n_ret > 0) {
+        CandoValue r = cando_vm_pop(&t->child_vm);
+        if (cando_is_string(r) && r.as.string && r.as.string->length > 0) {
+            transform_out_append(t,
+                                 (const u8 *)r.as.string->data,
+                                 r.as.string->length);
+            cando_os_cond_broadcast(&t->not_empty);
+        }
+        cando_value_release(r);
+        for (int i = 1; i < n_ret; i++) {
+            CandoValue extra = cando_vm_pop(&t->child_vm);
+            cando_value_release(extra);
+        }
+    }
+
+    cando_os_mutex_unlock(&t->mu);
+    *n_out = len;
+    return STREAM_OK;
+}
+
+static StreamStatus transform_read(void *vctx, u8 *out, usize cap, usize *n_out)
+{
+    TransformCtx *t = (TransformCtx *)vctx;
+    cando_os_mutex_lock(&t->mu);
+    while (t->out_len == 0 && !t->write_ended) {
+        cando_os_cond_wait(&t->not_empty, &t->mu);
+    }
+    if (t->out_len == 0) {
+        cando_os_mutex_unlock(&t->mu);
+        *n_out = 0;
+        return STREAM_EOF;
+    }
+    usize n = cap < t->out_len ? cap : t->out_len;
+    memcpy(out, t->out_buf, n);
+    if (n < t->out_len) {
+        memmove(t->out_buf, t->out_buf + n, t->out_len - n);
+    }
+    t->out_len -= n;
+    cando_os_mutex_unlock(&t->mu);
+    *n_out = n;
+    return STREAM_OK;
+}
+
+static StreamStatus transform_end(void *vctx)
+{
+    TransformCtx *t = (TransformCtx *)vctx;
+    cando_os_mutex_lock(&t->mu);
+    t->write_ended = true;
+    cando_os_cond_broadcast(&t->not_empty);
+    cando_os_mutex_unlock(&t->mu);
+    return STREAM_OK;
+}
+
+static void transform_destroy(void *vctx)
+{
+    TransformCtx *t = (TransformCtx *)vctx;
+    if (!t) return;
+    cando_os_mutex_lock(&t->mu);
+    t->write_ended = true;
+    cando_os_cond_broadcast(&t->not_empty);
+    cando_os_mutex_unlock(&t->mu);
+
+    if (t->vm_inited) {
+        cando_vm_destroy(&t->child_vm);
+        t->vm_inited = false;
+    }
+    cando_value_release(t->fn);
+    cando_free(t->out_buf);
+    cando_os_cond_destroy(&t->not_empty);
+    cando_os_mutex_destroy(&t->mu);
+    cando_free(t);
+}
+
+static const StreamVTable g_transform_vt = {
+    .read        = transform_read,
+    .write       = transform_write,
+    .flush       = NULL,
+    .end         = transform_end,
+    .destroy     = transform_destroy,
+    .seek        = NULL,
+    .tell        = NULL,
+    .kind_name   = "transform",
+    .self_locked = true,
+};
+
+/* stream.transform(fn) -> stream
+ *
+ * fn(chunk) → chunk: returns the transformed bytes for each input chunk.
+ * Return null or a non-string to drop the chunk.  The transform is
+ * applied eagerly on each :write so reads only see already-transformed
+ * bytes.
+ */
+static int mod_transform_fn(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1 || !cando_is_object(args[0])) {
+        cando_vm_error(vm, "stream.transform: function required");
+        return -1;
+    }
+    TransformCtx *t = (TransformCtx *)cando_alloc(sizeof(TransformCtx));
+    memset(t, 0, sizeof(*t));
+    cando_vm_init_child(&t->child_vm, vm);
+    t->vm_inited = true;
+    t->fn = cando_value_copy(args[0]);
+    cando_os_mutex_init(&t->mu);
+    cando_os_cond_init(&t->not_empty);
+
+    int idx = stream_pool_alloc(&g_transform_vt, t, STREAM_CAP_DUPLEX);
+    if (idx < 0) {
+        cando_value_release(t->fn);
+        cando_vm_destroy(&t->child_vm);
+        cando_os_cond_destroy(&t->not_empty);
+        cando_os_mutex_destroy(&t->mu);
+        cando_free(t);
+        cando_vm_error(vm, "stream.transform: too many active streams");
+        return -1;
+    }
+    t->owner = stream_pool_get(idx);
+    cando_vm_push(vm, stream_create_instance(vm, idx));
+    return 1;
+}
+
 /* stream.channel(capacity?) -> stream */
 static int mod_channel_fn(CandoVM *vm, int argc, CandoValue *args)
 {
@@ -907,8 +1105,9 @@ void cando_lib_stream_register(CandoVM *vm)
     /* Module globals. */
     CandoValue mod_val = cando_bridge_new_object(vm);
     CdoObject *mod_obj = cando_bridge_resolve(vm, mod_val.as.handle);
-    libutil_set_method(vm, mod_obj, "memory",  mod_memory_fn);
-    libutil_set_method(vm, mod_obj, "channel", mod_channel_fn);
+    libutil_set_method(vm, mod_obj, "memory",    mod_memory_fn);
+    libutil_set_method(vm, mod_obj, "channel",   mod_channel_fn);
+    libutil_set_method(vm, mod_obj, "transform", mod_transform_fn);
     cando_vm_set_global(vm, "stream", mod_val, true);
 
     /* Meta table for every stream instance. */

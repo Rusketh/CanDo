@@ -41,6 +41,7 @@ Four things to keep in mind:
 |---------------------------------|-------------------------------------------------|
 | `stream.memory([initialBytes])` | Duplex in-memory buffer (compacts as it drains) |
 | `stream.channel([capacity])`    | Bounded thread channel — backpressure built-in  |
+| `stream.transform(fn)`          | Pipes every chunk through `fn(chunk) → chunk`   |
 | `file.open(path, mode)`         | File-backed stream (`r/w/a`, optional `b`/`+`)  |
 | `sock:stream()`                 | Duplex view of an open TCP / TLS socket         |
 | `res:stream()`                  | Writable view of a server `http_response`       |
@@ -82,11 +83,34 @@ dst:close();
 
 ### Download an HTTP response straight to disk
 
+The body is buffered in memory unless you opt into streaming with
+`{ stream: true }`.  In streaming mode the response object's `body`
+field is `null` and `:stream()` returns a reader that pulls bytes from
+the connection on demand — handles Content-Length, chunked, and
+connection-close framing.
+
 ```cando
-VAR resp = fetch("https://example.com/big.zip");
+VAR resp = fetch("https://example.com/big.zip", { stream: TRUE });
 VAR out  = file.open("big.zip", "wb");
-resp:stream():pipeTo(out);
+resp:stream():pipeTo(out);          /* never materialises the whole body */
 out:close();
+```
+
+### Send a chunked HTTP response from a server
+
+`res:stream()` writes `Transfer-Encoding: chunked` headers on the first
+write and emits each subsequent write as one chunk.  `:end()` writes
+the terminating zero-chunk.
+
+```cando
+http.createServer(FUNCTION(req, res) {
+    res:setHeader("Content-Type", "application/octet-stream");
+    VAR rs = res:stream();
+    VAR f  = file.open("download.zip", "rb");
+    f:pipeTo(rs);                   /* arbitrary size, no server-side buffer */
+    rs:end();
+    f:close();
+}):listen(8080);
 ```
 
 ### Echo server using socket streams
@@ -127,17 +151,25 @@ print(p:wait());                    /* exit code */
 print(out:readAll());
 ```
 
-### Pipe a file out as the body of an HTTP response
+### Transform: uppercase every chunk on its way through
 
 ```cando
-http.createServer(FUNCTION(req, res) {
-    VAR f = file.open("download.zip", "rb");
-    VAR rs = res:stream();
-    f:pipeTo(rs);
-    rs:end();                       /* flush the buffered response */
-    f:close();
-}):listen(8080);
+VAR upper = stream.transform(FUNCTION(chunk) {
+    RETURN chunk:toUpper();
+});
+
+VAR src = file.open("input.txt",  "rb");
+VAR dst = file.open("upper.txt",  "wb");
+src:pipeTo(upper);
+upper:end();                        /* tell upper there's no more input */
+upper:pipeTo(dst);
+src:close();
+dst:close();
 ```
+
+The transform owns a child VM so the function can run from any thread —
+including the pipe driver — without sharing call frames with the caller.
+Returning `null` (or anything non-string) from `fn` drops that chunk.
 
 ## Threading and lifetimes
 
@@ -156,16 +188,18 @@ are fixed at construction.
   `cando_vm_wait_all_threads` machinery ensures the process won't exit
   before the pipe finishes.
 
-## Limitations
+## Notes
 
-* **HTTP bodies are still buffered.**  Both `clientResponse:stream()`
-  and `res:stream()` work over the existing buffered body.  True
-  on-the-wire streaming (chunked downloads, chunked sends) is a
-  follow-up that requires teaching `http_read_response` to expose the
-  unread connection.
-* **`process.spawn` is POSIX-only.**  The Windows path errors with
-  "not implemented".  `process.pid()` / `process.ppid()` work
-  everywhere.
-* **No transform streams yet.**  If you need to map / filter bytes mid-
-  pipe, drain into a `stream.memory()`, transform, and pipe out.  A
-  proper transform adapter will follow once the use cases are clearer.
+* **HTTP client streaming is opt-in.**  Plain `fetch(url)` still
+  buffers the body for backward compatibility; pass
+  `{ stream: TRUE }` to drain it on demand instead.
+* **HTTP server `res:stream()` writes chunked.**  The first `:write`
+  flushes status + headers (with `Transfer-Encoding: chunked`); set
+  status / headers *before* the first write.  Any user-supplied
+  `Content-Length` or `Transfer-Encoding` header on a streamed
+  response is dropped — framing is owned by the adapter.
+* **`process.spawn` works on POSIX and Windows.**  POSIX uses
+  `fork + execvp`; Windows uses `CreateProcess` with anonymous pipes
+  converted to fds via `_open_osfhandle`.  `proc:kill([sig])` ignores
+  the signal arg on Windows and unconditionally calls
+  `TerminateProcess`.

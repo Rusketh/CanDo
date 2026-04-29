@@ -39,11 +39,14 @@
 #include <errno.h>
 #include <signal.h>
 
-#include <unistd.h>
-#include <sys/types.h>
 #if defined(_WIN32) || defined(_WIN64)
+#  include <windows.h>
+#  include <io.h>
+#  include <fcntl.h>
 #  include <process.h>
 #else
+#  include <unistd.h>
+#  include <sys/types.h>
 #  include <sys/wait.h>
 #  include <fcntl.h>
 extern char **environ;
@@ -68,6 +71,9 @@ typedef struct ProcSlot {
     int              stdin_stream_idx;
     int              stdout_stream_idx;
     int              stderr_stream_idx;
+    /* Windows: HANDLE for the child process so wait/kill can address it.
+     * Stored as void* to keep the struct identical across platforms. */
+    void            *win_proc_handle;
 } ProcSlot;
 
 static ProcSlot      g_proc_pool[PROC_MAX_INSTANCES];
@@ -184,7 +190,181 @@ static StdioMode parse_stdio(CdoObject *opts, const char *key, StdioMode def)
     return def;
 }
 
-#if !defined(_WIN32) && !defined(_WIN64)
+#if defined(_WIN32) || defined(_WIN64)
+/* =========================================================================
+ * Windows spawn: CreateProcess + anonymous pipes.
+ *
+ * The Windows command-line is one big string; we have to build it from
+ * argv with the standard CommandLineToArgv quoting rules so the child
+ * sees the same tokens.  Pipe ends are handed to the child via
+ * STARTF_USESTDHANDLES with bInheritHandles=TRUE; the parent's ends
+ * are explicitly marked non-inheritable so they don't leak into a
+ * subsequent CreateProcess call.
+ * ===================================================================== */
+
+/* Quote one argv element per CommandLineToArgvW's escaping rules. */
+static void win_append_quoted(char **buf, usize *len, usize *cap, const char *arg)
+{
+    bool need_quote = (*arg == '\0') ||
+                      strchr(arg, ' ')  || strchr(arg, '\t') ||
+                      strchr(arg, '"');
+    usize alen = strlen(arg);
+
+    /* Worst case: every char becomes \\ + " expansion = 4x.  Plus quotes. */
+    usize need = (need_quote ? 2 : 0) + alen * 4;
+    if (*len + need + 1 > *cap) {
+        while (*len + need + 1 > *cap) *cap *= 2;
+        *buf = (char *)cando_realloc(*buf, *cap);
+    }
+
+    if (!need_quote) {
+        memcpy(*buf + *len, arg, alen);
+        *len += alen;
+        return;
+    }
+
+    (*buf)[(*len)++] = '"';
+    int bs = 0;
+    for (const char *p = arg; *p; p++) {
+        if (*p == '\\') {
+            bs++;
+            (*buf)[(*len)++] = '\\';
+        } else if (*p == '"') {
+            for (int k = 0; k < bs; k++) (*buf)[(*len)++] = '\\';
+            (*buf)[(*len)++] = '\\';
+            (*buf)[(*len)++] = '"';
+            bs = 0;
+        } else {
+            bs = 0;
+            (*buf)[(*len)++] = *p;
+        }
+    }
+    for (int k = 0; k < bs; k++) (*buf)[(*len)++] = '\\';
+    (*buf)[(*len)++] = '"';
+}
+
+static char *win_build_cmdline(char *const argv[])
+{
+    usize cap = 256, len = 0;
+    char *out = (char *)cando_alloc(cap);
+    for (int i = 0; argv[i]; i++) {
+        if (i > 0) {
+            if (len + 1 >= cap) { cap *= 2; out = (char *)cando_realloc(out, cap); }
+            out[len++] = ' ';
+        }
+        win_append_quoted(&out, &len, &cap, argv[i]);
+    }
+    if (len + 1 > cap) { cap += 1; out = (char *)cando_realloc(out, cap); }
+    out[len] = '\0';
+    return out;
+}
+
+static int spawn_windows(char *const argv[],
+                         StdioMode in_mode, StdioMode out_mode, StdioMode err_mode,
+                         const char *cwd,
+                         char *err, usize errlen)
+{
+    HANDLE in_rd = NULL, in_wr = NULL;
+    HANDLE out_rd = NULL, out_wr = NULL;
+    HANDLE err_rd = NULL, err_wr = NULL;
+    HANDLE null_in = INVALID_HANDLE_VALUE, null_out = INVALID_HANDLE_VALUE;
+    int slot_idx = -1;
+
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+
+    if (in_mode == STDIO_PIPE) {
+        if (!CreatePipe(&in_rd, &in_wr, &sa, 0)) goto pipe_err;
+        SetHandleInformation(in_wr, HANDLE_FLAG_INHERIT, 0);
+    }
+    if (out_mode == STDIO_PIPE) {
+        if (!CreatePipe(&out_rd, &out_wr, &sa, 0)) goto pipe_err;
+        SetHandleInformation(out_rd, HANDLE_FLAG_INHERIT, 0);
+    }
+    if (err_mode == STDIO_PIPE) {
+        if (!CreatePipe(&err_rd, &err_wr, &sa, 0)) goto pipe_err;
+        SetHandleInformation(err_rd, HANDLE_FLAG_INHERIT, 0);
+    }
+    if (in_mode == STDIO_NULL) {
+        null_in = CreateFileA("NUL", GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                              OPEN_EXISTING, 0, NULL);
+    }
+    if (out_mode == STDIO_NULL || err_mode == STDIO_NULL) {
+        null_out = CreateFileA("NUL", GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                               OPEN_EXISTING, 0, NULL);
+    }
+
+    slot_idx = proc_pool_alloc();
+    if (slot_idx < 0) {
+        snprintf(err, errlen, "process.spawn: pool exhausted");
+        goto cleanup;
+    }
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    ZeroMemory(&pi, sizeof(pi));
+    si.cb        = sizeof(si);
+    si.dwFlags   = STARTF_USESTDHANDLES;
+    si.hStdInput  = (in_mode  == STDIO_PIPE) ? in_rd  :
+                    (in_mode  == STDIO_NULL) ? null_in :
+                    GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = (out_mode == STDIO_PIPE) ? out_wr :
+                    (out_mode == STDIO_NULL) ? null_out :
+                    GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError  = (err_mode == STDIO_PIPE) ? err_wr :
+                    (err_mode == STDIO_NULL) ? null_out :
+                    GetStdHandle(STD_ERROR_HANDLE);
+
+    char *cmdline = win_build_cmdline(argv);
+    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE,
+                             0, NULL, cwd, &si, &pi);
+    cando_free(cmdline);
+
+    if (!ok) {
+        snprintf(err, errlen, "process.spawn: CreateProcess failed: %lu",
+                 (unsigned long)GetLastError());
+        g_proc_pool[slot_idx].in_use = false;
+        slot_idx = -1;
+        goto cleanup;
+    }
+
+    /* Close the child ends in the parent so EOF propagates correctly when
+     * the child exits. */
+    if (in_rd)  { CloseHandle(in_rd);  in_rd  = NULL; }
+    if (out_wr) { CloseHandle(out_wr); out_wr = NULL; }
+    if (err_wr) { CloseHandle(err_wr); err_wr = NULL; }
+    if (null_in  != INVALID_HANDLE_VALUE) { CloseHandle(null_in);  null_in  = INVALID_HANDLE_VALUE; }
+    if (null_out != INVALID_HANDLE_VALUE) { CloseHandle(null_out); null_out = INVALID_HANDLE_VALUE; }
+
+    ProcSlot *p = &g_proc_pool[slot_idx];
+    p->pid = (int)pi.dwProcessId;
+    p->win_proc_handle = pi.hProcess;
+    if (in_mode == STDIO_PIPE)
+        p->stdin_fd  = _open_osfhandle((intptr_t)in_wr,  _O_WRONLY | _O_BINARY);
+    if (out_mode == STDIO_PIPE)
+        p->stdout_fd = _open_osfhandle((intptr_t)out_rd, _O_RDONLY | _O_BINARY);
+    if (err_mode == STDIO_PIPE)
+        p->stderr_fd = _open_osfhandle((intptr_t)err_rd, _O_RDONLY | _O_BINARY);
+    CloseHandle(pi.hThread);
+    return slot_idx;
+
+pipe_err:
+    snprintf(err, errlen, "process.spawn: CreatePipe failed: %lu",
+             (unsigned long)GetLastError());
+cleanup:
+    if (in_rd)  CloseHandle(in_rd);
+    if (in_wr)  CloseHandle(in_wr);
+    if (out_rd) CloseHandle(out_rd);
+    if (out_wr) CloseHandle(out_wr);
+    if (err_rd) CloseHandle(err_rd);
+    if (err_wr) CloseHandle(err_wr);
+    if (null_in  != INVALID_HANDLE_VALUE) CloseHandle(null_in);
+    if (null_out != INVALID_HANDLE_VALUE) CloseHandle(null_out);
+    return slot_idx < 0 ? -1 : -1;
+}
+#else
 /*
  * spawn_posix -- fork + exec on POSIX.  Returns the parent's slot index, or
  * -1 with `err` populated on failure.  argv must be NULL-terminated.
@@ -273,11 +453,6 @@ cleanup:
 /* process.spawn(argv [, opts]) -> proc */
 static int process_spawn_fn(CandoVM *vm, int argc, CandoValue *args)
 {
-#if defined(_WIN32) || defined(_WIN64)
-    (void)argc; (void)args;
-    cando_vm_error(vm, "process.spawn: not implemented on Windows yet");
-    return -1;
-#else
     if (argc < 1 || !cando_is_object(args[0])) {
         cando_vm_error(vm, "process.spawn: argv (array) required");
         return -1;
@@ -294,8 +469,7 @@ static int process_spawn_fn(CandoVM *vm, int argc, CandoValue *args)
     }
 
     /* Materialise argv into a NULL-terminated char* array.  We dup each
-     * string so the child has stable storage even if the script GC moves
-     * underlying CdoString memory between fork() and exec(). */
+     * string so the child has stable storage independent of script GC. */
     char **argv = (char **)cando_alloc(sizeof(char *) * (nargs + 1));
     for (u32 i = 0; i < nargs; i++) {
         CdoValue v = cdo_null();
@@ -330,9 +504,15 @@ static int process_spawn_fn(CandoVM *vm, int argc, CandoValue *args)
             cwd = vcwd.as.string->data;
     }
 
-    char errbuf[160] = {0};
-    int slot_idx = spawn_posix(argv, in_mode, out_mode, err_mode, cwd,
-                               errbuf, sizeof(errbuf));
+    char errbuf[256] = {0};
+    int slot_idx;
+#if defined(_WIN32) || defined(_WIN64)
+    slot_idx = spawn_windows(argv, in_mode, out_mode, err_mode, cwd,
+                             errbuf, sizeof(errbuf));
+#else
+    slot_idx = spawn_posix(argv, in_mode, out_mode, err_mode, cwd,
+                           errbuf, sizeof(errbuf));
+#endif
 
     for (u32 i = 0; i < nargs; i++) cando_free(argv[i]);
     cando_free(argv);
@@ -343,7 +523,6 @@ static int process_spawn_fn(CandoVM *vm, int argc, CandoValue *args)
     }
     cando_vm_push(vm, proc_create_instance(vm, slot_idx));
     return 1;
-#endif
 }
 
 /* =========================================================================
@@ -437,7 +616,22 @@ static int proc_stderr_fn(CandoVM *vm, int argc, CandoValue *args)
                            "rb", STREAM_CAP_READABLE, "proc:stderr");
 }
 
-/* proc:wait() -> exit code (POSIX waitpid) */
+/* Close fds the user never promoted to a stream.  Stream-owned fds are
+ * cleared from the slot at promotion time so this only frees orphans. */
+static void proc_close_orphan_fds(ProcSlot *p)
+{
+#if defined(_WIN32) || defined(_WIN64)
+    if (p->stdin_fd  >= 0) { _close(p->stdin_fd);  p->stdin_fd  = -1; }
+    if (p->stdout_fd >= 0) { _close(p->stdout_fd); p->stdout_fd = -1; }
+    if (p->stderr_fd >= 0) { _close(p->stderr_fd); p->stderr_fd = -1; }
+#else
+    if (p->stdin_fd  >= 0) { close(p->stdin_fd);  p->stdin_fd  = -1; }
+    if (p->stdout_fd >= 0) { close(p->stdout_fd); p->stdout_fd = -1; }
+    if (p->stderr_fd >= 0) { close(p->stderr_fd); p->stderr_fd = -1; }
+#endif
+}
+
+/* proc:wait() -> exit code */
 static int proc_wait_fn(CandoVM *vm, int argc, CandoValue *args)
 {
     ProcSlot *p = proc_resolve_receiver(vm, argc > 0 ? args[0] : cando_null());
@@ -450,30 +644,45 @@ static int proc_wait_fn(CandoVM *vm, int argc, CandoValue *args)
         return 1;
     }
 #if defined(_WIN32) || defined(_WIN64)
-    cando_vm_error(vm, "proc:wait: not implemented on Windows");
-    return -1;
+    HANDLE h = (HANDLE)p->win_proc_handle;
+    if (h == NULL) {
+        cando_vm_error(vm, "proc:wait: process handle is invalid");
+        return -1;
+    }
+    DWORD wr = WaitForSingleObject(h, INFINITE);
+    if (wr != WAIT_OBJECT_0) {
+        cando_vm_error(vm, "proc:wait: WaitForSingleObject failed: %lu",
+                       (unsigned long)GetLastError());
+        return -1;
+    }
+    DWORD code = 0;
+    GetExitCodeProcess(h, &code);
+    CloseHandle(h);
+    p->win_proc_handle = NULL;
+    p->exit_code       = (int)code;
+    p->waited          = true;
+    proc_close_orphan_fds(p);
+    cando_vm_push(vm, cando_number((f64)code));
+    return 1;
 #else
     int status = 0;
     if (waitpid(p->pid, &status, 0) < 0) {
         cando_vm_error(vm, "proc:wait: waitpid failed: %s", strerror(errno));
         return -1;
     }
-    int code = WIFEXITED(status) ? WEXITSTATUS(status)
+    int code = WIFEXITED(status)  ? WEXITSTATUS(status)
             : WIFSIGNALED(status) ? -WTERMSIG(status)
             : -1;
     p->exit_code = code;
     p->waited    = true;
-    /* Close any fds the user never asked for via :stdin/:stdout/:stderr.
-     * Fds promoted into a stream are already owned by that stream. */
-    if (p->stdin_fd  >= 0) { close(p->stdin_fd);  p->stdin_fd  = -1; }
-    if (p->stdout_fd >= 0) { close(p->stdout_fd); p->stdout_fd = -1; }
-    if (p->stderr_fd >= 0) { close(p->stderr_fd); p->stderr_fd = -1; }
+    proc_close_orphan_fds(p);
     cando_vm_push(vm, cando_number((f64)code));
     return 1;
 #endif
 }
 
-/* proc:kill([sig]) */
+/* proc:kill([sig]) -- POSIX takes a signal; on Windows the signal arg is
+ * ignored and the child is unconditionally terminated. */
 static int proc_kill_fn(CandoVM *vm, int argc, CandoValue *args)
 {
     ProcSlot *p = proc_resolve_receiver(vm, argc > 0 ? args[0] : cando_null());
@@ -483,8 +692,18 @@ static int proc_kill_fn(CandoVM *vm, int argc, CandoValue *args)
     }
 #if defined(_WIN32) || defined(_WIN64)
     (void)argc;
-    cando_vm_error(vm, "proc:kill: not implemented on Windows");
-    return -1;
+    HANDLE h = (HANDLE)p->win_proc_handle;
+    if (h == NULL) {
+        cando_vm_error(vm, "proc:kill: process handle is invalid");
+        return -1;
+    }
+    if (!TerminateProcess(h, 1)) {
+        cando_vm_error(vm, "proc:kill: TerminateProcess failed: %lu",
+                       (unsigned long)GetLastError());
+        return -1;
+    }
+    cando_vm_push(vm, args[0]);
+    return 1;
 #else
     int sig = (int)libutil_arg_num_at(args, argc, 1, (f64)SIGTERM);
     if (kill(p->pid, sig) != 0) {

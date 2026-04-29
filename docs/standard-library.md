@@ -330,7 +330,7 @@ proper `strptime` shim is available.
 |---|---|
 | `process.pid() → number` | Current process ID. |
 | `process.ppid() → number` | Parent process ID. |
-| `process.spawn(argv [, opts]) → proc` | Spawn a child process (POSIX only).  `opts.stdin` / `opts.stdout` / `opts.stderr` are `"inherit"` (default), `"pipe"`, or `"null"`.  `opts.cwd` sets the child's working directory. |
+| `process.spawn(argv [, opts]) → proc` | Spawn a child process (POSIX `fork+exec` / Windows `CreateProcess`).  `opts.stdin` / `opts.stdout` / `opts.stderr` are `"inherit"` (default), `"pipe"`, or `"null"`.  `opts.cwd` sets the child's working directory. |
 
 ### Methods on a spawned `proc`
 
@@ -358,6 +358,7 @@ guide.
 |---|---|
 | `stream.memory([initialBytes]) → stream` | Duplex in-memory buffer; auto-compacts as the reader drains. |
 | `stream.channel([capacity]) → stream` | Bounded thread channel; reads block while empty, writes block while full. |
+| `stream.transform(fn) → stream` | Pipes every chunk through `fn(chunk) → chunk`.  Returns null/non-string from `fn` to drop the chunk. |
 
 ### Methods (`_meta.stream`)
 
@@ -375,7 +376,7 @@ guide.
 | `s:error() → string` | Last error message reported by the adapter; `""` if none. |
 | `s:bytesIn() → number` | Bytes read so far through any method. |
 | `s:bytesOut() → number` | Bytes written so far through any method. |
-| `s:kind() → string` | Adapter name: `"memory"`, `"file"`, `"tcp"`, `"tls"`, `"channel"`, `"http_response"`. |
+| `s:kind() → string` | Adapter name: `"memory"`, `"file"`, `"tcp"`, `"tls"`, `"channel"`, `"transform"`, `"http_body"`, `"http_response"`. |
 
 > **Naming note:** the method is `:pipeTo`, not `:pipe`, because `pipe`
 > is reserved as the implicit loop variable in CanDo's `~>` pipe
@@ -388,7 +389,7 @@ guide.
 | `file.open(path, mode)` | File-backed stream. |
 | `tcp_socket:stream()` / `tls_socket:stream()` | Duplex view of a connected TCP / TLS socket.  Does not own the socket. |
 | `res:stream()` | Writable view of a server `http_response`; `:end()` flushes the buffered response. |
-| `clientResponse:stream()` | Readable view of an HTTP client response body. |
+| `clientResponse:stream()` | Readable view of an HTTP client response body.  When the request was issued with `{ stream: TRUE }` the body is drained lazily from the live connection; otherwise it's a memory stream over the buffered body. |
 | `proc:stdin()` / `:stdout()` / `:stderr()` | Pipes for a spawned subprocess. |
 
 ---

@@ -208,4 +208,52 @@ small:pipeTo(collected);
 thread.join(p2);
 print(collected:readAll():length());   /* expected: 800 */
 
+/* ---- 13e. true streaming HTTP client: drain body straight into file ---
+ *         Same end-to-end shape as 13b but using `{ stream: true }` so the
+ *         response body is never buffered in memory.                    */
+VAR ssrv2 = http.createServer(FUNCTION(req, res) {
+    res:status(200);
+    res:send("streamed-from-server");
+});
+ssrv2:listen(18794);
+
+VAR resp_st = fetch("http://127.0.0.1:18794/", { stream: TRUE });
+print(resp_st.body);                /* expected: null */
+VAR sink_st = "/tmp/cando_stream_lazy.bin";
+file.delete(sink_st);
+VAR fout_st = file.open(sink_st, "wb");
+resp_st:stream():pipeTo(fout_st);
+fout_st:close();
+print(file.read(sink_st));          /* expected: streamed-from-server */
+file.delete(sink_st);
+ssrv2:close();
+
+/* ---- 14. transform: uppercase every chunk via a script function --- */
+VAR upper = stream.transform(FUNCTION(chunk) {
+    RETURN chunk:toUpper();
+});
+upper:writeAll("hello, ");
+upper:writeAll("world");
+upper:end();
+print(upper:readAll());             /* expected: HELLO, WORLD */
+print(upper:kind());                /* expected: transform */
+
+/* ---- 15. transform pipeline: file -> uppercase -> memory ---------- */
+VAR tr_path = "/tmp/cando_stream_transform.txt";
+file.delete(tr_path);
+VAR fw_t = file.open(tr_path, "wb");
+fw_t:writeAll("piped through transform");
+fw_t:close();
+
+VAR up2  = stream.transform(FUNCTION(c) { RETURN c:toUpper(); });
+VAR sink_t = stream.memory();
+VAR fr_t = file.open(tr_path, "rb");
+/* Two-phase: drain source into transform, end it, then drain transform. */
+fr_t:pipeTo(up2);
+up2:end();
+up2:pipeTo(sink_t);
+fr_t:close();
+print(sink_t:readAll());            /* expected: PIPED THROUGH TRANSFORM */
+file.delete(tr_path);
+
 print("ok");                        /* expected: ok */
