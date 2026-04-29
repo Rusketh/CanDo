@@ -192,6 +192,49 @@ typedef enum {
 #define FORMS_GEN_KEY   "__forms_gen"
 #define FORMS_KIND_KEY  "__forms_kind"
 
+/* Docking constants.  Mirror System.Windows.Forms.DockStyle. */
+#define FORMS_DOCK_NONE   0
+#define FORMS_DOCK_TOP    1
+#define FORMS_DOCK_BOTTOM 2
+#define FORMS_DOCK_LEFT   3
+#define FORMS_DOCK_RIGHT  4
+#define FORMS_DOCK_FILL   5
+
+/* Pure-C dock-rect peel.  Lives outside any conditional so the test
+ * build (which strips Win32) can still exercise it.  Given a parent's
+ * remaining client rect (read/written via *left, *top, *right, *bottom)
+ * and a child's preferred width/height, returns the rect the child
+ * should occupy and updates the remainder.  FILL is a no-op here --
+ * callers handle FILL by reading whatever's left after every other
+ * child has peeled its rect. */
+typedef struct DockRect { int x, y, w, h; } DockRect;
+
+static void compute_dock_rect(int dock, int child_w, int child_h,
+                              int *left, int *top, int *right, int *bottom,
+                              DockRect *out)
+{
+    int x = *left, y = *top, w = *right - *left, h = *bottom - *top;
+    switch (dock) {
+    case FORMS_DOCK_TOP:
+        h = child_h; *top    += child_h;
+        break;
+    case FORMS_DOCK_BOTTOM:
+        y = *bottom - child_h; h = child_h; *bottom -= child_h;
+        break;
+    case FORMS_DOCK_LEFT:
+        w = child_w; *left   += child_w;
+        break;
+    case FORMS_DOCK_RIGHT:
+        x = *right  - child_w; w = child_w; *right  -= child_w;
+        break;
+    case FORMS_DOCK_FILL:
+    case FORMS_DOCK_NONE:
+    default:
+        break;
+    }
+    out->x = x; out->y = y; out->w = w; out->h = h;
+}
+
 typedef struct FormsSlot {
     int          alive;
     int          generation;
@@ -207,6 +250,21 @@ typedef struct FormsSlot {
     int          x, y, w, h;
     int          visible;
     int          enabled;
+    /* Custom colours.  Win32 controls don't use these by default; the
+     * parent form's WndProc honours WM_CTLCOLOR* messages by looking
+     * up these fields on the slot of the calling child.  has_fore /
+     * has_back gate whether we override the system default.            */
+    int          has_fore;
+    int          has_back;
+    unsigned int fore_color;        /* 0x00BBGGRR (Win32 COLORREF order) */
+    unsigned int back_color;
+#if FORMS_HAVE_WIN32
+    HBRUSH       back_brush;        /* lazily created from back_color   */
+#endif
+    /* Docking style.  When the parent's client area resizes, the form's
+     * WM_SIZE handler walks the children and re-positions each one
+     * according to its dock value.                                     */
+    int          dock;              /* one of FORMS_DOCK_*               */
     /* Retained handle to the script-side instance so callbacks survive
      * the script returning.                                              */
     CandoValue   inst_val;
@@ -329,9 +387,15 @@ static int slot_alloc_locked(ControlKind kind, int parent_slot)
             s->enabled = 1;
             s->inst_val_held = 0;
             s->has_lifeline  = 0;
+            s->has_fore = 0;
+            s->has_back = 0;
+            s->fore_color = 0;
+            s->back_color = 0;
+            s->dock = FORMS_DOCK_NONE;
 #if FORMS_HAVE_WIN32
             s->hwnd        = NULL;
             s->orig_proc   = NULL;
+            s->back_brush  = NULL;
 #endif
             return i;
         }
@@ -440,6 +504,7 @@ static UINT        g_dispatch_timer_id = 0;
 static LRESULT CALLBACK mgr_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l);
 static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l);
 static void              dispatch_drain(void);
+static void              layout_dock_children(int parent_slot);
 
 /* Convert a UTF-8 string to a freshly-allocated wide string.  Caller
  * frees with free().  Returns NULL on alloc failure. */
@@ -631,6 +696,9 @@ static int do_create_control(FormsCommand *c)
         break;
     case KIND_PROGRESS:
         cls = PROGRESS_CLASSW;
+        if (c->style_extra & 4) style |= PBS_MARQUEE;
+        if (c->style_extra & 8) style |= PBS_VERTICAL;
+        if (c->style_extra & 16) style |= PBS_SMOOTH;
         break;
     case KIND_TRACKBAR:
         cls = TRACKBAR_CLASSW;
@@ -782,6 +850,8 @@ static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
         event_queue_push(ev);
         if (slot > 0 && slot < FORMS_MAX_SLOTS) {
             g_slots[slot].w = cw; g_slots[slot].h = ch;
+            /* Re-run docking for any children that asked for it. */
+            layout_dock_children(slot);
         }
         return 0;
     }
@@ -818,6 +888,50 @@ static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
             }
         }
         return 0;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORSCROLLBAR: {
+        /* w = HDC of the control, l = child HWND.  If the child slot
+         * has a custom fore/back colour, apply it and return the
+         * matching brush.  Otherwise let the default proc paint. */
+        HWND child = (HWND)l;
+        int  cid   = slot_from_hwnd(child);
+        if (cid > 0 && cid < FORMS_MAX_SLOTS && g_slots[cid].alive) {
+            FormsSlot *cs = &g_slots[cid];
+            HDC hdc = (HDC)w;
+            if (cs->has_fore) SetTextColor(hdc, (COLORREF)cs->fore_color);
+            if (cs->has_back) {
+                SetBkColor(hdc, (COLORREF)cs->back_color);
+                if (!cs->back_brush)
+                    cs->back_brush = CreateSolidBrush((COLORREF)cs->back_color);
+                if (cs->back_brush) return (LRESULT)cs->back_brush;
+            }
+            if (cs->has_fore && !cs->has_back) {
+                /* Make the bg transparent so only the fore colour
+                 * differs from the system default -- otherwise text
+                 * gets a coloured rectangle behind it. */
+                SetBkMode(hdc, TRANSPARENT);
+                return (LRESULT)GetStockObject(NULL_BRUSH);
+            }
+        }
+        break;
+    }
+    case WM_ERASEBKGND: {
+        /* Paint the form's own background colour if set. */
+        if (slot > 0 && slot < FORMS_MAX_SLOTS && g_slots[slot].has_back) {
+            FormsSlot *fs = &g_slots[slot];
+            if (!fs->back_brush)
+                fs->back_brush = CreateSolidBrush((COLORREF)fs->back_color);
+            if (fs->back_brush) {
+                RECT r; GetClientRect(h, &r);
+                FillRect((HDC)w, &r, fs->back_brush);
+                return 1;
+            }
+        }
+        break;
     }
     case WM_DESTROY:
         /* Slot teardown is initiated by the script via destroy(); we
@@ -1139,6 +1253,7 @@ static void slot_teardown(FormsSlot *s)
             s->hwnd = NULL;
         }
     }
+    if (s->back_brush) { DeleteObject(s->back_brush); s->back_brush = NULL; }
 #endif
     if (s->inst_val_held) {
         cando_value_release(s->inst_val);
@@ -1340,6 +1455,24 @@ static int generic_create(CandoVM *vm, ControlKind kind, int argc, CandoValue *a
             style_extra |= 2;
         }
         cdo_string_release(kp);
+        CdoString *kmar = cdo_string_intern("marquee", 7);
+        CdoValue  vmar;
+        if (cdo_object_rawget(opts, kmar, &vmar) && vmar.tag == CDO_BOOL && vmar.as.boolean) {
+            style_extra |= 4;
+        }
+        cdo_string_release(kmar);
+        CdoString *kvert = cdo_string_intern("vertical", 8);
+        CdoValue  vvert;
+        if (cdo_object_rawget(opts, kvert, &vvert) && vvert.tag == CDO_BOOL && vvert.as.boolean) {
+            style_extra |= 8;
+        }
+        cdo_string_release(kvert);
+        CdoString *ksm = cdo_string_intern("smooth", 6);
+        CdoValue  vsm;
+        if (cdo_object_rawget(opts, ksm, &vsm) && vsm.tag == CDO_BOOL && vsm.as.boolean) {
+            style_extra |= 16;
+        }
+        cdo_string_release(ksm);
     } else if (argc > arg0 && args[arg0].tag == CDO_STRING) {
         parse_text_arg(vm, args[arg0], text, sizeof(text));
     }
@@ -1706,6 +1839,110 @@ static int native_clear_items(CandoVM *vm, int argc, CandoValue *args)
     return 1;
 }
 
+static int native_get_item_count(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getItemCount");
+    if (!s) return -1;
+    int n = 0;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) {
+        if (s->kind == KIND_LISTBOX)
+            n = (int)SendMessageW(s->hwnd, LB_GETCOUNT, 0, 0);
+        else if (s->kind == KIND_COMBOBOX)
+            n = (int)SendMessageW(s->hwnd, CB_GETCOUNT, 0, 0);
+    }
+#endif
+    cando_vm_push(vm, cando_number((f64)n));
+    return 1;
+}
+
+#if FORMS_HAVE_WIN32
+/* Pull the i-th item text out of a list/combo as UTF-8.  Caller frees. */
+static char *list_item_text(FormsSlot *s, int idx)
+{
+    if (!s || !s->hwnd) return NULL;
+    LRESULT len_msg = (s->kind == KIND_LISTBOX)  ? LB_GETTEXTLEN :
+                      (s->kind == KIND_COMBOBOX) ? CB_GETLBTEXTLEN : -1;
+    LRESULT get_msg = (s->kind == KIND_LISTBOX)  ? LB_GETTEXT     :
+                      (s->kind == KIND_COMBOBOX) ? CB_GETLBTEXT   : -1;
+    if (len_msg < 0) return NULL;
+    LRESULT len = SendMessageW(s->hwnd, (UINT)len_msg, (WPARAM)idx, 0);
+    if (len < 0) return NULL;
+    wchar_t *wbuf = (wchar_t *)calloc((size_t)len + 1, sizeof(wchar_t));
+    if (!wbuf) return NULL;
+    SendMessageW(s->hwnd, (UINT)get_msg, (WPARAM)idx, (LPARAM)wbuf);
+    char *u8 = wide_to_utf8(wbuf);
+    free(wbuf);
+    return u8;
+}
+#endif
+
+static int native_get_item(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getItem");
+    if (!s) return -1;
+    int idx = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : -1;
+    if (idx < 0) {
+        cando_vm_push(vm, cando_null());
+        return 1;
+    }
+#if FORMS_HAVE_WIN32
+    char *u8 = list_item_text(s, idx);
+    if (u8) {
+        cando_vm_push(vm,
+            cando_string_value(cando_string_new(u8, (u32)strlen(u8))));
+        free(u8);
+        return 1;
+    }
+#endif
+    cando_vm_push(vm, cando_null());
+    return 1;
+}
+
+static int native_get_items(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getItems");
+    if (!s) return -1;
+    CandoValue arr = cando_bridge_new_array(vm);
+    CdoObject *a   = cando_bridge_resolve(vm, arr.as.handle);
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) {
+        int n = 0;
+        if (s->kind == KIND_LISTBOX)
+            n = (int)SendMessageW(s->hwnd, LB_GETCOUNT, 0, 0);
+        else if (s->kind == KIND_COMBOBOX)
+            n = (int)SendMessageW(s->hwnd, CB_GETCOUNT, 0, 0);
+        for (int i = 0; i < n; i++) {
+            char *u8 = list_item_text(s, i);
+            if (!u8) continue;
+            CdoString *cs = cdo_string_intern(u8, (u32)strlen(u8));
+            cdo_array_push(a, cdo_string_value(cs));
+            cdo_string_release(cs);
+            free(u8);
+        }
+    }
+#endif
+    cando_vm_push(vm, arr);
+    return 1;
+}
+
+static int native_remove_item(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "removeItem");
+    if (!s) return -1;
+    int idx = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && idx >= 0) {
+        if (s->kind == KIND_LISTBOX)
+            SendMessageW(s->hwnd, LB_DELETESTRING, (WPARAM)idx, 0);
+        else if (s->kind == KIND_COMBOBOX)
+            SendMessageW(s->hwnd, CB_DELETESTRING, (WPARAM)idx, 0);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
 static int native_get_selected_index(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "getSelectedIndex");
@@ -1784,6 +2021,236 @@ static int native_get_value(CandoVM *vm, int argc, CandoValue *args)
     return 1;
 }
 
+/* =========================================================================
+ * Colours.  Accepts (r, g, b) or a single packed 0xRRGGBB integer.
+ * ===================================================================== */
+
+static unsigned int parse_color_args(CandoValue *args, int argc, int start,
+                                     unsigned int default_rgb)
+{
+    if (argc <= start) return default_rgb;
+    /* Single-arg packed 0xRRGGBB */
+    if (argc == start + 1 && args[start].tag == CDO_NUMBER) {
+        unsigned int rgb = (unsigned int)args[start].as.number & 0xFFFFFFu;
+        unsigned char r = (rgb >> 16) & 0xFF;
+        unsigned char g = (rgb >>  8) & 0xFF;
+        unsigned char b = (rgb >>  0) & 0xFF;
+        /* Win32 COLORREF byte order is 0x00BBGGRR. */
+        return (unsigned int)(((unsigned)b << 16) | ((unsigned)g << 8) | (unsigned)r);
+    }
+    /* Three-arg (r, g, b) -- match WinForms Color.FromArgb. */
+    int r = (argc > start     && args[start].tag     == CDO_NUMBER) ? (int)args[start].as.number     : 0;
+    int g = (argc > start + 1 && args[start + 1].tag == CDO_NUMBER) ? (int)args[start + 1].as.number : 0;
+    int b = (argc > start + 2 && args[start + 2].tag == CDO_NUMBER) ? (int)args[start + 2].as.number : 0;
+    if (r < 0) r = 0;
+    if (g < 0) g = 0;
+    if (b < 0) b = 0;
+    if (r > 255) r = 255;
+    if (g > 255) g = 255;
+    if (b > 255) b = 255;
+    return (unsigned int)(((unsigned)b << 16) | ((unsigned)g << 8) | (unsigned)r);
+}
+
+static int native_set_fore_color(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setForeColor");
+    if (!s) return -1;
+    s->fore_color = parse_color_args(args, argc, 1, 0);
+    s->has_fore   = 1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) InvalidateRect(s->hwnd, NULL, TRUE);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_back_color(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setBackColor");
+    if (!s) return -1;
+    s->back_color = parse_color_args(args, argc, 1, 0);
+    s->has_back   = 1;
+#if FORMS_HAVE_WIN32
+    if (s->back_brush) { DeleteObject(s->back_brush); s->back_brush = NULL; }
+    if (s->hwnd) InvalidateRect(s->hwnd, NULL, TRUE);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_clear_fore_color(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "clearForeColor");
+    if (!s) return -1;
+    s->has_fore = 0;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) InvalidateRect(s->hwnd, NULL, TRUE);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_clear_back_color(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "clearBackColor");
+    if (!s) return -1;
+    s->has_back = 0;
+#if FORMS_HAVE_WIN32
+    if (s->back_brush) { DeleteObject(s->back_brush); s->back_brush = NULL; }
+    if (s->hwnd) InvalidateRect(s->hwnd, NULL, TRUE);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+#if FORMS_HAVE_WIN32 && !defined(FORMS_MODULE_TEST_BUILD)
+static void layout_dock_children(int parent_slot)
+{
+    if (parent_slot <= 0 || parent_slot >= FORMS_MAX_SLOTS) return;
+    FormsSlot *p = &g_slots[parent_slot];
+    if (!p->alive || !p->hwnd) return;
+    RECT r;
+    if (!GetClientRect(p->hwnd, &r)) return;
+
+    int left = r.left, top = r.top, right = r.right, bottom = r.bottom;
+    int fill_slot = -1;
+
+    /* Two-pass: first non-fill in declaration order, then the lone fill
+     * (if any) gets whatever's left. */
+    for (int i = 1; i < FORMS_MAX_SLOTS; i++) {
+        FormsSlot *c = &g_slots[i];
+        if (!c->alive || c->parent_slot != parent_slot || !c->hwnd) continue;
+        if (c->dock == FORMS_DOCK_NONE) continue;
+        if (c->dock == FORMS_DOCK_FILL) { fill_slot = i; continue; }
+
+        DockRect out;
+        compute_dock_rect(c->dock, c->w, c->h,
+                          &left, &top, &right, &bottom, &out);
+        SetWindowPos(c->hwnd, NULL, out.x, out.y, out.w, out.h,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        c->x = out.x; c->y = out.y; c->w = out.w; c->h = out.h;
+    }
+    if (fill_slot > 0) {
+        FormsSlot *c = &g_slots[fill_slot];
+        int w = right - left, h = bottom - top;
+        SetWindowPos(c->hwnd, NULL, left, top, w, h,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        c->x = left; c->y = top; c->w = w; c->h = h;
+    }
+}
+#endif
+
+/* Translate a dock argument (number or "top"/"bottom"/"left"/"right"/
+ * "fill"/"none") into a FORMS_DOCK_* constant. */
+static int parse_dock_arg(CandoValue v)
+{
+    if (v.tag == CDO_NUMBER) {
+        int n = (int)v.as.number;
+        if (n < FORMS_DOCK_NONE || n > FORMS_DOCK_FILL) return FORMS_DOCK_NONE;
+        return n;
+    }
+    if (v.tag == CDO_STRING && v.as.string) {
+        const char *s = v.as.string->data;
+        u32 n = v.as.string->length;
+        #define CHECK(name, val) \
+            if (n == sizeof(name)-1 && memcmp(s, name, sizeof(name)-1) == 0) return val
+        CHECK("none",   FORMS_DOCK_NONE);
+        CHECK("top",    FORMS_DOCK_TOP);
+        CHECK("bottom", FORMS_DOCK_BOTTOM);
+        CHECK("left",   FORMS_DOCK_LEFT);
+        CHECK("right",  FORMS_DOCK_RIGHT);
+        CHECK("fill",   FORMS_DOCK_FILL);
+        #undef CHECK
+    }
+    return FORMS_DOCK_NONE;
+}
+
+static int native_set_dock(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setDock");
+    if (!s) return -1;
+    s->dock = (argc >= 2) ? parse_dock_arg(args[1]) : FORMS_DOCK_NONE;
+#if FORMS_HAVE_WIN32
+    if (s->parent_slot > 0) layout_dock_children(s->parent_slot);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_get_dock(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getDock");
+    if (!s) return -1;
+    cando_vm_push(vm, cando_number((f64)s->dock));
+    return 1;
+}
+
+/* =========================================================================
+ * ProgressBar extras: marquee animation + colour state.
+ * ===================================================================== */
+
+static int native_set_marquee(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setMarquee");
+    if (!s) return -1;
+    bool active = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    int  speed  = (argc >= 3 && args[2].tag == CDO_NUMBER) ?
+                  (int)args[2].as.number : 30;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_PROGRESS) {
+        SendMessageW(s->hwnd, PBM_SETMARQUEE,
+                     (WPARAM)(active ? TRUE : FALSE), (LPARAM)speed);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_state(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setState");
+    if (!s) return -1;
+    int state = 1;  /* PBST_NORMAL */
+    if (argc >= 2) {
+        if (args[1].tag == CDO_NUMBER) {
+            state = (int)args[1].as.number;
+        } else if (args[1].tag == CDO_STRING && args[1].as.string) {
+            const char *t = args[1].as.string->data;
+            u32 n = args[1].as.string->length;
+            #define MATCH(name, val) \
+                if (n == sizeof(name)-1 && memcmp(t, name, sizeof(name)-1) == 0) state = val
+            MATCH("normal",  1);  /* PBST_NORMAL */
+            MATCH("error",   2);  /* PBST_ERROR  */
+            MATCH("paused",  3);  /* PBST_PAUSED */
+            MATCH("warning", 2);  /* alias -> error (red) for ergonomics */
+            MATCH("green",   1);  /* alias -> normal */
+            MATCH("yellow",  3);  /* alias -> paused (amber) */
+            MATCH("red",     2);  /* alias -> error */
+            #undef MATCH
+        }
+    }
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_PROGRESS) {
+        SendMessageW(s->hwnd, PBM_SETSTATE, (WPARAM)state, 0);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* Force-relayout helper -- script can call form:relayout() if it has
+ * mutated child sizes manually and wants the dock pass to re-run. */
+static int native_relayout(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "relayout");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    layout_dock_children((int)(s - g_slots));
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
 static int native_set_range(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setRange");
@@ -1847,6 +2314,27 @@ CandoValue cando_module_init(CandoVM *vm)
     cando_lib_meta_define(vm, meta, "getValue",     native_get_value);
     cando_lib_meta_define(vm, meta, "setRange",     native_set_range);
 
+    /* Item accessors (ListBox, ComboBox). */
+    cando_lib_meta_define(vm, meta, "getItem",      native_get_item);
+    cando_lib_meta_define(vm, meta, "getItems",     native_get_items);
+    cando_lib_meta_define(vm, meta, "getItemCount", native_get_item_count);
+    cando_lib_meta_define(vm, meta, "removeItem",   native_remove_item);
+
+    /* Colours. */
+    cando_lib_meta_define(vm, meta, "setForeColor",   native_set_fore_color);
+    cando_lib_meta_define(vm, meta, "setBackColor",   native_set_back_color);
+    cando_lib_meta_define(vm, meta, "clearForeColor", native_clear_fore_color);
+    cando_lib_meta_define(vm, meta, "clearBackColor", native_clear_back_color);
+
+    /* Docking. */
+    cando_lib_meta_define(vm, meta, "setDock",      native_set_dock);
+    cando_lib_meta_define(vm, meta, "getDock",      native_get_dock);
+    cando_lib_meta_define(vm, meta, "relayout",     native_relayout);
+
+    /* ProgressBar extras. */
+    cando_lib_meta_define(vm, meta, "setMarquee",   native_set_marquee);
+    cando_lib_meta_define(vm, meta, "setState",     native_set_state);
+
     CandoValue tbl = cando_bridge_new_object(vm);
     CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
 
@@ -1875,6 +2363,22 @@ CandoValue cando_module_init(CandoVM *vm)
     libutil_set_method(vm, obj, "TrackBar",      native_trackbar_create);
     libutil_set_method(vm, obj, "NumericUpDown", native_numeric_create);
     libutil_set_method(vm, obj, "PictureBox",    native_picturebox_create);
+
+    /* forms.Dock -- DockStyle constants for setDock(). */
+    {
+        CandoValue dv = cando_bridge_new_object(vm);
+        CdoObject *d  = cando_bridge_resolve(vm, dv.as.handle);
+        obj_set_number(d, "none",   (f64)FORMS_DOCK_NONE);
+        obj_set_number(d, "top",    (f64)FORMS_DOCK_TOP);
+        obj_set_number(d, "bottom", (f64)FORMS_DOCK_BOTTOM);
+        obj_set_number(d, "left",   (f64)FORMS_DOCK_LEFT);
+        obj_set_number(d, "right",  (f64)FORMS_DOCK_RIGHT);
+        obj_set_number(d, "fill",   (f64)FORMS_DOCK_FILL);
+        CdoString *kd = cdo_string_intern("Dock", 4);
+        cdo_object_rawset(obj, kd, cdo_object_value(
+            cando_bridge_resolve(vm, dv.as.handle)), FIELD_NONE);
+        cdo_string_release(kd);
+    }
 
     return tbl;
 }
@@ -1942,6 +2446,17 @@ void forms_test_event_push_full(int kind, int slot, int gen,
     ev.d0         = d0;
     ev.d1         = d1;
     event_queue_push(ev);
+}
+void forms_test_compute_dock_rect(int dock, int child_w, int child_h,
+                                  int *left, int *top, int *right, int *bottom,
+                                  int *out_x, int *out_y, int *out_w, int *out_h)
+{
+    DockRect r;
+    compute_dock_rect(dock, child_w, child_h, left, top, right, bottom, &r);
+    if (out_x) *out_x = r.x;
+    if (out_y) *out_y = r.y;
+    if (out_w) *out_w = r.w;
+    if (out_h) *out_h = r.h;
 }
 int forms_test_event_pop_full(int *kind_out, int *slot_out, int *gen_out,
                               int *i0_out, int *i1_out, int *i2_out,

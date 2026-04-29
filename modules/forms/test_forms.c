@@ -189,6 +189,83 @@ static void test_long_running_stability(void)
            seen_max == 1);
 }
 
+/* Verify the rect-peeling math for each dock direction in isolation.
+ * This is the pure-C step layout_dock_children calls per child; the
+ * Win32 wrapper only adds SetWindowPos. */
+static void test_dock_layout_basic(void)
+{
+    int left, top, right, bottom;
+    int x, y, w, h;
+
+    /* DOCK_TOP: takes the top strip (full width, child_h tall). */
+    left = 0; top = 0; right = 400; bottom = 300;
+    forms_test_compute_dock_rect(1 /*TOP*/, 9999, 40,
+                                 &left, &top, &right, &bottom,
+                                 &x, &y, &w, &h);
+    EXPECT("DOCK_TOP x",  x == 0);
+    EXPECT("DOCK_TOP y",  y == 0);
+    EXPECT("DOCK_TOP w",  w == 400);
+    EXPECT("DOCK_TOP h",  h == 40);
+    EXPECT("DOCK_TOP shrinks remainder top", top == 40);
+
+    /* DOCK_BOTTOM: anchored to the bottom of the remaining rect. */
+    left = 0; top = 0; right = 400; bottom = 300;
+    forms_test_compute_dock_rect(2 /*BOTTOM*/, 9999, 30,
+                                 &left, &top, &right, &bottom,
+                                 &x, &y, &w, &h);
+    EXPECT("DOCK_BOTTOM y",  y == 270);
+    EXPECT("DOCK_BOTTOM h",  h == 30);
+    EXPECT("DOCK_BOTTOM shrinks remainder bottom", bottom == 270);
+
+    /* DOCK_LEFT */
+    left = 0; top = 0; right = 400; bottom = 300;
+    forms_test_compute_dock_rect(3 /*LEFT*/, 80, 9999,
+                                 &left, &top, &right, &bottom,
+                                 &x, &y, &w, &h);
+    EXPECT("DOCK_LEFT w",   w == 80);
+    EXPECT("DOCK_LEFT h",   h == 300);
+    EXPECT("DOCK_LEFT advances remainder left", left == 80);
+
+    /* DOCK_RIGHT */
+    left = 0; top = 0; right = 400; bottom = 300;
+    forms_test_compute_dock_rect(4 /*RIGHT*/, 100, 9999,
+                                 &left, &top, &right, &bottom,
+                                 &x, &y, &w, &h);
+    EXPECT("DOCK_RIGHT x",  x == 300);
+    EXPECT("DOCK_RIGHT w",  w == 100);
+    EXPECT("DOCK_RIGHT shrinks remainder right", right == 300);
+}
+
+/* End-to-end: a four-child layout (TOP banner, LEFT sidebar, BOTTOM
+ * status, FILL center) over a 400x300 client area. */
+static void test_dock_layout_full_flow(void)
+{
+    int left = 0, top = 0, right = 400, bottom = 300;
+    int x, y, w, h;
+
+    /* TOP banner -- 400x40 across the top */
+    forms_test_compute_dock_rect(1, 0, 40, &left, &top, &right, &bottom,
+                                 &x, &y, &w, &h);
+    EXPECT("flow: top banner placed",  x == 0 && y == 0 && w == 400 && h == 40);
+
+    /* LEFT sidebar -- 80 wide, full remaining height (260) */
+    forms_test_compute_dock_rect(3, 80, 0, &left, &top, &right, &bottom,
+                                 &x, &y, &w, &h);
+    EXPECT("flow: left sidebar placed", x == 0 && y == 40 && w == 80 && h == 260);
+
+    /* BOTTOM status -- across the remaining width (320) at y=280 */
+    forms_test_compute_dock_rect(2, 0, 20, &left, &top, &right, &bottom,
+                                 &x, &y, &w, &h);
+    EXPECT("flow: bottom status placed",
+           x == 80 && y == 280 && w == 320 && h == 20);
+
+    /* FILL center -- remainder is (80, 40, 320, 240) */
+    EXPECT("flow: remainder left",   left   == 80);
+    EXPECT("flow: remainder top",    top    == 40);
+    EXPECT("flow: remainder right",  right  == 400);
+    EXPECT("flow: remainder bottom", bottom == 280);
+}
+
 int main(void)
 {
     printf("== modules/forms: C tests ==\n");
@@ -201,6 +278,8 @@ int main(void)
     test_slot_allocator();
     test_slot_generation_advances();
     test_long_running_stability();
+    test_dock_layout_basic();
+    test_dock_layout_full_flow();
 
     if (failures == 0) {
         printf("All forms C tests passed.\n");

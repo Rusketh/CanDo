@@ -95,14 +95,44 @@ forms.Button(parent, {                        // options table
 | ----------------------- | -------------------------------- |
 | `setChecked(b)` / `getChecked()` | CheckBox, RadioButton    |
 | `addItem(text)`         | ComboBox, ListBox                |
+| `removeItem(index)`     | ComboBox, ListBox                |
 | `clearItems()`          | ComboBox, ListBox                |
+| `getItem(index)`        | ComboBox, ListBox -- text at index |
+| `getItems()`            | ComboBox, ListBox -- array of all items |
+| `getItemCount()`        | ComboBox, ListBox                |
 | `getSelectedIndex()` / `setSelectedIndex(i)` | ComboBox, ListBox |
 | `setValue(n)` / `getValue()` | ProgressBar, TrackBar, NumericUpDown, TextBox |
 | `setRange(lo, hi)`      | ProgressBar, TrackBar            |
+| `setMarquee(active, [speed])`  | ProgressBar (needs `marquee=true` at construction) |
+| `setState("normal"\|"warning"\|"error"\|"paused")` | ProgressBar |
 
 Methods that don't apply to a given control are silent no-ops, so you
 can call `setChecked` on anything that has a check without writing a
 type guard.
+
+### Colours and docking
+
+| Method                              | Notes                          |
+| ----------------------------------- | ------------------------------ |
+| `setForeColor(r, g, b)` or `setForeColor(0xRRGGBB)` | text colour |
+| `setBackColor(r, g, b)` or `setBackColor(0xRRGGBB)` | background  |
+| `clearForeColor()` / `clearBackColor()` | revert to system default   |
+| `setDock(side)`                     | `"top"`, `"bottom"`, `"left"`, `"right"`, `"fill"`, `"none"` -- or use `forms.Dock.*` constants |
+| `getDock()`                         | numeric Dock value             |
+| `relayout()`                        | force the parent to re-run docking now |
+
+Docked children are laid out automatically when the parent form
+resizes.  Children peel rects off the parent's client area in
+allocation order (`TOP`, `BOTTOM`, `LEFT`, `RIGHT` -- using each
+child's stored size for the docked dimension).  A single `FILL` child
+takes whatever's left.
+
+```cando
+VAR top    = forms.Panel(f);     top:setSize(0, 40):setBackColor(0x2266AA):setDock("top")
+VAR side   = forms.Panel(f);     side:setSize(120, 0):setDock("left")
+VAR status = forms.Label(f);     status:setSize(0, 20):setDock("bottom")
+VAR body   = forms.Panel(f);     body:setDock("fill")
+```
 
 ### Events (set as instance properties)
 
