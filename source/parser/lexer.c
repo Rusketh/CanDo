@@ -241,6 +241,18 @@ static bool lex_match(CandoLexer *lex, char expected)
     return true;
 }
 
+/* Consume the next *two* characters only if they match `c1` followed
+ * by `c2`.  Used for three-character operators like `~!>` and `~&>`
+ * after the leading character has been consumed.                       */
+static bool lex_match2(CandoLexer *lex, char c1, char c2)
+{
+    if (lex->pos + 1 >= lex->source_len)            return false;
+    if (lex->source[lex->pos]     != c1)            return false;
+    if (lex->source[lex->pos + 1] != c2)            return false;
+    lex->pos += 2;
+    return true;
+}
+
 /* Build a token at the given start position. */
 static CandoToken make_token(const CandoLexer *lex,
                               CandoTokenType type,
@@ -560,23 +572,9 @@ restart:
 
     /* ---- '~' : tilde, ~>, ~!>, ~&> ----------------------------------- */
     case '~':
-        if (lex_peek_char(lex) == '!') {
-            if (lex->pos + 1 < lex->source_len &&
-                lex->source[lex->pos + 1] == '>') {
-                lex_advance(lex); /* '!' */
-                lex_advance(lex); /* '>' */
-                return EMIT(TOK_FILTER_OP);
-            }
-        }
-        if (lex_peek_char(lex) == '&') {
-            if (lex->pos + 1 < lex->source_len &&
-                lex->source[lex->pos + 1] == '>') {
-                lex_advance(lex); /* '&' */
-                lex_advance(lex); /* '>' */
-                return EMIT(TOK_COND_FILTER_OP);
-            }
-        }
-        if (lex_match(lex, '>'))   return EMIT(TOK_PIPE_OP);
+        if (lex_match2(lex, '!', '>'))  return EMIT(TOK_FILTER_OP);
+        if (lex_match2(lex, '&', '>'))  return EMIT(TOK_COND_FILTER_OP);
+        if (lex_match(lex, '>'))        return EMIT(TOK_PIPE_OP);
         return EMIT(TOK_TILDE);
 
     /* ---- '?' : question, ?., ?[ --------------------------------------- */
