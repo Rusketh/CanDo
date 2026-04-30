@@ -280,10 +280,21 @@ numbers use the shortest representation that round-trips.
 
 | Function | Description |
 |---|---|
-| `csv.parse(text)` | Parse CSV text into an array of rows (each row is an array of string fields). |
-| `csv.stringify(rows)` | Serialise an array of rows back to CSV text.  Fields containing the separator, quote, or newline are quoted. |
+| `csv.parse(text, delim?, header?)` | Parse CSV text.  By default the first row supplies the field names and the result is an array of objects keyed by those names.  Pass `false` for `header` to get a plain array of arrays of strings instead. |
+| `csv.stringify(data, delim?, headers?)` | Serialise back to CSV text.  Accepts either an array of arrays or an array of objects; in object mode the column order comes from `headers` (when supplied) or the keys of the first object.  Fields containing the separator, quote, or newline are quoted. |
 
-The parser accepts RFC 4180 quoting with doubled `""` escapes.
+`delim` is an optional single-character delimiter (default `","`).
+The parser accepts RFC 4180 quoting with doubled `""` escapes; cells are
+always returned as strings.
+
+```cando
+VAR rows = csv.parse("name,age\nalice,30\nbob,25\n");
+print(rows[0].name);                    // alice
+print(rows[1].age);                     // 25
+
+VAR raw = csv.parse("a,b\n1,2\n", ",", false);
+print(raw[1][0]);                       // 1
+```
 
 ---
 
@@ -752,7 +763,7 @@ The file extension selects the loader:
 | `.cdo`                   | Parsed and executed; top-level `RETURN` (or the last expression) is the module value.                                                                             |
 | `.so` / `.dylib` / `.dll`| Loaded with `dlopen`; the symbol `cando_module_init(CandoVM *) → CandoValue` is called once and its return value is the module value. See [writing-extensions.md](writing-extensions.md). |
 | `.json`                  | File contents are parsed as JSON and the resulting Cando value (object/array/string/number/bool/null) is returned.                                                |
-| `.csv`                   | File contents are parsed as CSV with the default `,` delimiter and no header row; the result is an array of arrays of strings.                                    |
+| `.csv`                   | File contents are parsed as CSV with the default `,` delimiter; the first row is treated as the header row and the result is an array of objects keyed by the header names.        |
 | `.yaml` / `.yml`         | File contents are parsed as YAML and the resulting Cando value is returned.  See `yaml.parse` for the supported feature set.                                       |
 
 If the path has **no extension at all**, `include` probes the
@@ -789,8 +800,8 @@ print(my.hello("world"));           // hi, world
 VAR cfg  = include("./config.json");   // parsed JSON object
 print(cfg.port);
 
-VAR rows = include("./data.csv");       // array of arrays of strings
-print(rows[0][0]);
+VAR rows = include("./data.csv");       // array of objects keyed by header row
+print(rows[0].name);
 
 VAR yaml = include("./settings.yaml");  // parsed YAML mapping
 print(yaml.host);

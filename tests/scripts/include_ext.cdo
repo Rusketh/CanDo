@@ -8,12 +8,12 @@ print(data.active);                 /* true             */
 print(data.tags[0]);                /* alpha            */
 print(data.tags[1]);                /* beta             */
 
-/* --- .csv: parsed array of arrays (default no header) --- */
+/* --- .csv: parsed array of objects keyed by header row --- */
 VAR rows = include("modules/people.csv");
-print(rows[0][0]);                  /* alice            */
-print(rows[1][0]);                  /* bob              */
-print(rows[2][0]);                  /* eve              */
-print(rows[1][2]);                  /* LA               */
+print(rows[0].name);                /* alice            */
+print(rows[1].name);                /* bob              */
+print(rows[2].name);                /* eve              */
+print(rows[1].city);                /* LA               */
 
 /* --- No extension: falls back to .cdo when no binary exists --- */
 VAR greet = include("modules/greeting");

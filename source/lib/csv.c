@@ -261,8 +261,8 @@ static int csv_parse(CandoVM *vm, int argc, CandoValue *args)
         delim = args[1].as.string->data[0];
     }
 
-    /* header mode */
-    bool header_mode = false;
+    /* header mode (defaults to true: first row is keys → array of objects) */
+    bool header_mode = true;
     if (argc >= 3 && cando_is_bool(args[2])) {
         header_mode = args[2].as.boolean;
     }

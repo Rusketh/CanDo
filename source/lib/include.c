@@ -5,6 +5,8 @@
  *
  *   Loads a script (.cdo), binary extension (.so/.dylib/.dll), JSON
  *   document (.json), CSV document (.csv) or YAML document (.yaml/.yml)
+ *   .csv files are parsed with the first row treated as the header row, so
+ *   the result is an array of objects keyed by the header names.
  *   by path.  The first load executes/parses the module and caches the
  *   result; every subsequent call with the same canonical path returns
  *   the cached value without re-running the loader (Node.js require()
@@ -33,10 +35,11 @@
  * Data modules
  *   .json files are parsed with cando_lib_json_parse_buffer() and the
  *   resulting Cando value is returned.  .csv files are parsed with
- *   cando_lib_csv_parse_buffer() (default comma delimiter, no header
- *   row) and the resulting array of arrays is returned.  .yaml / .yml
- *   files are parsed with cando_lib_yaml_parse_buffer() and the
- *   resulting Cando value is returned.
+ *   cando_lib_csv_parse_buffer() (default comma delimiter, header row
+ *   on) and the resulting array of objects keyed by header names is
+ *   returned.  .yaml / .yml files are parsed with
+ *   cando_lib_yaml_parse_buffer() and the resulting Cando value is
+ *   returned.
  *
  * Must compile with gcc -std=c11.
  */
@@ -442,7 +445,7 @@ static bool load_csv(CandoVM *vm, const char *canonical_path,
     char  *src = NULL;
     usize  len = 0;
     if (!read_whole_file(vm, canonical_path, &src, &len)) return false;
-    bool ok = cando_lib_csv_parse_buffer(vm, src, len, ',', false,
+    bool ok = cando_lib_csv_parse_buffer(vm, src, len, ',', true,
                                          "include", result_out);
     cando_free(src);
     return ok;

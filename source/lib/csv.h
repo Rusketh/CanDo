@@ -3,14 +3,16 @@
  *
  * Registers a global `csv` object with the following methods:
  *
- *   csv.parse(str, delim?, header?)   → array of arrays | array of objects
+ *   csv.parse(str, delim?, header?)   → array of objects | array of arrays
  *   csv.stringify(data, delim?, headers?) → string
  *
  * csv.parse():
  *   str    -- the CSV text to parse
  *   delim  -- optional single-character delimiter string (default: ",")
- *   header -- optional bool; if true the first row becomes field names and
- *             subsequent rows are returned as objects (default: false)
+ *   header -- optional bool; when true (the default) the first row supplies
+ *             the field names and subsequent rows are returned as objects
+ *             keyed by those names.  Pass false to get a plain array of
+ *             arrays of strings instead.
  *
  * csv.stringify():
  *   data    -- array of arrays  OR  array of objects
