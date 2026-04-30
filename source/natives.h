@@ -32,12 +32,15 @@ int cando_native_tostring(CandoVM *vm, int argc, CandoValue *args);
  * nested arrays/objects beyond that level.  Returns 1. */
 int cando_native_inspect(CandoVM *vm, int argc, CandoValue *args);
 
-/* Dispatch table indexed by NATIVE_INDEX.
- * Sized to CANDO_NATIVE_MAX; unused trailing slots are NULL.
- * Iterate until a NULL entry to discover the count. */
+/* Static dispatch table for the small set of *core* natives that ship
+ * inside libcando itself (print, type, toString, inspect, ...).  Sized to
+ * CANDO_NATIVE_MAX with unused trailing slots left NULL; iterate until a
+ * NULL entry to discover the count.  Standard-library natives registered
+ * via cando_vm_register_native() / cando_vm_add_native() do NOT live here
+ * — they live in the per-VM dynamic registry, which has no fixed cap. */
 extern CandoNativeFn cando_native_table[CANDO_NATIVE_MAX];
 
-/* Parallel name table (NULL-terminated) for registration in main(). */
+/* Parallel name table (NULL-terminated) for the core dispatch table. */
 extern const char *cando_native_names[CANDO_NATIVE_MAX];
 
 #endif /* CANDO_NATIVES_H */

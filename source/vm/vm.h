@@ -51,7 +51,9 @@
 #define CANDO_FRAMES_MAX       256    /* maximum call depth                 */
 #define CANDO_TRY_MAX          64     /* maximum nested try blocks          */
 #define CANDO_LOOP_MAX         64     /* maximum nested loop depth          */
-#define CANDO_NATIVE_MAX      512     /* maximum registered native functions */
+#define CANDO_NATIVE_MAX      512     /* size of the static core-native dispatch table
+                                        * in source/natives.c.  Per-VM native registries
+                                        * grow dynamically and are NOT bounded by this. */
 #define CANDO_MAX_THROW_ARGS   32     /* maximum values in one THROW        */
 
 /* Forward declaration — CandoClosure is defined below. */
@@ -239,8 +241,12 @@ struct CandoVM {
     CandoGlobalEnv  *globals_owned; /* heap-allocated env; NULL for child VMs */
 
     /* Native functions ------------------------------------------------- */
-    CandoNativeFn  native_fns[CANDO_NATIVE_MAX];
+    /* The native registry grows on demand: cando_vm_register_native /
+     * cando_vm_add_native double native_cap when full.  Child thread VMs
+     * receive a fresh allocation copied from the parent at fork time. */
+    CandoNativeFn *native_fns;
     u32            native_count;
+    u32            native_cap;
 
     /* Memory controller (may be NULL for unit tests) ------------------- */
     CandoMemCtrl  *mem;
@@ -425,17 +431,18 @@ CANDO_API u32 cando_vm_stack_depth(const CandoVM *vm);
  *
  * Assigns the next available sentinel value (-(count+1)) to the function,
  * stores it in vm->native_fns[], and defines a global variable `name` with
- * that sentinel so scripts can call it by name.
+ * that sentinel so scripts can call it by name.  The native table grows on
+ * demand, so registration only fails on allocation pressure.
  *
- * Returns true on success, false if CANDO_NATIVE_MAX is exceeded.
+ * Returns true on success, false if the underlying allocation failed.
  */
 CANDO_API bool cando_vm_register_native(CandoVM *vm, const char *name,
                                CandoNativeFn fn);
 
 /*
  * cando_vm_add_native -- register a native without exposing it as a global.
- * Returns the sentinel CandoValue that represents this function.
- * Returns cando_null() if CANDO_NATIVE_MAX is exceeded.
+ * Returns the sentinel CandoValue that represents this function, or
+ * cando_null() if the underlying allocation failed.
  */
 CANDO_API CandoValue cando_vm_add_native(CandoVM *vm, CandoNativeFn fn);
 

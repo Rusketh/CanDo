@@ -135,7 +135,10 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     vm->try_depth      = 0;
     vm->loop_depth     = 0;
     vm->open_upvalues  = NULL;
+    /* Native registry: lazily grown on first cando_vm_register_native(). */
+    vm->native_fns     = NULL;
     vm->native_count   = 0;
+    vm->native_cap     = 0;
     vm->mem            = mem;
     vm->has_error       = false;
     vm->error_val_count = 0;
@@ -234,10 +237,19 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
     child->globals_owned = NULL;
     child->globals       = parent->globals;   /* shared, locked on access */
 
-    /* Copy native function registry (read-only after init; safe to share). */
+    /* Copy native function registry (read-only after init; child gets its
+     * own buffer so subsequent registrations on either VM cannot disturb
+     * the other). */
     child->native_count = parent->native_count;
-    for (u32 i = 0; i < parent->native_count; i++)
-        child->native_fns[i] = parent->native_fns[i];
+    child->native_cap   = parent->native_count;
+    if (parent->native_count > 0) {
+        child->native_fns = (CandoNativeFn *)cando_alloc(
+            parent->native_count * sizeof(CandoNativeFn));
+        for (u32 i = 0; i < parent->native_count; i++)
+            child->native_fns[i] = parent->native_fns[i];
+    } else {
+        child->native_fns = NULL;
+    }
 
     /* NOTE: cdo_object_init() is intentionally NOT called here.
      * The parent VM's cando_vm_init() already initialized the global
@@ -285,6 +297,13 @@ void cando_vm_destroy(CandoVM *vm) {
     }
 
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) cando_value_release(vm->error_vals[i]);
+
+    /* Release the native registry.  Each VM owns its own buffer (see the
+     * fork path in cando_vm_init_child) so freeing here is unconditional. */
+    cando_free(vm->native_fns);
+    vm->native_fns   = NULL;
+    vm->native_count = 0;
+    vm->native_cap   = 0;
 
     /* Release eval results. */
     for (u32 i = 0; i < vm->eval_result_count; i++) {
@@ -483,9 +502,20 @@ static bool vm_set_global_str(CandoVM *vm, CandoString *key,
  * Native function registration
  * ===================================================================== */
 
+/* Ensure vm->native_fns has room for at least one more entry.  Doubles the
+ * capacity (starting at 16) so amortised registration is O(1).  Aborts on
+ * allocation failure via cando_realloc, matching the rest of the codebase. */
+static void vm_native_reserve_one(CandoVM *vm) {
+    if (vm->native_count < vm->native_cap) return;
+    u32 new_cap = vm->native_cap ? vm->native_cap * 2 : 16;
+    vm->native_fns = (CandoNativeFn *)cando_realloc(
+        vm->native_fns, new_cap * sizeof(CandoNativeFn));
+    vm->native_cap = new_cap;
+}
+
 bool cando_vm_register_native(CandoVM *vm, const char *name,
                                CandoNativeFn fn) {
-    if (vm->native_count >= CANDO_NATIVE_MAX) return false;
+    vm_native_reserve_one(vm);
     u32 idx = vm->native_count++;
     vm->native_fns[idx] = fn;
     /* Sentinel value: native #idx → -(idx+1) */
@@ -495,7 +525,7 @@ bool cando_vm_register_native(CandoVM *vm, const char *name,
 }
 
 CandoValue cando_vm_add_native(CandoVM *vm, CandoNativeFn fn) {
-    if (vm->native_count >= CANDO_NATIVE_MAX) return cando_null();
+    vm_native_reserve_one(vm);
     u32 idx = vm->native_count++;
     vm->native_fns[idx] = fn;
     return cando_number(-(f64)(idx + 1));
