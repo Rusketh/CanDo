@@ -329,22 +329,27 @@ static int file_list(CandoVM *vm, int argc, CandoValue *args)
  * Registration
  * ======================================================================= */
 
+static const LibutilMethodEntry file_methods[] = {
+    { "read",   file_read   },
+    { "write",  file_write  },
+    { "append", file_append },
+    { "exists", file_exists },
+    { "delete", file_delete },
+    { "copy",   file_copy   },
+    { "move",   file_move   },
+    { "size",   file_size   },
+    { "lines",  file_lines  },
+    { "mkdir",  file_mkdir  },
+    { "list",   file_list   },
+};
+
 void cando_lib_file_register(CandoVM *vm)
 {
     CandoValue file_val = cando_bridge_new_object(vm);
     CdoObject *file_obj = cando_bridge_resolve(vm, file_val.as.handle);
 
-    libutil_set_method(vm, file_obj, "read",   file_read);
-    libutil_set_method(vm, file_obj, "write",  file_write);
-    libutil_set_method(vm, file_obj, "append", file_append);
-    libutil_set_method(vm, file_obj, "exists", file_exists);
-    libutil_set_method(vm, file_obj, "delete", file_delete);
-    libutil_set_method(vm, file_obj, "copy",   file_copy);
-    libutil_set_method(vm, file_obj, "move",   file_move);
-    libutil_set_method(vm, file_obj, "size",   file_size);
-    libutil_set_method(vm, file_obj, "lines",  file_lines);
-    libutil_set_method(vm, file_obj, "mkdir",  file_mkdir);
-    libutil_set_method(vm, file_obj, "list",   file_list);
+    libutil_register_methods(vm, file_obj, file_methods,
+                             CANDO_ARRAY_LEN(file_methods));
 
     cando_vm_set_global(vm, "file", file_val, true);
 }

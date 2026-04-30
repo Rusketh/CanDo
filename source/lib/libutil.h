@@ -117,4 +117,35 @@ CANDO_API void libutil_push_cstr(CandoVM *vm, const char *str);
 CANDO_API void libutil_set_method(CandoVM *vm, CdoObject *obj,
                         const char *name, CandoNativeFn fn);
 
+/*
+ * LibutilMethodEntry -- one row in a static method table.
+ * A NULL `name` terminates the table when used with the variadic-loop
+ * form below; the count form uses an explicit length and ignores name.
+ */
+typedef struct {
+    const char    *name;
+    CandoNativeFn  fn;
+} LibutilMethodEntry;
+
+/*
+ * libutil_register_methods -- bulk variant of libutil_set_method.
+ *
+ * Walks `entries[0..count)` and registers each row.  The recommended
+ * pattern is to define a static const table next to a library's
+ * register function:
+ *
+ *     static const LibutilMethodEntry mylib_methods[] = {
+ *         { "foo", mylib_foo },
+ *         { "bar", mylib_bar },
+ *     };
+ *     libutil_register_methods(vm, obj, mylib_methods,
+ *                              CANDO_ARRAY_LEN(mylib_methods));
+ *
+ * Adding a new method becomes one new row instead of one row + one
+ * matching libutil_set_method call.
+ */
+CANDO_API void libutil_register_methods(CandoVM *vm, CdoObject *obj,
+                                        const LibutilMethodEntry *entries,
+                                        usize count);
+
 #endif /* CANDO_LIB_LIBUTIL_H */

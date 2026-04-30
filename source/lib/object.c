@@ -416,23 +416,28 @@ static int obj_values(CandoVM *vm, int argc, CandoValue *args) {
  * Registration
  * ======================================================================= */
 
+static const LibutilMethodEntry object_methods[] = {
+    { "lock",         obj_lock         },
+    { "locked",       obj_locked       },
+    { "unlock",       obj_unlock       },
+    { "copy",         obj_copy         },
+    { "assign",       obj_assign       },
+    { "apply",        obj_apply        },
+    { "get",          obj_get          },
+    { "set",          obj_set          },
+    { "setPrototype", obj_setPrototype },
+    { "getPrototype", obj_getPrototype },
+    { "keys",         obj_keys         },
+    { "values",       obj_values       },
+};
+
 void cando_lib_object_register(CandoVM *vm)
 {
     CandoValue proto_val = cando_bridge_new_object(vm);
     CdoObject *proto     = cando_bridge_resolve(vm, proto_val.as.handle);
 
-    libutil_set_method(vm, proto, "lock",         obj_lock);
-    libutil_set_method(vm, proto, "locked",       obj_locked);
-    libutil_set_method(vm, proto, "unlock",       obj_unlock);
-    libutil_set_method(vm, proto, "copy",         obj_copy);
-    libutil_set_method(vm, proto, "assign",       obj_assign);
-    libutil_set_method(vm, proto, "apply",        obj_apply);
-    libutil_set_method(vm, proto, "get",          obj_get);
-    libutil_set_method(vm, proto, "set",          obj_set);
-    libutil_set_method(vm, proto, "setPrototype", obj_setPrototype);
-    libutil_set_method(vm, proto, "getPrototype", obj_getPrototype);
-    libutil_set_method(vm, proto, "keys",         obj_keys);
-    libutil_set_method(vm, proto, "values",       obj_values);
+    libutil_register_methods(vm, proto, object_methods,
+                             CANDO_ARRAY_LEN(object_methods));
 
     cando_vm_set_global(vm, "object", proto_val, true);
 }

@@ -556,28 +556,33 @@ static int str_match(CandoVM *vm, int argc, CandoValue *args) {
  * Registration
  * ======================================================================= */
 
+static const LibutilMethodEntry string_methods[] = {
+    { "length",     str_length     },
+    { "sub",        str_sub        },
+    { "char",       str_char       },
+    { "chars",      str_chars      },
+    { "toLower",    str_toLower    },
+    { "toUpper",    str_toUpper    },
+    { "trim",       str_trim       },
+    { "left",       str_left       },
+    { "right",      str_right      },
+    { "repeat",     str_repeat     },
+    { "find",       str_find       },
+    { "split",      str_split      },
+    { "replace",    str_replace    },
+    { "startsWith", str_startsWith },
+    { "endsWith",   str_endsWith   },
+    { "format",     str_format     },
+    { "match",      str_match      },
+};
+
 void cando_lib_string_register(CandoVM *vm)
 {
     CandoValue proto_val = cando_bridge_new_object(vm);
     CdoObject *proto     = cando_bridge_resolve(vm, proto_val.as.handle);
 
-    libutil_set_method(vm, proto, "length",  str_length);
-    libutil_set_method(vm, proto, "sub",     str_sub);
-    libutil_set_method(vm, proto, "char",    str_char);
-    libutil_set_method(vm, proto, "chars",   str_chars);
-    libutil_set_method(vm, proto, "toLower", str_toLower);
-    libutil_set_method(vm, proto, "toUpper", str_toUpper);
-    libutil_set_method(vm, proto, "trim",    str_trim);
-    libutil_set_method(vm, proto, "left",    str_left);
-    libutil_set_method(vm, proto, "right",   str_right);
-    libutil_set_method(vm, proto, "repeat",     str_repeat);
-    libutil_set_method(vm, proto, "find",       str_find);
-    libutil_set_method(vm, proto, "split",      str_split);
-    libutil_set_method(vm, proto, "replace",    str_replace);
-    libutil_set_method(vm, proto, "startsWith", str_startsWith);
-    libutil_set_method(vm, proto, "endsWith",   str_endsWith);
-    libutil_set_method(vm, proto, "format",     str_format);
-    libutil_set_method(vm, proto, "match",      str_match);
+    libutil_register_methods(vm, proto, string_methods,
+                             CANDO_ARRAY_LEN(string_methods));
 
     /* Expose as both a global module and the default string prototype. */
     cando_vm_set_global(vm, "string", proto_val, true);
