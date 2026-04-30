@@ -956,6 +956,25 @@ static inline void cmp_snapshot(CandoParser *p,
     p->last_expr_was_unpack = false;
 }
 
+/* Simple binary-infix tokens that map 1:1 to a single emit_op call.
+ * Entries default to OP_CONST (= 0), which is never a valid binary op,
+ * so a non-zero value at SIMPLE_BINOP[op] flags a simple dispatch. */
+static const CandoOpcode SIMPLE_BINOP[TOK_COUNT] = {
+    [TOK_PLUS]       = OP_ADD,
+    [TOK_MINUS]      = OP_SUB,
+    [TOK_STAR]       = OP_MUL,
+    [TOK_SLASH]      = OP_DIV,
+    [TOK_PERCENT]    = OP_MOD,
+    [TOK_CARET]      = OP_POW,
+    [TOK_AMP]        = OP_BIT_AND,
+    [TOK_BITOR]      = OP_BIT_OR,
+    [TOK_BITXOR]     = OP_BIT_XOR,
+    [TOK_LSHIFT]     = OP_LSHIFT,
+    [TOK_RSHIFT]     = OP_RSHIFT,
+    [TOK_RANGE_ASC]  = OP_RANGE_ASC,
+    [TOK_RANGE_DESC] = OP_RANGE_DESC,
+};
+
 static void parse_binary(CandoParser *p, bool can_assign)
 {
     (void)can_assign;
@@ -969,18 +988,18 @@ static void parse_binary(CandoParser *p, bool can_assign)
     p->last_expr_was_unpack = false;
     parse_precedence(p, next);
 
+    /* Fast path: arithmetic / bitwise / range tokens map straight to a
+     * single opcode via SIMPLE_BINOP.  Everything else (comparisons)
+     * has multi-value RHS handling and falls into the switch below.   */
+    CandoOpcode simple = SIMPLE_BINOP[op];
+    if (simple) {
+        emit_op(p, simple);
+        p->last_expr_was_call   = false;
+        p->last_expr_was_unpack = false;
+        return;
+    }
+
     switch (op) {
-    case TOK_PLUS:       emit_op(p, OP_ADD);       break;
-    case TOK_MINUS:      emit_op(p, OP_SUB);       break;
-    case TOK_STAR:       emit_op(p, OP_MUL);       break;
-    case TOK_SLASH:      emit_op(p, OP_DIV);       break;
-    case TOK_PERCENT:    emit_op(p, OP_MOD);       break;
-    case TOK_CARET:      emit_op(p, OP_POW);       break;
-    case TOK_AMP:        emit_op(p, OP_BIT_AND);   break;
-    case TOK_BITOR:      emit_op(p, OP_BIT_OR);    break;
-    case TOK_BITXOR:     emit_op(p, OP_BIT_XOR);   break;
-    case TOK_LSHIFT:     emit_op(p, OP_LSHIFT);    break;
-    case TOK_RSHIFT:     emit_op(p, OP_RSHIFT);    break;
     case TOK_EQ:
     case TOK_NEQ:
     case TOK_LT:
@@ -1042,8 +1061,6 @@ static void parse_binary(CandoParser *p, bool can_assign)
         }
         break;
     }
-    case TOK_RANGE_ASC:  emit_op(p, OP_RANGE_ASC); break;
-    case TOK_RANGE_DESC: emit_op(p, OP_RANGE_DESC);break;
     default: break;
     }
     p->last_expr_was_call   = false;
