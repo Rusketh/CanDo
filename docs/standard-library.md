@@ -1,6 +1,6 @@
 # Standard Library
 
-CanDo ships 17 library modules plus 3 built-in native globals.  The
+CanDo ships 19 library modules plus 3 built-in native globals.  The
 `cando` CLI registers all of them.  When you embed the library, call
 `cando_openlibs(vm)` to register all, or an individual
 `cando_open_*lib(vm)` to register only what you need — see
@@ -37,6 +37,54 @@ instead.
 
 Returns the canonical string representation.  If `v` is an object with
 a `__tostring` meta-method, calls it and returns the result.
+
+### `inspect(v, depth*) → string`
+
+Returns a debug-friendly string showing the *contents* of arrays and
+objects rather than their handle id.  Designed to be passed to `print`:
+
+```cando
+var data = { name: "Alice", scores: [10, 20, 30] };
+print(inspect(data));
+// { name: "Alice", scores: [10, 20, 30] }
+```
+
+Formatting:
+
+| Value | Rendering |
+|---|---|
+| `null` / `true` / `false` | as-is |
+| number | same as `toString(n)` |
+| string | double-quoted, with `\\`, `\"`, `\n`, `\r`, `\t`, `\xNN` escapes |
+| array | `[v1, v2, ...]` |
+| object | `{ key: value, ... }` (FIFO insertion order; non-identifier keys are quoted) |
+| function / native / thread | `<function>` / `<native>` / `<thread>` |
+
+`depth` (default `0`) limits how many levels of nested arrays / objects
+are expanded:
+
+- `0` (default) — unlimited recursion.
+- `N > 0` — nested arrays / objects beyond level `N` are truncated to
+  `[...]` / `{...}`.
+
+Cycles are detected on the current path and rendered as `<circular>`,
+so `inspect` always terminates regardless of `depth`.  Two distinct
+sub-trees that happen to reference the same object are *not* flagged
+as cycles (they are printed twice).
+
+```cando
+var a = [1];
+a:push(a);
+print(inspect(a));            // [1, <circular>]
+
+var deep = { a: { b: { c: 1 } } };
+print(inspect(deep, 1));      // { a: {...} }
+print(inspect(deep, 2));      // { a: { b: {...} } }
+```
+
+`inspect` does not invoke `__tostring`; it always shows raw structure,
+which is what you want when debugging.  Use `toString(v)` when you do
+want the meta-method.
 
 ---
 
@@ -112,6 +160,65 @@ Array values answer to these methods via `:`.  Indices are 0-based.
 
 ---
 
+## `_meta` (global meta registry) {#meta-global-meta-registry}
+
+`_meta` is a writable global object that holds **meta tables** — prototype
+objects for built-in types.  Native libraries register a subtable per type
+and stamp every instance they create with `instance.__index = _meta.<type>`,
+so user code can attach methods that immediately become callable on every
+instance.
+
+```cando
+print(type(_meta));                       // object
+print(type(_meta.http_response));         // http_response
+
+_meta.http_response.write = FUNCTION(self, data) {
+    self.body = self.body + data;
+};
+
+http.createServer(FUNCTION(req, res) {
+    res:write("Hello, world!");
+    res:send();
+});
+```
+
+The `_meta.<name>` subtable's `__type` field is stamped immutably (`FIELD_STATIC`)
+to the type name, so `type(instance)` returns the type tag.  Method slots
+(`status`, `send`, `listen`, …) use ordinary `FIELD_NONE` flags so user code
+may override them.
+
+Subtables registered by the standard library:
+
+| Subtable | Used by |
+|---|---|
+| `_meta.string` | Same table as the global `string` and `vm->string_proto` -- the prototype consulted whenever a method is called on a string. |
+| `_meta.array` | Same table as `array` / `vm->array_proto` -- consulted for methods on array receivers. |
+| `_meta.object` | Same table as `object`.  Not auto-applied to plain objects; use `object.setPrototype(o, _meta.object)` to opt in. |
+| `_meta.thread` | Per-instance methods for thread receivers (`t:done()`, `t:join()`, `t:state()`, `t:then(fn)`, …).  Aliased onto the same native sentinels exposed via `thread.<name>`. |
+| `_meta.http_request` | Server-side request objects passed into `http.createServer`'s handler. |
+| `_meta.http_response` | Server-side response objects.  Default methods: `status`, `setHeader`, `send`, `json`. |
+| `_meta.http_server` | Server objects returned by `createServer`.  Default methods: `listen`, `close`. |
+| `_meta.http_client_response` | Response objects returned by `http.get`, `https.get`, `fetch`, etc. |
+| `_meta.tcp_socket` | Plain-TCP connections from the [`socket`](#socket) library.  Default methods: `connect`, `send`, `sendAll`, `recv`, `recvAll`, `recvLine`, `close`, `isOpen`, `setTimeout`, `setBlocking`, `setOption`, `fd`, `localAddress`, `remoteAddress`. |
+| `_meta.tcp_server` | TCP listener objects.  Default methods: `listen`, `close`, `fd`, `localAddress`. |
+| `_meta.tls_socket` | TLS connections from the [`secure_socket`](#secure_socket) library.  All `_meta.tcp_socket` methods plus `cipher`, `protocol`, `peerCertificate`. |
+| `_meta.tls_server` | TLS listener objects.  Same surface as `_meta.tcp_server` with a TLS-aware `listen`. |
+
+For `string`, `array`, `object`, and `thread` the meta table is the same
+underlying CdoObject as the like-named global, so writing through either
+name is observable through the other:
+
+```cando
+_meta.string.shout = FUNCTION(self) { RETURN self:toUpper() + "!"; };
+print("hi":shout());        // HI!
+print(string.shout("yes")); // YES!  -- same table, same method
+```
+
+You may also attach your own subtables at runtime (`_meta.foo = { ... }`)
+and use them as prototypes via `object.setPrototype(instance, _meta.foo)`.
+
+---
+
 ## `object`
 
 Utilities for manipulating objects.  All take the object as the first
@@ -153,6 +260,7 @@ functions and currently may be `"utf8"` (default) or `"binary"`.
 | `file.lines(path, encoding*) → array` | Array of lines, without newline terminators. |
 | `file.mkdir(path) → bool` | Create a directory.  Non-recursive. |
 | `file.list(path) → array` | Array of directory entry names. |
+| `file.open(path, mode) → stream` | Open a file as a `stream` (modes: `r`/`w`/`a`, optional `b`/`+`).  See [streaming.md](streaming.md). |
 
 ---
 
@@ -172,10 +280,72 @@ numbers use the shortest representation that round-trips.
 
 | Function | Description |
 |---|---|
-| `csv.parse(text)` | Parse CSV text into an array of rows (each row is an array of string fields). |
-| `csv.stringify(rows)` | Serialise an array of rows back to CSV text.  Fields containing the separator, quote, or newline are quoted. |
+| `csv.parse(text, delim?, header?)` | Parse CSV text.  By default the first row supplies the field names and the result is an array of objects keyed by those names.  Pass `false` for `header` to get a plain array of arrays of strings instead. |
+| `csv.stringify(data, delim?, headers?)` | Serialise back to CSV text.  Accepts either an array of arrays or an array of objects; in object mode the column order comes from `headers` (when supplied) or the keys of the first object.  Fields containing the separator, quote, or newline are quoted. |
 
-The parser accepts RFC 4180 quoting with doubled `""` escapes.
+`delim` is an optional single-character delimiter (default `","`).
+The parser accepts RFC 4180 quoting with doubled `""` escapes; cells are
+always returned as strings.
+
+```cando
+VAR rows = csv.parse("name,age\nalice,30\nbob,25\n");
+print(rows[0].name);                    // alice
+print(rows[1].age);                     // 25
+
+VAR raw = csv.parse("a,b\n1,2\n", ",", false);
+print(raw[1][0]);                       // 1
+```
+
+---
+
+## `yaml`
+
+| Function | Description |
+|---|---|
+| `yaml.parse(text)` | Decode a YAML 1.2 document into CanDo values.  Throws on malformed input. |
+| `yaml.stringify(value, indent?)` | Encode a CanDo value as block-style YAML text.  `indent` (default 2, range 1..16) controls the per-level indentation. |
+
+Supported features:
+
+- Block mappings (`key: value`), block sequences (`- item`), and nested
+  combinations of both — including the common `- key: value` form for
+  sequences of mappings.
+- Flow mappings (`{a: 1, b: 2}`) and flow sequences (`[1, 2, 3]`),
+  one-line only.
+- Plain, single-quoted (`'…'` with `''` escape), and double-quoted (`"…"`
+  with JSON-style escapes plus `\xNN`, `\uNNNN`, `\UNNNNNNNN`) scalars.
+- Literal (`|`) and folded (`>`) block scalars with the default
+  chomping behaviour (single trailing newline).
+- Core-schema scalar typing — unquoted scalars become `null`, `true`,
+  `false`, integers (decimal / `0x…` / `0o…`), or floats (`1.5`,
+  `.inf`, `.nan`) when they match the corresponding grammar; otherwise
+  they remain strings.  `yes`/`no`/`on`/`off` are also accepted as
+  booleans for compatibility.
+- Line comments (`# …`).  A `#` outside a quoted string and either at
+  start-of-line or preceded by whitespace begins a comment that runs to
+  end-of-line.
+- An optional leading `---` document marker.
+
+`yaml.stringify()` quotes scalars only when ambiguity rules require it
+(empty strings, reserved scalars like `null`/`true`/`yes`, leading
+indicator characters, embedded control characters, or strings that
+would otherwise round-trip back to a non-string type).  Functions and
+natives serialise as `null`.
+
+```cdo
+VAR cfg = yaml.parse("name: cando
+version: 1
+tags:
+  - alpha
+  - beta
+");
+print(cfg.name);          // cando
+print(cfg.tags[0]);       // alpha
+
+VAR doc = yaml.stringify({ host: "localhost", port: 8080 });
+// host: localhost
+// port: 8080
+```
 
 ---
 
@@ -222,6 +392,67 @@ proper `strptime` shim is available.
 |---|---|
 | `process.pid() → number` | Current process ID. |
 | `process.ppid() → number` | Parent process ID. |
+| `process.spawn(argv [, opts]) → proc` | Spawn a child process (POSIX `fork+exec` / Windows `CreateProcess`).  `opts.stdin` / `opts.stdout` / `opts.stderr` are `"inherit"` (default), `"pipe"`, or `"null"`.  `opts.cwd` sets the child's working directory. |
+
+### Methods on a spawned `proc`
+
+| Method | Description |
+|---|---|
+| `proc:pid() → number` | Child's process ID. |
+| `proc:stdin() → stream \| null` | Writable stream over the child's stdin (when opened with `pipe`). |
+| `proc:stdout() → stream \| null` | Readable stream over the child's stdout. |
+| `proc:stderr() → stream \| null` | Readable stream over the child's stderr. |
+| `proc:wait() → number` | Block until exit; returns the exit code (or `-signal` for signal termination). |
+| `proc:kill([sig]) → self` | Send a signal (default `SIGTERM`). |
+
+---
+
+## `stream`
+
+The `stream` library is a single byte-oriented I/O abstraction shared by
+files, sockets, HTTP bodies, subprocess pipes, in-memory buffers, and
+thread channels.  See [streaming.md](streaming.md) for the long-form
+guide.
+
+### Constructors
+
+| Function | Description |
+|---|---|
+| `stream.memory([initialBytes]) → stream` | Duplex in-memory buffer; auto-compacts as the reader drains. |
+| `stream.channel([capacity]) → stream` | Bounded thread channel; reads block while empty, writes block while full. |
+| `stream.transform(fn) → stream` | Pipes every chunk through `fn(chunk) → chunk`.  Returns null/non-string from `fn` to drop the chunk. |
+
+### Methods (`_meta.stream`)
+
+| Method | Description |
+|---|---|
+| `s:read(maxLen [, timeoutMs])` | Read up to `maxLen` bytes; `""` on clean EOF. |
+| `s:readAll()` | Drain to EOF and return everything. |
+| `s:write(data) → number` | Write; returns bytes consumed. |
+| `s:writeAll(data) → self` | Loop until all bytes are written. |
+| `s:flush() → self` | Adapter-defined.  No-op for memory/channel/socket. |
+| `s:end() → self` | Half-close the write side (signals EOF to readers). |
+| `s:close() → self` | Full close.  Idempotent. |
+| `s:pipeTo(dst [, opts]) → number` | Blocking copy to `dst`; returns total bytes copied. `opts.chunk` overrides the 64 KiB transfer block.  Wrap in `thread { … }` to run off-thread. |
+| `s:isClosed() → bool` | True after `:close()` or once the underlying transport is gone. |
+| `s:error() → string` | Last error message reported by the adapter; `""` if none. |
+| `s:bytesIn() → number` | Bytes read so far through any method. |
+| `s:bytesOut() → number` | Bytes written so far through any method. |
+| `s:kind() → string` | Adapter name: `"memory"`, `"file"`, `"tcp"`, `"tls"`, `"channel"`, `"transform"`, `"http_body"`, `"http_response"`. |
+
+> **Naming note:** the method is `:pipeTo`, not `:pipe`, because `pipe`
+> is reserved as the implicit loop variable in CanDo's `~>` pipe
+> expressions.
+
+### Adapter accessors on existing handles
+
+| Call | Returns |
+|---|---|
+| `file.open(path, mode)` | File-backed stream. |
+| `tcp_socket:stream()` / `tls_socket:stream()` | Duplex view of a connected TCP / TLS socket.  Does not own the socket. |
+| `res:stream()` | Writable view of a server `http_response`; `:end()` flushes the buffered response. |
+| `clientResponse:stream()` | Readable view of an HTTP client response body.  When the request was issued with `{ stream: TRUE }` the body is drained lazily from the live connection; otherwise it's a memory stream over the buffered body. |
+| `proc:stdin()` / `:stdout()` / `:stderr()` | Pipes for a spawned subprocess. |
 
 ---
 
@@ -230,6 +461,163 @@ proper `strptime` shim is available.
 | Function | Description |
 |---|---|
 | `net.lookup(hostname) → string` | Resolve a hostname to an IPv4 address.  `NULL` on failure. |
+
+---
+
+## `socket`
+
+Raw TCP sockets (IPv4 and IPv6, dual-stack via `getaddrinfo`).  The
+`http` and `https` libraries are layered on top — reach for `socket`
+when you need custom protocols, line-oriented servers, or any non-HTTP
+network code.  See [socket.md](socket.md) for a long-form guide.
+
+### Module functions
+
+| Function | Description |
+|---|---|
+| `socket.tcp() → tcp_socket` | Create an unconnected TCP socket. |
+| `socket.connect(host, port [, opts]) → tcp_socket` | Convenience: open + connect.  `opts.timeout` (ms), `opts.family` (`"inet"`/`"inet6"`/`"any"`). |
+| `socket.createServer(callback) → tcp_server` | Mirrors `http.createServer`.  `callback(conn)` runs in a fresh child VM thread for every accepted connection. |
+| `socket.resolve(host) → array` | Returns up to 16 IPv4/IPv6 numeric address strings, or `NULL` if resolution fails. |
+
+### Connection methods (`_meta.tcp_socket`)
+
+| Method | Description |
+|---|---|
+| `s:connect(host, port [, ms])` | Synchronous connect on an unconnected socket; throws on failure. Returns `self`. |
+| `s:send(data) → bytes` | Single write; returns the number of bytes accepted. |
+| `s:sendAll(data) → self` | Loop until every byte is written. |
+| `s:recv(maxLen [, ms]) → string` | Up to `maxLen` bytes (default 4096; capped at 16 MB).  Returns `""` on clean EOF. |
+| `s:recvAll() → string` | Read until EOF or peer close. |
+| `s:recvLine([maxLen]) → string` | Read up to and including the next LF; CRLF or LF is stripped from the result.  `maxLen` defaults to 65536. |
+| `s:close()` | Idempotent shutdown of the underlying transport. |
+| `s:isOpen() → bool` | True iff the connection is still open. |
+| `s:setTimeout(ms) → self` | Sets `SO_RCVTIMEO` and `SO_SNDTIMEO`; pass `0` to disable. |
+| `s:setBlocking(bool) → self` | Toggle non-blocking mode (`O_NONBLOCK` / `FIONBIO`). |
+| `s:setOption(name, value) → self` | Recognised names: `"tcp_nodelay"`, `"so_keepalive"`, `"so_reuseaddr"` (bool); `"so_rcvbuf"`, `"so_sndbuf"` (number). |
+| `s:fd() → number` | Underlying file-descriptor (escape hatch for advanced use). |
+| `s:localAddress() → object` | `{ host, port, family }` of the local endpoint, or `NULL`. |
+| `s:remoteAddress() → object` | `{ host, port, family }` of the peer, or `NULL`. |
+
+### Server methods (`_meta.tcp_server`)
+
+| Method | Description |
+|---|---|
+| `srv:listen(port [, host [, backlog]]) → self` | Bind, listen, and spawn the accept worker.  Returns immediately; the calling script keeps running.  An optional callback may be passed in place of `host` or as the third argument. |
+| `srv:close()` | Stop the accept loop and release resources. |
+| `srv:fd() → number` | Listener fd. |
+| `srv:localAddress() → object` | Bound address. |
+
+### Errors
+
+I/O failures (refused connect, peer reset, bind failure, `:recv` after
+peer reset) and programmer errors (wrong types, calling `:send` on a
+closed socket, unknown option name) all throw via the standard CanDo
+error mechanism — wrap calls in `try { … } catch (e) { … }` to handle.
+A clean EOF on `:recv` returns `""` and is *not* an error.
+
+```cando
+/* Non-blocking echo server.  Main thread continues past :listen. */
+socket.createServer(FUNCTION(conn) {
+    VAR data = conn:recv(4096);
+    WHILE data != "" {
+        conn:sendAll(data);
+        data = conn:recv(4096);
+    }
+    conn:close();
+}):listen(7000);
+print("server up; main loop is free to do other work");
+```
+
+```cando
+/* Extending sockets via _meta */
+VAR LF = '
+';
+_meta.tcp_socket.writeLine = FUNCTION(self, line) { self:sendAll(line + LF); };
+
+VAR s = socket.connect("127.0.0.1", 7000);
+s:writeLine("ping");
+print(s:recvLine());
+s:close();
+```
+
+---
+
+## `secure_socket`
+
+TLS variant of `socket`.  The surface is a near mirror; the only
+material differences are the additional opts on the constructors and
+three TLS introspection methods.  OpenSSL is statically linked into
+`libcando` so no extra runtime libraries are required beyond what
+`http`/`https` already need.
+
+### Module functions
+
+| Function | Description |
+|---|---|
+| `secure_socket.tcp([opts]) → tls_socket` | Unconnected; opts seed the SSL_CTX and SNI hostname for a later `:connect`. |
+| `secure_socket.connect(host, port [, opts]) → tls_socket` | Open + TLS handshake in one call.  `opts.verifyPeer` defaults to **true** (safer than `http`/`https` for the new API). |
+| `secure_socket.createServer(opts, callback) → tls_server` | `opts.cert` and `opts.key` (PEM strings) are required.  Optional `opts.verifyPeer` + `opts.ca` enable client-cert verification. |
+
+Client `opts`:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `verifyPeer` | bool | `true` | Verify the server cert against the system trust store and the supplied CA bundle. |
+| `ca` | string | — | PEM bundle of additional trust roots. |
+| `cert`, `key` | strings | — | Client cert + key for mutual TLS. |
+| `serverName` | string | host arg | SNI override; also used for hostname verification when `verifyPeer` is true. |
+| `timeout` | number | `0` | Connect / per-call recv timeout in ms. |
+| `family` | string | `"any"` | Address family. |
+
+Server `opts`:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `cert`, `key` | strings | — | **Required.** PEM-encoded leaf certificate (chain optional) and matching private key. |
+| `verifyPeer` | bool | `false` | Require a client certificate. |
+| `ca` | string | — | PEM bundle of acceptable client CAs (used with `verifyPeer`). |
+
+### Methods (`_meta.tls_socket`, `_meta.tls_server`)
+
+`_meta.tls_socket` inherits all of `_meta.tcp_socket`'s methods (the
+shared connection surface) plus three TLS introspection helpers:
+
+| Method | Description |
+|---|---|
+| `s:cipher() → string` | Negotiated cipher suite name (e.g. `"TLS_AES_256_GCM_SHA384"`), or `NULL`. |
+| `s:protocol() → string` | Negotiated TLS version (e.g. `"TLSv1.3"`). |
+| `s:peerCertificate() → object` | `{ subject, issuer, notBefore, notAfter, fingerprint }`.  Fingerprint is the lowercase-hex SHA-256 of the DER encoding. |
+
+`_meta.tls_server` inherits the listener methods from
+`_meta.tcp_server`; `:listen` is replaced with a TLS-aware variant that
+runs the handshake on the connection's worker thread before invoking
+the user callback.  By the time `callback(conn)` runs the TLS session
+is established and `conn:cipher()`/`:peerCertificate()` are valid.
+
+```cando
+/* TLS client with default-on verification */
+VAR s = secure_socket.connect("example.com", 443);
+s:sendAll("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n");
+print(s:recvAll());
+s:close();
+```
+
+```cando
+/* TLS server with cert + key */
+VAR creds = include("modules/test_cert.cdo");
+secure_socket.createServer({ cert: creds.cert, key: creds.key },
+    FUNCTION(conn) {
+        print("peer cipher:", conn:cipher());
+        conn:sendAll("hello over TLS\n");
+        conn:close();
+    }):listen(8443);
+```
+
+> **Note.** `tls_socket` does *not* chain to `tcp_socket` via `__index`
+> — that would make `type()` return `"tcp_socket"` for TLS sockets,
+> which is misleading.  Methods you want available on both should be
+> aliased explicitly: `_meta.tls_socket.write = _meta.tcp_socket.write;`.
 
 ---
 
@@ -251,6 +639,21 @@ provides:
 | `thread.then(t, fn)` | Register a success callback; called with `t`'s return values. |
 | `thread.catch(t, fn)` | Register an error callback; called with the thrown value. |
 
+Every per-thread function (`done`, `join`, `cancel`, `state`, `error`,
+`then`, `catch`) is also reachable through the `_meta.thread` prototype as
+a method on the thread receiver itself:
+
+```cando
+VAR t = thread { RETURN 42; };
+print(t:state());   // running | done
+print(await t);     // 42
+print(t:done());    // true
+```
+
+Because `_meta.thread` aliases the same native sentinels as `thread.<name>`,
+both forms call the same underlying implementation -- and overrides applied
+under either name take effect for both.
+
 The language-level `thread { … }` expression and `await` operator are
 described in [language-reference.md](language-reference.md).
 
@@ -271,8 +674,9 @@ the same implementation but requires OpenSSL and uses TLS.
 | `https.request(options) → response` | TLS equivalent. |
 | `fetch(url, options*) → response` | Scheme-aware global; picks http vs https from the URL. |
 
-The response object has fields `status`, `statusText`, `headers` (object), and `body` (string), plus a
-`:json()` method that parses `body` using `json.parse`.
+Client responses inherit from `_meta.http_client_response`; the instance
+itself carries `status`, `ok`, `body`, and `headers` fields and methods are
+attached on the meta table so user code can extend it (see [`_meta`](#meta-global-meta-registry) below).
 
 ### Server
 
@@ -282,6 +686,52 @@ The response object has fields `status`, `statusText`, `headers` (object), and `
 | `https.createServer(handler, keyPath, certPath)` | TLS equivalent. |
 | `server:listen(port, host*)` | Start accepting connections. |
 | `server:close()` | Stop accepting new connections and let in-flight ones finish. |
+
+Server `req` / `res` objects inherit from `_meta.http_request` and
+`_meta.http_response`; `server` objects inherit from `_meta.http_server`.
+The default response methods are:
+
+| Method | Description |
+|---|---|
+| `res:status(code)` | Set the status code (returns the receiver for chaining). |
+| `res:setHeader(name, value)` | Add a response header. |
+| `res:send(body*)` | Flush the response.  If `body` is omitted, the receiver's `body` field (a string accumulator that defaults to `""`) is used. |
+| `res:json(value)` | JSON-encode `value` and send it with `Content-Type: application/json`. |
+
+`res:send()` may be invoked **synchronously from the handler**, or
+**asynchronously from any other thread**.  The connection thread keeps the
+TCP/TLS socket open after the handler returns and waits for `:send()` before
+cleaning up.  Stash `res` on a global, hand it to a `thread { ... }`, or push
+it into a queue — the response is only flushed once `:send()` runs.
+
+```cando
+VAR pending = NULL;
+http.createServer(FUNCTION(req, res) {
+    pending = res;            // defer
+});
+thread {
+    thread.sleep(50);
+    pending:send("delayed");  // sends from another thread
+};
+```
+
+### Extending request and response objects
+
+Because `req` and `res` follow the prototype chain, any function attached to
+`_meta.http_response` (or `_meta.http_request`) becomes a method on every
+instance.  This is the recommended way to build response helpers:
+
+```cando
+_meta.http_response.write = FUNCTION(self, data) {
+    self.body = self.body + data;
+};
+
+http.createServer(FUNCTION(req, res) {
+    res:write("Hello, ");
+    res:write("world!");
+    res:send();               // sends the accumulated body
+});
+```
 
 ---
 
@@ -305,15 +755,33 @@ Load and cache a module.  Resolution rules:
 - Absolute paths are canonicalised with `realpath()` and used directly.
 - Relative paths are resolved relative to the **script's directory** —
   the nearest enclosing frame whose chunk name is an absolute path.
-- `.cdo` files are parsed and executed; their top-level `RETURN` value
-  (or the last expression) becomes the module value.
-- `.so` / `.dylib` / `.dll` files are loaded with `dlopen`; the symbol
-  `cando_module_init(CandoVM *) → CandoValue` is called once and its
-  return value becomes the module value.  See
-  [writing-extensions.md](writing-extensions.md).
+
+The file extension selects the loader:
+
+| Extension                | Loader                                                                                                                                                            |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.cdo`                   | Parsed and executed; top-level `RETURN` (or the last expression) is the module value.                                                                             |
+| `.so` / `.dylib` / `.dll`| Loaded with `dlopen`; the symbol `cando_module_init(CandoVM *) → CandoValue` is called once and its return value is the module value. See [writing-extensions.md](writing-extensions.md). |
+| `.json`                  | File contents are parsed as JSON and the resulting Cando value (object/array/string/number/bool/null) is returned.                                                |
+| `.csv`                   | File contents are parsed as CSV with the default `,` delimiter; the first row is treated as the header row and the result is an array of objects keyed by the header names.        |
+| `.yaml` / `.yml`         | File contents are parsed as YAML and the resulting Cando value is returned.  See `yaml.parse` for the supported feature set.                                       |
+
+If the path has **no extension at all**, `include` probes the
+filesystem in this order and uses the first match it finds:
+
+1. `<path>.so`
+2. `<path>.dylib`
+3. `<path>.dll`
+4. `<path>.cdo`
+
+If a path is supplied with one of the recognised extensions but the
+file does not exist, `include` raises an error rather than probing
+alternatives.
 
 Identical canonical paths share one cached value across the whole VM —
-Node.js `require()` semantics.
+Node.js `require()` semantics.  This applies to JSON, CSV and YAML
+results too, so mutating the returned value mutates every other holder
+of it.
 
 Example:
 
@@ -326,6 +794,17 @@ RETURN lib;
 
 ```cando
 // main.cdo
-VAR my = include("./mylib.cdo");
+VAR my   = include("./mylib.cdo");
 print(my.hello("world"));           // hi, world
+
+VAR cfg  = include("./config.json");   // parsed JSON object
+print(cfg.port);
+
+VAR rows = include("./data.csv");       // array of objects keyed by header row
+print(rows[0].name);
+
+VAR yaml = include("./settings.yaml");  // parsed YAML mapping
+print(yaml.host);
+
+VAR bin  = include("./mylib");          // tries mylib.so, .dylib, .dll, .cdo
 ```

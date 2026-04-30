@@ -30,7 +30,8 @@ All meta-key strings are pre-interned at startup.  The corresponding global
 | `__pow`       | `g_meta_pow`       | `a ^ b`                                  |
 | `__unm`       | `g_meta_unm`       | Unary `-obj`                             |
 | `__idiv`      | `g_meta_idiv`      | Integer division (reserved)              |
-| `__call`      | `g_meta_call`      | Reserved — not yet dispatched            |
+| `__call`      | `g_meta_call`      | `obj(...)` when `obj` is not a function  |
+| `__constructor` | `g_meta_constructor` | Run by the default class `__call`       |
 
 Metamethods can be **native** C functions, inline **script** functions
 (number PC offsets), or **OBJ_FUNCTION** closures.  The VM dispatcher
@@ -108,77 +109,112 @@ print(type(vec));    // Vec3
 
 ---
 
-## `CLASS` — prototype-based class declarations
+## `CLASS` — callable class objects
 
-`CLASS` is syntactic sugar that creates a plain object whose methods are
-stored as fields.  Instances are created manually by a factory method that
-sets `__index` back to the class so field lookups traverse the method table.
+`CLASS` produces a plain object that is **callable**.  Calling the class
+runs a default `__call` wrapper that allocates a fresh instance, links it
+to the class via `__index`, and runs the class's `__constructor` on the
+new instance.  The body between the braces is the constructor body; its
+parameters come right after the `=` sign.
 
 ```cando
-CLASS Point {
-    FUNCTION make(x, y) {
-        VAR p = { x: x, y: y };
-        object.setPrototype(p, Point);   // p.__index = Point
-        RETURN p;
-    }
-    FUNCTION dist(self) {
-        RETURN math.sqrt(self.x * self.x + self.y * self.y);
-    }
-    FUNCTION sum(self) {
-        RETURN self.x + self.y;
-    }
+CLASS Point = (self, x, y) {
+    self.x = x;
+    self.y = y;
 }
+Point.dist = FUNCTION(self) {
+    RETURN math.sqrt(self.x * self.x + self.y * self.y);
+};
+Point.sum = FUNCTION(self) {
+    RETURN self.x + self.y;
+};
 
 print(type(Point));           // Point  (__type set by CLASS)
-
-VAR p = Point.make(3, 4);
+VAR p = Point(3, 4);
 print(p:dist());              // 5
 print(p:sum());               // 7
 ```
 
-`STATIC` before a method name is accepted by the parser but has no special
-VM effect — static methods are simply regular fields on the class object.
+### What a class is, exactly
+
+`class Vector = (self, x, y, z) { BODY }` desugars to roughly:
 
 ```cando
-CLASS MathUtil {
-    STATIC FUNCTION square(n) { RETURN n * n; }
-}
-print(MathUtil.square(7));    // 49
+VAR Vector = { __type: "Vector" };
+Vector.__constructor = FUNCTION(self, x, y, z) { BODY };
+Vector.__call = <vm-supplied default-call wrapper>;
 ```
+
+When the class is invoked --  `Vector(1, 2, 3)`  --  `OP_CALL` follows
+`__call` to the default wrapper, which:
+
+1. Allocates a new object (the instance).
+2. Sets `instance.__index = Vector` so methods on the class are reachable
+   from the instance via the prototype chain.
+3. If the class has a `__constructor` field, calls it with
+   `(instance, args…)`.  The constructor's return value is discarded.
+4. Returns the instance.
+
+This means an instance is just a plain object whose `__index` points back
+at the class.  All method lookups (`obj:method()`, operator metamethods,
+`__type`, `__tostring`) flow through that link.
+
+### Three forms
+
+```cando
+class Vector = (self, x, y, z) { ... }                  // statement
+var Vector = class (self, x, y, z) { ... };             // anonymous expr
+var Vector = class Vector (self, x, y, z) { ... };      // named expr
+class Empty = { }                                       // params optional
+```
+
+The statement form requires the leading `=`; both expression forms drop
+it.  Naming is optional in the expression form -- if absent, the class
+has no `__type`.
 
 ### How `CLASS` compiles
 
-The parser emits:
+For `class Vector = (self, x, y, z) { BODY }` the parser emits:
 
-1. `OP_NEW_CLASS name_idx` — allocates a plain object with `__type` set to
-   the class name, pushes it onto the stack.
-2. For each `FUNCTION`:  `OP_CONST pc_idx` then `OP_BIND_METHOD meth_idx` —
-   pops the method PC and rawsets it as a field on the class (class stays on
-   top of stack).
-3. `OP_DEF_GLOBAL name_idx` — pops the class and stores it as a global.
+1. `OP_NEW_CLASS Vector` (or `OP_NEW_OBJECT` for the anonymous form) --
+   allocates the class object, sets `__type` to the class name when
+   present, and pushes it onto the stack.
+2. (If `extends Parent` was given) `OP_LOAD_GLOBAL Parent` is emitted
+   *before* the class object so the stack reads `[..., parent, class]`,
+   followed by `OP_INHERIT` which sets `class.__index = parent` and pops
+   the parent.
+3. The constructor body is compiled inline as a closure: a forward
+   `OP_JUMP` over the body, the body itself ending in `OP_RETURN`, then
+   `OP_CLOSURE` to push the closure value, then
+   `OP_BIND_METHOD __constructor`.
+4. `OP_BIND_DEFAULT_CALL` -- sets `class.__call` to the VM's
+   built-in default-constructor native.
+5. (Statement form only) `OP_DEF_GLOBAL Vector` binds the class as a
+   global.
 
-### Inheritance
+### Inheritance with `EXTENDS`
 
-Two-level inheritance works via prototype chaining:
+`EXTENDS` chains two classes together by setting the child class's
+`__index` to the parent.  Inside a method, parent dispatch is done
+directly through `Child.__index` -- there is no `super` keyword.
 
 ```cando
-CLASS Animal {
-    FUNCTION speak(self) { RETURN self.name + " makes a sound"; }
-}
+class Animal = (self, name) { self.name = name; }
+Animal.speak = FUNCTION(self) { RETURN self.name + " says hello"; };
 
-CLASS Dog {
-    FUNCTION make(name) {
-        VAR inst = { name: name };
-        object.setPrototype(inst, Dog);
-        RETURN inst;
-    }
-    FUNCTION fetch(self) { RETURN self.name + " fetches!"; }
+class Dog extends Animal = (self, name, breed) {
+    Animal.__constructor(self, name);   // delegate to parent ctor
+    self.breed = breed;
 }
-object.setPrototype(Dog, Animal);    // Dog.__index = Animal
+Dog.bark = FUNCTION(self) {
+    RETURN Dog.__index.speak(self) +     // -> Animal.speak
+           " (woof, " + self.breed + ")";
+};
 
-VAR d = Dog.make("Rex");
-print(d:fetch());    // Rex fetches!
-print(d:speak());    // Rex makes a sound  (found on Animal)
+VAR rex = Dog("Rex", "labrador");
+print(type(rex));           // Dog
+print(rex:speak());         // Rex says hello   (inherited from Animal)
+print(rex:bark());          // Rex says hello (woof, labrador)
 ```
 
 ---
@@ -190,17 +226,14 @@ called with the object as the sole argument and should return a string.  If
 absent, `toString` falls back to the default representation.
 
 ```cando
-CLASS Vec {
-    FUNCTION make(x, y) {
-        VAR v = { x: x, y: y };
-        object.setPrototype(v, Vec);
-        RETURN v;
-    }
+CLASS Vec = (self, x, y) {
+    self.x = x;
+    self.y = y;
 }
 Vec.__tostring = FUNCTION(v) {
     RETURN "Vec(" + toString(v.x) + "," + toString(v.y) + ")";
 };
-print(toString(Vec.make(3, 4)));   // Vec(3,4)
+print(toString(Vec(3, 4)));   // Vec(3,4)
 ```
 
 ---
@@ -325,6 +358,53 @@ bool found_own = cdo_object_rawget(obj, key, &out);  // own fields only
 
 See `source/object/object.h` for the full API and `source/object/class.h`
 for `cdo_class_new`.
+
+---
+
+## The `_meta` global registry
+
+Native libraries that hand out instance objects (HTTP request/response,
+servers, etc.) wire them up to a shared prototype stored at `_meta.<name>`.
+Because `_meta` is an ordinary writable global, user code can attach new
+methods that propagate to every instance through the `__index` chain:
+
+```cando
+_meta.http_response.write = FUNCTION(self, data) {
+    self.body = self.body + data;
+};
+```
+
+Each subtable is created lazily; its `__type` is stamped as a `FIELD_STATIC`
+constant equal to the type name (`"http_response"` for example), so
+`type(instance)` reflects the tag.  Default native methods are inserted with
+`FIELD_NONE` flags so user code may override them.
+
+The same pattern is used by the [`socket`](standard-library.md#socket)
+and [`secure_socket`](standard-library.md#secure_socket) libraries.
+Adding a method once on `_meta.tcp_socket` makes it visible on every
+plain-TCP connection (including those created in a child VM by
+`createServer`):
+
+```cando
+VAR LF = '
+';
+_meta.tcp_socket.writeLine = FUNCTION(self, line) { self:sendAll(line + LF); };
+```
+
+`_meta.tls_socket` is a separate table — it does *not* chain to
+`_meta.tcp_socket` via `__index`, because doing so would make
+`type(s)` return `"tcp_socket"` for TLS connections.  Alias methods
+explicitly when you want them on both:
+
+```cando
+_meta.tls_socket.writeLine = _meta.tcp_socket.writeLine;
+```
+
+You can register your own meta tables and use them as prototypes with
+`object.setPrototype` for any type you control.
+
+See [standard-library.md `#_meta`](standard-library.md#meta-global-meta-registry)
+for the list of built-in subtables and their default methods.
 
 ---
 

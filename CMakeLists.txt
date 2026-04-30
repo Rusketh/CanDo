@@ -17,7 +17,8 @@ endif()
 # Platform link libraries
 # ----------------------------------------------------------------------------
 if(WIN32)
-    set(PLATFORM_LIBS ws2_32 m)
+    # crypt32 is required by OpenSSL's static libcrypto on Windows.
+    set(PLATFORM_LIBS ws2_32 crypt32 m)
 else()
     set(PLATFORM_LIBS m dl)
 endif()
@@ -26,6 +27,11 @@ endif()
 find_package(Threads REQUIRED)
 
 # OpenSSL (hard dependency for the http/https standard library)
+# On Windows, prefer static OpenSSL so libcrypto-3-x64.dll / libssl-3-x64.dll
+# do not need to ship alongside cando.exe and libcando.dll.
+if(WIN32)
+    set(OPENSSL_USE_STATIC_LIBS TRUE)
+endif()
 find_package(OpenSSL REQUIRED)
 
 # ----------------------------------------------------------------------------
@@ -73,6 +79,7 @@ set(LIB_SRCS
     source/lib/include.c
     source/lib/json.c
     source/lib/csv.c
+    source/lib/yaml.c
     source/lib/thread.c
     source/lib/os.c
     source/lib/datetime.c
@@ -81,9 +88,14 @@ set(LIB_SRCS
     source/lib/process.c
     source/lib/net.c
     source/lib/object.c
+    source/lib/sockutil.c
+    source/lib/socket.c
+    source/lib/secure_socket.c
     source/lib/httputil.c
     source/lib/http.c
     source/lib/https.c
+    source/lib/meta.c
+    source/lib/stream.c
 )
 
 # Windows compatibility shim (POSIX regex replacement)
@@ -157,7 +169,16 @@ target_include_directories(libcando
 target_link_libraries(libcando PUBLIC Threads::Threads OpenSSL::SSL OpenSSL::Crypto ${PLATFORM_LIBS})
 
 if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    target_link_options(libcando PRIVATE -static-libgcc)
+    # Statically link libgcc and libwinpthread so libcando.dll has no runtime
+    # DLL dependencies beyond system libraries.  --whole-archive forces every
+    # winpthread symbol to be embedded, and the trailing -Bstatic catches the
+    # implicit -lpthread MinGW's GCC spec appends to satisfy libgcc's
+    # internal pthread references.
+    target_link_options(libcando PRIVATE
+        -static-libgcc
+        -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive,-Bdynamic
+        "LINKER:-Bstatic"
+    )
 endif()
 
 # ----------------------------------------------------------------------------
@@ -206,7 +227,11 @@ target_include_directories(cando PRIVATE
 target_link_libraries(cando PRIVATE libcando)
 
 if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    target_link_options(cando PRIVATE -static-libgcc)
+    target_link_options(cando PRIVATE
+        -static-libgcc
+        -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive,-Bdynamic
+        "LINKER:-Bstatic"
+    )
 endif()
 
 # ----------------------------------------------------------------------------
@@ -290,3 +315,26 @@ add_executable(test_vm
 target_compile_options(test_vm PRIVATE ${CANDO_IQUOTE_FLAGS})
 target_link_libraries(test_vm PRIVATE Threads::Threads ${PLATFORM_LIBS})
 add_test(NAME test_vm COMMAND $<TARGET_FILE:test_vm>)
+
+# test_sockutil — covers the cross-platform TCP/TLS primitives directly.
+add_executable(test_sockutil
+    ${CORE_SRCS}
+    source/lib/sockutil.c
+    tests/test_sockutil.c
+)
+target_compile_options(test_sockutil PRIVATE
+    ${CANDO_IQUOTE_FLAGS}
+    "SHELL:-iquote ${CMAKE_SOURCE_DIR}/source/lib"
+)
+target_link_libraries(test_sockutil PRIVATE
+    Threads::Threads OpenSSL::SSL OpenSSL::Crypto ${PLATFORM_LIBS})
+add_test(NAME test_sockutil COMMAND $<TARGET_FILE:test_sockutil>)
+
+# test_yaml — links against libcando to drive the high-level VM/library API.
+add_executable(test_yaml tests/test_yaml.c)
+target_include_directories(test_yaml PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/source
+)
+target_link_libraries(test_yaml PRIVATE libcando)
+add_test(NAME test_yaml COMMAND $<TARGET_FILE:test_yaml>)

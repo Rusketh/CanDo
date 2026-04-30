@@ -37,6 +37,7 @@ typedef enum {
     TOK_FOR,
     TOK_FUNCTION,
     TOK_CLASS,
+    TOK_EXTENDS,
     TOK_RETURN,
     TOK_THROW,
     TOK_TRY,
@@ -63,6 +64,9 @@ typedef enum {
     /* --- Multi-character operators --------------------------------------- */
     TOK_PIPE_OP,         /* ~>   functional map (pipe)                      */
     TOK_FILTER_OP,       /* ~!>  functional filter                          */
+    TOK_COND_FILTER_OP,  /* ~&>  conditional filter (predicate keeps value) */
+    TOK_QDOT,            /* ?.   safe property access                       */
+    TOK_QLBRACKET,       /* ?[   safe subscript access                      */
     TOK_RANGE_ASC,       /* ->   ascending range generator                  */
     TOK_RANGE_DESC,      /* <-   descending range generator                 */
     TOK_FLUENT,          /* ::   fluent method call (returns receiver)      */
@@ -111,6 +115,7 @@ typedef enum {
     TOK_SEMI,            /* ;  */
     TOK_COMMA,           /* ,  */
     TOK_COLON,           /* :  (method call or object key separator)        */
+    TOK_QUESTION,        /* ?  (ternary conditional)                        */
 
     /* --- Sentinel / error ----------------------------------------------- */
     TOK_EOF,             /* end of source                                   */
@@ -143,8 +148,9 @@ const char *cando_token_type_name(CandoTokenType t);
  * cando_keyword_type -- if the given identifier lexeme (length `len`) is a
  * reserved keyword, return its keyword token type; otherwise return TOK_IDENT.
  *
- * The comparison is case-sensitive: Cando keywords are all upper-case
- * ("IF", "WHILE", ...) except for "pipe" which is lower-case.
+ * The comparison is case-insensitive but rejects mixed-case lexemes: only
+ * pure upper-case ("CLASS") and pure lower-case ("class") match.  Mixed
+ * spellings ("Class", "cLaSs") are returned as plain identifiers.
  * ------------------------------------------------------------------------ */
 CandoTokenType cando_keyword_type(const char *ident, u32 len);
 

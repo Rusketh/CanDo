@@ -1,0 +1,45 @@
+// modules/sqlite/test_sqlite_smoke.cdo -- minimal smoke test for the
+// Windows CI job (also runs cleanly on Linux).  Verifies that the
+// module loads, cando_module_init returns the expected object, and the
+// module-level constants are present.  Kept deliberately simple so a
+// runtime failure points clearly at the binary, not the script.
+
+print("smoke: starting");
+
+VAR sql = NULL;
+TRY {
+    sql = include("./sqlite.dll");
+    print("smoke: loaded sqlite.dll");
+} CATCH (e) {
+    print(`smoke: sqlite.dll load failed: ${e}`);
+    TRY {
+        sql = include("./sqlite.so");
+        print("smoke: loaded sqlite.so");
+    } CATCH (e2) {
+        print(`smoke: sqlite.so load failed: ${e2}`);
+        os.exit(1);
+    }
+}
+
+IF type(sql.VERSION) != "string" {
+    print("smoke: VERSION missing or not a string");
+    os.exit(1);
+}
+print(`smoke: module VERSION  = ${sql.VERSION}`);
+
+IF type(sql.SQLITE_VERSION) != "string" {
+    print("smoke: SQLITE_VERSION missing or not a string");
+    os.exit(1);
+}
+print(`smoke: SQLITE_VERSION = ${sql.SQLITE_VERSION}`);
+
+IF type(sql.escape) != "number" || type(sql.escapeIdentifier) != "number" {
+    print("smoke: escape helpers missing");
+    os.exit(1);
+}
+IF sql.escape("o'brien") != "'o''brien'" {
+    print(`smoke: escape produced unexpected output: ${sql.escape("o'brien")}`);
+    os.exit(1);
+}
+
+print("OK");

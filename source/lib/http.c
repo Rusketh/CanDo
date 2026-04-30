@@ -18,6 +18,8 @@
 #include "http.h"
 #include "httputil.h"
 #include "libutil.h"
+#include "meta.h"
+#include "stream.h"
 #include "../vm/bridge.h"
 #include "../vm/vm.h"
 #include "../object/object.h"
@@ -60,6 +62,7 @@ typedef struct HttpServer {
     _Atomic(bool)    running;
     cando_thread_t   accept_thread;
     bool             has_thread;
+    bool             has_lifeline;   /* held while accept thread runs */
     CandoVM         *parent_vm;
     CandoValue       callback_fn;
     _Atomic(u32)     active_conns;
@@ -69,11 +72,16 @@ typedef struct HttpServer {
 } HttpServer;
 
 typedef struct HttpResCtx {
-    HttpConn     conn;
-    int          status_code;
-    HttpHeaders  headers;
-    bool         sent;
-    bool         active;
+    HttpConn      conn;
+    int           status_code;
+    HttpHeaders   headers;
+    bool          sent;
+    bool          active;
+    /* Wakes the connection thread once the response has been written so it
+     * can clean up the connection.  Necessary because res:send() may run from
+     * a different thread (e.g. one spawned inside the request handler). */
+    cando_mutex_t mu;
+    cando_cond_t  cv;
 } HttpResCtx;
 
 static HttpServer    g_servers[HTTP_MAX_SERVERS];
@@ -129,6 +137,8 @@ static int res_alloc(void)
             memset(&g_res_pool[i], 0, sizeof(HttpResCtx));
             http_conn_init(&g_res_pool[i].conn);
             http_headers_init(&g_res_pool[i].headers);
+            cando_os_mutex_init(&g_res_pool[i].mu);
+            cando_os_cond_init(&g_res_pool[i].cv);
             g_res_pool[i].active = true;
             g_res_pool[i].status_code = 200;
             idx = i;
@@ -144,6 +154,8 @@ static void res_free(int idx)
     if (idx < 0 || idx >= HTTP_MAX_ACTIVE_RESPONSES) return;
     cando_os_mutex_lock(&g_res_pool_mutex);
     http_headers_free(&g_res_pool[idx].headers);
+    cando_os_mutex_destroy(&g_res_pool[idx].mu);
+    cando_os_cond_destroy(&g_res_pool[idx].cv);
     g_res_pool[idx].active = false;
     cando_os_mutex_unlock(&g_res_pool_mutex);
 }
@@ -196,17 +208,35 @@ static void set_obj_field(CdoObject *obj, const char *name, CdoObject *child)
     cdo_string_release(key);
 }
 
-/* Iterate headers from a CdoObject (user-supplied {"Name": "Value", ...}). */
+/* Iterate headers from a CdoObject (user-supplied {"Name": "Value", ...}).
+ *
+ * Non-string values (numbers, bools, null) are coerced via cdo_value_tostring
+ * so callers can write `{ "X-Count": 42 }` without the field silently dropping.
+ * Internal keys prefixed with `__` are skipped so meta-method machinery does
+ * not bleed into the wire request. */
 typedef struct { HttpBuf *buf; } HeaderAppendUD;
 
 static bool append_header_iter(CdoString *key, CdoValue *val, u8 flags, void *ud)
 {
     (void)flags;
     HeaderAppendUD *a = (HeaderAppendUD *)ud;
-    if (val->tag != CDO_STRING) return true;
+
+    if (key->length == 0) return true;
+    if (key->length >= 2 && key->data[0] == '_' && key->data[1] == '_')
+        return true;
+    if (val->tag == CDO_NULL) return true;
+
     httpbuf_append(a->buf, key->data, key->length);
     httpbuf_append_cstr(a->buf, ": ");
-    httpbuf_append(a->buf, val->as.string->data, val->as.string->length);
+    if (val->tag == CDO_STRING && val->as.string) {
+        httpbuf_append(a->buf, val->as.string->data, val->as.string->length);
+    } else {
+        char *s = cdo_value_tostring(*val);
+        if (s) {
+            httpbuf_append_cstr(a->buf, s);
+            free(s);
+        }
+    }
     httpbuf_append_cstr(a->buf, "\r\n");
     return true;
 }
@@ -273,12 +303,67 @@ static CdoObject *get_obj_field(CdoObject *obj, const char *name)
 }
 
 /* =========================================================================
+ * Client-side streaming response body adapter
+ *
+ * Wraps an open HttpConn + HttpBodyReader so script code can drain the
+ * body lazily — `resp:stream():pipeTo(file.open("out.bin", "wb"))`
+ * downloads any size of file with a single chunk-sized buffer in flight,
+ * regardless of Content-Length or chunked encoding.
+ *
+ * The adapter owns the HttpConn and closes it on destroy.
+ * ===================================================================== */
+
+typedef struct HttpClientBodyCtx {
+    HttpConn          conn;
+    HttpResponseHead  head;
+    HttpBodyReader    reader;
+    StreamSlot       *owner;
+} HttpClientBodyCtx;
+
+static StreamStatus http_client_body_read(void *vctx, u8 *out, usize cap,
+                                          usize *n_out)
+{
+    HttpClientBodyCtx *bc = (HttpClientBodyCtx *)vctx;
+    int n = http_body_reader_read(&bc->reader, out, cap);
+    if (n < 0) {
+        *n_out = 0;
+        stream_set_error(bc->owner, "http body: read failed");
+        return STREAM_ERR;
+    }
+    *n_out = (usize)n;
+    if (n == 0 && bc->reader.eof) return STREAM_EOF;
+    return STREAM_OK;
+}
+
+static void http_client_body_destroy(void *vctx)
+{
+    HttpClientBodyCtx *bc = (HttpClientBodyCtx *)vctx;
+    if (!bc) return;
+    http_body_reader_free(&bc->reader);
+    http_response_head_free(&bc->head);
+    http_conn_close(&bc->conn);
+    cando_free(bc);
+}
+
+static const StreamVTable g_http_client_body_vt = {
+    .read       = http_client_body_read,
+    .write      = NULL,
+    .flush      = NULL,
+    .end        = NULL,
+    .destroy    = http_client_body_destroy,
+    .seek       = NULL,
+    .tell       = NULL,
+    .kind_name  = "http_body",
+};
+
+/* =========================================================================
  * Shared client workhorse: http_do_request_native
  *
  * Accepts either a bare URL string or an options object with fields
- *   { url, method, headers, body, timeout }.
+ *   { url, method, headers, body, timeout, stream }.
  * is_tls_hint forces TLS regardless of scheme (used by https.request).
- * Pushes a single result object { status, ok, body, headers } on success.
+ * Pushes a single result object { status, ok, body, headers } on success;
+ * with `stream: true` the body is null and `:stream()` lazily drains.
  * ===================================================================== */
 int http_do_request_native(CandoVM *vm, int argc, CandoValue *args,
                            bool is_tls_hint)
@@ -327,6 +412,17 @@ int http_do_request_native(CandoVM *vm, int argc, CandoValue *args,
         headers_obj = get_obj_field(opts, "headers");
         int t = 0;
         if (get_int_field(opts, "timeout", &t) && t > 0) timeout = t;
+    }
+    /* Streaming mode: callers asking for `stream: true` get the response
+     * object with body=null and an `__stream_id` hidden field; the body
+     * is drained lazily on demand via `:stream()`. */
+    bool stream_body = false;
+    if (opts) {
+        CdoString *kstream = cdo_string_intern("stream", 6);
+        CdoValue   vstream = cdo_null();
+        bool ok = cdo_object_rawget(opts, kstream, &vstream);
+        cdo_string_release(kstream);
+        if (ok && vstream.tag == CDO_BOOL) stream_body = vstream.as.boolean;
     }
 
     if (!url_cstr || url_len == 0) {
@@ -407,6 +503,69 @@ int http_do_request_native(CandoVM *vm, int argc, CandoValue *args,
     }
     httpbuf_free(&req);
 
+    /* ---------------------------------------------------------------
+     * Streaming path: read only the headers, then hand the open
+     * connection off to a body-stream adapter so the script can drain
+     * the body lazily without first materialising it.
+     * --------------------------------------------------------------- */
+    if (stream_body) {
+        HttpClientBodyCtx *bc =
+            (HttpClientBodyCtx *)cando_alloc(sizeof(HttpClientBodyCtx));
+        memset(bc, 0, sizeof(*bc));
+        /* Move the connection into the ctx so its destroy can close it. */
+        bc->conn = conn;
+        http_response_head_init(&bc->head);
+        if (!http_read_response_head(&bc->conn, &bc->head)) {
+            http_response_head_free(&bc->head);
+            http_conn_close(&bc->conn);
+            cando_free(bc);
+            cando_vm_error(vm, "http.request: bad or truncated response");
+            return -1;
+        }
+        http_body_reader_init(&bc->reader, &bc->head, &bc->conn);
+
+        int sidx = stream_pool_alloc(&g_http_client_body_vt, bc,
+                                     STREAM_CAP_READABLE);
+        if (sidx < 0) {
+            http_body_reader_free(&bc->reader);
+            http_response_head_free(&bc->head);
+            http_conn_close(&bc->conn);
+            cando_free(bc);
+            cando_vm_error(vm, "http.request: too many active streams");
+            return -1;
+        }
+        bc->owner = stream_pool_get(sidx);
+
+        /* Build clientResponse: status/headers populated, body=null,
+         * `__stream_id` hidden field tells :stream() to surface the
+         * lazy body adapter. */
+        CandoValue result_val = cando_bridge_new_object(vm);
+        CdoObject *result     = cando_bridge_resolve(vm, result_val.as.handle);
+        set_num_field (result, "status", (f64)bc->head.status);
+        set_bool_field(result, "ok",
+                       bc->head.status >= 200 && bc->head.status < 300);
+        set_num_field (result, "__stream_id", (f64)sidx);
+        /* Provide a `body` field for symmetry with the buffered path; in
+         * streaming mode it's null until the user drains the stream. */
+        CdoString *kbody = cdo_string_intern("body", 4);
+        cdo_object_rawset(result, kbody, cdo_null(), FIELD_NONE);
+        cdo_string_release(kbody);
+
+        CandoValue hdrs_val = cando_bridge_new_object(vm);
+        CdoObject *hdrs     = cando_bridge_resolve(vm, hdrs_val.as.handle);
+        for (u32 i = 0; i < bc->head.headers.count; i++) {
+            set_str_field(hdrs,
+                          bc->head.headers.entries[i].name,
+                          bc->head.headers.entries[i].value,
+                          (u32)strlen(bc->head.headers.entries[i].value));
+        }
+        set_obj_field(result, "headers", hdrs);
+        cando_lib_meta_attach(vm, result, "http_client_response");
+
+        cando_vm_push(vm, result_val);
+        return 1;
+    }
+
     /* Read response. */
     HttpResponse resp;
     http_response_init(&resp);
@@ -439,6 +598,10 @@ int http_do_request_native(CandoVM *vm, int argc, CandoValue *args,
     }
     set_obj_field(result, "headers", hdrs);
 
+    /* Attach the user-extensible meta table so script code can add helper
+     * methods via `_meta.http_client_response.<name> = FUNCTION(...) { ... }`. */
+    cando_lib_meta_attach(vm, result, "http_client_response");
+
     http_response_free(&resp);
 
     cando_vm_push(vm, result_val);
@@ -454,10 +617,7 @@ static int http_request_fn(CandoVM *vm, int argc, CandoValue *args)
 static int http_get_fn(CandoVM *vm, int argc, CandoValue *args)
 {
     /* http.get(url) -- shortcut; force GET method. */
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "http.get: expected url string");
-        return -1;
-    }
+    if (!libutil_require_str_at(vm, args, argc, 0, "http.get")) return -1;
     /* Wrap into a tiny options object with method=GET and reuse the workhorse. */
     CandoValue opts_val = cando_bridge_new_object(vm);
     CdoObject *opts     = cando_bridge_resolve(vm, opts_val.as.handle);
@@ -490,9 +650,22 @@ static HttpResCtx *res_get_ctx_from(CandoVM *vm, CandoValue receiver)
     return &g_res_pool[idx];
 }
 
-/* Build and send a complete response on ctx->conn. */
+/*
+ * res_send_impl -- write the complete HTTP response on ctx->conn, mark it as
+ * sent, and wake any thread (typically the connection thread) blocked in
+ * res_wait_until_sent waiting for cleanup.
+ *
+ * Caller must NOT hold ctx->mu; this function acquires it internally so the
+ * write is serialised against itself if invoked concurrently.
+ */
 static bool res_send_impl(HttpResCtx *ctx, const char *body, usize body_len)
 {
+    cando_os_mutex_lock(&ctx->mu);
+    if (ctx->sent) {
+        cando_os_mutex_unlock(&ctx->mu);
+        return false;
+    }
+
     HttpBuf out;
     httpbuf_init(&out);
 
@@ -524,7 +697,22 @@ static bool res_send_impl(HttpResCtx *ctx, const char *body, usize body_len)
     bool ok = http_conn_write_all(&ctx->conn, out.data, out.len);
     httpbuf_free(&out);
     ctx->sent = true;
+    cando_os_cond_broadcast(&ctx->cv);
+    cando_os_mutex_unlock(&ctx->mu);
     return ok;
+}
+
+/*
+ * res_wait_until_sent -- block until ctx->sent becomes true.  Used by the
+ * connection thread to keep the socket and response context alive after the
+ * request handler returns so res:send() may be invoked from another thread.
+ */
+static void res_wait_until_sent(HttpResCtx *ctx)
+{
+    cando_os_mutex_lock(&ctx->mu);
+    while (!ctx->sent)
+        cando_os_cond_wait(&ctx->cv, &ctx->mu);
+    cando_os_mutex_unlock(&ctx->mu);
 }
 
 /* res.status(code) */
@@ -555,28 +743,301 @@ static int res_setHeader_fn(CandoVM *vm, int argc, CandoValue *args)
     return 1;
 }
 
-/* res.send(body) */
+/*
+ * res.send([body])
+ *
+ * If `body` is omitted (or null), the value of the receiver's `body` field is
+ * sent instead.  The default `body` field is initialised to "" when the res
+ * object is built, and meta-method extensions like `_meta.http_response.write`
+ * append to it before calling :send().
+ */
 static int res_send_fn(CandoVM *vm, int argc, CandoValue *args)
 {
     if (argc < 1) { cando_vm_push(vm, cando_null()); return 1; }
     HttpResCtx *ctx = res_get_ctx_from(vm, args[0]);
-    if (!ctx || ctx->sent) { cando_vm_push(vm, args[0]); return 1; }
+    if (!ctx) { cando_vm_push(vm, args[0]); return 1; }
 
     const char *body = "";
     u32         blen = 0;
     char       *tmp  = NULL;
-    if (argc >= 2) {
+    CdoValue    field_val = cdo_null();
+    bool        have_field = false;
+
+    if (argc >= 2 && !cando_is_null(args[1])) {
         if (cando_is_string(args[1])) {
             body = args[1].as.string->data;
             blen = args[1].as.string->length;
-        } else if (!cando_is_null(args[1])) {
+        } else {
             tmp = cando_value_tostring(args[1]);
             if (tmp) { body = tmp; blen = (u32)strlen(tmp); }
         }
+    } else {
+        /* Fall back to the receiver's `body` field so users can build the
+         * response incrementally (e.g. via res:write) and call res:send(). */
+        CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+        if (obj) {
+            CdoString *kbody = cdo_string_intern("body", 4);
+            have_field = cdo_object_get(obj, kbody, &field_val);
+            cdo_string_release(kbody);
+        }
+        if (have_field && field_val.tag == CDO_STRING && field_val.as.string) {
+            body = field_val.as.string->data;
+            blen = field_val.as.string->length;
+        } else if (have_field && field_val.tag != CDO_NULL) {
+            tmp = cdo_value_tostring(field_val);
+            if (tmp) { body = tmp; blen = (u32)strlen(tmp); }
+        }
     }
+
     res_send_impl(ctx, body, blen);
     if (tmp) free(tmp);
+    /* field_val is borrowed from cdo_object_get -- do NOT release. */
+    (void)have_field;
     cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* res:stream() -> writable stream that emits the response body using
+ * chunked transfer encoding.
+ *
+ * The first :write sends the headers + Transfer-Encoding: chunked, then
+ * each subsequent write is one chunk on the wire.  :end() sends the
+ * terminating zero-length chunk.  This means script code can hand a
+ * gigabyte response back without ever buffering it on the server.
+ *
+ * `:status()` and `:setHeader()` only have effect *before* the first
+ * :write (or :end) — that's when the headers are flushed.
+ */
+typedef struct ResStreamCtx {
+    HttpResCtx *res;
+    bool        headers_sent;
+    StreamSlot *owner;
+} ResStreamCtx;
+
+/* Build and emit the status line + headers with chunked framing.  Caller
+ * must NOT hold ctx->mu; we acquire it ourselves. */
+static bool res_stream_send_headers(HttpResCtx *ctx)
+{
+    cando_os_mutex_lock(&ctx->mu);
+    if (ctx->sent) { cando_os_mutex_unlock(&ctx->mu); return false; }
+
+    HttpBuf out;
+    httpbuf_init(&out);
+
+    const char *reason = http_status_text(ctx->status_code);
+    httpbuf_append_fmt(&out, "HTTP/1.1 %d %s\r\n",
+                      ctx->status_code,
+                      reason && *reason ? reason : "OK");
+
+    bool has_ct = false, has_cn = false;
+    for (u32 i = 0; i < ctx->headers.count; i++) {
+        const char *n = ctx->headers.entries[i].name;
+        if (strcmp(n, "content-type")      == 0) has_ct = true;
+        if (strcmp(n, "connection")        == 0) has_cn = true;
+        /* Drop user-supplied framing headers — we manage them. */
+        if (strcmp(n, "content-length")    == 0) continue;
+        if (strcmp(n, "transfer-encoding") == 0) continue;
+        httpbuf_append_cstr(&out, n);
+        httpbuf_append_cstr(&out, ": ");
+        httpbuf_append_cstr(&out, ctx->headers.entries[i].value);
+        httpbuf_append_cstr(&out, "\r\n");
+    }
+    if (!has_ct) httpbuf_append_cstr(&out, "Content-Type: text/html; charset=utf-8\r\n");
+    if (!has_cn) httpbuf_append_cstr(&out, "Connection: close\r\n");
+    httpbuf_append_cstr(&out, "Transfer-Encoding: chunked\r\n\r\n");
+
+    bool ok = http_conn_write_all(&ctx->conn, out.data, out.len);
+    httpbuf_free(&out);
+    cando_os_mutex_unlock(&ctx->mu);
+    return ok;
+}
+
+/* Emit one chunk: <hex-len>\r\n<bytes>\r\n */
+static bool res_stream_send_chunk(HttpResCtx *ctx, const u8 *buf, usize len)
+{
+    if (len == 0) return true;
+    cando_os_mutex_lock(&ctx->mu);
+    HttpBuf out;
+    httpbuf_init(&out);
+    httpbuf_append_fmt(&out, "%zx\r\n", len);
+    httpbuf_append(&out, buf, len);
+    httpbuf_append_cstr(&out, "\r\n");
+    bool ok = http_conn_write_all(&ctx->conn, out.data, out.len);
+    httpbuf_free(&out);
+    cando_os_mutex_unlock(&ctx->mu);
+    return ok;
+}
+
+/* Emit the terminating zero-length chunk and wake the connection thread. */
+static bool res_stream_send_terminator(HttpResCtx *ctx)
+{
+    cando_os_mutex_lock(&ctx->mu);
+    if (ctx->sent) { cando_os_mutex_unlock(&ctx->mu); return true; }
+    bool ok = http_conn_write_all(&ctx->conn, "0\r\n\r\n", 5);
+    ctx->sent = true;
+    cando_os_cond_broadcast(&ctx->cv);
+    cando_os_mutex_unlock(&ctx->mu);
+    return ok;
+}
+
+static StreamStatus res_stream_write(void *vctx, const u8 *buf, usize len,
+                                     usize *n_out)
+{
+    ResStreamCtx *rs = (ResStreamCtx *)vctx;
+    if (rs->res->sent) {
+        *n_out = 0;
+        stream_set_error(rs->owner, "response already sent");
+        return STREAM_ERR;
+    }
+    if (!rs->headers_sent) {
+        if (!res_stream_send_headers(rs->res)) {
+            stream_set_error(rs->owner, "failed to send response headers");
+            *n_out = 0;
+            return STREAM_ERR;
+        }
+        rs->headers_sent = true;
+    }
+    if (!res_stream_send_chunk(rs->res, buf, len)) {
+        stream_set_error(rs->owner, "chunk send failed");
+        *n_out = 0;
+        return STREAM_ERR;
+    }
+    *n_out = len;
+    return STREAM_OK;
+}
+
+static StreamStatus res_stream_end(void *vctx)
+{
+    ResStreamCtx *rs = (ResStreamCtx *)vctx;
+    if (rs->res->sent) return STREAM_OK;
+    if (!rs->headers_sent) {
+        if (!res_stream_send_headers(rs->res)) {
+            stream_set_error(rs->owner, "failed to send response headers");
+            return STREAM_ERR;
+        }
+        rs->headers_sent = true;
+    }
+    if (!res_stream_send_terminator(rs->res)) {
+        stream_set_error(rs->owner, "terminator send failed");
+        return STREAM_ERR;
+    }
+    return STREAM_OK;
+}
+
+static void res_stream_destroy(void *vctx)
+{
+    ResStreamCtx *rs = (ResStreamCtx *)vctx;
+    if (!rs) return;
+    /* Ensure the connection thread doesn't park forever in
+     * res_wait_until_sent if the script abandons the stream.  If we
+     * already wrote headers, finish the chunked stream cleanly; else
+     * just unblock with `sent = true` (the connection will close with
+     * no response, which is the script's responsibility). */
+    if (rs->headers_sent && !rs->res->sent) {
+        res_stream_send_terminator(rs->res);
+    } else if (!rs->res->sent) {
+        cando_os_mutex_lock(&rs->res->mu);
+        rs->res->sent = true;
+        cando_os_cond_broadcast(&rs->res->cv);
+        cando_os_mutex_unlock(&rs->res->mu);
+    }
+    cando_free(rs);
+}
+
+static const StreamVTable g_res_stream_vt = {
+    .read       = NULL,
+    .write      = res_stream_write,
+    .flush      = NULL,
+    .end        = res_stream_end,
+    .destroy    = res_stream_destroy,
+    .seek       = NULL,
+    .tell       = NULL,
+    .kind_name  = "http_response",
+};
+
+static int res_stream_fn(CandoVM *vm, int argc, CandoValue *args)
+{
+    HttpResCtx *ctx = res_get_ctx_from(vm,
+                          argc > 0 ? args[0] : cando_null());
+    if (!ctx) {
+        cando_vm_error(vm, "res:stream: invalid receiver");
+        return -1;
+    }
+    ResStreamCtx *rs = (ResStreamCtx *)cando_alloc(sizeof(ResStreamCtx));
+    memset(rs, 0, sizeof(*rs));
+    rs->res = ctx;
+
+    int idx = stream_pool_alloc(&g_res_stream_vt, rs, STREAM_CAP_WRITABLE);
+    if (idx < 0) {
+        cando_free(rs);
+        cando_vm_error(vm, "res:stream: too many active streams");
+        return -1;
+    }
+    rs->owner = stream_pool_get(idx);
+    cando_vm_push(vm, stream_create_instance(vm, idx));
+    return 1;
+}
+
+/* clientResponse:stream() -> readable stream over the buffered body
+ *
+ * The HTTP client buffers the full response body before returning, so this
+ * adapter presents it as a pre-filled, write-ended memory stream.  The
+ * point is uniformity: downstream code can `:pipeTo(file)` /
+ * `:pipeTo(channel)` on an HTTP body the same way it does on any other
+ * source.
+ *
+ * On-the-fly streaming (skip the body buffer entirely) requires teaching
+ * `http_read_response` to hand back an unread `HttpConn`; that's deferred
+ * to a follow-up because it touches the parser surface area.
+ */
+static int http_client_response_stream_fn(CandoVM *vm, int argc,
+                                          CandoValue *args)
+{
+    if (argc < 1 || !cando_is_object(args[0])) {
+        cando_vm_error(vm, "clientResponse:stream: invalid receiver");
+        return -1;
+    }
+    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    if (!obj) {
+        cando_vm_error(vm, "clientResponse:stream: invalid receiver");
+        return -1;
+    }
+    /* Streaming-mode response: the request was issued with `stream: true`
+     * so the body lives in a pre-allocated stream slot.  Surface that
+     * directly — the caller may have already partially drained it. */
+    {
+        CdoString *kid = cdo_string_intern("__stream_id", 11);
+        CdoValue   vid = cdo_null();
+        bool ok = cdo_object_rawget(obj, kid, &vid);
+        cdo_string_release(kid);
+        if (ok && vid.tag == CDO_NUMBER) {
+            int sid = (int)vid.as.number;
+            if (stream_pool_get(sid)) {
+                cando_vm_push(vm, stream_create_instance(vm, sid));
+                return 1;
+            }
+        }
+    }
+
+    /* Buffered mode: build a one-shot memory stream over the body field. */
+    CdoString *kbody = cdo_string_intern("body", 4);
+    CdoValue   bv    = cdo_null();
+    bool       have  = cdo_object_get(obj, kbody, &bv);
+    cdo_string_release(kbody);
+
+    const void *data = "";
+    usize       len  = 0;
+    if (have && bv.tag == CDO_STRING && bv.as.string) {
+        data = bv.as.string->data;
+        len  = bv.as.string->length;
+    }
+
+    CandoValue sv = cando_stream_from_bytes(vm, data, len);
+    if (cando_is_null(sv)) {
+        cando_vm_error(vm, "clientResponse:stream: too many active streams");
+        return -1;
+    }
+    cando_vm_push(vm, sv);
     return 1;
 }
 
@@ -723,25 +1184,36 @@ static CANDO_THREAD_RETURN conn_thread_fn(void *arg_p)
                       (u32)strlen(preq.headers.entries[i].value));
     }
     set_obj_field(req_obj, "headers", hdrs_obj);
+    cando_lib_meta_attach(&child, req_obj, "http_request");
 
-    /* Build res object. */
+    /* Build res object.  Methods live on `_meta.http_response` so users can
+     * extend them; we only stash the per-instance `__res_id` and an empty
+     * mutable `body` accumulator here. */
     CandoValue res_val = cando_bridge_new_object(&child);
     CdoObject *res_obj = cando_bridge_resolve(&child, res_val.as.handle);
     set_num_field(res_obj, "__res_id", (f64)res_idx);
-    libutil_set_method(&child, res_obj, "status",    res_status_fn);
-    libutil_set_method(&child, res_obj, "setHeader", res_setHeader_fn);
-    libutil_set_method(&child, res_obj, "send",      res_send_fn);
-    libutil_set_method(&child, res_obj, "json",      res_json_fn);
+    set_str_field(res_obj, "body", "", 0);
+    cando_lib_meta_attach(&child, res_obj, "http_response");
 
     /* Call the user callback(req, res). */
     CandoValue cb_args[2] = { req_val, res_val };
     cando_vm_call_value(&child, server->callback_fn, cb_args, 2);
 
-    /* If the callback did not send anything, flush a default 500. */
-    if (!ctx->sent) {
-        ctx->status_code = 500;
-        res_send_impl(ctx, "Internal Server Error", 21);
+    /* If the callback errored out, send a 500 immediately so the client
+     * doesn't hang.  Otherwise wait for res:send -- which may be invoked
+     * synchronously from the callback or asynchronously from another
+     * Cando thread that captured the res object. */
+    if (child.has_error) {
+        cando_os_mutex_lock(&ctx->mu);
+        bool already_sent = ctx->sent;
+        cando_os_mutex_unlock(&ctx->mu);
+        if (!already_sent) {
+            ctx->status_code = 500;
+            res_send_impl(ctx, "Internal Server Error", 21);
+        }
     }
+
+    res_wait_until_sent(ctx);
 
     /* Cleanup. */
     http_parsed_request_free(&preq);
@@ -758,7 +1230,8 @@ static CANDO_THREAD_RETURN accept_thread_fn(void *arg)
     if (sidx < 0 || sidx >= HTTP_MAX_SERVERS) return CANDO_THREAD_RETURN_VAL;
     HttpServer *server = &g_servers[sidx];
 
-    while (atomic_load(&server->running)) {
+    while (atomic_load(&server->running) &&
+           !cando_vm_quit_requested(server->parent_vm)) {
         struct sockaddr_storage sa;
         socklen_t slen = sizeof(sa);
         int cfd = (int)accept(server->listen_fd, (struct sockaddr *)&sa, &slen);
@@ -778,6 +1251,13 @@ static CANDO_THREAD_RETURN accept_thread_fn(void *arg)
             continue;
         }
         cando_os_thread_detach(t);
+    }
+    /* Release the VM lifeline now that the accept loop is winding
+     * down.  server:close() joins this thread, so the join naturally
+     * synchronises with the lifeline release. */
+    if (server->has_lifeline) {
+        server->has_lifeline = false;
+        cando_vm_lifeline_release(server->parent_vm);
     }
     return CANDO_THREAD_RETURN_VAL;
 }
@@ -869,6 +1349,10 @@ static int server_listen_fn(CandoVM *vm, int argc, CandoValue *args)
     }
     server->has_thread = true;
 
+    /* Pin the script's process while the accept thread runs. */
+    cando_vm_lifeline_acquire(vm, "http_server");
+    server->has_lifeline = true;
+
     cando_vm_push(vm, args[0]);  /* return receiver */
     return 1;
 }
@@ -933,11 +1417,12 @@ int http_create_server_native_impl(CandoVM *vm, CandoValue callback,
     server->ssl_ctx     = (SSL_CTX *)ssl_ctx;
     server->listen_fd   = -1;
 
+    /* The instance only carries the per-server identifier; listen/close are
+     * inherited from `_meta.http_server`. */
     CandoValue sobj_val = cando_bridge_new_object(vm);
     CdoObject *sobj     = cando_bridge_resolve(vm, sobj_val.as.handle);
     set_num_field(sobj, "__server_id", (f64)sidx);
-    libutil_set_method(vm, sobj, "listen", server_listen_fn);
-    libutil_set_method(vm, sobj, "close",  server_close_fn);
+    cando_lib_meta_attach(vm, sobj, "http_server");
 
     cando_vm_push(vm, sobj_val);
     return 1;
@@ -956,6 +1441,41 @@ static int http_create_server_fn(CandoVM *vm, int argc, CandoValue *args)
  * Registration
  * ===================================================================== */
 
+/*
+ * http_register_meta_tables -- populate the user-extensible `_meta` tables
+ * for HTTP/HTTPS objects with their default native methods.  Idempotent and
+ * safe to call from both http and https registration so either library may
+ * be opened standalone.
+ */
+void http_register_meta_tables(CandoVM *vm)
+{
+    cando_lib_meta_register(vm);
+
+    CdoObject *res_meta = cando_lib_meta_table(vm, "http_response");
+    if (res_meta) {
+        cando_lib_meta_define(vm, res_meta, "status",    res_status_fn);
+        cando_lib_meta_define(vm, res_meta, "setHeader", res_setHeader_fn);
+        cando_lib_meta_define(vm, res_meta, "send",      res_send_fn);
+        cando_lib_meta_define(vm, res_meta, "json",      res_json_fn);
+        cando_lib_meta_define(vm, res_meta, "stream",    res_stream_fn);
+    }
+    /* http_request currently has no native methods.  The table is created
+     * eagerly so user code can attach methods reliably at script startup. */
+    (void)cando_lib_meta_table(vm, "http_request");
+
+    CdoObject *cres_meta = cando_lib_meta_table(vm, "http_client_response");
+    if (cres_meta) {
+        cando_lib_meta_define(vm, cres_meta, "stream",
+                              http_client_response_stream_fn);
+    }
+
+    CdoObject *server_meta = cando_lib_meta_table(vm, "http_server");
+    if (server_meta) {
+        cando_lib_meta_define(vm, server_meta, "listen", server_listen_fn);
+        cando_lib_meta_define(vm, server_meta, "close",  server_close_fn);
+    }
+}
+
 void cando_lib_http_register(CandoVM *vm)
 {
     ensure_pools_inited();
@@ -969,6 +1489,8 @@ void cando_lib_http_register(CandoVM *vm)
     libutil_set_method(vm, http_obj, "createServer", http_create_server_fn);
 
     cando_vm_set_global(vm, "http", http_val, true);
+
+    http_register_meta_tables(vm);
 
     /* Register global fetch(). */
     cando_vm_register_native(vm, "fetch", fetch_fn);

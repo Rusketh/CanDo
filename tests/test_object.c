@@ -577,6 +577,78 @@ TEST(test_prototype_self_loop_guard) {
 }
 
 /* -----------------------------------------------------------------------
+ * Callable __index detection
+ *
+ * A function/native __index does NOT act as a lookup-table; cdo_object_get
+ * must terminate without descending into it, and cdo_object_index_callable
+ * must surface it for VM-layer dispatch.
+ * --------------------------------------------------------------------- */
+TEST(test_index_callable_direct) {
+    CdoObject *obj = cdo_object_new();
+    CdoObject *fn  = cdo_function_new(0, NULL, NULL, 0);
+    CdoString *k   = cdo_string_intern("missing", 7);
+
+    CdoValue fv = { .tag = CDO_FUNCTION, .as = { .object = fn } };
+    EXPECT_TRUE(cdo_object_rawset(obj, g_meta_index, fv, FIELD_NONE));
+
+    /* cdo_object_get must NOT recurse into the function. */
+    CdoValue out;
+    EXPECT_FALSE(cdo_object_get(obj, k, &out));
+
+    /* cdo_object_index_callable must surface the function. */
+    CdoValue cb;
+    EXPECT_TRUE(cdo_object_index_callable(obj, &cb));
+    EXPECT_EQ(cb.tag, (u8)CDO_FUNCTION);
+    EXPECT_EQ(cb.as.object, fn);
+
+    cdo_string_release(k);
+    cdo_object_destroy(obj);
+    cdo_object_destroy(fn);
+}
+
+TEST(test_index_callable_via_chain) {
+    /* instance.__index = mid (table) ; mid.__index = fn (callable) */
+    CdoObject *fn       = cdo_function_new(0, NULL, NULL, 0);
+    CdoObject *mid      = cdo_object_new();
+    CdoObject *instance = cdo_object_new();
+
+    CdoValue fv  = { .tag = CDO_FUNCTION, .as = { .object = fn } };
+    CdoValue mv  = { .tag = CDO_OBJECT,   .as = { .object = mid } };
+    cdo_object_rawset(mid,      g_meta_index, fv, FIELD_NONE);
+    cdo_object_rawset(instance, g_meta_index, mv, FIELD_NONE);
+
+    /* Direct lookup of a non-meta key: chain walks instance -> mid, then
+     * encounters callable __index on mid and stops. */
+    CdoString *k = cdo_string_intern("missing", 7);
+    CdoValue out;
+    EXPECT_FALSE(cdo_object_get(instance, k, &out));
+
+    /* Callable scan walks the same chain and surfaces fn. */
+    CdoValue cb;
+    EXPECT_TRUE(cdo_object_index_callable(instance, &cb));
+    EXPECT_EQ(cb.as.object, fn);
+
+    cdo_string_release(k);
+    cdo_object_destroy(instance);
+    cdo_object_destroy(mid);
+    cdo_object_destroy(fn);
+}
+
+TEST(test_index_callable_table_only_returns_false) {
+    /* obj.__index = table -- no callable in the chain. */
+    CdoObject *proto = cdo_object_new();
+    CdoObject *obj   = cdo_object_new();
+    CdoValue   pv    = { .tag = CDO_OBJECT, .as = { .object = proto } };
+    cdo_object_rawset(obj, g_meta_index, pv, FIELD_NONE);
+
+    CdoValue cb;
+    EXPECT_FALSE(cdo_object_index_callable(obj, &cb));
+
+    cdo_object_destroy(obj);
+    cdo_object_destroy(proto);
+}
+
+/* -----------------------------------------------------------------------
  * Object length
  * --------------------------------------------------------------------- */
 TEST(test_object_length) {
@@ -1263,6 +1335,9 @@ int main(void) {
     run_test("basic __index chain",       test_prototype_chain_basic);
     run_test("3-level chain",             test_prototype_chain_depth);
     run_test("self-loop guard",           test_prototype_self_loop_guard);
+    run_test("__index callable direct",   test_index_callable_direct);
+    run_test("__index callable in chain", test_index_callable_via_chain);
+    run_test("__index table-only false",  test_index_callable_table_only_returns_false);
 
     printf("\n-- Length --\n");
     run_test("object length",             test_object_length);

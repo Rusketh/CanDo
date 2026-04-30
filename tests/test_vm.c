@@ -1112,7 +1112,7 @@ static int spread_test_native(CandoVM *vm, int argc, CandoValue *args) {
     return 0;
 }
 
-static void build_spread_ret(CandoChunk *c) {
+static void build_spread_ret(CandoChunk *c, f64 outer_native_sentinel) {
     /* Jump past inner function body */
     u32 skip = cando_chunk_emit_jump(c, OP_JUMP, 1);
 
@@ -1125,8 +1125,8 @@ static void build_spread_ret(CandoChunk *c) {
 
     /* Main code */
     cando_chunk_patch_jump(c, skip);
-    /* outer_native is at index 0 → sentinel -1.0 */
-    u16 outer_idx = cando_chunk_add_const(c, cando_number(-1.0));
+    /* outer_native sentinel encodes its index in the VM native table.    */
+    u16 outer_idx = cando_chunk_add_const(c, cando_number(outer_native_sentinel));
     u16 inner_idx = cando_chunk_add_const(c, cando_number(3.0));  /* fn PC */
     u16 c100     = cando_chunk_add_const(c, cando_number(100.0));
 
@@ -1143,9 +1143,13 @@ TEST(test_exec_spread_ret) {
     g_spread_test_argc = -1;
     CandoVM vm;
     cando_vm_init(&vm, NULL);
+    /* cando_vm_init already registers the default class __call native, so
+     * spread_outer's index is whatever native_count is at this point.    */
+    u32 sentinel_idx = vm.native_count;
     cando_vm_register_native(&vm, "spread_outer", spread_test_native);
+    f64 outer_sentinel = -(f64)(sentinel_idx + 1);
     CandoChunk *c = cando_chunk_new("spread_ret", 0, false);
-    build_spread_ret(c);
+    build_spread_ret(c, outer_sentinel);
     CandoVMResult r = cando_vm_exec(&vm, c);
     EXPECT_EQ(r, VM_HALT);
     /* outer native received 3 args (5, 7 from spread + 100) */

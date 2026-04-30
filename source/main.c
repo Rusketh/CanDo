@@ -6,8 +6,10 @@
  * main.c only handles command-line argument parsing and exit codes.
  *
  * Usage:
- *   cando <file.cdo>            Execute a script
- *   cando <file.cdo> --disasm   Disassemble then execute
+ *   cando <file.cdo> [--disasm] [args...]
+ *
+ * Anything after the script path that is not the `--disasm` switch is
+ * forwarded to the script via the global `args` array.
  *
  * Must compile with gcc -std=c11.
  */
@@ -22,20 +24,41 @@ int main(int argc, char *argv[])
 {
     if (argc < 2) {
         fprintf(stderr, "CanDo %s\n", CANDO_VERSION);
-        fprintf(stderr, "usage: %s <file.cdo> [--disasm]\n", argv[0]);
+        fprintf(stderr, "usage: %s <file.cdo> [--disasm] [args...]\n", argv[0]);
         return 1;
     }
 
     const char *path   = argv[1];
-    bool        disasm = (argc >= 3 && strcmp(argv[2], "--disasm") == 0);
+    bool        disasm = false;
+
+    /* Collect script args: everything after argv[1] except the --disasm
+     * switch (which is consumed by the interpreter, not the script). */
+    const char **script_argv = NULL;
+    int          script_argc = 0;
+    if (argc > 2) {
+        script_argv = (const char **)malloc(sizeof(char *) * (size_t)(argc - 2));
+        if (!script_argv) {
+            fprintf(stderr, "cando: out of memory\n");
+            return 1;
+        }
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--disasm") == 0) {
+                disasm = true;
+            } else {
+                script_argv[script_argc++] = argv[i];
+            }
+        }
+    }
 
     /* Create a new VM and load all standard libraries. */
     CandoVM *vm = cando_open();
     if (!vm) {
         fprintf(stderr, "cando: failed to create VM (out of memory?)\n");
+        free(script_argv);
         return 1;
     }
     cando_openlibs(vm);
+    cando_set_args(vm, script_argc, script_argv);
 
     int rc = 0;
 
@@ -46,6 +69,7 @@ int main(int argc, char *argv[])
         if (!f) {
             fprintf(stderr, "cando: cannot open '%s'\n", path);
             cando_close(vm);
+            free(script_argv);
             return 1;
         }
         fseek(f, 0, SEEK_END);
@@ -61,6 +85,7 @@ int main(int argc, char *argv[])
             if (lr != CANDO_OK || !chunk) {
                 fprintf(stderr, "cando: %s\n", cando_errmsg(vm));
                 cando_close(vm);
+                free(script_argv);
                 return 1;
             }
             cando_chunk_disasm(chunk, stderr);
@@ -83,5 +108,6 @@ int main(int argc, char *argv[])
     }
 
     cando_close(vm);
+    free(script_argv);
     return rc;
 }

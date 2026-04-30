@@ -83,6 +83,7 @@ static const char *const s_opcode_names[OP_COUNT] = {
     [OP_JUMP]             = "OP_JUMP",
     [OP_JUMP_IF_FALSE]    = "OP_JUMP_IF_FALSE",
     [OP_JUMP_IF_TRUE]     = "OP_JUMP_IF_TRUE",
+    [OP_JUMP_IF_NULL]     = "OP_JUMP_IF_NULL",
     [OP_LOOP]             = "OP_LOOP",
     [OP_BREAK]            = "OP_BREAK",
     [OP_CONTINUE]         = "OP_CONTINUE",
@@ -112,6 +113,7 @@ static const char *const s_opcode_names[OP_COUNT] = {
     [OP_PIPE_END]         = "OP_PIPE_END",
     [OP_PIPE_COLLECT]     = "OP_PIPE_COLLECT",
     [OP_FILTER_COLLECT]   = "OP_FILTER_COLLECT",
+    [OP_COND_FILTER_COLLECT] = "OP_COND_FILTER_COLLECT",
     /* Band 14: error handling */
     [OP_TRY_BEGIN]        = "OP_TRY_BEGIN",
     [OP_TRY_END]          = "OP_TRY_END",
@@ -125,9 +127,10 @@ static const char *const s_opcode_names[OP_COUNT] = {
     [OP_YIELD]            = "OP_YIELD",
     [OP_THREAD]           = "OP_THREAD",
     /* Band 16: classes */
-    [OP_NEW_CLASS]        = "OP_NEW_CLASS",
-    [OP_BIND_METHOD]      = "OP_BIND_METHOD",
-    [OP_INHERIT]          = "OP_INHERIT",
+    [OP_NEW_CLASS]         = "OP_NEW_CLASS",
+    [OP_BIND_METHOD]       = "OP_BIND_METHOD",
+    [OP_INHERIT]           = "OP_INHERIT",
+    [OP_BIND_DEFAULT_CALL] = "OP_BIND_DEFAULT_CALL",
     /* Band 17: mask/selector */
     [OP_MASK_PASS]        = "OP_MASK_PASS",
     [OP_MASK_SKIP]        = "OP_MASK_SKIP",
@@ -225,6 +228,7 @@ static const CandoOpFmt s_opcode_fmts[OP_COUNT] = {
     [OP_JUMP]             = OPFMT_A,
     [OP_JUMP_IF_FALSE]    = OPFMT_A,
     [OP_JUMP_IF_TRUE]     = OPFMT_A,
+    [OP_JUMP_IF_NULL]     = OPFMT_A,
     [OP_LOOP]             = OPFMT_A,
     [OP_BREAK]            = OPFMT_A,
     [OP_CONTINUE]         = OPFMT_A,
@@ -267,9 +271,10 @@ static const CandoOpFmt s_opcode_fmts[OP_COUNT] = {
     [OP_YIELD]            = OPFMT_NONE,
     [OP_THREAD]           = OPFMT_NONE,
     /* Band 16: classes */
-    [OP_NEW_CLASS]        = OPFMT_A,
-    [OP_BIND_METHOD]      = OPFMT_A,
-    [OP_INHERIT]          = OPFMT_NONE,
+    [OP_NEW_CLASS]         = OPFMT_A,
+    [OP_BIND_METHOD]       = OPFMT_A,
+    [OP_INHERIT]           = OPFMT_NONE,
+    [OP_BIND_DEFAULT_CALL] = OPFMT_NONE,
     /* Band 17: mask/selector */
     [OP_MASK_PASS]        = OPFMT_NONE,
     [OP_MASK_SKIP]        = OPFMT_NONE,
@@ -303,4 +308,14 @@ const char *cando_opcode_name(CandoOpcode op) {
 CandoOpFmt cando_opcode_fmt(CandoOpcode op) {
     if ((u32)op >= OP_COUNT) return OPFMT_NONE;
     return s_opcode_fmts[(u32)op];
+}
+
+u32 cando_instr_size_at(const u8 *code, u32 offset) {
+    CandoOpcode op = (CandoOpcode)code[offset];
+    if (op == OP_CLOSURE) {
+        /* OP_CLOSURE = 1B opcode + 2B const idx + 2B capture_count + 2B*N */
+        u16 cap = (u16)code[offset + 3] | ((u16)code[offset + 4] << 8);
+        return 5u + (u32)cap * 2u;
+    }
+    return cando_opcode_size(op);
 }

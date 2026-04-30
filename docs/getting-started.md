@@ -47,7 +47,7 @@ Run it:
 ./build/cando hello.cdo
 ```
 
-Every script run via the `cando` CLI gets all 17 standard libraries
+Every script run via the `cando` CLI gets all 19 standard libraries
 pre-loaded.  When embedding CanDo yourself you decide which libraries
 to open — see [embedding.md](embedding.md).
 

@@ -154,6 +154,79 @@ void http_response_free(HttpResponse *r);
 bool http_read_response(HttpConn *conn, HttpResponse *r);
 
 /* =========================================================================
+ * Streaming response parser + body reader
+ *
+ * For callers that want to drain the body lazily (e.g. pipe straight to a
+ * file without buffering the whole download).  Workflow:
+ *
+ *     HttpResponseHead head;
+ *     http_response_head_init(&head);
+ *     http_read_response_head(conn, &head);   // reads only status + headers
+ *     HttpBodyReader br;
+ *     http_body_reader_init(&br, &head, conn);
+ *     for (;;) {
+ *         u8 buf[4096];
+ *         int n = http_body_reader_read(&br, buf, sizeof(buf));
+ *         if (n <= 0) break;
+ *         consume(buf, n);
+ *     }
+ *     http_body_reader_free(&br);
+ *     http_response_head_free(&head);
+ *
+ * The reader supports Content-Length, Transfer-Encoding: chunked, and
+ * connection-close framing — same coverage as http_read_response.
+ * ===================================================================== */
+typedef enum {
+    HBF_NONE    = 0,
+    HBF_LENGTH  = 1,    /* Content-Length: N                  */
+    HBF_CHUNKED = 2,    /* Transfer-Encoding: chunked         */
+    HBF_CLOSE   = 3,    /* Read until peer closes (HTTP/1.0)  */
+} HttpBodyFraming;
+
+typedef struct {
+    int             status;
+    char            reason[64];
+    HttpHeaders     headers;
+    HttpBodyFraming framing;
+    usize           length_remaining; /* meaningful only if HBF_LENGTH */
+    HttpBuf         tail;             /* over-read body bytes */
+    usize           tail_off;
+} HttpResponseHead;
+
+void http_response_head_init(HttpResponseHead *r);
+void http_response_head_free(HttpResponseHead *r);
+
+/*
+ * http_read_response_head -- read status line + headers; do NOT touch the
+ * body.  Any over-read bytes are stashed in r->tail for the body reader.
+ * Returns true on success.
+ */
+bool http_read_response_head(HttpConn *conn, HttpResponseHead *r);
+
+typedef struct {
+    HttpConn       *conn;            /* borrowed; not closed by reader */
+    HttpBodyFraming framing;
+    usize           length_remaining;
+    int             chunk_state;     /* 0=size_line 1=in_chunk 2=trail_crlf 3=done */
+    usize           chunk_remaining;
+    HttpBuf         recv;            /* internal buffer (seeded from head.tail) */
+    usize           recv_off;
+    bool            eof;
+} HttpBodyReader;
+
+void http_body_reader_init(HttpBodyReader *br,
+                           const HttpResponseHead *head, HttpConn *conn);
+void http_body_reader_free(HttpBodyReader *br);
+
+/*
+ * http_body_reader_read -- pull up to `cap` bytes into `out`.  Returns:
+ *   >0   bytes read
+ *    0   clean EOF (body fully consumed); br->eof is now true
+ *   -1   I/O or framing error
+ */
+int  http_body_reader_read(HttpBodyReader *br, void *out, usize cap);
+
+/* =========================================================================
  * Miscellaneous helpers
  * ===================================================================== */
 

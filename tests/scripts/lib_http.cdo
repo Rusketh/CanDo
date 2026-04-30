@@ -1,0 +1,68 @@
+/* lib_http.cdo -- Integration tests for the HTTP server, the `_meta`
+ * extensibility hook, and deferred `res:send()`.
+ *
+ * Each scenario starts an HTTP server on a private port, makes a fetch
+ * request, then closes the server.  Expected output is registered in
+ * tests/integration/run_tests.sh.
+ */
+
+/* ----- 1. Built-in res:send() inside the callback ------------------------ */
+VAR s1 = http.createServer(FUNCTION(req, res) {
+    res:status(200);
+    res:setHeader("X-Test", "basic");
+    res:send("ok-1");
+});
+s1:listen(18791);
+VAR r1 = fetch("http://127.0.0.1:18791/");
+print(r1.status);          /* expected: 200 */
+print(r1.body);            /* expected: ok-1 */
+print(r1.headers["x-test"]);  /* expected: basic */
+s1:close();
+
+/* ----- 2. User-defined `write` on _meta.http_response, send() with no body */
+_meta.http_response.write = FUNCTION(self, data) {
+    self.body = self.body + data;
+};
+VAR s2 = http.createServer(FUNCTION(req, res) {
+    res:write("hello ");
+    res:write("world");
+    res:send();          /* uses the accumulated `body` field */
+});
+s2:listen(18792);
+VAR r2 = fetch("http://127.0.0.1:18792/");
+print(r2.body);            /* expected: hello world */
+s2:close();
+
+/* ----- 3. Deferred res:send() from outside the callback ------------------
+ *
+ * The handler stashes `res` on a global instead of sending; a separate thread
+ * picks it up later and calls send().  Demonstrates that the connection
+ * stays open across the boundary.  Globals are the simplest cross-thread
+ * channel since thread blocks do not capture function parameters. */
+VAR pending = NULL;
+VAR s3 = http.createServer(FUNCTION(req, res) {
+    pending = res;
+});
+s3:listen(18793);
+
+thread {
+    thread.sleep(50);
+    pending:send("delayed");
+};
+
+VAR r3 = fetch("http://127.0.0.1:18793/");
+print(r3.body);            /* expected: delayed */
+s3:close();
+
+/* ----- 4. User method on _meta.http_response is visible on instances ----- */
+_meta.http_response.greet = FUNCTION(self, who) {
+    self.body = self.body + "hi " + who;
+};
+VAR s4 = http.createServer(FUNCTION(req, res) {
+    res:greet("alice");
+    res:send();
+});
+s4:listen(18794);
+VAR r4 = fetch("http://127.0.0.1:18794/");
+print(r4.body);            /* expected: hi alice */
+s4:close();

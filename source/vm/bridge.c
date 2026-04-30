@@ -6,20 +6,36 @@
 
 #include "bridge.h"
 #include "../object/string.h"
+#include "../object/thread.h"
 
 CdoObject *cando_bridge_resolve(CandoVM *vm, HandleIndex h) {
     return (CdoObject *)cando_handle_get(vm->handles, h);
 }
 
+/* Read whichever handle_idx field a tracked heap object stores, by
+ * dispatching on the shared `kind` byte at offset 16.  OBJ_THREAD has
+ * a different layout from CdoObject past that prefix.                */
+static HandleIndex bridge_existing_handle(void *p) {
+    u8 kind = *((u8 *)p + 16);
+    if (kind == OBJ_THREAD) return ((CdoThread *)p)->handle_idx;
+    return ((CdoObject *)p)->handle_idx;
+}
+
+HandleIndex cando_bridge_track_obj(CandoVM *vm, CdoObject *obj) {
+    HandleIndex h   = cando_handle_alloc(vm->handles, obj);
+    obj->handle_idx = h;
+    return h;
+}
+
 CandoValue cando_bridge_new_object(CandoVM *vm) {
     CdoObject  *obj = cdo_object_new();
-    HandleIndex h   = cando_handle_alloc(vm->handles, obj);
+    HandleIndex h   = cando_bridge_track_obj(vm, obj);
     return cando_object_value(h);
 }
 
 CandoValue cando_bridge_new_array(CandoVM *vm) {
     CdoObject  *arr = cdo_array_new();
-    HandleIndex h   = cando_handle_alloc(vm->handles, arr);
+    HandleIndex h   = cando_bridge_track_obj(vm, arr);
     return cando_object_value(h);
 }
 
@@ -41,7 +57,17 @@ CandoValue cando_bridge_to_cando(CandoVM *vm, CdoValue v) {
         case CDO_ARRAY:
         case CDO_FUNCTION:
         case CDO_NATIVE: {
+            /* If the underlying object already has a handle (it usually
+             * does, set at allocation time), reuse it -- otherwise the
+             * GC sweep would only reclaim ONE handle per object even
+             * when several CandoValues reference it.  Allocate a fresh
+             * handle only for objects that haven't been tracked yet
+             * (legacy paths from before Stage 1).                      */
+            HandleIndex existing = bridge_existing_handle(v.as.object);
+            if (existing != CANDO_INVALID_HANDLE)
+                return cando_object_value(existing);
             HandleIndex h = cando_handle_alloc(vm->handles, v.as.object);
+            ((CdoObject *)v.as.object)->handle_idx = h;
             return cando_object_value(h);
         }
         default: return cando_null();

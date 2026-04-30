@@ -1,0 +1,62 @@
+/* inspect.cdo -- Integration tests for the inspect built-in.
+ *
+ * Containers are rendered with multi-line indentation; primitives, empty
+ * containers, depth-truncation markers, and circular references stay
+ * compact.  Expected output is registered in tests/integration/run_tests.sh.
+ */
+
+/* ----- primitives -------------------------------------------------------- */
+print(inspect(null));        /* null  */
+print(inspect(true));        /* true  */
+print(inspect(false));       /* false */
+print(inspect(0));           /* 0     */
+print(inspect(42));          /* 42    */
+print(inspect(-7));          /* -7    */
+print(inspect("hi"));        /* "hi"  */
+
+/* ----- string escapes ---------------------------------------------------- */
+var nl = `a
+b`;
+print(inspect(nl));          /* "a\nb" */
+
+/* ----- arrays ------------------------------------------------------------ */
+print(inspect([]));          /* []  */
+print(inspect([1, 2, 3]));   /* multi-line list */
+print(inspect([1, "two", null]));
+
+/* ----- objects ----------------------------------------------------------- */
+print(inspect({}));          /* {}  */
+print(inspect({a: 1}));      /* multi-line object */
+print(inspect({a: 1, b: 2}));
+
+/* non-identifier keys must be quoted */
+var o = {};
+o["with space"] = 1;
+print(inspect(o));
+
+/* ----- nesting ----------------------------------------------------------- */
+print(inspect({list: [1, 2, [3, 4]]}));
+
+/* ----- depth limit ------------------------------------------------------- */
+var deep = {a: {b: {c: 1}}};
+print(inspect(deep));        /* unlimited */
+print(inspect(deep, 1));     /* { a: {...} }      */
+print(inspect(deep, 2));     /* { a: { b: {...} } } */
+print(inspect(deep, 3));     /* fully expanded    */
+
+var deepa = [[[1]]];
+print(inspect(deepa, 1));
+print(inspect(deepa, 2));
+
+/* ----- cycles ------------------------------------------------------------ */
+var ca = [1];
+ca:push(ca);
+print(inspect(ca));
+
+var co = {x: 1};
+co.self = co;
+print(inspect(co));
+
+/* shared, non-circular references should NOT be reported as cycles */
+var shared = [9];
+print(inspect([shared, shared]));

@@ -76,7 +76,6 @@ TEST(test_thread_new) {
     EXPECT_FALSE(cdo_thread_is_done(t));
 
     cdo_thread_destroy(t);
-    cando_free(t);
 }
 
 TEST(test_thread_set_results) {
@@ -93,7 +92,6 @@ TEST(test_thread_set_results) {
     EXPECT_EQ(t->results[1].as.number, 2.0);
 
     cdo_thread_destroy(t);
-    cando_free(t);
 }
 
 TEST(test_thread_set_error) {
@@ -108,7 +106,6 @@ TEST(test_thread_set_error) {
     EXPECT_EQ(t->error.as.number, 404.0);
 
     cdo_thread_destroy(t);
-    cando_free(t);
 }
 
 TEST(test_thread_is_done_cancelled) {
@@ -123,7 +120,6 @@ TEST(test_thread_is_done_cancelled) {
     EXPECT_TRUE(cdo_thread_is_done(t));
 
     cdo_thread_destroy(t);
-    cando_free(t);
 }
 
 /* -----------------------------------------------------------------------
@@ -171,7 +167,6 @@ TEST(test_thread_wait_blocks_until_done) {
 
     cando_os_thread_join(os_t);
     cdo_thread_destroy(t);
-    cando_free(t);
 }
 
 TEST(test_thread_wait_already_done) {
@@ -188,7 +183,6 @@ TEST(test_thread_wait_already_done) {
     EXPECT_TRUE(cdo_thread_is_done(t));
 
     cdo_thread_destroy(t);
-    cando_free(t);
 }
 
 /* -----------------------------------------------------------------------
@@ -243,7 +237,6 @@ TEST(test_concurrent_result_set) {
     EXPECT_EQ(t->result_count, 1u);
 
     cdo_thread_destroy(t);
-    cando_free(t);
 }
 
 /* -----------------------------------------------------------------------
@@ -256,7 +249,6 @@ TEST(test_then_fn_initialises_null) {
     EXPECT_TRUE(t->then_fn.tag == TYPE_NULL);
     EXPECT_TRUE(t->catch_fn.tag == TYPE_NULL);
     cdo_thread_destroy(t);
-    cando_free(t);
 }
 
 TEST(test_then_fn_stored_and_released) {
@@ -271,7 +263,6 @@ TEST(test_then_fn_stored_and_released) {
     EXPECT_EQ(t->then_fn.as.number, 1.0);
     /* cdo_thread_destroy must release then_fn without crashing. */
     cdo_thread_destroy(t);
-    cando_free(t);
 }
 
 /* -----------------------------------------------------------------------
@@ -283,7 +274,6 @@ TEST(test_handle_idx_initialises_invalid) {
     CdoThread *t  = cdo_thread_new(fn);
     EXPECT_EQ(t->handle_idx, CANDO_INVALID_HANDLE);
     cdo_thread_destroy(t);
-    cando_free(t);
 }
 
 TEST(test_handle_idx_settable) {
@@ -292,7 +282,6 @@ TEST(test_handle_idx_settable) {
     t->handle_idx = 42u;
     EXPECT_EQ(t->handle_idx, 42u);
     cdo_thread_destroy(t);
-    cando_free(t);
 }
 
 /* -----------------------------------------------------------------------
@@ -350,7 +339,6 @@ TEST(test_then_fn_survives_set_results) {
     EXPECT_EQ(atomic_load(&g_cb_fire_count), 1);
 
     cdo_thread_destroy(t);
-    cando_free(t);
 }
 
 /* -----------------------------------------------------------------------

@@ -1,0 +1,6 @@
+/* Verify that command-line arguments are exposed via the `args` global. */
+
+print("args_type: " + type(args));
+print("args_count: " + toString(args:length()));
+
+FOR a OF args { print("arg: " + a); }

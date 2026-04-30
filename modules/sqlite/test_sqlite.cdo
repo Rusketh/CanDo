@@ -1,0 +1,608 @@
+// modules/sqlite/test_sqlite.cdo -- Script-level integration tests for
+// the SQLite module.  Run with:
+//
+//     ./cando modules/sqlite/test_sqlite.cdo
+//
+// Verifies the public API surface, both calling styles
+// (sql.exec(db, sql) AND db:exec(sql)), the multi-value TRY/CATCH
+// error contract, and every error path that does not require external
+// state.  Database operations run against :memory: so the tests are
+// hermetic and survive a read-only working directory.
+
+VAR sql = include("./sqlite.so");
+
+VAR pass = 0;
+VAR fail = 0;
+
+FUNCTION expect(name, ok) {
+    IF ok {
+        print(`  PASS  ${name}`);
+        pass = pass + 1;
+    } ELSE {
+        print(`  FAIL  ${name}`);
+        fail = fail + 1;
+    }
+}
+
+print("sqlite module integration tests");
+print("-------------------------------");
+
+// ---- Module surface --------------------------------------------------------
+expect("method: open",         type(sql.open)  == "number");
+expect("method: close",        type(sql.close) == "number");
+expect("method: exec",         type(sql.exec)  == "number");
+expect("method: escape",            type(sql.escape)            == "number");
+expect("method: escapeIdentifier",  type(sql.escapeIdentifier)  == "number");
+
+// Escape helpers are static; verify them before opening any handle.
+expect("escape(\"o'brien\")",  sql.escape("o'brien") == "'o''brien'");
+expect("escape(NULL)",         sql.escape(NULL)     == "NULL");
+expect("escape(TRUE)",         sql.escape(TRUE)     == "1");
+expect("escape(42)",           sql.escape(42)       == "42");
+// Cando string literals don't process backslash escapes; backticks
+// give us a way to embed `"` cleanly.
+expect("escapeIdentifier",     sql.escapeIdentifier(`we"ird`) == `"we""ird"`);
+
+expect("VERSION is a string",        type(sql.VERSION)        == "string");
+expect("SQLITE_VERSION is a string", type(sql.SQLITE_VERSION) == "string");
+
+expect("OPEN_READONLY  is a number", type(sql.OPEN_READONLY)  == "number");
+expect("OPEN_READWRITE is a number", type(sql.OPEN_READWRITE) == "number");
+expect("OPEN_CREATE    is a number", type(sql.OPEN_CREATE)    == "number");
+expect("OPEN_URI       is a number", type(sql.OPEN_URI)       == "number");
+expect("OPEN_MEMORY    is a number", type(sql.OPEN_MEMORY)    == "number");
+
+// ---- open: argument validation --------------------------------------------
+VAR caught_msg = "";
+TRY { sql.open(); } CATCH (m) { caught_msg = m; }
+expect("open(): missing path throws", caught_msg != "");
+
+caught_msg = "";
+TRY { sql.open(123); } CATCH (m) { caught_msg = m; }
+expect("open(non-string): throws", caught_msg != "");
+
+// ---- open + close: round-trip ---------------------------------------------
+VAR db = sql.open(":memory:");
+expect("open(\":memory:\") returns object", type(db) == "object");
+expect("db has __sqlite_db_slot", type(db.__sqlite_db_slot) == "number");
+
+// Both methods are reachable on the handle for `db:method()` style.
+expect("db:close   sentinel attached", type(db.close) == "number");
+expect("db:exec    sentinel attached", type(db.exec)  == "number");
+
+// ---- exec: function-style and method-style --------------------------------
+sql.exec(db, "CREATE TABLE t(x INTEGER PRIMARY KEY, name TEXT)");
+db:exec("INSERT INTO t (x, name) VALUES (1, 'Ada')");
+db:exec("INSERT INTO t (x, name) VALUES (2, 'Grace')");
+expect("exec accepted via both styles", TRUE);
+
+// ---- exec: error path ------------------------------------------------------
+VAR caught_code     = -1;
+VAR caught_sqlstate = "";
+TRY {
+    db:exec("INSERT INTO t (x, name) VALUES (1, 'duplicate')");
+} CATCH (msg, code, sqlstate) {
+    caught_msg      = msg;
+    caught_code     = code;
+    caught_sqlstate = sqlstate;
+}
+expect("UNIQUE violation throws message",  caught_msg != "");
+expect("UNIQUE violation passes a code",   caught_code != 0);
+expect("UNIQUE violation -> SQLITE_CONSTRAINT_PRIMARYKEY",
+    caught_sqlstate == "SQLITE_CONSTRAINT_PRIMARYKEY");
+
+caught_msg = ""; caught_code = -1; caught_sqlstate = "";
+TRY {
+    db:exec("THIS IS NOT VALID SQL");
+} CATCH (msg, code, sqlstate) {
+    caught_msg      = msg;
+    caught_code     = code;
+    caught_sqlstate = sqlstate;
+}
+expect("syntax error throws message",            caught_msg != "");
+expect("syntax error sqlstate is SQLITE_ERROR",  caught_sqlstate == "SQLITE_ERROR");
+
+// ---- exec: missing args / bad types ---------------------------------------
+caught_msg = "";
+TRY { db:exec(); } CATCH (m) { caught_msg = m; }
+expect("exec with no sql throws", caught_msg != "");
+
+caught_msg = "";
+TRY { sql.exec(db, 42); } CATCH (m) { caught_msg = m; }
+expect("exec(non-string sql) throws", caught_msg != "");
+
+caught_msg = "";
+TRY { sql.exec("not a db handle", "SELECT 1"); } CATCH (m) { caught_msg = m; }
+expect("exec(non-handle) throws", caught_msg != "");
+
+// ---- close: idempotent ----------------------------------------------------
+db:close();
+expect("close() returns without throwing", TRUE);
+
+caught_msg = "";
+TRY { db:exec("SELECT 1"); } CATCH (m, code, sqlstate) {
+    caught_msg = m;
+    caught_sqlstate = sqlstate;
+}
+expect("exec after close throws",                      caught_msg != "");
+expect("exec after close has empty sqlstate",          caught_sqlstate == "");
+
+// Double-close is a no-op (matches node:sqlite leniency).
+caught_msg = "";
+TRY { db:close(); } CATCH (m) { caught_msg = m; }
+expect("close() on already-closed handle is a no-op",  caught_msg == "");
+
+// ---- open: options flags --------------------------------------------------
+VAR ro = sql.open(":memory:", { readonly: TRUE, create: FALSE });
+expect("open with readonly opens", type(ro) == "object");
+
+caught_msg = "";
+TRY {
+    ro:exec("CREATE TABLE x(y INTEGER)");
+} CATCH (m, code, sqlstate) {
+    caught_msg = m;
+    caught_sqlstate = sqlstate;
+}
+expect("write on readonly db throws", caught_msg != "");
+expect("write on readonly db -> SQLITE_READONLY",
+    caught_sqlstate == "SQLITE_READONLY");
+ro:close();
+
+// ---- open with custom timeout (just verify it doesn't fault) --------------
+VAR fast = sql.open(":memory:", { timeout: 100 });
+fast:exec("CREATE TABLE z(a INTEGER)");
+fast:close();
+expect("custom timeout option accepted", TRUE);
+
+// ===========================================================================
+// Prepared statements (chunk 3)
+// ===========================================================================
+print("");
+print("-- prepared statements --");
+
+VAR pdb = sql.open(":memory:");
+pdb:exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)");
+
+// ---- prepare returns a stmt handle with the right methods ----------------
+VAR ins = pdb:prepare("INSERT INTO users (name, age) VALUES (?, ?)");
+expect("prepare returns object",          type(ins) == "object");
+expect("stmt has __sqlite_stmt_slot",     type(ins.__sqlite_stmt_slot) == "number");
+expect("stmt has sourceSQL",              type(ins.sourceSQL) == "string");
+expect("stmt:run sentinel attached",      type(ins.run)  == "number");
+expect("stmt:get sentinel attached",      type(ins.get)  == "number");
+expect("stmt:all sentinel attached",      type(ins.all)  == "number");
+expect("stmt:bind sentinel attached",     type(ins.bind) == "number");
+expect("stmt:reset sentinel attached",    type(ins.reset) == "number");
+expect("stmt:finalize sentinel attached", type(ins.finalize) == "number");
+
+// ---- run: positional, multiple invocations --------------------------------
+VAR r1 = ins:run("Ada", 36);
+expect("run() returns object",          type(r1) == "object");
+expect("r1.lastInsertRowid == 1",       r1.lastInsertRowid == 1);
+expect("r1.changes        == 1",       r1.changes == 1);
+
+VAR r2 = ins:run("Grace", 85);
+expect("r2.lastInsertRowid == 2",       r2.lastInsertRowid == 2);
+
+VAR r3 = ins:run("Hedy", 0);
+expect("r3.lastInsertRowid == 3",       r3.lastInsertRowid == 3);
+ins:finalize();
+
+// ---- run via array binding ------------------------------------------------
+VAR ins2 = pdb:prepare("INSERT INTO users (name, age) VALUES (?, ?)");
+ins2:run(["Linus", 54]);
+expect("run([params]) bound positionally", TRUE);
+ins2:finalize();
+
+// ---- run via named-bind ---------------------------------------------------
+VAR ins3 = pdb:prepare("INSERT INTO users (name, age) VALUES (:n, :a)");
+ins3:run({ n: "Margaret", a: 88 });
+expect("run({name: ...}) bound by name", TRUE);
+ins3:finalize();
+
+// ---- get: returns first row or null --------------------------------------
+VAR sel = pdb:prepare("SELECT id, name, age FROM users WHERE name = ?");
+VAR row = sel:get("Ada");
+expect("get returns object",               type(row) == "object");
+expect("get row.name == 'Ada'",            row.name == "Ada");
+expect("get row.age  == 36",               row.age  == 36);
+expect("get row.id   == 1",                row.id   == 1);
+
+VAR none = sel:get("Nobody");
+expect("get returns NULL when no row",     none == NULL);
+
+sel:finalize();
+
+// ---- all: returns array of rows -------------------------------------------
+VAR list = pdb:prepare("SELECT id, name FROM users ORDER BY id");
+VAR rows = list:all();
+expect("all returns array",                  type(rows) == "object");
+expect("all returned 5 rows",                rows:length() == 5);
+expect("all rows[0].name == 'Ada'",          rows[0].name == "Ada");
+expect("all rows[4].name == 'Margaret'",     rows[4].name == "Margaret");
+list:finalize();
+
+// ---- bind + reset + step via run -----------------------------------------
+VAR upd = pdb:prepare("UPDATE users SET age = ? WHERE name = ?");
+upd:bind([99, "Ada"]);
+expect("bind() returns true",  TRUE);
+upd:reset();
+VAR ru = upd:run([42, "Ada"]);
+expect("run after reset works", ru.changes == 1);
+upd:finalize();
+
+VAR check = pdb:prepare("SELECT age FROM users WHERE name = 'Ada'");
+expect("update propagated", check:get().age == 42);
+check:finalize();
+
+// ---- error: prepare invalid SQL -------------------------------------------
+VAR caught = "";
+VAR caught_state = "";
+TRY {
+    pdb:prepare("SELECT * FROM nonexistent");
+} CATCH (m, code, sqlstate) {
+    caught = m;
+    caught_state = sqlstate;
+}
+expect("prepare on bogus table throws",     caught != "");
+expect("prepare error sqlstate SQLITE_ERROR", caught_state == "SQLITE_ERROR");
+
+// ---- error: run with constraint violation --------------------------------
+VAR dup = pdb:prepare("INSERT INTO users (id, name, age) VALUES (?, ?, ?)");
+caught = ""; caught_state = "";
+TRY {
+    dup:run(1, "Conflict", 0);
+} CATCH (m, code, sqlstate) {
+    caught       = m;
+    caught_state = sqlstate;
+}
+expect("run with PK conflict throws",                 caught != "");
+expect("PK conflict sqlstate -> CONSTRAINT_PRIMARYKEY",
+    caught_state == "SQLITE_CONSTRAINT_PRIMARYKEY");
+dup:finalize();
+
+// ---- finalize is idempotent ----------------------------------------------
+VAR fin = pdb:prepare("SELECT 1");
+fin:finalize();
+caught = "";
+TRY { fin:finalize(); } CATCH (m) { caught = m; }
+expect("finalize twice is a no-op", caught == "");
+
+// ---- using a finalised stmt throws ---------------------------------------
+caught = "";
+TRY { fin:run(); } CATCH (m, code, sqlstate) { caught = m; }
+expect("run on finalised stmt throws", caught != "");
+
+// ---- type round-trip: text, blob, null, real -----------------------------
+pdb:exec("CREATE TABLE blobs (id INTEGER PRIMARY KEY, b BLOB, t TEXT, r REAL, n INTEGER)");
+VAR tins = pdb:prepare("INSERT INTO blobs (b, t, r, n) VALUES (?, ?, ?, ?)");
+// Cando string literals don't expose hex escapes, but Cando strings
+// are byte-safe, so a plain ASCII payload still verifies that the
+// blob path bypasses TEXT/UTF-8 conversions.
+tins:run({ blob: "raw-bytes" }, "snowman", 3.14, NULL);
+tins:finalize();
+
+VAR tsel = pdb:prepare("SELECT b, t, r, n, typeof(b) AS bt FROM blobs WHERE id = 1");
+VAR trow = tsel:get();
+expect("blob round-trips bytes",        trow.b == "raw-bytes");
+expect("blob column type is 'blob'",    trow.bt == "blob");
+expect("text round-trips",              trow.t == "snowman");
+expect("real round-trips",              trow.r == 3.14);
+expect("null round-trips",              trow.n == NULL);
+tsel:finalize();
+
+// ---- bigintMode: number (default) vs string -------------------------------
+pdb:exec("CREATE TABLE big (x INTEGER)");
+VAR bigsql = pdb:prepare("INSERT INTO big (x) VALUES (?)");
+// 2^53 + 1 cannot be represented exactly as a double, so passing it
+// from script-side is already lossy.  Insert via SQL so SQLite stores
+// the precise value and the read-side bigintMode can be verified.
+pdb:exec("INSERT INTO big VALUES (9223372036854775000)");
+bigsql:finalize();
+
+VAR rd = pdb:prepare("SELECT x FROM big");
+expect("default bigintMode is 'number'", pdb:bigintMode() == "number");
+VAR num_row = rd:get();
+expect("default returns f64 (lossy)",    type(num_row.x) == "number");
+rd:finalize();
+
+pdb:bigintMode("string");
+expect("bigintMode now 'string'",        pdb:bigintMode() == "string");
+VAR rd2 = pdb:prepare("SELECT x FROM big");
+VAR str_row = rd2:get();
+expect("string mode returns string",     type(str_row.x) == "string");
+expect("string is precise",              str_row.x == "9223372036854775000");
+rd2:finalize();
+
+// setReadBigInts is the node:sqlite-compat alias.
+pdb:setReadBigInts(FALSE);
+expect("setReadBigInts(FALSE) flips back",  pdb:bigintMode() == "number");
+
+caught = "";
+TRY { pdb:bigintMode("nope"); } CATCH (m) { caught = m; }
+expect("bigintMode unknown mode throws", caught != "");
+
+pdb:close();
+
+// ===========================================================================
+// Chunk 4: transactions / iterate / pragma / columns / expandedSQL
+// ===========================================================================
+print("");
+print("-- transactions / iterate / pragma --");
+
+VAR tdb = sql.open(":memory:");
+tdb:exec("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
+
+// ---- Module surface
+expect("method: prepare",       type(sql.prepare)       == "number");
+expect("method: begin",         type(sql.begin)         == "number");
+expect("method: commit",        type(sql.commit)        == "number");
+expect("method: rollback",      type(sql.rollback)      == "number");
+expect("method: inTransaction", type(sql.inTransaction) == "number");
+expect("method: transaction",   type(sql.transaction)   == "number");
+expect("method: pragma",        type(sql.pragma)        == "number");
+expect("method: expandedSQL",   type(sql.expandedSQL)   == "number");
+expect("method: columns",       type(sql.columns)       == "number");
+expect("method: iterate",       type(sql.iterate)       == "number");
+expect("method: next",          type(sql.next)          == "number");
+
+// ---- begin / commit / rollback
+expect("inTransaction false at start", tdb:inTransaction() == FALSE);
+tdb:begin();
+expect("inTransaction true after begin", tdb:inTransaction() == TRUE);
+tdb:exec("INSERT INTO t (id, name) VALUES (1, 'A')");
+tdb:commit();
+expect("inTransaction false after commit", tdb:inTransaction() == FALSE);
+
+VAR cnt = tdb:prepare("SELECT count(*) AS n FROM t");
+expect("commit persisted",  cnt:get().n == 1);
+
+tdb:begin();
+tdb:exec("INSERT INTO t (id, name) VALUES (2, 'B')");
+tdb:rollback();
+expect("rollback discarded",  cnt:get().n == 1);
+
+// nested savepoints
+tdb:begin();
+tdb:exec("INSERT INTO t (id, name) VALUES (2, 'B')");
+tdb:begin();
+tdb:exec("INSERT INTO t (id, name) VALUES (3, 'C')");
+tdb:rollback();
+// outer remains, inner gone
+expect("nested rollback drops only inner", cnt:get().n == 2);
+tdb:commit();
+expect("after outer commit count == 2", cnt:get().n == 2);
+cnt:finalize();
+
+// errors
+VAR caught_t = "";
+TRY { tdb:commit(); } CATCH (m) { caught_t = m; }
+expect("commit without begin throws", caught_t != "");
+
+caught_t = "";
+TRY { tdb:rollback(); } CATCH (m) { caught_t = m; }
+expect("rollback without begin throws", caught_t != "");
+
+// ---- transaction(fn) helper: rollback-on-throw, return-value passthrough
+VAR txr = tdb:transaction(FUNCTION(name) {
+    tdb:exec("INSERT INTO t (id, name) VALUES (10, 'X')");
+    return 99;
+}, "ignored");
+expect("transaction(fn) returns fn's return value", txr == 99);
+expect("transaction(fn) committed",
+    tdb:prepare("SELECT count(*) AS n FROM t WHERE id = 10"):get().n == 1);
+
+caught_t = "";
+TRY {
+    tdb:transaction(FUNCTION() {
+        tdb:exec("INSERT INTO t (id, name) VALUES (11, 'Y')");
+        throw "boom";
+    });
+} CATCH (m) { caught_t = m; }
+expect("transaction(fn) rolls back on throw", caught_t == "boom");
+expect("transaction(fn) rollback discarded the row",
+    tdb:prepare("SELECT count(*) AS n FROM t WHERE id = 11"):get().n == 0);
+expect("transaction(fn) cleared inTransaction flag",
+    tdb:inTransaction() == FALSE);
+
+// ---- pragma reads + writes
+VAR pj = tdb:pragma("journal_mode");
+expect("pragma returns array",            type(pj) == "object");
+expect("pragma returned 1+ row(s)",       pj:length() >= 1);
+expect("pragma row has journal_mode key", type(pj[0].journal_mode) == "string");
+
+VAR pfk = tdb:pragma("foreign_keys");
+expect("foreign_keys query returned",  pfk:length() == 1);
+
+// setter: numeric
+tdb:pragma("cache_size", 2000);
+VAR cs = tdb:pragma("cache_size");
+expect("pragma setter applied",  cs[0].cache_size == 2000);
+
+// setter: bool
+tdb:pragma("foreign_keys", FALSE);
+expect("pragma bool setter",  tdb:pragma("foreign_keys")[0].foreign_keys == 0);
+
+// setter: bad name
+caught_t = "";
+TRY { tdb:pragma("bad name"); } CATCH (m) { caught_t = m; }
+expect("pragma rejects unsafe name", caught_t != "");
+
+// ---- expandedSQL + columns
+VAR es = tdb:prepare("SELECT id, name FROM t WHERE id = ?");
+es:bind([1]);
+VAR esql = es:expandedSQL();
+expect("expandedSQL returns string", type(esql) == "string");
+expect("expandedSQL includes the bound 1",
+    esql:find("1") != NULL || esql:find("WHERE id = 1") != NULL);
+
+VAR cols = es:columns();
+expect("columns returns array",       type(cols) == "object");
+expect("columns has 2 entries",       cols:length() == 2);
+expect("columns[0].name == 'id'",     cols[0].name   == "id");
+expect("columns[0].column == 'id'",   cols[0].column == "id");
+expect("columns[0].table == 't'",     cols[0].table  == "t");
+expect("columns[1].name == 'name'",   cols[1].name   == "name");
+es:finalize();
+
+// ---- iterate: stream rows one at a time
+tdb:exec("INSERT INTO t (id, name) VALUES (4, 'D')");
+tdb:exec("INSERT INTO t (id, name) VALUES (5, 'E')");
+
+VAR ist = tdb:prepare("SELECT id, name FROM t ORDER BY id");
+VAR it  = ist:iterate();
+expect("iterate returns object",  type(it) == "object");
+expect("it.done = FALSE initially", it.done == FALSE);
+
+VAR seen = 0;
+VAR last = NULL;
+WHILE TRUE {
+    VAR r = it:next();
+    IF r == NULL { break; }
+    seen = seen + 1;
+    last = r;
+}
+expect("iterate visited every row",  seen >= 4);
+expect("last row is 'X' (id=10)",    last.name == "X");
+expect("it.done = TRUE at end",      it.done == TRUE);
+
+// next() after done returns null
+expect("next() after done is NULL",  it:next() == NULL);
+ist:finalize();
+
+tdb:close();
+
+// ===========================================================================
+// Chunk 5: function / aggregate / loadExtension / backup
+// ===========================================================================
+print("");
+print("-- functions / aggregates / backup --");
+
+VAR udb = sql.open(":memory:");
+
+expect("method: defineFunction",  type(sql.defineFunction)  == "number");
+expect("method: defineAggregate", type(sql.defineAggregate) == "number");
+expect("method: loadExtension",   type(sql.loadExtension)   == "number");
+expect("method: backup",          type(sql.backup)          == "number");
+
+// ---- scalar UDF -----------------------------------------------------------
+udb:defineFunction("addone", FUNCTION(x) { return x + 1; });
+VAR sf = udb:prepare("SELECT addone(10) AS v");
+expect("UDF: addone(10) == 11",  sf:get().v == 11);
+sf:finalize();
+
+udb:defineFunction("greet", FUNCTION(name) { return "hello, " + name; });
+sf = udb:prepare("SELECT greet(?) AS v");
+expect("UDF takes string args",  sf:get("Ada").v == "hello, Ada");
+sf:finalize();
+
+// UDF returning null
+udb:defineFunction("retnull", FUNCTION() { return NULL; });
+sf = udb:prepare("SELECT retnull() AS v");
+expect("UDF returns null",       sf:get().v == NULL);
+sf:finalize();
+
+// UDF that throws -> SQL error
+udb:defineFunction("kaboom", FUNCTION() { throw "udf error: kaboom"; });
+sf = udb:prepare("SELECT kaboom() AS v");
+VAR caught_u = "";
+TRY { sf:get(); } CATCH (m, code, sqlstate) { caught_u = m; }
+expect("UDF throw becomes SQL error", caught_u != "");
+sf:finalize();
+
+// ---- aggregate UDF --------------------------------------------------------
+udb:exec("CREATE TABLE nums (n INTEGER)");
+udb:exec("INSERT INTO nums VALUES (1), (2), (3), (4), (5)");
+
+udb:defineAggregate("sum_squares", {
+    start: 0,
+    step: FUNCTION(acc, x) { return acc + x * x; }
+});
+VAR ag = udb:prepare("SELECT sum_squares(n) AS s FROM nums");
+expect("aggregate: sum_squares == 55", ag:get().s == 55);
+ag:finalize();
+
+// aggregate with result fn
+udb:defineAggregate("avg_my", {
+    start: { sum: 0, n: 0 },
+    step:   FUNCTION(acc, x) {
+        return { sum: acc.sum + x, n: acc.n + 1 };
+    },
+    result: FUNCTION(acc) {
+        IF acc.n == 0 { return NULL; }
+        return acc.sum / acc.n;
+    }
+});
+VAR ag2 = udb:prepare("SELECT avg_my(n) AS a FROM nums");
+expect("aggregate with result fn", ag2:get().a == 3);
+ag2:finalize();
+
+// ---- loadExtension is gated ----------------------------------------------
+caught_u = "";
+TRY {
+    udb:loadExtension("./nonexistent.so");
+} CATCH (m) { caught_u = m; }
+expect("loadExtension on default db throws",  caught_u != "");
+
+// (Cannot test the success path without a real extension; the gate is
+// what's interesting here -- chunk 1 already proved the linkage works.)
+VAR udb2 = sql.open(":memory:", { enableLoadExtension: TRUE });
+caught_u = "";
+TRY {
+    udb2:loadExtension("./absolutely-not-here.so");
+} CATCH (m, code, sqlstate) {
+    caught_u = m;
+}
+expect("loadExtension on enabled db reports load error",
+    caught_u != "");
+udb2:close();
+
+// ---- backup ---------------------------------------------------------------
+// Use a file path inside /tmp; clean up afterward via os.remove if available.
+VAR bk_path = "/tmp/cando_sqlite_backup_test.db";
+TRY { os.remove(bk_path); } CATCH (e) { caught_u = ""; }
+
+udb:exec("CREATE TABLE zzz (k INTEGER PRIMARY KEY, v TEXT)");
+udb:exec("INSERT INTO zzz VALUES (1, 'one'), (2, 'two')");
+
+VAR rep = udb:backup(bk_path);
+expect("backup returns object",     type(rep) == "object");
+expect("backup reported >= 1 page", rep.pages >= 1);
+
+// Reopen the backup file and verify the data made it.
+VAR rdb = sql.open(bk_path, { readonly: TRUE });
+VAR rcheck = rdb:prepare("SELECT k, v FROM zzz ORDER BY k");
+VAR rrows  = rcheck:all();
+expect("backup preserved 2 rows",    rrows:length() == 2);
+expect("backup row 0 v == 'one'",    rrows[0].v == "one");
+expect("backup row 1 v == 'two'",    rrows[1].v == "two");
+rcheck:finalize();
+rdb:close();
+TRY { os.remove(bk_path); } CATCH (e) { caught_u = ""; }
+
+// ---- threaded use: a UDF call that runs on a worker thread ---------------
+// (Demonstrates that scripts use the language's `thread` syntax in place
+// of an async API.  Both threads call the same db; SQLite's serialized
+// mode does the rest.)
+udb:exec("CREATE TABLE counts (id INTEGER PRIMARY KEY, n INTEGER)");
+udb:exec("INSERT INTO counts VALUES (1, 0)");
+
+VAR worker = thread {
+    VAR s = udb:prepare("UPDATE counts SET n = n + 1 WHERE id = 1");
+    s:run();
+    s:finalize();
+    return TRUE;
+};
+VAR ok = await worker;
+expect("threaded write committed",  ok == TRUE);
+
+VAR sq = udb:prepare("SELECT n FROM counts WHERE id = 1");
+expect("threaded write visible to main", sq:get().n == 1);
+sq:finalize();
+
+udb:close();
+
+// ---- Summary --------------------------------------------------------------
+print("");
+print(`pass: ${pass}    fail: ${fail}`);
+IF fail > 0 { os.exit(1); }
