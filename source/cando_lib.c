@@ -124,9 +124,17 @@ CANDO_API CandoVM *cando_open(void)
     }
     cando_os_mutex_unlock(&g_state_mutex);
 
+    /* Allocate the memory controller alongside the VM.  The memctrl
+     * tracks every CdoObject / CdoThread the VM allocates so they can
+     * be reclaimed at cando_close instead of leaking until process
+     * exit.  Child VMs (spawned threads) share this same controller via
+     * vm->mem so allocations from any thread land in one registry.    */
+    CandoMemCtrl *mem = (CandoMemCtrl *)cando_alloc(sizeof(CandoMemCtrl));
+    cando_memctrl_init(mem);
+
     /* Allocate and initialise the VM. */
     CandoVM *vm = (CandoVM *)cando_alloc(sizeof(CandoVM));
-    cando_vm_init(vm, NULL);
+    cando_vm_init(vm, mem);
 
     /* Register core native functions (print, type, toString). */
     for (u32 i = 0; cando_native_names[i] && cando_native_table[i]; i++) {
@@ -145,8 +153,19 @@ CANDO_API void cando_close(CandoVM *vm)
      * native window render threads, accept-loop servers, etc.
      * Lifelines and threads share the same counter. */
     cando_vm_wait_all_lifelines(vm);
+
+    /* Capture the memctrl pointer before vm_destroy clears it; the
+     * memctrl outlives the VM struct so we can sweep its registry
+     * here, after the VM has finished releasing its own roots and
+     * before we lose the pointer.                                     */
+    CandoMemCtrl *mem = vm->mem;
     cando_vm_destroy(vm);
     cando_free(vm);
+
+    if (mem) {
+        cando_memctrl_destroy(mem);
+        cando_free(mem);
+    }
 
     /* Tear down the global object layer when the last VM is closed. */
     cando_os_mutex_lock(&g_state_mutex);

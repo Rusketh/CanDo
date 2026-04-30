@@ -515,6 +515,15 @@ struct CdoThread; /* forward — full type in object/thread.h */
 CANDO_API struct CdoThread *cando_current_thread(void);
 
 /*
+ * cando_current_vm -- return the CandoVM* that currently owns this OS
+ * thread, or NULL outside any VM.  Set automatically by cando_vm_init,
+ * cando_vm_init_child, and the spawned-thread trampoline.  Used by the
+ * object allocators (cdo_obj_alloc / cdo_thread_new) so they can
+ * register allocations on the live-tracking memctrl.
+ */
+CANDO_API CandoVM *cando_current_vm(void);
+
+/*
  * cando_vm_wait_all_threads -- block until all threads spawned from this VM
  * (or any child VM sharing its registry) have finished.
  *

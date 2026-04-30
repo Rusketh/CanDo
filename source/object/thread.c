@@ -6,6 +6,7 @@
 
 #include "thread.h"
 #include "../core/common.h"
+#include "../core/memory.h"
 
 /* =========================================================================
  * Lifecycle
@@ -30,6 +31,9 @@ CdoThread *cdo_thread_new(CandoValue fn_val) {
     cando_os_mutex_init(&t->done_mutex);
     cando_os_cond_init(&t->done_cond);
 
+    /* Register on the active VM's memctrl so the thread is reclaimed
+     * at VM teardown if it never gets explicitly destroyed.            */
+    cando_gc_track(t, (void (*)(void *))cdo_thread_destroy);
     return t;
 }
 
@@ -45,6 +49,12 @@ void cdo_thread_destroy(CdoThread *t) {
 
     cando_os_cond_destroy(&t->done_cond);
     cando_os_mutex_destroy(&t->done_mutex);
+
+    /* Free the CdoThread struct itself.  Callers used to be required to
+     * cando_free(t) after this; that is now handled here so the
+     * destructor signature matches cdo_object_destroy and the memctrl
+     * destroy callback can dispose of the whole object in one call.   */
+    cando_free(t);
 }
 
 /* =========================================================================

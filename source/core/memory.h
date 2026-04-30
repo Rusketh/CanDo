@@ -1,19 +1,17 @@
 /*
- * memory.h -- Block allocator and mark-and-sweep GC skeleton.
+ * memory.h -- Memory Controller and GC scaffolding for Cando.
  *
- * The Memory Controller (CandoMemCtrl) owns:
- *   - the global CandoHandleTable
- *   - a registry of all live CandoBlockHeaders for GC traversal
+ * The Memory Controller (CandoMemCtrl) owns the registry of all live
+ * heap-allocated CdoObjects (and CdoThreads, which share its layout
+ * prefix).  Every cdo_obj_alloc / cdo_thread_new registers itself here
+ * via cando_memctrl_track and is freed at VM teardown by walking the
+ * registry.  This is Stage 1 of GC plumbing: it stops objects leaking
+ * at process exit.  Stage 2 will use the same registry plus per-kind
+ * tracers to implement mark-and-sweep collection mid-execution.
  *
- * Every GC-managed object is prefixed with a CandoBlockHeader that
- * embeds a CandoLockHeader (so the auto-locking layer can protect
- * individual blocks) plus bookkeeping metadata.
- *
- * GC lifecycle (skeleton):
- *   1. cando_gc_collect(mc, roots, n_roots)
- *      a. cando_handle_clear_marks()   — unmark all handles
- *      b. cando_gc_mark() per root     — mark reachable handles
- *      c. cando_gc_sweep()             — free all unmarked blocks
+ * Each tracked entry carries its own destructor function pointer so
+ * different object kinds (CdoObject vs CdoThread, etc.) can dispose of
+ * their internals correctly.
  *
  * Must compile with gcc -std=c11.
  */
@@ -27,31 +25,25 @@
 #include "handle.h"
 
 /* -----------------------------------------------------------------------
- * CandoBlockHeader -- prefix of every GC-managed heap block.
- *
- * Embed at the very beginning of a heap allocation.  A pointer to the
- * allocation can be cast to CandoBlockHeader* to reach the lock and
- * the handle that owns this block.
+ * CandoTrackedObj -- one entry in the live registry
  * --------------------------------------------------------------------- */
-typedef struct CandoBlockHeader {
-    CandoLockHeader lock;       /* per-object auto-lock (16 bytes, first) */
-    HandleIndex     handle;     /* the CandoHandleTable slot for this obj  */
-    u32             user_size;  /* bytes of usable payload after header    */
-} CandoBlockHeader;
-
-/* Pointer to the user payload that immediately follows the header. */
-#define CANDO_BLOCK_PAYLOAD(hdr) \
-    ((void *)((CandoBlockHeader *)(hdr) + 1))
+typedef struct {
+    void *obj;
+    /* Called once when the object is collected.  Must release any
+     * heap state owned by the object AND free the object pointer
+     * itself.                                                          */
+    void (*destroy)(void *obj);
+} CandoTrackedObj;
 
 /* -----------------------------------------------------------------------
  * CandoMemCtrl -- the Memory Controller
  * --------------------------------------------------------------------- */
 typedef struct CandoMemCtrl {
-    CandoHandleTable   handles;       /* global handle/indirection table   */
-    CandoLockHeader    gc_lock;       /* serialises GC collect cycles      */
-    CandoBlockHeader **live_blocks;   /* registry of all live blocks       */
-    u32                live_count;
-    u32                live_cap;
+    CandoHandleTable handles;       /* unused yet; reserved for Stage 2 */
+    CandoLockHeader  gc_lock;       /* serialises track / collect       */
+    CandoTrackedObj *live;          /* registry of live tracked objects */
+    u32              live_count;
+    u32              live_cap;
 } CandoMemCtrl;
 
 /* -----------------------------------------------------------------------
@@ -59,59 +51,43 @@ typedef struct CandoMemCtrl {
  * --------------------------------------------------------------------- */
 
 void cando_memctrl_init(CandoMemCtrl *mc);
+
+/* Destroy every still-tracked object via its registered destructor,
+ * then release the registry itself.  Idempotent.                       */
 void cando_memctrl_destroy(CandoMemCtrl *mc);
 
 /* -----------------------------------------------------------------------
- * Allocation
+ * Object tracking
  * --------------------------------------------------------------------- */
 
-/*
- * cando_memctrl_alloc -- allocate a new block with `user_size` bytes of
- * payload.  Payload is zero-initialised.  Returns the HandleIndex that
- * identifies this object.
- */
-HandleIndex cando_memctrl_alloc(CandoMemCtrl *mc, u32 user_size);
+/* Register `obj` as live with the given destructor.  Called by every
+ * cdo_obj_alloc / cdo_thread_new on the active VM's memctrl.           */
+void cando_memctrl_track(CandoMemCtrl *mc, void *obj,
+                         void (*destroy)(void *));
 
-/*
- * cando_memctrl_get_ptr -- resolve a handle to its payload pointer.
- * The pointer is valid until the next GC sweep cycle.
- */
-void *cando_memctrl_get_ptr(CandoMemCtrl *mc, HandleIndex h);
-
-/*
- * cando_memctrl_get_header -- resolve a handle to its block header.
- * Use this to access the per-object lock for manual locking.
- */
-CandoBlockHeader *cando_memctrl_get_header(CandoMemCtrl *mc, HandleIndex h);
-
-/*
- * cando_memctrl_free -- immediately free the block at `h`, removing it
- * from the live registry and releasing the handle slot.
- */
-void cando_memctrl_free(CandoMemCtrl *mc, HandleIndex h);
+/* Remove `obj` from the registry without destroying it.  Used when an
+ * object is freed early via an explicit code path so the destroy-all
+ * sweep at VM teardown does not double-free.                           */
+void cando_memctrl_untrack(CandoMemCtrl *mc, void *obj);
 
 /* -----------------------------------------------------------------------
- * GC
+ * Active memctrl (per OS thread)
+ *
+ * Allocators (cdo_obj_alloc / cdo_thread_new) call cando_gc_track /
+ * cando_gc_untrack with the object they just produced; those helpers
+ * forward to whichever memctrl was last installed via
+ * cando_gc_set_active_memctrl on this OS thread.  vm.c installs the
+ * VM's memctrl in cando_vm_init / cando_vm_init_child / the spawned-
+ * thread trampoline so allocations on every VM-owned thread land in
+ * the right registry.  When no memctrl is active (e.g. unit tests
+ * exercising the lexer or object layer in isolation) the helpers are
+ * a no-op and allocations are not tracked.
  * --------------------------------------------------------------------- */
 
-/*
- * cando_gc_mark -- mark handle `h` as reachable.  In a full
- * implementation this would recursively trace object fields; in this
- * skeleton only the direct handle is marked.
- */
-void cando_gc_mark(CandoMemCtrl *mc, HandleIndex h);
+void cando_gc_set_active_memctrl(CandoMemCtrl *mc);
+CandoMemCtrl *cando_gc_active_memctrl(void);
 
-/*
- * cando_gc_sweep -- free every live block that was not marked since the
- * last call to cando_handle_clear_marks().
- */
-void cando_gc_sweep(CandoMemCtrl *mc);
-
-/*
- * cando_gc_collect -- full stop-the-world collection cycle:
- *   clear marks -> mark roots -> sweep.
- */
-void cando_gc_collect(CandoMemCtrl *mc, const HandleIndex *roots,
-                      u32 n_roots);
+void cando_gc_track(void *obj, void (*destroy)(void *));
+void cando_gc_untrack(void *obj);
 
 #endif /* CANDO_MEMORY_H */

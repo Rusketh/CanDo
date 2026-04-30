@@ -123,6 +123,11 @@ struct CdoObject {
             u32       upvalue_count;
             CdoValue *upvalues;    /* captured upvalue array              */
             void     *bytecode;    /* opaque JIT bytecode pointer         */
+            /* Optional destructor for `bytecode`.  When non-NULL,
+             * cdo_object_destroy invokes it on `bytecode` so the VM-layer
+             * CandoClosure produced by OP_CLOSURE is reclaimed without
+             * the object layer having to know about CandoClosure.       */
+            void    (*bytecode_free)(void *);
         } script;
         struct {                   /* OBJ_NATIVE: C function wrapper      */
             CdoNativeFn fn;

@@ -12,6 +12,7 @@
 #endif
 
 #include "object.h"
+#include "../core/memory.h"
 #include <string.h>
 
 /* -----------------------------------------------------------------------
@@ -92,6 +93,12 @@ static const MetaKeyEntry META_KEYS[] = {
 
 void cdo_object_init(void) {
     cdo_intern_init();
+    /* Idempotent: cando_open and cando_vm_init both call this.  When
+     * the META keys are already populated, skipping the second pass
+     * avoids inflating their refcount via cdo_string_intern's dedup
+     * retain (which previously left them with refcount = 3 instead
+     * of 2 and leaked them at process exit).                         */
+    if (g_meta_index) return;
     for (usize i = 0; i < CANDO_ARRAY_LEN(META_KEYS); i++) {
         const MetaKeyEntry *e = &META_KEYS[i];
         *e->slot = cdo_string_intern(e->name, e->len);
@@ -127,6 +134,9 @@ CdoObject *cdo_obj_alloc(ObjectKind kind) {
     obj->items_len       = 0;
     obj->items_cap       = 0;
     memset(&obj->fn, 0, sizeof(obj->fn));
+    /* Register on the active VM's memctrl so the object is reclaimed
+     * at VM teardown.  No-op outside any VM (unit tests etc.).         */
+    cando_gc_track(obj, (void (*)(void *))cdo_object_destroy);
     return obj;
 }
 
@@ -160,6 +170,13 @@ void cdo_object_destroy(CdoObject *obj) {
         for (u32 i = 0; i < obj->fn.script.upvalue_count; i++)
             cdo_value_release(obj->fn.script.upvalues[i]);
         cando_free(obj->fn.script.upvalues);
+    }
+
+    /* If a VM-layer bytecode object (e.g. CandoClosure) is attached,
+     * dispose of it via the callback the producer registered.        */
+    if (obj->kind == OBJ_FUNCTION && obj->fn.script.bytecode &&
+        obj->fn.script.bytecode_free) {
+        obj->fn.script.bytecode_free(obj->fn.script.bytecode);
     }
 
     cando_free(obj);

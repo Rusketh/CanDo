@@ -27,8 +27,22 @@
  * ===================================================================== */
 _Thread_local static CdoThread *tl_current_thread = NULL;
 
+/* Thread-local: VM currently owning the calling OS thread.  Set by
+ * cando_vm_init / cando_vm_init_child (and the thread trampoline) so
+ * allocators -- which run synchronously on whichever OS thread is
+ * compiling, evaluating, or executing the script -- can find the
+ * active memctrl to register their allocations against.  May be NULL
+ * for callers that never enter a VM (e.g. unit tests that exercise the
+ * lexer in isolation), in which case allocations are not tracked and
+ * leak as before.                                                      */
+_Thread_local static CandoVM *tl_current_vm = NULL;
+
 CdoThread *cando_current_thread(void) {
     return tl_current_thread;
+}
+
+CandoVM *cando_current_vm(void) {
+    return tl_current_vm;
 }
 
 void cando_vm_wait_all_threads(CandoVM *vm) {
@@ -133,6 +147,13 @@ static int            vm_native_class_default_call(CandoVM *vm, int argc,
  * ===================================================================== */
 
 void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
+    /* Make the new VM the active one for this OS thread BEFORE any
+     * downstream code allocates a CdoObject (the object/native libs
+     * register heap-allocated metatables during cando_openlibs etc.,
+     * and those allocations need to land in the right registry).      */
+    tl_current_vm = vm;
+    cando_gc_set_active_memctrl(mem);
+
     vm->stack_top      = vm->stack;
     vm->frame_count    = 0;
     vm->try_depth      = 0;
@@ -198,6 +219,12 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
 }
 
 void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
+    /* The child VM runs on a different OS thread; pin the thread-local
+     * to it so allocations in this thread land in the shared memctrl
+     * via the child rather than (incorrectly) the parent's pointer.   */
+    tl_current_vm = child;
+    cando_gc_set_active_memctrl(parent->mem);
+
     /* Start with a clean state. */
     child->stack_top      = child->stack;
     child->frame_count    = 0;
@@ -1323,6 +1350,8 @@ static CANDO_THREAD_RETURN vm_thread_trampoline(void *raw_arg) {
 cleanup:
     tl_current_thread = NULL;
     cando_vm_destroy(&child);
+    tl_current_vm     = NULL;
+    cando_gc_set_active_memctrl(NULL);
     cando_value_release(ta->fn_val);
     /* Capture the registry pointer before freeing ta. */
     CandoThreadRegistry *reg = ta->parent_vm->thread_registry;
@@ -2045,7 +2074,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CandoValue *base = vm->stack_top - n;
                 for (u32 i = 0; i < n; i++) {
                     CdoValue item = cando_bridge_to_cdo(vm, base[i]);
-                    cdo_array_push(arr, item);
+                    cdo_array_push(arr, item);   /* retains internally */
+                    cdo_value_release(item);
                     cando_value_release(base[i]);
                 }
                 vm->stack_top -= n;
@@ -2162,7 +2192,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 }
             }
             CdoValue cdo_val = cando_bridge_to_cdo(vm, val);
-            cdo_object_rawset(obj, key, cdo_val, FIELD_NONE);
+            cdo_object_rawset(obj, key, cdo_val, FIELD_NONE);  /* retains */
+            cdo_value_release(cdo_val);
             cdo_string_release(key);
             cando_value_release(val);
             DISPATCH();
@@ -2218,7 +2249,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             CdoValue   cdo_val = cando_bridge_to_cdo(vm, val);
             if (cando_is_number(idx_val)) {
                 u32 idx = (u32)idx_val.as.number;
-                cdo_array_rawset_idx(obj, idx, cdo_val);
+                cdo_array_rawset_idx(obj, idx, cdo_val);   /* retains */
             } else if (cando_is_string(idx_val)) {
                 CdoString *key = cando_bridge_intern_key(idx_val.as.string);
                 CdoValue   existing;
@@ -2227,26 +2258,30 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     if (cando_vm_call_meta(vm, obj_val.as.handle,
                                            (struct CdoString *)g_meta_newindex,
                                            args, 3)) {
+                        cdo_value_release(cdo_val);
                         cdo_string_release(key);
                         cando_value_release(val);
                         cando_value_release(idx_val);
                         DISPATCH();
                     }
                     if (vm->has_error) {
+                        cdo_value_release(cdo_val);
                         cdo_string_release(key);
                         cando_value_release(val);
                         cando_value_release(idx_val);
                         goto handle_error;
                     }
                 }
-                cdo_object_rawset(obj, key, cdo_val, FIELD_NONE);
+                cdo_object_rawset(obj, key, cdo_val, FIELD_NONE);   /* retains */
                 cdo_string_release(key);
             } else {
+                cdo_value_release(cdo_val);
                 cando_value_release(val);
                 cando_value_release(idx_val);
                 vm_runtime_error(vm, "index must be a number or string");
                 goto handle_error;
             }
+            cdo_value_release(cdo_val);
             cando_value_release(val);
             cando_value_release(idx_val);
             DISPATCH();
@@ -2483,6 +2518,10 @@ static CandoVMResult vm_run(CandoVM *vm) {
             CdoObject  *fn_obj = cdo_function_new(fn_pc,
                                                   (void *)new_closure,
                                                   NULL, 0);
+            /* Tell cdo_object_destroy how to dispose of the attached
+             * CandoClosure when the OBJ_FUNCTION is reclaimed.          */
+            fn_obj->fn.script.bytecode_free =
+                (void (*)(void *))cando_closure_free;
             HandleIndex h = cando_handle_alloc(vm->handles, fn_obj);
             PUSH(cando_object_value(h));
             DISPATCH();
@@ -3288,7 +3327,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
             CdoObject  *arr = cando_bridge_resolve(vm,
                                   (HandleIndex)arr_ptr->as.handle);
             CdoValue cdo_result = cando_bridge_to_cdo(vm, result);
-            cdo_array_push(arr, cdo_result);
+            cdo_array_push(arr, cdo_result);   /* retains */
+            cdo_value_release(cdo_result);
             cando_value_release(result);
             DISPATCH();
         }
@@ -3302,7 +3342,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CdoObject  *arr = cando_bridge_resolve(vm,
                                       (HandleIndex)arr_ptr->as.handle);
                 CdoValue cdo_result = cando_bridge_to_cdo(vm, result);
-                cdo_array_push(arr, cdo_result);
+                cdo_array_push(arr, cdo_result);   /* retains */
+                cdo_value_release(cdo_result);
             }
             cando_value_release(result);
             DISPATCH();
@@ -3326,7 +3367,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
                                       (HandleIndex)arr_ptr->as.handle);
                 CandoValue elem_copy = cando_value_copy(*val_ptr);
                 CdoValue cdo_elem = cando_bridge_to_cdo(vm, elem_copy);
-                cdo_array_push(arr, cdo_elem);
+                cdo_array_push(arr, cdo_elem);   /* retains */
+                cdo_value_release(cdo_elem);
                 cando_value_release(elem_copy);
             }
             DISPATCH();
@@ -3513,9 +3555,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cando_value_release(fn_val);
                 cando_value_release(ta->fn_val);
                 cando_free(ta);
+                /* Untrack so the upcoming destroy isn't followed by a
+                 * second sweep at VM teardown.  cdo_thread_destroy now
+                 * frees the struct itself, so no separate cando_free.   */
+                cando_gc_untrack(t);
                 cdo_thread_destroy(t);
                 cando_handle_free(vm->handles, h);
-                cando_free(t);
                 vm_runtime_error(vm, "thread: failed to create OS thread");
                 goto handle_error;
             }
