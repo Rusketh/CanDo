@@ -118,6 +118,9 @@ run_test "include_16" "$SCRIPTS/include_16.cdo" \
 run_test "include_ext" "$SCRIPTS/include_ext.cdo" \
     "$(printf 'Cando\n1\ntrue\nalpha\nbeta\nalice\nbob\neve\nLA\nHello, Ext!\nMutated\nCando\n1\nalpha\ntrue')"
 
+run_test "lib_csv" "$SCRIPTS/lib_csv.cdo" \
+    "$(printf '2\nalice\n30\nNYC\nbob\nLA\n2\na\n2\nv1\nv2\nhello, world\nshe said "hi"\nalice\n25\n30\nbob')"
+
 run_test "lib_yaml" "$SCRIPTS/lib_yaml.cdo" \
     "$(printf '42\n3.5\ntrue\nfalse\nnull\nnull\ntrue\nfalse\nhello\n42\nAlice\n30\ntrue\none\n2\ntrue\nnull\nlocalhost\n8080\ndebug\nverbose\nalice\n30\nbob\n25\n1\n3\n1\nhello\ntrue\n12\n14\nvalue\na\nb\ntrue\n3\n5\n5\n7\n6\nCando\n1\na\nb\ntrue\n3\n3\nflow_error_caught')"
 

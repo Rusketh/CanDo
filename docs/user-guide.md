@@ -752,15 +752,15 @@ a JSON report:
 VAR text = file.read("scores.csv");
 IF text == NULL { print("file not found"); os.exit(1); }
 
+// csv.parse() defaults to header mode: rows are objects keyed by the
+// first line's column names (e.g. "name,score").
 VAR rows = csv.parse(text);
-VAR header = rows[0];
 
-// Process data rows (skip header)
 VAR results = [];
-FOR i IN 1 -> #rows - 1 {
+FOR i IN 0 -> #rows - 1 {
     VAR row = rows[i];
-    VAR name = row[0];
-    VAR score = +row[1];         // +x coerces string to number
+    VAR name = row.name;
+    VAR score = +row.score;      // +x coerces string to number
 
     VAR grade = "F";
     IF score >= 90 { grade = "A"; }
