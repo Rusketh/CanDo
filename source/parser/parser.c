@@ -1372,18 +1372,24 @@ static void parse_mask_emit(CandoParser *p, bool *bits, u32 n)
     p->last_multi_push = pass_count;
 }
 
-/* Pipe operator: collection ~> body_expr
- *   collection ~> expr               -- inline expression body
- *   collection ~> { stmts; }         -- block body; 'return expr;' yields value
+/* Compile a `~>` / `~!>` / `~&>` body.  Stack contract:
+ *   in : [..., collection]                        (already pushed by LHS)
+ *   out: [..., result_array]                       after OP_PIPE_END
  *
- * Stack layout during execution (separate from locals frame):
- *   [result_arr | elem0..elemN-1 | count | src_idx]
- * The 'pipe' local variable holds the current element each iteration.   */
-static void parse_pipe_op(CandoParser *p, bool can_assign)
+ * `next_op` advances the iterator one element (or jumps to exit when
+ * exhausted) and `collect_op` decides what each iteration contributes
+ * to the output array (append, filter-by-truthiness, etc).
+ *
+ * The body may be either an inline expression or a `{ ... }` block; in
+ * a block, `return expr;` emits a patchable forward jump rather than
+ * OP_RETURN so the enclosing function is not exited.  All such jumps
+ * land at the OP_NULL fallthrough that follows the block, so an early
+ * return contributes its expression to the collect op.                  */
+static void compile_pipe_body(CandoParser *p,
+                              CandoOpcode next_op,
+                              CandoOpcode collect_op)
 {
-    (void)can_assign;
-
-    /* Collection is already on the stack (left operand of ~>). */
+    /* Collection is already on the stack (left operand). */
     emit_op_a(p, OP_PIPE_INIT, 1);
     /* Stack: [result_arr, elem0..elemN-1, count, src_idx=0] */
 
@@ -1393,19 +1399,16 @@ static void parse_pipe_op(CandoParser *p, bool can_assign)
     u32 pipe_slot = declare_local(p, "pipe", 4, false);
     emit_op_a(p, OP_DEF_LOCAL, (u16)pipe_slot);
 
-    /* Loop header: OP_PIPE_NEXT pushes the next element or jumps to exit. */
+    /* Loop header: next_op pushes the next element or jumps to exit. */
     u32 loop_start = cur(p)->code_len;
-    u32 exit_jump  = emit_jump(p, OP_PIPE_NEXT);
+    u32 exit_jump  = emit_jump(p, next_op);
     /* Element is now on expression stack; pop it into the pipe local. */
     emit_op_a(p, OP_DEF_LOCAL, (u16)pipe_slot);
 
     /* Parse body (expression or block). */
     if (match(p, TOK_LBRACE)) {
-        /* Block body. 'return expr;' inside emits expr + OP_JUMP (patched
-         * below) instead of OP_RETURN, so the enclosing function is not
-         * exited.                                                         */
-        bool saved_in_pipe     = p->in_pipe_body;
-        u32  saved_exit_count  = p->pipe_exit_count;
+        bool saved_in_pipe    = p->in_pipe_body;
+        u32  saved_exit_count = p->pipe_exit_count;
         p->in_pipe_body    = true;
         p->pipe_exit_count = 0;
 
@@ -1417,20 +1420,32 @@ static void parse_pipe_op(CandoParser *p, bool can_assign)
         for (u32 i = 0; i < p->pipe_exit_count; i++)
             patch_jump(p, p->pipe_exits[i]);
 
-        p->in_pipe_body   = saved_in_pipe;
+        p->in_pipe_body    = saved_in_pipe;
         p->pipe_exit_count = saved_exit_count;
     } else {
-        /* Inline expression body. */
         parse_expression(p);
     }
 
-    /* Append body result to the result array, then loop. */
-    emit_op(p, OP_PIPE_COLLECT);
+    /* Append body result to the result array (or filter), then loop. */
+    emit_op(p, collect_op);
     emit_loop(p, loop_start);
 
     patch_jump(p, exit_jump);
     scope_end(p);
     emit_op(p, OP_PIPE_END);
+}
+
+/* Pipe operator: collection ~> body_expr
+ *   collection ~> expr               -- inline expression body
+ *   collection ~> { stmts; }         -- block body; 'return expr;' yields value
+ *
+ * Stack layout during execution (separate from locals frame):
+ *   [result_arr | elem0..elemN-1 | count | src_idx]
+ * The 'pipe' local variable holds the current element each iteration.   */
+static void parse_pipe_op(CandoParser *p, bool can_assign)
+{
+    (void)can_assign;
+    compile_pipe_body(p, OP_PIPE_NEXT, OP_PIPE_COLLECT);
 }
 
 /* Ternary conditional: cond ? then_expr : else_expr
@@ -1466,88 +1481,18 @@ static void parse_ternary(CandoParser *p, bool can_assign)
 static void parse_filter_op(CandoParser *p, bool can_assign)
 {
     (void)can_assign;
-
-    emit_op_a(p, OP_PIPE_INIT, 1);
-
-    scope_begin(p);
-    emit_op(p, OP_NULL);
-    u32 pipe_slot = declare_local(p, "pipe", 4, false);
-    emit_op_a(p, OP_DEF_LOCAL, (u16)pipe_slot);
-
-    u32 loop_start = cur(p)->code_len;
-    u32 exit_jump  = emit_jump(p, OP_FILTER_NEXT);
-    emit_op_a(p, OP_DEF_LOCAL, (u16)pipe_slot);
-
-    if (match(p, TOK_LBRACE)) {
-        bool saved_in_pipe    = p->in_pipe_body;
-        u32  saved_exit_count = p->pipe_exit_count;
-        p->in_pipe_body    = true;
-        p->pipe_exit_count = 0;
-
-        parse_block(p);
-
-        emit_op(p, OP_NULL);
-        for (u32 i = 0; i < p->pipe_exit_count; i++)
-            patch_jump(p, p->pipe_exits[i]);
-
-        p->in_pipe_body    = saved_in_pipe;
-        p->pipe_exit_count = saved_exit_count;
-    } else {
-        parse_expression(p);
-    }
-
-    emit_op(p, OP_FILTER_COLLECT);
-    emit_loop(p, loop_start);
-
-    patch_jump(p, exit_jump);
-    scope_end(p);
-    emit_op(p, OP_PIPE_END);
+    compile_pipe_body(p, OP_FILTER_NEXT, OP_FILTER_COLLECT);
 }
 
 /* Conditional filter operator: collection ~&> predicate_expr
  *   Like ~!>, but the body is interpreted as a boolean predicate: when the
  *   body returns a truthy value the *original* element (not the body
  *   result) is kept in the output array; otherwise the element is dropped.
- *   Identical structure to parse_filter_op except the collect opcode.    */
+ *   Identical structure to ~!> except the collect opcode.               */
 static void parse_cond_filter_op(CandoParser *p, bool can_assign)
 {
     (void)can_assign;
-
-    emit_op_a(p, OP_PIPE_INIT, 1);
-
-    scope_begin(p);
-    emit_op(p, OP_NULL);
-    u32 pipe_slot = declare_local(p, "pipe", 4, false);
-    emit_op_a(p, OP_DEF_LOCAL, (u16)pipe_slot);
-
-    u32 loop_start = cur(p)->code_len;
-    u32 exit_jump  = emit_jump(p, OP_FILTER_NEXT);
-    emit_op_a(p, OP_DEF_LOCAL, (u16)pipe_slot);
-
-    if (match(p, TOK_LBRACE)) {
-        bool saved_in_pipe    = p->in_pipe_body;
-        u32  saved_exit_count = p->pipe_exit_count;
-        p->in_pipe_body    = true;
-        p->pipe_exit_count = 0;
-
-        parse_block(p);
-
-        emit_op(p, OP_NULL);   /* fall-through default predicate value */
-        for (u32 i = 0; i < p->pipe_exit_count; i++)
-            patch_jump(p, p->pipe_exits[i]);
-
-        p->in_pipe_body    = saved_in_pipe;
-        p->pipe_exit_count = saved_exit_count;
-    } else {
-        parse_expression(p);
-    }
-
-    emit_op(p, OP_COND_FILTER_COLLECT);
-    emit_loop(p, loop_start);
-
-    patch_jump(p, exit_jump);
-    scope_end(p);
-    emit_op(p, OP_PIPE_END);
+    compile_pipe_body(p, OP_FILTER_NEXT, OP_COND_FILTER_COLLECT);
 }
 
 /* =========================================================================
