@@ -309,3 +309,13 @@ CandoOpFmt cando_opcode_fmt(CandoOpcode op) {
     if ((u32)op >= OP_COUNT) return OPFMT_NONE;
     return s_opcode_fmts[(u32)op];
 }
+
+u32 cando_instr_size_at(const u8 *code, u32 offset) {
+    CandoOpcode op = (CandoOpcode)code[offset];
+    if (op == OP_CLOSURE) {
+        /* OP_CLOSURE = 1B opcode + 2B const idx + 2B capture_count + 2B*N */
+        u16 cap = (u16)code[offset + 3] | ((u16)code[offset + 4] << 8);
+        return 5u + (u32)cap * 2u;
+    }
+    return cando_opcode_size(op);
+}

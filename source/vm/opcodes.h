@@ -241,6 +241,10 @@ CandoOpFmt cando_opcode_fmt(CandoOpcode op);
 
 /* -------------------------------------------------------------------------
  * Convenience: byte-size of the full instruction (opcode + operands).
+ *
+ * NOTE: variable-width opcodes (currently OP_CLOSURE, whose tail carries
+ * an inline capture-spec table) cannot be sized from the opcode alone --
+ * use cando_instr_size_at() with the chunk byte buffer for those.
  * ---------------------------------------------------------------------- */
 CANDO_INLINE u32 cando_opcode_size(CandoOpcode op) {
     switch (cando_opcode_fmt(op)) {
@@ -250,6 +254,14 @@ CANDO_INLINE u32 cando_opcode_size(CandoOpcode op) {
         default:         return 1;
     }
 }
+
+/* -------------------------------------------------------------------------
+ * cando_instr_size_at -- byte-size of the instruction at `code[offset]`,
+ * including any variable-length tail (currently the capture metadata that
+ * follows OP_CLOSURE).  Use this when walking a chunk's bytecode rather
+ * than cando_opcode_size().
+ * ---------------------------------------------------------------------- */
+u32 cando_instr_size_at(const u8 *code, u32 offset);
 
 /* -------------------------------------------------------------------------
  * Operand read/write helpers — little-endian u16 stored in bytecode.

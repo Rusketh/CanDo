@@ -85,6 +85,19 @@ typedef struct {
      * than as the method-call infix operator.                            */
     u32          ternary_then_depth;
 
+    /* Closure capture tracking ----------------------------------------- */
+    /* When parsing the body of a nested function, `outer_locals` /
+     * `outer_count` point at the enclosing function's local table.  An
+     * identifier that doesn't resolve inside the current body but does
+     * resolve in the outer table is captured: its outer-frame slot is
+     * appended to upvalue_specs[] and referenced via OP_LOAD_UPVAL.  At
+     * the matching OP_CLOSURE the recorded slots are written out as
+     * capture metadata so the VM can snapshot them at runtime.         */
+    CandoLocal  *outer_locals;
+    u32          outer_count;
+    u16          upvalue_specs[CANDO_LOCAL_MAX];
+    u16          upvalue_count;
+
     /* Safe-access chain tracking (?., ?[) ------------------------------ */
     /* When true, every member-access infix in the current expression also
      * emits an OP_JUMP_IF_NULL guard so a null result mid-chain skips the

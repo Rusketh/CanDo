@@ -2501,15 +2501,43 @@ static CandoVMResult vm_run(CandoVM *vm) {
         OP_CASE(OP_CLOSURE): {
             /* The constant at index ci is a cando_number(fn_pc) — the byte
              * offset of the function body within the current chunk.
-             * We wrap (current closure, fn_pc) in a CdoObject of kind
-             * OBJ_FUNCTION so the function value carries its home chunk
-             * and can be called correctly even after crossing module
-             * boundaries via include().                                  */
+             * Following the operand the parser writes:
+             *
+             *     u16 capture_count
+             *     u16 outer_slot[capture_count]
+             *
+             * For each captured slot we snapshot the current frame's value
+             * into a fresh CandoUpvalue and attach the array to a fresh
+             * CandoClosure -- so each invocation of OP_CLOSURE produces a
+             * function whose OP_LOAD_UPVAL/OP_STORE_UPVAL access *its*
+             * captures, not whatever the parent frame happened to share. */
             u16 ci    = READ_U16();
             u32 fn_pc = (u32)frame->closure->chunk->constants[ci].as.number;
 
+            u16 cap_count = READ_U16();
+
+            CandoClosure *new_closure = (CandoClosure *)cando_alloc(
+                sizeof(CandoClosure));
+            new_closure->chunk         = frame->closure->chunk;
+            new_closure->upvalue_count = cap_count;
+            new_closure->upvalues      = NULL;
+            if (cap_count > 0) {
+                new_closure->upvalues = (CandoUpvalue **)cando_alloc(
+                    cap_count * sizeof(CandoUpvalue *));
+                for (u16 ui = 0; ui < cap_count; ui++) {
+                    u16 slot = READ_U16();
+                    CandoUpvalue *uv = (CandoUpvalue *)cando_alloc(
+                        sizeof(CandoUpvalue));
+                    cando_lock_init(&uv->lock);
+                    uv->closed   = cando_value_copy(frame->slots[slot]);
+                    uv->location = &uv->closed;
+                    uv->next     = NULL;
+                    new_closure->upvalues[ui] = uv;
+                }
+            }
+
             CdoObject  *fn_obj = cdo_function_new(fn_pc,
-                                                  (void *)frame->closure,
+                                                  (void *)new_closure,
                                                   NULL, 0);
             HandleIndex h = cando_handle_alloc(vm->handles, fn_obj);
             PUSH(cando_object_value(h));

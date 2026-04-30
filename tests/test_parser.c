@@ -89,7 +89,7 @@ static int find_op(const CandoChunk *c, CandoOpcode op)
     while (i < c->code_len) {
         CandoOpcode cur = (CandoOpcode)c->code[i];
         if (cur == op) return (int)i;
-        u32 sz = cando_opcode_size(cur);
+        u32 sz = cando_instr_size_at(c->code, i);
         i += (sz > 0) ? sz : 1;
     }
     return -1;
@@ -103,7 +103,7 @@ static int count_op(const CandoChunk *c, CandoOpcode op)
     while (i < c->code_len) {
         CandoOpcode cur = (CandoOpcode)c->code[i];
         if (cur == op) n++;
-        u32 sz = cando_opcode_size(cur);
+        u32 sz = cando_instr_size_at(c->code, i);
         i += (sz > 0) ? sz : 1;
     }
     return n;
@@ -805,7 +805,7 @@ TEST(test_safe_dot_chain)
     for (u32 i = 0; i < c->code_len; ) {
         u8 op = c->code[i];
         if (op == OP_JUMP_IF_NULL) n_guards++;
-        i += cando_opcode_size((CandoOpcode)op);
+        i += cando_instr_size_at(c->code, i);
     }
     EXPECT_TRUE(n_guards >= 3);   /* one per access in the chain */
     cando_chunk_free(c);
@@ -1021,7 +1021,7 @@ TEST(test_inline_function_no_spread_from_body)
     while (i < c->code_len) {
         CandoOpcode cur = (CandoOpcode)c->code[i];
         if (cur == OP_CALL) call_pos = (int)i;
-        u32 sz = cando_opcode_size(cur);
+        u32 sz = cando_instr_size_at(c->code, i);
         i += (sz > 0) ? sz : 1;
     }
     EXPECT_TRUE(call_pos >= 0);
@@ -1039,7 +1039,7 @@ TEST(test_inline_function_body_with_method_call)
     while (i < c->code_len) {
         CandoOpcode cur = (CandoOpcode)c->code[i];
         if (cur == OP_CALL) call_pos = (int)i;
-        u32 sz = cando_opcode_size(cur);
+        u32 sz = cando_instr_size_at(c->code, i);
         i += (sz > 0) ? sz : 1;
     }
     EXPECT_TRUE(call_pos >= 0);
