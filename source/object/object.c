@@ -398,40 +398,49 @@ bool cdo_object_rawdelete(CdoObject *obj, CdoString *key) {
 }
 
 /* -----------------------------------------------------------------------
- * Prototype-chain lookup
+ * Prototype-chain helpers
  *
  * __index can be:
  *   - a plain object or array (lookup table): traversal continues into it
  *   - a function/native (callable): traversal stops; the VM layer dispatches
  *     the callable via cdo_object_index_callable + cando_vm_dispatch_callable
  * --------------------------------------------------------------------- */
+
+/* Look up __index on `obj`.  Uses the cached g_meta_index when
+ * cdo_object_init has run, falling back to a non-retaining weak intern
+ * lookup so prototype walking still works during early bring-up.
+ * Returns true and writes *out on hit; false otherwise.               */
+static bool obj_get_meta_index(CdoObject *obj, CdoValue *out) {
+    CdoString *meta_index = g_meta_index
+        ? g_meta_index
+        : cdo_intern_weak(META_INDEX, (u32)(sizeof(META_INDEX) - 1));
+    if (!meta_index) return false;
+    return cdo_object_rawget(obj, meta_index, out);
+}
+
+/* Decide whether `idx_val` advances the prototype chain from `cur`.
+ * Returns the next CdoObject to walk into, or NULL if the value is not
+ * a traversable lookup table (objects/arrays only) or would form a
+ * self-loop.  Callable __index values are NOT traversable -- they end
+ * the chain and the per-caller logic decides what to do with them.    */
+static CdoObject *proto_step_via(CdoValue idx_val, CdoObject *cur) {
+    if (idx_val.tag != CDO_OBJECT && idx_val.tag != CDO_ARRAY) return NULL;
+    if (!idx_val.as.object) return NULL;
+    if (idx_val.as.object == cur) return NULL;
+    return idx_val.as.object;
+}
+
+/* -----------------------------------------------------------------------
+ * Prototype-chain field lookup
+ * --------------------------------------------------------------------- */
 bool cdo_object_get(CdoObject *obj, CdoString *key, CdoValue *out) {
     CdoObject *cur = obj;
-
     for (int depth = 0; depth < CANDO_PROTO_DEPTH_MAX; depth++) {
-        if (cdo_object_rawget(cur, key, out))
-            return true;
-
-        CdoString *meta_index = g_meta_index
-            ? g_meta_index
-            : cdo_intern_weak(META_INDEX, (u32)(sizeof(META_INDEX) - 1));
-        if (!meta_index)
-            return false;
-
+        if (cdo_object_rawget(cur, key, out)) return true;
         CdoValue idx_val;
-        if (!cdo_object_rawget(cur, meta_index, &idx_val))
-            return false;
-
-        /* Only plain objects and arrays act as lookup tables; callables
-         * (functions/natives/PC sentinels) terminate the chain. */
-        if (idx_val.tag != CDO_OBJECT && idx_val.tag != CDO_ARRAY)
-            return false;
-        if (!idx_val.as.object)
-            return false;
-
-        CdoObject *next = idx_val.as.object;
-        if (next == cur)
-            return false; /* self-loop guard */
+        if (!obj_get_meta_index(cur, &idx_val)) return false;
+        CdoObject *next = proto_step_via(idx_val, cur);
+        if (!next) return false;
         cur = next;
     }
     return false;
@@ -447,32 +456,16 @@ bool cdo_object_get(CdoObject *obj, CdoString *key, CdoValue *out) {
  * --------------------------------------------------------------------- */
 bool cdo_object_index_callable(CdoObject *obj, CdoValue *out) {
     CdoObject *cur = obj;
-
     for (int depth = 0; depth < CANDO_PROTO_DEPTH_MAX; depth++) {
-        CdoString *meta_index = g_meta_index
-            ? g_meta_index
-            : cdo_intern_weak(META_INDEX, (u32)(sizeof(META_INDEX) - 1));
-        if (!meta_index)
-            return false;
-
         CdoValue idx_val;
-        if (!cdo_object_rawget(cur, meta_index, &idx_val))
-            return false;
-
+        if (!obj_get_meta_index(cur, &idx_val)) return false;
         if (idx_val.tag == CDO_FUNCTION || idx_val.tag == CDO_NATIVE ||
             idx_val.tag == CDO_NUMBER) {
             *out = idx_val;
             return true;
         }
-
-        if (idx_val.tag != CDO_OBJECT && idx_val.tag != CDO_ARRAY)
-            return false;
-        if (!idx_val.as.object)
-            return false;
-
-        CdoObject *next = idx_val.as.object;
-        if (next == cur)
-            return false; /* self-loop guard */
+        CdoObject *next = proto_step_via(idx_val, cur);
+        if (!next) return false;
         cur = next;
     }
     return false;
