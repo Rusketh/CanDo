@@ -26,104 +26,106 @@
  * ======================================================================= */
 
 /* Maps every CandoTokenType to a short printable name. */
+static const char *const TOKEN_TYPE_NAMES[TOK_COUNT] = {
+    [TOK_NUMBER]         = "NUMBER",
+    [TOK_STRING_DQ]      = "STRING_DQ",
+    [TOK_STRING_SQ]      = "STRING_SQ",
+    [TOK_STRING_BT]      = "STRING_BT",
+    [TOK_IDENT]          = "IDENT",
+
+    [TOK_IF]             = "IF",
+    [TOK_ELSE]           = "ELSE",
+    [TOK_WHILE]          = "WHILE",
+    [TOK_FOR]            = "FOR",
+    [TOK_FUNCTION]       = "FUNCTION",
+    [TOK_CLASS]          = "CLASS",
+    [TOK_EXTENDS]        = "EXTENDS",
+    [TOK_RETURN]         = "RETURN",
+    [TOK_THROW]          = "THROW",
+    [TOK_TRY]            = "TRY",
+    [TOK_CATCH]          = "CATCH",
+    [TOK_FINALY]         = "FINALY",
+    [TOK_CONST]          = "CONST",
+    [TOK_VAR]            = "VAR",
+    [TOK_GLOBAL]         = "GLOBAL",
+    [TOK_STATIC]         = "STATIC",
+    [TOK_PRIVATE]        = "PRIVATE",
+    [TOK_ASYNC]          = "ASYNC",
+    [TOK_AWAIT]          = "AWAIT",
+    [TOK_THREAD]         = "THREAD",
+    [TOK_NULL_KW]        = "NULL",
+    [TOK_TRUE_KW]        = "TRUE",
+    [TOK_FALSE_KW]       = "FALSE",
+    [TOK_IN]             = "IN",
+    [TOK_OF]             = "OF",
+    [TOK_OVER]           = "OVER",
+    [TOK_CONTINUE]       = "CONTINUE",
+    [TOK_BREAK]          = "BREAK",
+    [TOK_PIPE_KW]        = "pipe",
+
+    [TOK_PIPE_OP]        = "~>",
+    [TOK_FILTER_OP]      = "~!>",
+    [TOK_COND_FILTER_OP] = "~&>",
+    [TOK_QDOT]           = "?.",
+    [TOK_QLBRACKET]      = "?[",
+    [TOK_RANGE_ASC]      = "->",
+    [TOK_RANGE_DESC]     = "<-",
+    [TOK_FLUENT]         = "::",
+    [TOK_VARARG]         = "...",
+    [TOK_FAT_ARROW]      = "=>",
+    [TOK_AND]            = "&&",
+    [TOK_OR]             = "||",
+    [TOK_EQ]             = "==",
+    [TOK_NEQ]            = "!=",
+    [TOK_LEQ]            = "<=",
+    [TOK_GEQ]            = ">=",
+    [TOK_LSHIFT]         = "<<",
+    [TOK_RSHIFT]         = ">>",
+    [TOK_BITXOR]         = "|&",
+    [TOK_PLUS_ASSIGN]    = "+=",
+    [TOK_MINUS_ASSIGN]   = "-=",
+    [TOK_STAR_ASSIGN]    = "*=",
+    [TOK_SLASH_ASSIGN]   = "/=",
+    [TOK_PERCENT_ASSIGN] = "%=",
+    [TOK_CARET_ASSIGN]   = "^=",
+    [TOK_INCR]           = "++",
+    [TOK_DECR]           = "--",
+
+    [TOK_PLUS]           = "+",
+    [TOK_MINUS]          = "-",
+    [TOK_STAR]           = "*",
+    [TOK_SLASH]          = "/",
+    [TOK_PERCENT]        = "%",
+    [TOK_CARET]          = "^",
+    [TOK_AMP]            = "&",
+    [TOK_BITOR]          = "|",
+    [TOK_LT]             = "<",
+    [TOK_GT]             = ">",
+    [TOK_ASSIGN]         = "=",
+    [TOK_BANG]           = "!",
+    [TOK_TILDE]          = "~",
+    [TOK_DOT]            = ".",
+    [TOK_HASH]           = "#",
+    [TOK_LPAREN]         = "(",
+    [TOK_RPAREN]         = ")",
+    [TOK_LBRACE]         = "{",
+    [TOK_RBRACE]         = "}",
+    [TOK_LBRACKET]       = "[",
+    [TOK_RBRACKET]       = "]",
+    [TOK_SEMI]           = ";",
+    [TOK_COMMA]          = ",",
+    [TOK_COLON]          = ":",
+    [TOK_QUESTION]       = "?",
+
+    [TOK_EOF]             = "EOF",
+    [TOK_ERROR]           = "ERROR",
+};
+
 const char *cando_token_type_name(CandoTokenType t)
 {
-    switch (t) {
-    case TOK_NUMBER:         return "NUMBER";
-    case TOK_STRING_DQ:      return "STRING_DQ";
-    case TOK_STRING_SQ:      return "STRING_SQ";
-    case TOK_STRING_BT:      return "STRING_BT";
-    case TOK_IDENT:          return "IDENT";
-
-    case TOK_IF:             return "IF";
-    case TOK_ELSE:           return "ELSE";
-    case TOK_WHILE:          return "WHILE";
-    case TOK_FOR:            return "FOR";
-    case TOK_FUNCTION:       return "FUNCTION";
-    case TOK_CLASS:          return "CLASS";
-    case TOK_EXTENDS:        return "EXTENDS";
-    case TOK_RETURN:         return "RETURN";
-    case TOK_THROW:          return "THROW";
-    case TOK_TRY:            return "TRY";
-    case TOK_CATCH:          return "CATCH";
-    case TOK_FINALY:         return "FINALY";
-    case TOK_CONST:          return "CONST";
-    case TOK_VAR:            return "VAR";
-    case TOK_GLOBAL:         return "GLOBAL";
-    case TOK_STATIC:         return "STATIC";
-    case TOK_PRIVATE:        return "PRIVATE";
-    case TOK_ASYNC:          return "ASYNC";
-    case TOK_AWAIT:          return "AWAIT";
-    case TOK_THREAD:         return "THREAD";
-    case TOK_NULL_KW:        return "NULL";
-    case TOK_TRUE_KW:        return "TRUE";
-    case TOK_FALSE_KW:       return "FALSE";
-    case TOK_IN:             return "IN";
-    case TOK_OF:             return "OF";
-    case TOK_OVER:           return "OVER";
-    case TOK_CONTINUE:       return "CONTINUE";
-    case TOK_BREAK:          return "BREAK";
-    case TOK_PIPE_KW:        return "pipe";
-
-    case TOK_PIPE_OP:        return "~>";
-    case TOK_FILTER_OP:      return "~!>";
-    case TOK_COND_FILTER_OP: return "~&>";
-    case TOK_QDOT:           return "?.";
-    case TOK_QLBRACKET:      return "?[";
-    case TOK_RANGE_ASC:      return "->";
-    case TOK_RANGE_DESC:     return "<-";
-    case TOK_FLUENT:         return "::";
-    case TOK_VARARG:         return "...";
-    case TOK_FAT_ARROW:      return "=>";
-    case TOK_AND:            return "&&";
-    case TOK_OR:             return "||";
-    case TOK_EQ:             return "==";
-    case TOK_NEQ:            return "!=";
-    case TOK_LEQ:            return "<=";
-    case TOK_GEQ:            return ">=";
-    case TOK_LSHIFT:         return "<<";
-    case TOK_RSHIFT:         return ">>";
-    case TOK_BITXOR:         return "|&";
-    case TOK_PLUS_ASSIGN:    return "+=";
-    case TOK_MINUS_ASSIGN:   return "-=";
-    case TOK_STAR_ASSIGN:    return "*=";
-    case TOK_SLASH_ASSIGN:   return "/=";
-    case TOK_PERCENT_ASSIGN: return "%=";
-    case TOK_CARET_ASSIGN:   return "^=";
-    case TOK_INCR:           return "++";
-    case TOK_DECR:           return "--";
-
-    case TOK_PLUS:           return "+";
-    case TOK_MINUS:          return "-";
-    case TOK_STAR:           return "*";
-    case TOK_SLASH:          return "/";
-    case TOK_PERCENT:        return "%";
-    case TOK_CARET:          return "^";
-    case TOK_AMP:            return "&";
-    case TOK_BITOR:          return "|";
-    case TOK_LT:             return "<";
-    case TOK_GT:             return ">";
-    case TOK_ASSIGN:         return "=";
-    case TOK_BANG:           return "!";
-    case TOK_TILDE:          return "~";
-    case TOK_DOT:            return ".";
-    case TOK_HASH:           return "#";
-    case TOK_LPAREN:         return "(";
-    case TOK_RPAREN:         return ")";
-    case TOK_LBRACE:         return "{";
-    case TOK_RBRACE:         return "}";
-    case TOK_LBRACKET:       return "[";
-    case TOK_RBRACKET:       return "]";
-    case TOK_SEMI:           return ";";
-    case TOK_COMMA:          return ",";
-    case TOK_COLON:          return ":";
-    case TOK_QUESTION:       return "?";
-
-    case TOK_EOF:            return "EOF";
-    case TOK_ERROR:          return "ERROR";
-    case TOK_COUNT:          return "<COUNT>";
-    }
-    return "<unknown>";
+    if ((unsigned)t >= (unsigned)TOK_COUNT) return "<unknown>";
+    const char *name = TOKEN_TYPE_NAMES[t];
+    return name ? name : "<unknown>";
 }
 
 /* -------------------------------------------------------------------------
