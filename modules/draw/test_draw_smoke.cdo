@@ -1,0 +1,41 @@
+// modules/draw/test_draw_smoke.cdo -- minimal smoke test that the draw
+// module loads on either Linux (.so) or Windows (.dll), exposes VERSION,
+// and reserves the `_meta.draw_image` and `_meta.draw_font` prototypes.
+// No GL context is created, so this runs cleanly on headless CI hosts.
+
+print("smoke: starting");
+
+VAR draw = NULL;
+TRY {
+    draw = include("./draw.dll");
+    print("smoke: loaded draw.dll");
+} CATCH (e) {
+    print(`smoke: draw.dll load failed: ${e}`);
+    TRY {
+        draw = include("./draw.so");
+        print("smoke: loaded draw.so");
+    } CATCH (e2) {
+        print(`smoke: draw.so load failed: ${e2}`);
+        os.exit(1);
+    }
+}
+
+IF type(draw.VERSION) != "string" {
+    print("smoke: VERSION missing or not a string");
+    os.exit(1);
+}
+print(`smoke: module VERSION = ${draw.VERSION}`);
+
+// _meta.<name> tables stamp their __type to <name>, so e.g.
+// type(_meta.draw_image) is "draw_image" (source/lib/meta.c:62-68).
+IF type(_meta.draw_image) != "draw_image" {
+    print(`smoke: _meta.draw_image not registered (type = ${type(_meta.draw_image)})`);
+    os.exit(1);
+}
+IF type(_meta.draw_font) != "draw_font" {
+    print(`smoke: _meta.draw_font not registered (type = ${type(_meta.draw_font)})`);
+    os.exit(1);
+}
+print("smoke: _meta.draw_image and _meta.draw_font prototypes are present");
+
+print("smoke: all checks passed");

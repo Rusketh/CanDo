@@ -167,9 +167,12 @@ CdoObject *cdo_class_new(const char *type_name, u32 name_len);
 ```
 
 Creates a `CdoObject` with `__type` pre-set to the given name. Used by the
-`OP_NEW_CLASS` opcode. The `__call` meta-method serves as the constructor and
-is expected to return a new instance whose `__index` points back to the class
-object.
+`OP_NEW_CLASS` opcode.  The compiler additionally binds `__call` on every
+class to a VM-supplied default-constructor native (`OP_BIND_DEFAULT_CALL`),
+which on invocation allocates a fresh instance, sets its `__index` to the
+class, runs `class.__constructor(instance, args…)` if the class declares
+one, and returns the instance.  User code may override `__call` with its
+own function to take full control of construction.
 
 ## CdoString (`source/object/string.h`)
 

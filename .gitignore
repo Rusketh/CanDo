@@ -13,6 +13,7 @@ tests/test_parser
 tests/test_sockutil
 tests/test_thread
 tests/test_vm
+tests/test_sockutil
 tests/test_yaml
 
 # Library build artifacts (CMake and Makefile)
@@ -24,6 +25,15 @@ libcando.dll
 libcando.lib
 icon.res
 .libobjs/
+
+# Module build artifacts
+modules/*/test_ldap
+modules/*/test_sqlite
+modules/*/test_sql
+modules/*/*.so
+modules/*/*.dylib
+modules/*/*.dll
+modules/*/*.lib
 
 # Common OS junk
 .DS_Store

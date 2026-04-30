@@ -387,6 +387,16 @@ TEST(test_string_backtick_nested_braces)
     EXPECT_EQ(tok.type, TOK_STRING_BT);
 }
 
+TEST(test_string_backtick_nested_template)
+{
+    /* A backtick string inside ${ } — the inner backticks must round-trip
+     * out as a single TOK_STRING_BT so the whole outer token covers both. */
+    const char *src = "`Bearer ${enc(`${u}:${p}`)}`";
+    CandoToken tok = lex_nth(src, 0);
+    EXPECT_EQ(tok.type, TOK_STRING_BT);
+    EXPECT_EQ(tok.length, (u32)strlen(src));
+}
+
 TEST(test_string_unterminated_dq)
 {
     CandoLexer lex;
@@ -561,6 +571,54 @@ TEST(test_filter_operator)
     free(toks);
 }
 
+TEST(test_cond_filter_operator)
+{
+    /* items ~&> pipe > 0 */
+    u32 count;
+    CandoToken *toks = lex_all("items ~&> pipe > 0", &count);
+    EXPECT_EQ(count, 5u);
+    EXPECT_EQ(toks[0].type, TOK_IDENT);
+    EXPECT_EQ(toks[1].type, TOK_COND_FILTER_OP);
+    EXPECT_EQ(toks[2].type, TOK_PIPE_KW);
+    EXPECT_EQ(toks[3].type, TOK_GT);
+    EXPECT_EQ(toks[4].type, TOK_NUMBER);
+    free(toks);
+}
+
+TEST(test_ternary_tokens)
+{
+    /* a ? b : c */
+    u32 count;
+    CandoToken *toks = lex_all("a ? b : c", &count);
+    EXPECT_EQ(count, 5u);
+    EXPECT_EQ(toks[0].type, TOK_IDENT);
+    EXPECT_EQ(toks[1].type, TOK_QUESTION);
+    EXPECT_EQ(toks[2].type, TOK_IDENT);
+    EXPECT_EQ(toks[3].type, TOK_COLON);
+    EXPECT_EQ(toks[4].type, TOK_IDENT);
+    free(toks);
+}
+
+TEST(test_safe_access_tokens)
+{
+    /* obj?.a, obj?[k], and bare '?' must each lex distinctly. */
+    u32 count;
+    CandoToken *toks = lex_all("obj?.a obj?[k] x ?y", &count);
+    /* obj ?. a obj ?[ k ] x ? y  ->  10 tokens */
+    EXPECT_EQ(count, 10u);
+    EXPECT_EQ(toks[0].type, TOK_IDENT);
+    EXPECT_EQ(toks[1].type, TOK_QDOT);
+    EXPECT_EQ(toks[2].type, TOK_IDENT);
+    EXPECT_EQ(toks[3].type, TOK_IDENT);
+    EXPECT_EQ(toks[4].type, TOK_QLBRACKET);
+    EXPECT_EQ(toks[5].type, TOK_IDENT);
+    EXPECT_EQ(toks[6].type, TOK_RBRACKET);
+    EXPECT_EQ(toks[7].type, TOK_IDENT);
+    EXPECT_EQ(toks[8].type, TOK_QUESTION);
+    EXPECT_EQ(toks[9].type, TOK_IDENT);
+    free(toks);
+}
+
 TEST(test_range_operators)
 {
     /* 1 -> 5 ; 5 <- 1
@@ -632,13 +690,43 @@ TEST(test_try_catch_finaly)
 
 TEST(test_class_snippet)
 {
-    /* CLASS Foo(x) { FUNCTION self.bar() { } }
-     * [0]=CLASS [1]=Foo [2]=( [3]=x [4]=) [5]={ [6]=FUNCTION ... */
+    /* New class syntax:
+     *   CLASS Foo = (self, x) { self.x = x; }
+     * [0]=CLASS [1]=Foo [2]== [3]=( [4]=self [5]=, [6]=x [7]=) [8]={ ...
+     */
     u32 count;
-    CandoToken *toks = lex_all("CLASS Foo(x) { FUNCTION self.bar() { } }", &count);
+    CandoToken *toks = lex_all(
+        "CLASS Foo = (self, x) { self.x = x; }", &count);
     EXPECT_EQ(toks[0].type, TOK_CLASS);
-    EXPECT_EQ(toks[1].type, TOK_IDENT);   /* Foo */
-    EXPECT_EQ(toks[6].type, TOK_FUNCTION);
+    EXPECT_EQ(toks[1].type, TOK_IDENT);    /* Foo */
+    EXPECT_EQ(toks[2].type, TOK_ASSIGN);   /* =  */
+    EXPECT_EQ(toks[3].type, TOK_LPAREN);   /* (  */
+    free(toks);
+}
+
+TEST(test_class_extends_snippet)
+{
+    /* CLASS Dog EXTENDS Animal = (self, name) { ... } */
+    u32 count;
+    CandoToken *toks = lex_all(
+        "CLASS Dog EXTENDS Animal = (self, name) { }", &count);
+    EXPECT_EQ(toks[0].type, TOK_CLASS);
+    EXPECT_EQ(toks[1].type, TOK_IDENT);    /* Dog */
+    EXPECT_EQ(toks[2].type, TOK_EXTENDS);
+    EXPECT_EQ(toks[3].type, TOK_IDENT);    /* Animal */
+    EXPECT_EQ(toks[4].type, TOK_ASSIGN);
+    free(toks);
+}
+
+TEST(test_class_lowercase_snippet)
+{
+    /* Pure lowercase keywords are treated identically to uppercase.       */
+    u32 count;
+    CandoToken *toks = lex_all(
+        "class Foo = (self) { self.x = 1; }", &count);
+    EXPECT_EQ(toks[0].type, TOK_CLASS);
+    EXPECT_EQ(toks[1].type, TOK_IDENT);    /* Foo (mixed case identifier) */
+    EXPECT_EQ(toks[2].type, TOK_ASSIGN);
     free(toks);
 }
 
@@ -685,6 +773,7 @@ int main(void)
     run_test("single-quoted string",      test_string_single_quote);
     run_test("backtick string",           test_string_backtick);
     run_test("backtick nested braces",    test_string_backtick_nested_braces);
+    run_test("backtick nested template",  test_string_backtick_nested_template);
     run_test("unterminated double-quote", test_string_unterminated_dq);
     run_test("unterminated single-quote", test_string_unterminated_sq);
     run_test("unterminated backtick",     test_string_unterminated_bt);
@@ -706,12 +795,17 @@ int main(void)
     run_test("if statement",              test_if_statement);
     run_test("pipe operator",             test_pipe_operator);
     run_test("filter operator",           test_filter_operator);
+    run_test("conditional filter operator", test_cond_filter_operator);
+    run_test("ternary tokens",            test_ternary_tokens);
+    run_test("safe-access tokens",        test_safe_access_tokens);
     run_test("range operators",           test_range_operators);
     run_test("fluent call",               test_fluent_call);
     run_test("vararg",                    test_vararg);
     run_test("mask operators",            test_mask_operators);
     run_test("try/catch/finaly",          test_try_catch_finaly);
     run_test("class snippet",             test_class_snippet);
+    run_test("class extends snippet",     test_class_extends_snippet);
+    run_test("class lowercase snippet",   test_class_lowercase_snippet);
 
     printf("\n=== Results: %d/%d passed ===\n",
            g_tests_passed, g_tests_run);

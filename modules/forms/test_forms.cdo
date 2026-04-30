@@ -1,0 +1,107 @@
+// modules/forms/test_forms.cdo
+//
+// Full integration test for the forms module.  Windows-only -- on
+// Linux/macOS the module loads a stub backend whose constructors error
+// with "forms is only supported on Windows", and this script exits
+// before reaching any of them.
+//
+// Run interactively on Windows with:
+//
+//     cd modules\forms
+//     ..\..\cando.exe test_forms.cdo
+//
+// The script opens a sample form, attaches a few callbacks, and waits
+// up to 5 seconds before destroying the form.  CI does not invoke this
+// (no display); see test_forms_smoke.cdo for the headless check.
+
+VAR forms = NULL;
+TRY {
+    forms = include("./forms.dll");
+} CATCH (e) {
+    forms = include("./forms.so");
+}
+
+print("forms.VERSION   =", forms.VERSION);
+print("forms.platform  =", forms.platform);
+
+IF forms.supported == FALSE {
+    print("forms not supported on this platform; integration test skipped.");
+    EXIT(0);
+}
+
+// -- Build a form ----------------------------------------------------------
+VAR f = forms.Form();
+f:setText("CanDo Forms demo");
+f:setSize(420, 320);
+f:setLocation(200, 200);
+
+// Top-level click counter -- captured by the button's onClick.
+VAR clicks = 0;
+
+// -- Add controls ----------------------------------------------------------
+VAR title = forms.Label(f);
+title:setText("Hello from CanDo!");
+title:setLocation(20, 20);
+title:setSize(380, 24);
+
+VAR input = forms.TextBox(f);
+input:setLocation(20, 60);
+input:setSize(380, 24);
+input:setText("type here");
+input.onTextChanged = function(self) {
+    print("[textbox] text =", self:getText());
+};
+
+VAR check = forms.CheckBox(f);
+check:setText("Enable spinner");
+check:setLocation(20, 100);
+check:setSize(160, 24);
+
+VAR bar = forms.ProgressBar(f);
+bar:setLocation(20, 140);
+bar:setSize(380, 16);
+bar:setRange(0, 100);
+bar:setValue(35);
+
+VAR list = forms.ListBox(f);
+list:setLocation(20, 170);
+list:setSize(180, 100);
+list:addItem("Apples");
+list:addItem("Bananas");
+list:addItem("Cherries");
+list.onSelectionChanged = function(self) {
+    print("[list] sel =", self:getSelectedIndex());
+};
+
+VAR btn = forms.Button(f);
+btn:setText("Click me");
+btn:setLocation(220, 240);
+btn:setSize(180, 30);
+btn.onClick = function(self) {
+    clicks = clicks + 1;
+    bar:setValue((clicks * 10) % 101);
+    print("[button] click #" + clicks);
+};
+
+// -- Form-level callbacks --------------------------------------------------
+f.onClose = function(self) {
+    print("[form] close requested -- destroying.");
+    self:destroy();
+};
+f.onShown = function(self) {
+    print("[form] shown.");
+};
+f.onResize = function(self, w, h) {
+    print("[form] resized to", w, "x", h);
+};
+
+f:show();
+
+// Auto-close after 5s so this script can run unattended on a CI box.
+// Comment out to drive the form interactively.
+VAR start = os.time();
+WHILE f:isOpen() && (os.time() - start) < 5 {
+    os.sleep(0.05);
+}
+IF f:isOpen() { f:destroy(); }
+print("integration test done; clicks observed:", clicks);

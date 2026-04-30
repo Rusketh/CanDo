@@ -78,6 +78,34 @@ typedef struct {
      * onto the stack (pass_count).  All other expressions leave this at 1.
      * parse_var_decl uses this to count values correctly.                 */
     u32          last_multi_push;
+
+    /* Ternary nesting depth -------------------------------------------- */
+    /* Incremented while parsing the THEN branch of a `cond ? then : else`
+     * expression so that ':' is treated as the ternary delimiter rather
+     * than as the method-call infix operator.                            */
+    u32          ternary_then_depth;
+
+    /* Closure capture tracking ----------------------------------------- */
+    /* When parsing the body of a nested function, `outer_locals` /
+     * `outer_count` point at the enclosing function's local table.  An
+     * identifier that doesn't resolve inside the current body but does
+     * resolve in the outer table is captured: its outer-frame slot is
+     * appended to upvalue_specs[] and referenced via OP_LOAD_UPVAL.  At
+     * the matching OP_CLOSURE the recorded slots are written out as
+     * capture metadata so the VM can snapshot them at runtime.         */
+    CandoLocal  *outer_locals;
+    u32          outer_count;
+    u16          upvalue_specs[CANDO_LOCAL_MAX];
+    u16          upvalue_count;
+
+    /* Safe-access chain tracking (?., ?[) ------------------------------ */
+    /* When true, every member-access infix in the current expression also
+     * emits an OP_JUMP_IF_NULL guard so a null result mid-chain skips the
+     * remainder of the chain.  Patches are recorded in safe_chain_jumps[]
+     * and rewritten to point past the chain when parse_precedence finishes. */
+    bool         in_safe_chain;
+    u32          safe_chain_jumps[32];
+    u32          safe_chain_count;
 } CandoParser;
 
 /* Initialise parser; `chunk` receives all emitted bytecode.

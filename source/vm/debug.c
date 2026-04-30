@@ -137,6 +137,7 @@ u32 cando_instr_disasm(const CandoChunk *chunk, u32 offset, FILE *out) {
         case OP_PIPE_END:         return disasm_simple("OP_PIPE_END",         offset, out);
         case OP_PIPE_COLLECT:     return disasm_simple("OP_PIPE_COLLECT",     offset, out);
         case OP_FILTER_COLLECT:   return disasm_simple("OP_FILTER_COLLECT",   offset, out);
+        case OP_COND_FILTER_COLLECT: return disasm_simple("OP_COND_FILTER_COLLECT", offset, out);
         case OP_SPREAD_RET:       return disasm_simple("OP_SPREAD_RET",       offset, out);
         case OP_NOP:              return disasm_simple("OP_NOP",               offset, out);
         case OP_HALT:         return disasm_simple("OP_HALT",         offset, out);
@@ -149,7 +150,20 @@ u32 cando_instr_disasm(const CandoChunk *chunk, u32 offset, FILE *out) {
         case OP_DEF_CONST_GLOBAL: return disasm_const(chunk, "OP_DEF_CONST_GLOBAL", offset, out);
         case OP_GET_FIELD:        return disasm_const(chunk, "OP_GET_FIELD",        offset, out);
         case OP_SET_FIELD:        return disasm_const(chunk, "OP_SET_FIELD",        offset, out);
-        case OP_CLOSURE:          return disasm_const(chunk, "OP_CLOSURE",          offset, out);
+        case OP_CLOSURE: {
+            u16 idx = cando_read_u16(&chunk->code[offset + 1]);
+            u16 cap = cando_read_u16(&chunk->code[offset + 3]);
+            fprintf(out, "%-22s %5u    ", "OP_CLOSURE", idx);
+            if (idx < chunk->const_count)
+                print_const(&chunk->constants[idx], out);
+            fprintf(out, " (captures=%u", cap);
+            for (u16 ci = 0; ci < cap; ci++) {
+                u16 slot = cando_read_u16(&chunk->code[offset + 5 + ci * 2]);
+                fprintf(out, "%s%u", ci == 0 ? ": " : ",", slot);
+            }
+            fprintf(out, ")\n");
+            return offset + 5 + (u32)cap * 2;
+        }
         case OP_NEW_CLASS:        return disasm_const(chunk, "OP_NEW_CLASS",        offset, out);
         case OP_BIND_METHOD:      return disasm_const(chunk, "OP_BIND_METHOD",      offset, out);
 
@@ -189,6 +203,8 @@ u32 cando_instr_disasm(const CandoChunk *chunk, u32 offset, FILE *out) {
             return disasm_jump("OP_JUMP_IF_FALSE", offset, 1, chunk, out);
         case OP_JUMP_IF_TRUE:
             return disasm_jump("OP_JUMP_IF_TRUE",  offset, 1, chunk, out);
+        case OP_JUMP_IF_NULL:
+            return disasm_jump("OP_JUMP_IF_NULL",  offset, 1, chunk, out);
         case OP_LOOP:
             return disasm_jump("OP_LOOP",          offset, -1, chunk, out);
         case OP_AND_JUMP:

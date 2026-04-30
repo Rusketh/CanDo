@@ -89,7 +89,7 @@ static int find_op(const CandoChunk *c, CandoOpcode op)
     while (i < c->code_len) {
         CandoOpcode cur = (CandoOpcode)c->code[i];
         if (cur == op) return (int)i;
-        u32 sz = cando_opcode_size(cur);
+        u32 sz = cando_instr_size_at(c->code, i);
         i += (sz > 0) ? sz : 1;
     }
     return -1;
@@ -103,7 +103,7 @@ static int count_op(const CandoChunk *c, CandoOpcode op)
     while (i < c->code_len) {
         CandoOpcode cur = (CandoOpcode)c->code[i];
         if (cur == op) n++;
-        u32 sz = cando_opcode_size(cur);
+        u32 sz = cando_instr_size_at(c->code, i);
         i += (sz > 0) ? sz : 1;
     }
     return n;
@@ -127,6 +127,14 @@ static bool const_is_string(const CandoChunk *c, u32 idx, const char *expected)
     CandoString *s = v.as.string;
     return s->length == (u32)strlen(expected) &&
            memcmp(s->data, expected, s->length) == 0;
+}
+
+/* True if any string constant in the chunk equals expected. */
+static bool has_string_const(const CandoChunk *c, const char *expected)
+{
+    for (u32 i = 0; i < c->const_count; i++)
+        if (const_is_string(c, i, expected)) return true;
+    return false;
 }
 
 /* -------------------------------------------------------------------------
@@ -257,6 +265,130 @@ TEST(test_string_literal)
     CandoChunk *c = compile_ok("\"hello\";");
     EXPECT_EQ(c->code[0], (u8)OP_CONST);
     EXPECT_TRUE(const_is_string(c, 0, "hello"));
+    cando_chunk_free(c);
+}
+
+/* -------------------------------------------------------------------------
+ * Tests: backtick template strings -- `lit${expr}lit`
+ *
+ * Each ${expr} compiles to toString(expr) and concatenates with adjacent
+ * literal segments via OP_ADD.  The bare backtick form (no ${...}) emits
+ * a single OP_CONST with the literal body.
+ * ------------------------------------------------------------------------ */
+TEST(test_template_string_no_interpolation)
+{
+    /* "`hello`;" should behave like a plain string literal.               */
+    CandoChunk *c = compile_ok("`hello`;");
+    EXPECT_EQ(c->code[0], (u8)OP_CONST);
+    EXPECT_TRUE(has_string_const(c, "hello"));
+    /* No concatenation, no toString lookup. */
+    EXPECT_EQ(count_op(c, OP_ADD), 0);
+    EXPECT_FALSE(has_string_const(c, "toString"));
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_empty)
+{
+    /* "``;" should still emit something so the expression statement has
+     * a value to OP_POP.                                                  */
+    CandoChunk *c = compile_ok("``;");
+    EXPECT_EQ(c->code[0], (u8)OP_CONST);
+    EXPECT_TRUE(has_string_const(c, ""));
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_single_interp)
+{
+    /* "`hi ${name}`;" should:
+     *   - emit "hi " as a literal segment
+     *   - load global toString
+     *   - load global name
+     *   - OP_CALL with arity 1
+     *   - OP_ADD to concat literal + result                               */
+    CandoChunk *c = compile_ok("`hi ${name}`;");
+    EXPECT_TRUE(has_string_const(c, "hi "));
+    EXPECT_TRUE(has_string_const(c, "toString"));
+    EXPECT_TRUE(has_string_const(c, "name"));
+    EXPECT_EQ(count_op(c, OP_CALL), 1);
+    EXPECT_EQ(count_op(c, OP_ADD), 1);
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_only_interp)
+{
+    /* "`${42}`;" has no surrounding literal — only the toString call.    */
+    CandoChunk *c = compile_ok("`${42}`;");
+    EXPECT_TRUE(has_string_const(c, "toString"));
+    /* No surrounding literal means no concatenation. */
+    EXPECT_EQ(count_op(c, OP_ADD), 0);
+    EXPECT_EQ(count_op(c, OP_CALL), 1);
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_multiple_interps)
+{
+    /* "`a${x}b${y}c`;" produces 3 literal segments and 2 interpolations.
+     * Concatenation order with OP_ADD merges left-to-right, yielding
+     * 4 OP_ADDs (lit+toStr(x), then +lit, +toStr(y), +lit).              */
+    CandoChunk *c = compile_ok("`a${x}b${y}c`;");
+    EXPECT_TRUE(has_string_const(c, "a"));
+    EXPECT_TRUE(has_string_const(c, "b"));
+    EXPECT_TRUE(has_string_const(c, "c"));
+    EXPECT_TRUE(has_string_const(c, "x"));
+    EXPECT_TRUE(has_string_const(c, "y"));
+    EXPECT_TRUE(has_string_const(c, "toString"));
+    EXPECT_EQ(count_op(c, OP_CALL), 2);
+    EXPECT_EQ(count_op(c, OP_ADD), 4);
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_with_expression)
+{
+    /* "`sum=${1+2}`;" — interpolated expression with its own OP_ADD.
+     * Two OP_ADDs total: one inside ${...} (for 1+2) and one to
+     * concat the literal "sum=" with the result.                         */
+    CandoChunk *c = compile_ok("`sum=${1+2}`;");
+    EXPECT_TRUE(has_string_const(c, "sum="));
+    EXPECT_TRUE(has_string_const(c, "toString"));
+    EXPECT_TRUE(const_is_number(c, 0, 1.0) || const_is_number(c, 1, 1.0) ||
+                const_is_number(c, 2, 1.0) || const_is_number(c, 3, 1.0));
+    EXPECT_EQ(count_op(c, OP_CALL), 1);
+    EXPECT_EQ(count_op(c, OP_ADD), 2);
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_nested)
+{
+    /* "`outer ${ `inner ${x}` }`;" — a template inside a template.       */
+    CandoChunk *c = compile_ok("`outer ${ `inner ${x}` }`;");
+    EXPECT_TRUE(has_string_const(c, "outer "));
+    EXPECT_TRUE(has_string_const(c, "inner "));
+    EXPECT_TRUE(has_string_const(c, "x"));
+    /* Outer toString + inner toString = 2 calls. */
+    EXPECT_EQ(count_op(c, OP_CALL), 2);
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_method_call_inside)
+{
+    /* "`auth=${obj.name}`;" — method/field access inside ${...}.         */
+    CandoChunk *c = compile_ok("`auth=${obj.name}`;");
+    EXPECT_TRUE(has_string_const(c, "auth="));
+    EXPECT_TRUE(has_string_const(c, "toString"));
+    EXPECT_TRUE(has_string_const(c, "obj"));
+    EXPECT_TRUE(has_string_const(c, "name"));
+    EXPECT_TRUE(find_op(c, OP_GET_FIELD) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_template_string_empty_interp)
+{
+    /* "`pre ${} post`;" — interpolation with no expression should emit
+     * an empty string for that segment instead of erroring.              */
+    CandoChunk *c = compile_ok("`pre ${} post`;");
+    EXPECT_TRUE(has_string_const(c, "pre "));
+    EXPECT_TRUE(has_string_const(c, " post"));
+    EXPECT_TRUE(has_string_const(c, "toString"));
     cando_chunk_free(c);
 }
 
@@ -608,6 +740,95 @@ TEST(test_filter_operator)
     cando_chunk_free(c);
 }
 
+TEST(test_cond_filter_operator)
+{
+    /* The conditional filter shares the FILTER_NEXT loop opcode but emits
+     * OP_COND_FILTER_COLLECT instead of OP_FILTER_COLLECT.                */
+    CandoChunk *c = compile_ok("items ~&> pipe > 0;");
+    EXPECT_TRUE(find_op(c, OP_PIPE_INIT) >= 0);
+    EXPECT_TRUE(find_op(c, OP_FILTER_NEXT) >= 0);
+    EXPECT_TRUE(find_op(c, OP_COND_FILTER_COLLECT) >= 0);
+    EXPECT_TRUE(find_op(c, OP_PIPE_END) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_cond_filter_block)
+{
+    CandoChunk *c = compile_ok("items ~&> { return pipe % 2 == 0; };");
+    EXPECT_TRUE(find_op(c, OP_COND_FILTER_COLLECT) >= 0);
+    cando_chunk_free(c);
+}
+
+/* -------------------------------------------------------------------------
+ * Tests: ternary conditional
+ * ------------------------------------------------------------------------ */
+TEST(test_ternary_simple)
+{
+    CandoChunk *c = compile_ok("var x = TRUE ? 1 : 2;");
+    /* Ternary lowers to JUMP_IF_FALSE + JUMP, like an IF/ELSE. */
+    EXPECT_TRUE(find_op(c, OP_JUMP_IF_FALSE) >= 0);
+    EXPECT_TRUE(find_op(c, OP_JUMP) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_ternary_nested)
+{
+    /* Right-associative: a ? b : c ? d : e parses as a ? b : (c ? d : e). */
+    CompileResult r = compile("var x = TRUE ? 1 : FALSE ? 2 : 3;");
+    EXPECT_TRUE(r.ok);
+    if (r.chunk) cando_chunk_free(r.chunk);
+}
+
+TEST(test_ternary_in_assignment)
+{
+    CompileResult r = compile("var x; x = (1 < 2) ? \"yes\" : \"no\";");
+    EXPECT_TRUE(r.ok);
+    if (r.chunk) cando_chunk_free(r.chunk);
+}
+
+/* -------------------------------------------------------------------------
+ * Tests: safety indexer
+ * ------------------------------------------------------------------------ */
+TEST(test_safe_dot)
+{
+    CandoChunk *c = compile_ok("var x = obj?.a;");
+    EXPECT_TRUE(find_op(c, OP_JUMP_IF_NULL) >= 0);
+    EXPECT_TRUE(find_op(c, OP_GET_FIELD) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_safe_dot_chain)
+{
+    /* Every access after the first ?. should also be guarded. */
+    CandoChunk *c = compile_ok("var x = obj?.a.b.c;");
+    int n_guards = 0;
+    for (u32 i = 0; i < c->code_len; ) {
+        u8 op = c->code[i];
+        if (op == OP_JUMP_IF_NULL) n_guards++;
+        i += cando_instr_size_at(c->code, i);
+    }
+    EXPECT_TRUE(n_guards >= 3);   /* one per access in the chain */
+    cando_chunk_free(c);
+}
+
+TEST(test_safe_subscript)
+{
+    CandoChunk *c = compile_ok("var x = obj?[\"a\"];");
+    EXPECT_TRUE(find_op(c, OP_JUMP_IF_NULL) >= 0);
+    EXPECT_TRUE(find_op(c, OP_GET_INDEX) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_logical_or_lua)
+{
+    /* `||` should compile to OP_OR_JUMP (peek-keep-on-truthy) which gives
+     * Lua-style semantics: returns the left operand if truthy, else the
+     * right operand verbatim.                                            */
+    CandoChunk *c = compile_ok("var x = a || b;");
+    EXPECT_TRUE(find_op(c, OP_OR_JUMP) >= 0);
+    cando_chunk_free(c);
+}
+
 /* -------------------------------------------------------------------------
  * Tests: range operators
  * ------------------------------------------------------------------------ */
@@ -630,14 +851,56 @@ TEST(test_range_desc)
  * ------------------------------------------------------------------------ */
 TEST(test_class_declaration)
 {
-    CandoChunk *c = compile_ok("CLASS Dog { FUNCTION bark() { RETURN NULL; } }");
+    /* New class syntax:  the body between '{' and '}' is the constructor
+     * body, methods are added later as field assignments.                 */
+    CandoChunk *c = compile_ok(
+        "CLASS Dog = (self, name) { self.name = name; }");
     EXPECT_TRUE(find_op(c, OP_NEW_CLASS) >= 0);
-    EXPECT_TRUE(find_op(c, OP_BIND_METHOD) >= 0);
-    bool found = false;
+    EXPECT_TRUE(find_op(c, OP_CLOSURE) >= 0);            /* ctor closure   */
+    EXPECT_TRUE(find_op(c, OP_BIND_METHOD) >= 0);        /* __constructor  */
+    EXPECT_TRUE(find_op(c, OP_BIND_DEFAULT_CALL) >= 0);  /* default __call */
+    EXPECT_TRUE(find_op(c, OP_DEF_GLOBAL) >= 0);
+    bool dog_const = false, ctor_const = false;
     for (u32 i = 0; i < c->const_count; i++) {
-        if (const_is_string(c, i, "Dog")) { found = true; break; }
+        if (const_is_string(c, i, "Dog"))           dog_const  = true;
+        if (const_is_string(c, i, "__constructor")) ctor_const = true;
     }
-    EXPECT_TRUE(found);
+    EXPECT_TRUE(dog_const);
+    EXPECT_TRUE(ctor_const);
+    cando_chunk_free(c);
+}
+
+TEST(test_class_extends)
+{
+    CandoChunk *c = compile_ok(
+        "CLASS Animal = (self, name) { self.name = name; }\n"
+        "CLASS Dog EXTENDS Animal = (self, name, breed) {\n"
+        "    Animal.__constructor(self, name);\n"
+        "    self.breed = breed;\n"
+        "}");
+    EXPECT_TRUE(find_op(c, OP_INHERIT) >= 0);
+    EXPECT_TRUE(find_op(c, OP_BIND_DEFAULT_CALL) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_class_expression_form)
+{
+    /* Anonymous class assigned to a variable. */
+    CandoChunk *c = compile_ok(
+        "VAR Counter = class (self) { self.count = 0; };");
+    EXPECT_TRUE(find_op(c, OP_NEW_OBJECT) >= 0);  /* anon -> NEW_OBJECT  */
+    EXPECT_TRUE(find_op(c, OP_BIND_DEFAULT_CALL) >= 0);
+    EXPECT_TRUE(find_op(c, OP_DEF_GLOBAL) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_class_lowercase_keywords)
+{
+    /* The lexer treats pure lowercase keywords identically.              */
+    CandoChunk *c = compile_ok(
+        "class Vec = (self, x, y) { self.x = x; self.y = y; }");
+    EXPECT_TRUE(find_op(c, OP_NEW_CLASS) >= 0);
+    EXPECT_TRUE(find_op(c, OP_BIND_DEFAULT_CALL) >= 0);
     cando_chunk_free(c);
 }
 
@@ -758,7 +1021,7 @@ TEST(test_inline_function_no_spread_from_body)
     while (i < c->code_len) {
         CandoOpcode cur = (CandoOpcode)c->code[i];
         if (cur == OP_CALL) call_pos = (int)i;
-        u32 sz = cando_opcode_size(cur);
+        u32 sz = cando_instr_size_at(c->code, i);
         i += (sz > 0) ? sz : 1;
     }
     EXPECT_TRUE(call_pos >= 0);
@@ -776,7 +1039,7 @@ TEST(test_inline_function_body_with_method_call)
     while (i < c->code_len) {
         CandoOpcode cur = (CandoOpcode)c->code[i];
         if (cur == OP_CALL) call_pos = (int)i;
-        u32 sz = cando_opcode_size(cur);
+        u32 sz = cando_instr_size_at(c->code, i);
         i += (sz > 0) ? sz : 1;
     }
     EXPECT_TRUE(call_pos >= 0);
@@ -860,6 +1123,17 @@ int main(void)
     run_test("true/false literals",            test_true_false_literals);
     run_test("string literal",                 test_string_literal);
 
+    printf("\n-- template strings --\n");
+    run_test("backtick: no interpolation",     test_template_string_no_interpolation);
+    run_test("backtick: empty",                test_template_string_empty);
+    run_test("backtick: single ${name}",       test_template_string_single_interp);
+    run_test("backtick: only ${expr}",         test_template_string_only_interp);
+    run_test("backtick: multiple interps",     test_template_string_multiple_interps);
+    run_test("backtick: ${1+2} expression",    test_template_string_with_expression);
+    run_test("backtick: nested templates",     test_template_string_nested);
+    run_test("backtick: ${obj.name}",          test_template_string_method_call_inside);
+    run_test("backtick: empty ${} segment",    test_template_string_empty_interp);
+
     printf("\n-- arithmetic --\n");
     run_test("addition",                       test_addition);
     run_test("arithmetic operators",           test_arithmetic_operators);
@@ -908,6 +1182,15 @@ int main(void)
     printf("\n-- pipe / filter --\n");
     run_test("pipe operator (~>)",             test_pipe_operator);
     run_test("filter operator (~!>)",          test_filter_operator);
+    run_test("cond filter (~&>) inline",       test_cond_filter_operator);
+    run_test("cond filter (~&>) block",        test_cond_filter_block);
+    run_test("ternary simple",                 test_ternary_simple);
+    run_test("ternary nested (right-assoc)",   test_ternary_nested);
+    run_test("ternary in assignment",          test_ternary_in_assignment);
+    run_test("safe dot (?.)",                  test_safe_dot);
+    run_test("safe dot chain (?.a.b.c)",       test_safe_dot_chain);
+    run_test("safe subscript (?[])",           test_safe_subscript);
+    run_test("logical || (Lua semantics)",     test_logical_or_lua);
 
     printf("\n-- ranges --\n");
     run_test("ascending range (->)",           test_range_asc);
@@ -915,6 +1198,9 @@ int main(void)
 
     printf("\n-- classes --\n");
     run_test("class declaration",              test_class_declaration);
+    run_test("class extends",                  test_class_extends);
+    run_test("class expression (anon)",        test_class_expression_form);
+    run_test("class lowercase keywords",       test_class_lowercase_keywords);
 
     printf("\n-- compound --\n");
     run_test("nested if/while",                test_nested_if_while);

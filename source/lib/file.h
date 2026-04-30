@@ -33,4 +33,23 @@
  */
 CANDO_API void cando_lib_file_register(CandoVM *vm);
 
+/* =========================================================================
+ * Internal: build a file-stream around an existing FILE*.
+ *
+ * Used by other libraries (process, etc.) that already have a FILE* — for
+ * example after fdopen()ing a pipe — and want to expose it through the
+ * unified `stream` API without re-implementing the file vtable.
+ *
+ * The returned stream takes ownership of `fp`: closing the stream closes
+ * the file.  `caps` should match the open mode (READABLE for read-pipes,
+ * WRITABLE for write-pipes).  Returns cando_null() on pool exhaustion.
+ *
+ * Not part of the public CanDo API — declared here so process.c can call
+ * it without copy/pasting the file_stream vtable.
+ */
+#include <stdio.h>
+CANDO_API CandoValue cando_lib_file_stream_from_fp(CandoVM *vm,
+                                                   FILE *fp,
+                                                   unsigned caps);
+
 #endif /* CANDO_LIB_FILE_H */

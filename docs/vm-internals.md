@@ -338,9 +338,24 @@ and filter (`~!>`) operators.
 
 ### Band 16 — Classes
 
-`OP_NEW_CLASS` (A) — create class object named `constants[A]`.
-`OP_BIND_METHOD` (A) — bind method `constants[A]` to class on TOS.
-`OP_INHERIT` — set `__index` on child to parent.
+`OP_NEW_CLASS` (A) — create class object named `constants[A]`, push it.
+`OP_BIND_METHOD` (A) — pop a value and bind it to `constants[A]` on the
+class on TOS (class stays on TOS).
+`OP_INHERIT` — pop parent and child, set `child.__index = parent`, push
+the child back.  Used to wire up `EXTENDS Parent`.
+`OP_BIND_DEFAULT_CALL` — set the `__call` field on the class on TOS to
+the VM-wide default constructor native (`vm->default_class_call`).
+This is what makes a `CLASS` invokable as `ClassName(args)`.
+
+The default `__call` native receives `(class, args…)` from `OP_CALL`,
+allocates a new instance, sets `instance.__index = class`, then
+invokes `class.__constructor(instance, args…)` if the class declares
+one, and finally returns the instance.
+
+`OP_CALL` itself learned to follow `__call` when its callee is an
+object that is neither an `OBJ_FUNCTION` nor a native sentinel: the
+original callee is spliced in as the new first argument and dispatch
+is retried with `__call` as the new callee.
 
 ### Band 17 — Masks
 

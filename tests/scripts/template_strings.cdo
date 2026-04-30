@@ -1,0 +1,28 @@
+/* template_strings.cdo -- backtick template string interpolation */
+
+VAR name = "world";
+VAR n    = 42;
+
+/* Plain backtick (no interpolation) behaves like a string literal. */
+print(`hello`);
+
+/* Single ${expr} between literal segments. */
+print(`hi ${name}!`);
+
+/* Pure interpolation, no surrounding literal. */
+print(`${name}`);
+
+/* Multiple interpolations and arithmetic inside ${...}. */
+print(`${1 + 2} = three`);
+print(`a${n}b${n + 1}c`);
+
+/* Non-string values are coerced via toString(). */
+print(`bool=${TRUE} null=${NULL}`);
+
+/* Empty interpolation segment ${} renders as empty. */
+print(`pre${}post`);
+
+/* Nested templates: a backtick string inside ${...}. */
+VAR u = "user";
+VAR p = "pass";
+print(`auth=${`${u}:${p}`}`);

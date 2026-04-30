@@ -118,17 +118,24 @@ CANDO_LIB_SRCS = \
     source/lib/include.c          \
     source/lib/json.c             \
     source/lib/csv.c              \
+    source/lib/yaml.c             \
     source/lib/thread.c           \
     source/lib/os.c               \
+    source/lib/app.c              \
     source/lib/datetime.c         \
     source/lib/array.c            \
     source/lib/object.c           \
     source/lib/crypto.c           \
     source/lib/process.c          \
     source/lib/net.c              \
+    source/lib/sockutil.c         \
+    source/lib/socket.c           \
+    source/lib/secure_socket.c    \
     source/lib/httputil.c         \
     source/lib/http.c             \
     source/lib/https.c            \
+    source/lib/meta.c             \
+    source/lib/stream.c           \
     source/cando_lib.c
 
 # Windows compatibility shim added on Windows
@@ -140,18 +147,21 @@ CANDO_BIN = cando
 # Test binaries
 # ---------------------------------------------------------------------------
 
-TEST_CORE_BIN    = tests/test_core
-TEST_OBJECT_BIN  = tests/test_object
-TEST_LEXER_BIN   = tests/test_lexer
-TEST_PARSER_BIN  = tests/test_parser
-TEST_VM_BIN      = tests/test_vm
-TEST_THREAD_BIN  = tests/test_thread
+TEST_CORE_BIN     = tests/test_core
+TEST_OBJECT_BIN   = tests/test_object
+TEST_LEXER_BIN    = tests/test_lexer
+TEST_PARSER_BIN   = tests/test_parser
+TEST_VM_BIN       = tests/test_vm
+TEST_THREAD_BIN   = tests/test_thread
+TEST_SOCKUTIL_BIN = tests/test_sockutil
+TEST_YAML_BIN     = tests/test_yaml
 
-TEST_CORE_SRCS   = $(CORE_SRCS)   tests/test_core.c
-TEST_OBJECT_SRCS = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_object.c
-TEST_LEXER_SRCS  = $(LEXER_SRCS)  tests/test_lexer.c
-TEST_PARSER_SRCS = $(PARSER_SRCS) tests/test_parser.c
-TEST_THREAD_SRCS = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_thread.c
+TEST_CORE_SRCS     = $(CORE_SRCS)   tests/test_core.c
+TEST_OBJECT_SRCS   = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_object.c
+TEST_LEXER_SRCS    = $(LEXER_SRCS)  tests/test_lexer.c
+TEST_PARSER_SRCS   = $(PARSER_SRCS) tests/test_parser.c
+TEST_THREAD_SRCS   = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_thread.c
+TEST_SOCKUTIL_SRCS = $(CORE_SRCS) source/lib/sockutil.c tests/test_sockutil.c
 
 # ---------------------------------------------------------------------------
 # Default target
@@ -159,11 +169,13 @@ TEST_THREAD_SRCS = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_thread.c
 
 .PHONY: all cando libcando.so libcando.a \
         test test_core test_object test_lexer test_parser test_vm test_thread \
-        test_integration clean
+        test_sockutil test_yaml test_integration clean \
+        modules modules-test modules-windows modules-clean
 
 all: libcando.so libcando.a $(CANDO_BIN) \
      $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) \
-     $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN)
+     $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN) \
+     $(TEST_SOCKUTIL_BIN) $(TEST_YAML_BIN)
 
 # ---------------------------------------------------------------------------
 # Shared library: libcando.so
@@ -220,6 +232,17 @@ $(TEST_VM_BIN): $(CORE_SRCS) $(OBJECT_SRCS) $(VM_SRCS) tests/test_vm.c
 $(TEST_THREAD_BIN): $(TEST_THREAD_SRCS)
 	$(CC) $(CFLAGS_OBJECT) $^ -o $@ $(LDFLAGS)
 
+# test_sockutil links sockutil.c plus the core layer (for thread_platform).
+# It needs the lib/ headers to be visible via -iquote source.
+$(TEST_SOCKUTIL_BIN): $(TEST_SOCKUTIL_SRCS)
+	$(CC) $(CFLAGS_CORE) -iquote source -iquote source/lib $^ -o $@ $(LDFLAGS)
+
+# test_yaml uses the high-level embedding API so it links against libcando.so.
+$(TEST_YAML_BIN): tests/test_yaml.c libcando.so
+	$(CC) $(CFLAGS_EXE) tests/test_yaml.c \
+	    -L. -lcando -Wl,-rpath,'$$ORIGIN/..' \
+	    -o $@ $(LDFLAGS)
+
 test: all
 	./$(TEST_CORE_BIN)
 	./$(TEST_OBJECT_BIN)
@@ -227,6 +250,8 @@ test: all
 	./$(TEST_LEXER_BIN)
 	./$(TEST_PARSER_BIN)
 	./$(TEST_VM_BIN)
+	./$(TEST_SOCKUTIL_BIN)
+	./$(TEST_YAML_BIN)
 	bash tests/integration/run_tests.sh
 
 test_integration: $(CANDO_BIN)
@@ -250,6 +275,12 @@ test_vm: $(TEST_VM_BIN)
 test_thread: $(TEST_THREAD_BIN)
 	./$(TEST_THREAD_BIN)
 
+test_sockutil: $(TEST_SOCKUTIL_BIN)
+	./$(TEST_SOCKUTIL_BIN)
+
+test_yaml: $(TEST_YAML_BIN)
+	./$(TEST_YAML_BIN)
+
 # ---------------------------------------------------------------------------
 # Windows cross-compilation (requires mingw-w64)
 # ---------------------------------------------------------------------------
@@ -266,26 +297,85 @@ CFLAGS_WIN  = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0
 CFLAGS_EXE_WIN = -std=c11 -Wall -Wextra -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0600 \
                  -iquote source -iquote source/core -Iinclude
 
-LDFLAGS_WIN = -lm -lws2_32 -lssl -lcrypto -static-libgcc
+# OpenSSL and winpthread are linked statically into libcando.dll so the only
+# files needed at runtime are cando.exe and libcando.dll (no
+# libcrypto-3-x64.dll, libwinpthread-1.dll, etc.).
+# crypt32 is required by OpenSSL's static libcrypto on Windows.
+#
+# --whole-archive on libwinpthread forces every pthread symbol to be embedded,
+# so any reference (including ones GCC's spec adds implicitly after our flags)
+# resolves to the static archive instead of libwinpthread-1.dll.  The trailing
+# -Wl,-Bstatic catches the implicit -lpthread MinGW's GCC spec appends to
+# satisfy libgcc's internal pthread references.
+LDFLAGS_LIB_WIN = -static-libgcc \
+                  -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive \
+                  -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic \
+                  -lws2_32 -lcrypt32 -lm \
+                  -Wl,-Bstatic
+
+# The executable links against libcando.dll only — no OpenSSL needed here.
+# winpthread is statically linked defensively in case the toolchain pulls it
+# in for the EXE itself (libgcc's TLS/EH support references pthread symbols
+# even when the user code doesn't).
+LDFLAGS_EXE_WIN = -static-libgcc \
+                  -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive \
+                  -Wl,-Bdynamic -lws2_32 -lm \
+                  -Wl,-Bstatic
 
 libcando.dll: $(CANDO_LIB_SRCS) $(CANDO_WIN_EXTRA)
-	$(MINGW_CC) $(CFLAGS_WIN) -shared $^ -o $@ $(LDFLAGS_WIN) \
-	    -Wl,--out-implib,libcando.lib
+	$(MINGW_CC) $(CFLAGS_WIN) -shared $^ -o $@ \
+	    -Wl,--out-implib,libcando.lib $(LDFLAGS_LIB_WIN)
 
 icon.res: source/icon.rc assets/icon.ico
 	cd source && $(WINDRES) icon.rc -O coff -o ../icon.res
 
 cando.exe: source/main.c libcando.dll icon.res
 	$(MINGW_CC) $(CFLAGS_EXE_WIN) source/main.c icon.res \
-	    -L. -lcando -o $@ $(LDFLAGS_WIN)
+	    -L. -lcando -o $@ $(LDFLAGS_EXE_WIN)
+
+# ---------------------------------------------------------------------------
+# Binary modules (loaded by scripts via include())
+#
+# Each subdirectory of modules/ ships its own Makefile.  Add new module
+# directories to the MODULES list below.
+# ---------------------------------------------------------------------------
+
+MODULES = ldap sqlite sql window draw forms
+
+# Build every module's POSIX shared library.
+modules:
+	@for m in $(MODULES); do \
+	    echo "==> building module: $$m"; \
+	    $(MAKE) -C modules/$$m || exit $$?; \
+	done
+
+# Run every module's C unit-test suite.
+modules-test:
+	@for m in $(MODULES); do \
+	    echo "==> testing module: $$m"; \
+	    $(MAKE) -C modules/$$m test || exit $$?; \
+	done
+
+# Cross-compile every module to a Windows DLL.
+modules-windows:
+	@for m in $(MODULES); do \
+	    echo "==> cross-compiling module: $$m (windows)"; \
+	    $(MAKE) -C modules/$$m $$m.dll MINGW_CC=$(MINGW_CC) || exit $$?; \
+	done
+
+modules-clean:
+	@for m in $(MODULES); do \
+	    $(MAKE) -C modules/$$m clean || true; \
+	done
 
 # ---------------------------------------------------------------------------
 # Clean
 # ---------------------------------------------------------------------------
 
-clean:
+clean: modules-clean
 	rm -f $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) \
 	      $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN) \
+	      $(TEST_SOCKUTIL_BIN) $(TEST_YAML_BIN) \
 	      $(CANDO_BIN) cando.exe \
 	      libcando.so libcando.a libcando.dll libcando.lib icon.res
 	rm -rf $(LIBOBJS_DIR)

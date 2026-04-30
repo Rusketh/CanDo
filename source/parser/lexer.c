@@ -41,6 +41,7 @@ const char *cando_token_type_name(CandoTokenType t)
     case TOK_FOR:            return "FOR";
     case TOK_FUNCTION:       return "FUNCTION";
     case TOK_CLASS:          return "CLASS";
+    case TOK_EXTENDS:        return "EXTENDS";
     case TOK_RETURN:         return "RETURN";
     case TOK_THROW:          return "THROW";
     case TOK_TRY:            return "TRY";
@@ -66,6 +67,9 @@ const char *cando_token_type_name(CandoTokenType t)
 
     case TOK_PIPE_OP:        return "~>";
     case TOK_FILTER_OP:      return "~!>";
+    case TOK_COND_FILTER_OP: return "~&>";
+    case TOK_QDOT:           return "?.";
+    case TOK_QLBRACKET:      return "?[";
     case TOK_RANGE_ASC:      return "->";
     case TOK_RANGE_DESC:     return "<-";
     case TOK_FLUENT:         return "::";
@@ -113,6 +117,7 @@ const char *cando_token_type_name(CandoTokenType t)
     case TOK_SEMI:           return ";";
     case TOK_COMMA:          return ",";
     case TOK_COLON:          return ":";
+    case TOK_QUESTION:       return "?";
 
     case TOK_EOF:            return "EOF";
     case TOK_ERROR:          return "ERROR";
@@ -139,6 +144,7 @@ static const KeywordEntry KEYWORDS[] = {
     { "FOR",      3,  TOK_FOR      },
     { "FUNCTION", 8,  TOK_FUNCTION },
     { "CLASS",    5,  TOK_CLASS    },
+    { "EXTENDS",  7,  TOK_EXTENDS  },
     { "RETURN",   6,  TOK_RETURN   },
     { "THROW",    5,  TOK_THROW    },
     { "TRY",      3,  TOK_TRY      },
@@ -565,7 +571,7 @@ restart:
         }
         return make_token(lex, TOK_DOT, start_pos, start_line, start_line_start);
 
-    /* ---- '~' : tilde, ~>, ~!> ----------------------------------------- */
+    /* ---- '~' : tilde, ~>, ~!>, ~&> ----------------------------------- */
     case '~':
         if (lex_peek_char(lex) == '!') {
             /* Could be ~!> */
@@ -576,9 +582,26 @@ restart:
                 return make_token(lex, TOK_FILTER_OP, start_pos, start_line, start_line_start);
             }
         }
+        if (lex_peek_char(lex) == '&') {
+            /* Could be ~&> */
+            if (lex->pos + 1 < lex->source_len &&
+                lex->source[lex->pos + 1] == '>') {
+                lex_advance(lex); /* '&' */
+                lex_advance(lex); /* '>' */
+                return make_token(lex, TOK_COND_FILTER_OP, start_pos, start_line, start_line_start);
+            }
+        }
         if (lex_match(lex, '>'))
             return make_token(lex, TOK_PIPE_OP, start_pos, start_line, start_line_start);
         return make_token(lex, TOK_TILDE, start_pos, start_line, start_line_start);
+
+    /* ---- '?' : question, ?., ?[ --------------------------------------- */
+    case '?':
+        if (lex_match(lex, '.'))
+            return make_token(lex, TOK_QDOT, start_pos, start_line, start_line_start);
+        if (lex_match(lex, '['))
+            return make_token(lex, TOK_QLBRACKET, start_pos, start_line, start_line_start);
+        return make_token(lex, TOK_QUESTION, start_pos, start_line, start_line_start);
 
     /* ---- String literals ----------------------------------------------- */
     case '"':

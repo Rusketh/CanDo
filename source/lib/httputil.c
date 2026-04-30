@@ -5,6 +5,7 @@
  */
 
 #include "httputil.h"
+#include "sockutil.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -12,29 +13,6 @@
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
-
-#if defined(CANDO_PLATFORM_WINDOWS)
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  include <winsock2.h>
-#  include <ws2tcpip.h>
-#  define CLOSESOCK(fd) closesocket(fd)
-#  define SOCK_ERRNO() WSAGetLastError()
-typedef int socklen_t_compat;
-#else
-#  include <unistd.h>
-#  include <sys/types.h>
-#  include <sys/socket.h>
-#  include <netinet/in.h>
-#  include <netinet/tcp.h>
-#  include <arpa/inet.h>
-#  include <netdb.h>
-#  include <fcntl.h>
-#  include <sys/time.h>
-#  define CLOSESOCK(fd) close(fd)
-#  define SOCK_ERRNO() errno
-#endif
 
 /* =========================================================================
  * Dynamic byte buffer
@@ -247,29 +225,20 @@ void http_headers_free(HttpHeaders *h)
 }
 
 /* =========================================================================
- * One-time global init
+ * One-time global init  (delegates to sockutil)
  * ===================================================================== */
-
-static _Atomic(int) g_init_done = 0;
 
 void http_one_time_init(void)
 {
-    int expected = 0;
-    if (!atomic_compare_exchange_strong(&g_init_done, &expected, 1))
-        return;
-
-#if defined(CANDO_PLATFORM_WINDOWS)
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
-#endif
-
-    /* OpenSSL 1.1+ auto-initialises; this call is a no-op but harmless. */
-    (void)OPENSSL_init_ssl(
-        OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
+    sockutil_one_time_init();
 }
 
 /* =========================================================================
  * Connection abstraction
+ *
+ * HttpConn is now a thin wrapper around sockutil's primitives.  The fd field
+ * is preserved for binary compatibility with http.c which directly assigns
+ * incoming `accept`-returned descriptors into ctx->conn.fd.
  * ===================================================================== */
 
 void http_conn_init(HttpConn *c)
@@ -280,52 +249,14 @@ void http_conn_init(HttpConn *c)
     c->ssl_ctx = NULL;
 }
 
-static void set_timeouts(int fd, int timeout_ms)
-{
-    if (timeout_ms <= 0) return;
-#if defined(CANDO_PLATFORM_WINDOWS)
-    DWORD tv = (DWORD)timeout_ms;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv));
-#else
-    struct timeval tv;
-    tv.tv_sec  = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-#endif
-}
-
 bool http_conn_connect(HttpConn *c, const HttpUrl *url, int timeout_ms)
 {
-    http_one_time_init();
     http_conn_init(c);
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    char portstr[16];
-    snprintf(portstr, sizeof(portstr), "%d", url->port);
-
-    struct addrinfo *res = NULL;
-    int rc = getaddrinfo(url->host, portstr, &hints, &res);
-    if (rc != 0 || !res) return false;
-
-    int fd = -1;
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = (int)socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
-        set_timeouts(fd, timeout_ms);
-        if (connect(fd, ai->ai_addr, (socklen_t)ai->ai_addrlen) == 0) break;
-        CLOSESOCK(fd);
-        fd = -1;
-    }
-    freeaddrinfo(res);
-    if (fd < 0) return false;
-
-    c->fd = fd;
+    sockutil_socket_t fd = sockutil_tcp_connect(url->host, url->port,
+                                                AF_UNSPEC, timeout_ms,
+                                                NULL, 0);
+    if (fd == SOCKUTIL_INVALID_SOCKET) return false;
+    c->fd = (int)fd;
     return true;
 }
 
@@ -333,27 +264,18 @@ bool http_conn_start_tls_client(HttpConn *c, const char *sni_host)
 {
     if (c->fd < 0) return false;
 
-    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    /* Match the previous behaviour of httputil: no peer verification by
+     * default.  Callers that require verification should use the new
+     * `secure_socket` library which defaults verifyPeer to true. */
+    SockutilTlsClientOpts opts = { 0 };
+    opts.verify_peer = false;
+
+    SSL_CTX *ctx = sockutil_build_client_ssl_ctx(&opts, NULL, 0);
     if (!ctx) return false;
 
-    /* Use system default verify paths; we accept unverified by default
-     * (callers can strengthen later).  For self-signed testing we skip verify. */
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
-
-    SSL *ssl = SSL_new(ctx);
+    SSL *ssl = sockutil_tls_wrap((sockutil_socket_t)c->fd, ctx, true,
+                                 sni_host, NULL, 0);
     if (!ssl) {
-        SSL_CTX_free(ctx);
-        return false;
-    }
-
-    if (sni_host && *sni_host) {
-        SSL_set_tlsext_host_name(ssl, sni_host);
-    }
-
-    SSL_set_fd(ssl, c->fd);
-
-    if (SSL_connect(ssl) <= 0) {
-        SSL_free(ssl);
         SSL_CTX_free(ctx);
         return false;
     }
@@ -368,14 +290,9 @@ bool http_conn_start_tls_server(HttpConn *c, SSL_CTX *ctx)
 {
     if (c->fd < 0 || !ctx) return false;
 
-    SSL *ssl = SSL_new(ctx);
+    SSL *ssl = sockutil_tls_wrap((sockutil_socket_t)c->fd, ctx, false,
+                                 NULL, NULL, 0);
     if (!ssl) return false;
-
-    SSL_set_fd(ssl, c->fd);
-    if (SSL_accept(ssl) <= 0) {
-        SSL_free(ssl);
-        return false;
-    }
 
     c->ssl     = ssl;
     c->ssl_ctx = NULL;  /* context is owned externally (by the server) */
@@ -386,47 +303,29 @@ bool http_conn_start_tls_server(HttpConn *c, SSL_CTX *ctx)
 int http_conn_read(HttpConn *c, void *buf, int len)
 {
     if (c->fd < 0) return -1;
-    if (c->is_tls) {
-        return SSL_read(c->ssl, buf, len);
-    }
-#if defined(CANDO_PLATFORM_WINDOWS)
-    return recv(c->fd, (char *)buf, len, 0);
-#else
-    return (int)recv(c->fd, buf, (size_t)len, 0);
-#endif
+    if (c->is_tls) return sockutil_tls_recv(c->ssl, buf, len);
+    return sockutil_recv_raw((sockutil_socket_t)c->fd, buf, len);
 }
 
 int http_conn_write(HttpConn *c, const void *buf, int len)
 {
     if (c->fd < 0) return -1;
-    if (c->is_tls) {
-        return SSL_write(c->ssl, buf, len);
-    }
-#if defined(CANDO_PLATFORM_WINDOWS)
-    return send(c->fd, (const char *)buf, len, 0);
-#else
-    return (int)send(c->fd, buf, (size_t)len, 0);
-#endif
+    if (c->is_tls) return sockutil_tls_send(c->ssl, buf, len);
+    return sockutil_send_raw((sockutil_socket_t)c->fd, buf, len);
 }
 
 bool http_conn_write_all(HttpConn *c, const void *buf, usize len)
 {
-    const char *p = (const char *)buf;
-    usize left = len;
-    while (left > 0) {
-        int n = http_conn_write(c, p, (int)(left > 65536 ? 65536 : left));
-        if (n <= 0) return false;
-        p    += n;
-        left -= (usize)n;
-    }
-    return true;
+    if (c->fd < 0) return false;
+    return sockutil_send_all((sockutil_socket_t)c->fd,
+                             c->is_tls ? c->ssl : NULL,
+                             buf, len);
 }
 
 void http_conn_close(HttpConn *c)
 {
     if (c->ssl) {
-        SSL_shutdown(c->ssl);
-        SSL_free(c->ssl);
+        sockutil_tls_free(c->ssl);
         c->ssl = NULL;
     }
     if (c->ssl_ctx) {
@@ -434,7 +333,7 @@ void http_conn_close(HttpConn *c)
         c->ssl_ctx = NULL;
     }
     if (c->fd >= 0) {
-        CLOSESOCK(c->fd);
+        sockutil_close((sockutil_socket_t)c->fd);
         c->fd = -1;
     }
     c->is_tls = false;
@@ -709,6 +608,214 @@ bool http_read_response(HttpConn *conn, HttpResponse *r)
     }
     httpbuf_free(&recv);
     return true;
+}
+
+/* =========================================================================
+ * Streaming response: header-only parser + body state machine
+ * ===================================================================== */
+
+void http_response_head_init(HttpResponseHead *r)
+{
+    r->status     = 0;
+    r->reason[0]  = '\0';
+    r->framing    = HBF_NONE;
+    r->length_remaining = 0;
+    r->tail_off   = 0;
+    http_headers_init(&r->headers);
+    httpbuf_init(&r->tail);
+}
+
+void http_response_head_free(HttpResponseHead *r)
+{
+    http_headers_free(&r->headers);
+    httpbuf_free(&r->tail);
+}
+
+bool http_read_response_head(HttpConn *conn, HttpResponseHead *r)
+{
+    HttpBuf recv;
+    httpbuf_init(&recv);
+    usize offset = 0;
+
+    char line[8192];
+    int n = read_crlf_line(conn, &recv, &offset, line, sizeof(line));
+    if (n <= 0) { httpbuf_free(&recv); return false; }
+
+    /* HTTP/X.Y SP STATUS SP REASON */
+    char *sp1 = strchr(line, ' ');
+    if (!sp1) { httpbuf_free(&recv); return false; }
+    *sp1 = '\0';
+    char *code_s = sp1 + 1;
+    char *sp2 = strchr(code_s, ' ');
+    if (sp2) *sp2 = '\0';
+
+    r->status = (int)strtol(code_s, NULL, 10);
+    if (sp2) {
+        const char *reason = sp2 + 1;
+        usize rl = strlen(reason);
+        if (rl >= sizeof(r->reason)) rl = sizeof(r->reason) - 1;
+        memcpy(r->reason, reason, rl); r->reason[rl] = '\0';
+    }
+
+    if (!parse_headers(conn, &recv, &offset, &r->headers)) {
+        httpbuf_free(&recv);
+        return false;
+    }
+
+    /* Choose framing exactly as http_read_response does so the streamed
+     * path matches the buffered path byte-for-byte for any given server. */
+    const char *te = http_headers_get(&r->headers, "transfer-encoding");
+    const char *cl = http_headers_get(&r->headers, "content-length");
+    const char *cn = http_headers_get(&r->headers, "connection");
+    bool close_delim = (cn && strcasecmp(cn, "close") == 0);
+
+    if (te && strcasecmp(te, "chunked") == 0) {
+        r->framing = HBF_CHUNKED;
+    } else if (cl) {
+        r->framing = HBF_LENGTH;
+        r->length_remaining = strtoul(cl, NULL, 10);
+    } else if (close_delim || r->status == 200 || r->status == 204) {
+        r->framing = HBF_CLOSE;
+    } else {
+        r->framing = HBF_NONE;
+    }
+
+    /* Stash any bytes we over-read past the headers so the body reader
+     * sees them before going back to the wire. */
+    if (offset < recv.len) {
+        httpbuf_append(&r->tail, recv.data + offset, recv.len - offset);
+    }
+    r->tail_off = 0;
+    httpbuf_free(&recv);
+    return true;
+}
+
+void http_body_reader_init(HttpBodyReader *br,
+                           const HttpResponseHead *head, HttpConn *conn)
+{
+    br->conn             = conn;
+    br->framing          = head->framing;
+    br->length_remaining = head->length_remaining;
+    br->chunk_state      = 0;
+    br->chunk_remaining  = 0;
+    br->recv_off         = 0;
+    br->eof              = (head->framing == HBF_NONE) ||
+                           (head->framing == HBF_LENGTH &&
+                            head->length_remaining == 0);
+    httpbuf_init(&br->recv);
+    /* Seed the reader's recv buffer with whatever the head parser
+     * already pulled past the header terminator. */
+    if (head->tail.len > head->tail_off) {
+        httpbuf_append(&br->recv,
+                       head->tail.data + head->tail_off,
+                       head->tail.len - head->tail_off);
+    }
+}
+
+void http_body_reader_free(HttpBodyReader *br)
+{
+    httpbuf_free(&br->recv);
+    br->conn = NULL;
+}
+
+/* Drain min(cap, available) bytes out of br->recv into `out`.  Returns
+ * the number of bytes copied; advances recv_off. */
+static usize body_drain_recv(HttpBodyReader *br, void *out, usize cap)
+{
+    usize avail = br->recv.len - br->recv_off;
+    if (avail == 0) return 0;
+    usize n = cap < avail ? cap : avail;
+    memcpy(out, br->recv.data + br->recv_off, n);
+    br->recv_off += n;
+    return n;
+}
+
+int http_body_reader_read(HttpBodyReader *br, void *out, usize cap)
+{
+    if (br->eof || cap == 0) return 0;
+    u8 *outb = (u8 *)out;
+
+    if (br->framing == HBF_LENGTH) {
+        usize want = cap < br->length_remaining ? cap : br->length_remaining;
+        if (want == 0) { br->eof = true; return 0; }
+        usize taken = body_drain_recv(br, outb, want);
+        if (taken < want) {
+            int n = http_conn_read(br->conn, outb + taken,
+                                   (int)(want - taken));
+            if (n <= 0) return -1;
+            taken += (usize)n;
+        }
+        br->length_remaining -= taken;
+        if (br->length_remaining == 0) br->eof = true;
+        return (int)taken;
+    }
+
+    if (br->framing == HBF_CLOSE) {
+        usize taken = body_drain_recv(br, outb, cap);
+        if (taken == 0) {
+            int n = http_conn_read(br->conn, outb, (int)cap);
+            if (n < 0)  return -1;
+            if (n == 0) { br->eof = true; return 0; }
+            taken = (usize)n;
+        }
+        return (int)taken;
+    }
+
+    if (br->framing == HBF_CHUNKED) {
+        /* Iterate the state machine until we have at least one byte for
+         * the caller, hit clean EOF, or hit an error.  cap > 0 here so
+         * the loop terminates as soon as `taken` advances. */
+        usize taken = 0;
+        while (taken == 0 && !br->eof) {
+            if (br->chunk_state == 0) {
+                char line[64];
+                int n = read_crlf_line(br->conn, &br->recv, &br->recv_off,
+                                       line, sizeof(line));
+                if (n < 0) return -1;
+                char *semi = strchr(line, ';');
+                if (semi) *semi = '\0';
+                br->chunk_remaining = (usize)strtoul(line, NULL, 16);
+                if (br->chunk_remaining == 0) {
+                    /* Consume any trailers, then we're done. */
+                    while (1) {
+                        n = read_crlf_line(br->conn, &br->recv, &br->recv_off,
+                                           line, sizeof(line));
+                        if (n < 0) return -1;
+                        if (n == 0) break;
+                    }
+                    br->chunk_state = 3;
+                    br->eof = true;
+                    return 0;
+                }
+                br->chunk_state = 1;
+            } else if (br->chunk_state == 1) {
+                usize want = cap < br->chunk_remaining ? cap : br->chunk_remaining;
+                usize from_buf = body_drain_recv(br, outb, want);
+                taken += from_buf;
+                br->chunk_remaining -= from_buf;
+                if (br->chunk_remaining > 0 && taken < cap) {
+                    usize need = cap - taken;
+                    if (need > br->chunk_remaining) need = br->chunk_remaining;
+                    int n = http_conn_read(br->conn, outb + taken, (int)need);
+                    if (n <= 0) return -1;
+                    taken += (usize)n;
+                    br->chunk_remaining -= (usize)n;
+                }
+                if (br->chunk_remaining == 0) br->chunk_state = 2;
+            } else if (br->chunk_state == 2) {
+                char line[8];
+                int n = read_crlf_line(br->conn, &br->recv, &br->recv_off,
+                                       line, sizeof(line));
+                if (n != 0) return -1;     /* expected empty CRLF */
+                br->chunk_state = 0;
+            }
+        }
+        return (int)taken;
+    }
+
+    /* HBF_NONE — no body. */
+    br->eof = true;
+    return 0;
 }
 
 /* =========================================================================

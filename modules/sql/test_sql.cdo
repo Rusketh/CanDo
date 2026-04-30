@@ -1,0 +1,190 @@
+// modules/sql/test_sql.cdo -- script-level integration tests for the SQL
+// module.  Run with:
+//
+//     ./cando modules/sql/test_sql.cdo
+//
+// This script tries to talk to a PostgreSQL server at $PG_HOST or
+// 127.0.0.1:5432 and a MySQL/MariaDB server at $MYSQL_HOST or
+// 127.0.0.1:3306.  Each driver section is skipped gracefully when no
+// server is reachable, so the script also acts as a no-server smoke
+// test for the API surface.
+//
+// Configure with environment variables:
+//   PG_HOST PG_PORT PG_USER PG_PASSWORD PG_DATABASE
+//   MYSQL_HOST MYSQL_PORT MYSQL_USER MYSQL_PASSWORD MYSQL_DATABASE
+
+VAR sql = include("./sql.so");
+
+VAR pass = 0;
+VAR fail = 0;
+VAR skip = 0;
+
+FUNCTION expect(name, ok) {
+    IF ok {
+        print(`  PASS  ${name}`);
+        pass = pass + 1;
+    } ELSE {
+        print(`  FAIL  ${name}`);
+        fail = fail + 1;
+    }
+}
+
+FUNCTION env_or(name, def) {
+    VAR v = os.getenv(name);
+    IF type(v) != "string" || v == "" { return def; }
+    return v;
+}
+
+// ---- Module surface --------------------------------------------------------
+print("\n[module surface]");
+expect("method: open",          type(sql.open)          == "number");
+expect("method: openPostgres",  type(sql.openPostgres)  == "number");
+expect("method: openMySQL",     type(sql.openMySQL)     == "number");
+expect("method: exec",          type(sql.exec)          == "number");
+expect("method: prepare",       type(sql.prepare)       == "number");
+expect("method: run",           type(sql.run)           == "number");
+expect("method: get",           type(sql.get)           == "number");
+expect("method: all",           type(sql.all)           == "number");
+expect("method: begin",         type(sql.begin)         == "number");
+expect("method: commit",        type(sql.commit)        == "number");
+expect("method: rollback",      type(sql.rollback)      == "number");
+expect("method: transaction",   type(sql.transaction)   == "number");
+expect("VERSION is a string",   type(sql.VERSION)       == "string");
+expect("DRIVER_POSTGRES const", sql.DRIVER_POSTGRES     == "postgres");
+expect("DRIVER_MYSQL const",    sql.DRIVER_MYSQL        == "mysql");
+
+// ---- Argument-validation paths (no server needed) -------------------------
+print("\n[argument validation]");
+VAR caught = "";
+TRY { sql.open(); } CATCH (m) { caught = m; }
+expect("open(): missing driver throws", caught != "");
+
+caught = "";
+TRY { sql.open("oracle"); } CATCH (m) { caught = m; }
+expect("open(\"oracle\"): unknown driver throws", caught != "");
+
+caught = "";
+TRY { sql.exec(); } CATCH (m) { caught = m; }
+expect("exec(): missing args throws", caught != "");
+
+caught = "";
+TRY { sql.exec("not a handle", "SELECT 1"); } CATCH (m) { caught = m; }
+expect("exec(non-handle) throws", caught != "");
+
+// ---- PostgreSQL ------------------------------------------------------------
+FUNCTION run_pg_tests() {
+    VAR opts = {
+        host:     env_or("PG_HOST", "127.0.0.1"),
+        port:     5432,
+        user:     env_or("PG_USER",     "postgres"),
+        password: env_or("PG_PASSWORD", "postgres"),
+        database: env_or("PG_DATABASE", "postgres"),
+        applicationName: "cdo-sql-test",
+        connectTimeout: 2000
+    };
+
+    VAR db = NULL;
+    TRY {
+        db = sql.openPostgres(opts);
+    } CATCH (e) {
+        print(`  SKIP  postgres unavailable (${e})`);
+        skip = skip + 1;
+        return;
+    }
+    expect("postgres: open returns object", type(db) == "object");
+    expect("postgres: handle has __sql_db_slot",
+        type(db.__sql_db_slot) == "number");
+    expect("postgres: handle.driver = \"postgres\"",
+        db.driver == "postgres");
+
+    // Round-trip simple exec.
+    db:exec("CREATE TEMP TABLE cdo_t (id INTEGER PRIMARY KEY, name TEXT)");
+    VAR ins = db:exec("INSERT INTO cdo_t VALUES (1, 'Ada'), (2, 'Grace')");
+    expect("postgres: exec affected = 2", ins.affected == 2);
+
+    // Prepared statement with params (text-protocol $1, $2 placeholders).
+    VAR s = db:prepare("SELECT id, name FROM cdo_t WHERE id >= ? ORDER BY id");
+    expect("postgres: prepare returns object", type(s) == "object");
+    VAR rows = s:all(1);
+    expect("postgres: all returns array", type(rows) == "array");
+    expect("postgres: all length = 2",     #rows == 2);
+    expect("postgres: row[0].id = 1",      rows[0].id == 1);
+    expect("postgres: row[0].name = Ada",  rows[0].name == "Ada");
+    s:finalize();
+
+    // get() returns null on no rows.
+    VAR s2 = db:prepare("SELECT 1 AS x WHERE 0 = 1");
+    VAR none = s2:get();
+    expect("postgres: get on empty result is null", none == NULL);
+    s2:finalize();
+
+    // Transaction commit + rollback path.
+    db:begin();
+    db:exec("INSERT INTO cdo_t VALUES (3, 'Hopper')");
+    db:rollback();
+    VAR s3 = db:prepare("SELECT count(*) AS n FROM cdo_t");
+    VAR r  = s3:get();
+    expect("postgres: rollback removed insert", r.n == 2);
+    s3:finalize();
+
+    // SQLSTATE multi-value catch on UNIQUE violation.
+    VAR caught_msg = "";
+    VAR caught_sqlstate = "";
+    TRY {
+        db:exec("INSERT INTO cdo_t VALUES (1, 'dup')");
+    } CATCH (msg, code, sqlstate) {
+        caught_msg = msg;
+        caught_sqlstate = sqlstate;
+    }
+    expect("postgres: UNIQUE violation surfaces sqlstate",
+        caught_sqlstate == "23505");
+
+    db:close();
+}
+
+print("\n[postgres]");
+run_pg_tests();
+
+// ---- MySQL -----------------------------------------------------------------
+FUNCTION run_my_tests() {
+    VAR opts = {
+        host:     env_or("MYSQL_HOST", "127.0.0.1"),
+        port:     3306,
+        user:     env_or("MYSQL_USER",     "root"),
+        password: env_or("MYSQL_PASSWORD", ""),
+        database: env_or("MYSQL_DATABASE", "test"),
+        connectTimeout: 2000
+    };
+
+    VAR db = NULL;
+    TRY {
+        db = sql.openMySQL(opts);
+    } CATCH (e) {
+        print(`  SKIP  mysql unavailable (${e})`);
+        skip = skip + 1;
+        return;
+    }
+    expect("mysql: open returns object",     type(db) == "object");
+    expect("mysql: handle.driver = \"mysql\"", db.driver == "mysql");
+
+    db:exec("DROP TEMPORARY TABLE IF EXISTS cdo_t");
+    db:exec("CREATE TEMPORARY TABLE cdo_t (id INTEGER PRIMARY KEY, name TEXT)");
+    VAR ins = db:exec("INSERT INTO cdo_t VALUES (1, 'Ada'), (2, 'Grace')");
+    expect("mysql: exec affected = 2", ins.affected == 2);
+
+    VAR s = db:prepare("SELECT id, name FROM cdo_t WHERE id >= ? ORDER BY id");
+    expect("mysql: prepare returns object", type(s) == "object");
+    VAR rows = s:all(1);
+    expect("mysql: all returns array", type(rows) == "array");
+    expect("mysql: all length = 2",     #rows == 2);
+    expect("mysql: row[0].id = 1",      rows[0].id == 1);
+    s:finalize();
+
+    db:close();
+}
+
+print("\n[mysql]");
+run_my_tests();
+
+print(`\nresults: ${pass} pass, ${fail} fail, ${skip} skip`);
+IF fail > 0 { os.exit(1); }

@@ -6,6 +6,7 @@
 
 #include "array.h"
 #include "libutil.h"
+#include "meta.h"
 #include "../vm/bridge.h"
 #include "../object/object.h"
 #include "../object/array.h"
@@ -337,4 +338,9 @@ void cando_lib_array_register(CandoVM *vm)
 
     cando_vm_set_global(vm, "array", proto_val, true);
     vm->array_proto = proto_val;
+
+    /* Mirror onto `_meta.array` so user scripts can extend the prototype
+     * via either name (`array.foo = ...` or `_meta.array.foo = ...`). */
+    cando_lib_meta_register(vm);
+    cando_lib_meta_set(vm, "array", proto);
 }

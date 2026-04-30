@@ -1,0 +1,179 @@
+{
+  "Variable declaration": {
+    "prefix": ["var", "VAR"],
+    "body": ["VAR ${1:name} = ${2:value};"],
+    "description": "Declare a mutable variable."
+  },
+  "Constant declaration": {
+    "prefix": ["const", "CONST"],
+    "body": ["CONST ${1:name} = ${2:value};"],
+    "description": "Declare an immutable constant."
+  },
+  "Global declaration": {
+    "prefix": ["global", "GLOBAL"],
+    "body": ["GLOBAL ${1:name} = ${2:value};"],
+    "description": "Declare a global variable."
+  },
+  "If statement": {
+    "prefix": ["if", "IF"],
+    "body": [
+      "IF ${1:condition} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "If statement."
+  },
+  "If / Else": {
+    "prefix": ["ife", "IFE"],
+    "body": [
+      "IF ${1:condition} {",
+      "\t$2",
+      "} ELSE {",
+      "\t$0",
+      "}"
+    ],
+    "description": "If / else statement."
+  },
+  "Multi-comparison If": {
+    "prefix": ["ifmulti", "IFMULTI"],
+    "body": [
+      "IF ${1:value} == ${2:a}, ${3:b}, ${4:c} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "If with multi-comparison list."
+  },
+  "While loop": {
+    "prefix": ["while", "WHILE"],
+    "body": [
+      "WHILE ${1:condition} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "While loop."
+  },
+  "For range (ascending)": {
+    "prefix": ["forasc", "FORASC"],
+    "body": [
+      "FOR ${1:i} OF ${2:1} -> ${3:n} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Ascending range loop."
+  },
+  "For range (descending)": {
+    "prefix": ["fordesc", "FORDESC"],
+    "body": [
+      "FOR ${1:i} OF ${2:n} <- ${3:1} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Descending range loop."
+  },
+  "For-in loop": {
+    "prefix": ["forin", "FORIN"],
+    "body": [
+      "FOR ${1:item} IN ${2:collection} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Iterate elements of a collection."
+  },
+  "For-over loop": {
+    "prefix": ["forover", "FOROVER"],
+    "body": [
+      "FOR ${1:key}, ${2:value} OVER ${3:object} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Iterate keys and values of an object."
+  },
+  "Function declaration": {
+    "prefix": ["fn", "function", "FUNCTION"],
+    "body": [
+      "FUNCTION ${1:name}(${2:args}) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Named function."
+  },
+  "Lambda function": {
+    "prefix": ["lambda", "=>"],
+    "body": ["(${1:args}) => ${0:expr}"],
+    "description": "Lambda / arrow function."
+  },
+  "Class declaration": {
+    "prefix": ["class", "CLASS"],
+    "body": [
+      "CLASS ${1:Name} {",
+      "\tFUNCTION init(${2:args}) {",
+      "\t\t$0",
+      "\t}",
+      "}"
+    ],
+    "description": "Class declaration with init."
+  },
+  "Class extends": {
+    "prefix": ["classx", "CLASSX"],
+    "body": [
+      "CLASS ${1:Name} EXTENDS ${2:Parent} {",
+      "\tFUNCTION init(${3:args}) {",
+      "\t\t$0",
+      "\t}",
+      "}"
+    ],
+    "description": "Class extending another class."
+  },
+  "Try / catch / finaly": {
+    "prefix": ["try", "TRY"],
+    "body": [
+      "TRY {",
+      "\t$1",
+      "} CATCH ${2:err} {",
+      "\t$3",
+      "} FINALY {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Try / catch / finaly block (note: FINALY, one L)."
+  },
+  "Pipe map": {
+    "prefix": ["pipe", "~>"],
+    "body": ["${1:array} ~> { RETURN ${0:expr}; }"],
+    "description": "Functional map using ~>."
+  },
+  "Pipe filter": {
+    "prefix": ["filter", "~!>"],
+    "body": ["${1:array} ~!> { RETURN ${0:predicate}; }"],
+    "description": "Functional filter using ~!>."
+  },
+  "Conditional filter": {
+    "prefix": ["cfilter", "~&>"],
+    "body": ["${1:array} ~&> ${0:predicate}"],
+    "description": "Conditional filter using ~&> (predicate keeps value)."
+  },
+  "Ternary": {
+    "prefix": ["ternary", "?:"],
+    "body": ["${1:cond} ? ${2:a} : ${0:b}"],
+    "description": "Ternary conditional."
+  },
+  "Print": {
+    "prefix": "print",
+    "body": ["print(${0:value});"],
+    "description": "Print to stdout."
+  },
+  "Thread spawn": {
+    "prefix": ["thread", "THREAD"],
+    "body": ["THREAD ${0:expr};"],
+    "description": "Spawn an OS thread to run the expression."
+  },
+  "Async function": {
+    "prefix": ["async", "ASYNC"],
+    "body": [
+      "ASYNC FUNCTION ${1:name}(${2:args}) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Asynchronous function."
+  }
+}

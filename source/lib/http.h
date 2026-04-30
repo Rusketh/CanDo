@@ -57,4 +57,12 @@ int http_do_request_native(CandoVM *vm, int argc, CandoValue *args,
 int http_create_server_native_impl(CandoVM *vm, CandoValue callback,
                                    struct SSL_CTX_st *ssl_ctx);
 
+/*
+ * http_register_meta_tables -- create / populate `_meta.http_request`,
+ * `_meta.http_response`, `_meta.http_client_response`, and `_meta.http_server`
+ * with their default native methods.  Idempotent.  Used by both the http and
+ * https library registration paths.
+ */
+void http_register_meta_tables(CandoVM *vm);
+
 #endif /* CANDO_LIB_HTTP_H */

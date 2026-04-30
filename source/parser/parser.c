@@ -26,6 +26,7 @@
 typedef enum {
     PREC_NONE,
     PREC_ASSIGN,      /* =  +=  -=  *=  /=  %=  ^=          right-assoc */
+    PREC_TERNARY,     /* ?:                                  right-assoc */
     PREC_OR,          /* ||                                               */
     PREC_AND,         /* &&                                               */
     PREC_BITOR,       /* |                                                */
@@ -58,6 +59,7 @@ static void        parse_precedence(CandoParser *p, Precedence min_prec);
 static void        parse_statement(CandoParser *p);
 static void        parse_block(CandoParser *p);
 static void        parse_function_expr(CandoParser *p, bool can_assign);
+static void        parse_class_expr(CandoParser *p, bool can_assign);
 static const ParseRule *get_rule(CandoTokenType t);
 
 /* ---- chunk shortcut --------------------------------------------------- */
@@ -274,9 +276,130 @@ static void parse_number(CandoParser *p, bool can_assign)
     emit_op_a(p, OP_CONST, idx);
 }
 
+/* Compile a backtick template string `lit${expr}lit...` as a chain of
+ * concatenations. Each ${expr} is wrapped in toString(...) so non-string
+ * values (numbers, bools, ...) interpolate correctly via the OP_ADD string-
+ * concat path. The lexer has already validated brace balance for the whole
+ * token; we re-walk the body here to split segments and re-lex each
+ * expression substring with a sub-lexer. */
+static void parse_template_string(CandoParser *p)
+{
+    const char *body  = p->previous.start + 1;
+    u32         total = p->previous.length >= 2 ? p->previous.length - 2 : 0;
+    u32         start_line = p->previous.line;
+
+    bool emitted = false;  /* true once we've pushed something on the stack */
+    u32  i = 0;
+
+    while (i < total) {
+        /* Scan literal segment up to the next "${" or end. */
+        u32 lit_start = i;
+        while (i < total) {
+            char c = body[i];
+            if (c == '\\' && i + 1 < total) { i += 2; continue; }
+            if (c == '$' && i + 1 < total && body[i + 1] == '{') break;
+            i++;
+        }
+        u32 lit_len = i - lit_start;
+        if (lit_len > 0) {
+            u16 idx = str_const(p, body + lit_start, lit_len);
+            emit_op_a(p, OP_CONST, idx);
+            if (emitted) emit_op(p, OP_ADD);
+            emitted = true;
+        }
+        if (i >= total) break;
+
+        /* Found "${": find the matching '}'. */
+        i += 2;
+        u32 expr_start = i;
+        int depth = 1;
+        while (i < total) {
+            char c = body[i];
+            if (c == '\\' && i + 1 < total) { i += 2; continue; }
+            if      (c == '{') depth++;
+            else if (c == '}') { depth--; if (depth == 0) break; }
+            i++;
+        }
+        u32 expr_len = i - expr_start;
+        if (i < total && body[i] == '}') i++;  /* consume closing '}' */
+
+        /* Emit toString(<expr>) — load the global, parse the expression,
+         * then OP_CALL with one argument. */
+        u16 fn_idx = str_const(p, "toString", 8);
+        emit_op_a(p, OP_LOAD_GLOBAL, fn_idx);
+
+        /* Trim leading whitespace so an empty `${ }` is detected cleanly. */
+        u32 trim_start = expr_start, trim_end = expr_start + expr_len;
+        while (trim_start < trim_end &&
+               (body[trim_start] == ' '  || body[trim_start] == '\t' ||
+                body[trim_start] == '\n' || body[trim_start] == '\r'))
+            trim_start++;
+
+        if (trim_start >= trim_end) {
+            /* Empty interpolation: pass an empty string so toString(...) is
+             * still well-formed. */
+            u16 empty_idx = str_const(p, "", 0);
+            emit_op_a(p, OP_CONST, empty_idx);
+        } else {
+            /* Save outer parser state, swap in a sub-lexer over the
+             * expression substring, parse, then restore.                  */
+            CandoLexer saved_lexer    = p->lexer;
+            CandoToken saved_current  = p->current;
+            CandoToken saved_previous = p->previous;
+            bool       saved_panic    = p->panic_mode;
+            u32        saved_call_d   = p->call_depth;
+            bool       saved_was_call = p->last_expr_was_call;
+            bool       saved_was_unp  = p->last_expr_was_unpack;
+            u32        saved_mpush    = p->last_multi_push;
+
+            cando_lexer_init(&p->lexer, body + expr_start, expr_len);
+            p->lexer.line = start_line;
+            p->panic_mode = false;
+            p->call_depth = 0;
+            p->last_expr_was_call   = false;
+            p->last_expr_was_unpack = false;
+            p->last_multi_push      = 1;
+
+            advance(p);  /* prime current with first token of the sub-expr */
+            parse_expression(p);
+            /* If the inner expression was itself a call, spread its return
+             * values into our toString argument list so the static argc=1
+             * gets adjusted at runtime to the actual count.               */
+            if (p->last_expr_was_call) emit_op(p, OP_SPREAD_RET);
+
+            p->lexer    = saved_lexer;
+            p->current  = saved_current;
+            p->previous = saved_previous;
+            p->panic_mode           = saved_panic;
+            p->call_depth           = saved_call_d;
+            p->last_expr_was_call   = saved_was_call;
+            p->last_expr_was_unpack = saved_was_unp;
+            p->last_multi_push      = saved_mpush;
+        }
+
+        emit_op_a(p, OP_CALL, 1);
+        if (emitted) emit_op(p, OP_ADD);
+        emitted = true;
+    }
+
+    if (!emitted) {
+        u16 idx = str_const(p, "", 0);
+        emit_op_a(p, OP_CONST, idx);
+    }
+
+    /* The result is a single string value. */
+    p->last_expr_was_call   = false;
+    p->last_expr_was_unpack = false;
+    p->last_multi_push      = 1;
+}
+
 static void parse_string_literal(CandoParser *p, bool can_assign)
 {
     (void)can_assign;
+    if (p->previous.type == TOK_STRING_BT) {
+        parse_template_string(p);
+        return;
+    }
     const char *s   = p->previous.start + 1;
     u32         len = p->previous.length >= 2 ? p->previous.length - 2 : 0;
     u16 idx = str_const(p, s, len);
@@ -345,16 +468,52 @@ static void parse_unary(CandoParser *p, bool can_assign)
     p->last_expr_was_call = false;
 }
 
-/* Emit load for a name, using local slot if available, else global. */
+/* Look up `name` in the immediate enclosing function's local table; if
+ * found, register an upvalue capture (de-duplicating by slot) and return
+ * its index in upvalue_specs[].  Returns -1 if no outer local matches.
+ *
+ * Only the *immediate* enclosing function is consulted -- closures over
+ * locals more than one function deep are not supported yet, but
+ * single-level capture covers script-body locals that the user is most
+ * likely to close over (e.g. loop variables in the script's main scope).
+ */
+static int resolve_upvalue(CandoParser *p, const char *name, u32 len)
+{
+    if (!p->outer_locals || p->outer_count == 0) return -1;
+    for (int i = (int)p->outer_count - 1; i >= 0; i--) {
+        CandoLocal *loc = &p->outer_locals[i];
+        if (loc->len == len && memcmp(loc->name, name, len) == 0) {
+            /* Already captured? */
+            for (u16 j = 0; j < p->upvalue_count; j++) {
+                if (p->upvalue_specs[j] == (u16)i) return (int)j;
+            }
+            if (p->upvalue_count >= CANDO_LOCAL_MAX) {
+                error(p, "too many captured upvalues");
+                return -1;
+            }
+            p->upvalue_specs[p->upvalue_count] = (u16)i;
+            return (int)p->upvalue_count++;
+        }
+    }
+    return -1;
+}
+
+/* Emit load for a name, using local slot if available, then closure
+ * upvalue, else global. */
 static void emit_load(CandoParser *p, const char *name, u32 len)
 {
     int slot = resolve_local(p, name, len);
     if (slot >= 0) {
         emit_op_a(p, OP_LOAD_LOCAL, (u16)slot);
-    } else {
-        u16 idx = str_const(p, name, len);
-        emit_op_a(p, OP_LOAD_GLOBAL, idx);
+        return;
     }
+    int uv = resolve_upvalue(p, name, len);
+    if (uv >= 0) {
+        emit_op_a(p, OP_LOAD_UPVAL, (u16)uv);
+        return;
+    }
+    u16 idx = str_const(p, name, len);
+    emit_op_a(p, OP_LOAD_GLOBAL, idx);
 }
 
 /* Emit store for a name. */
@@ -363,9 +522,35 @@ static void emit_store(CandoParser *p, const char *name, u32 len)
     int slot = resolve_local(p, name, len);
     if (slot >= 0) {
         emit_op_a(p, OP_STORE_LOCAL, (u16)slot);
-    } else {
-        u16 idx = str_const(p, name, len);
-        emit_op_a(p, OP_STORE_GLOBAL, idx);
+        return;
+    }
+    int uv = resolve_upvalue(p, name, len);
+    if (uv >= 0) {
+        emit_op_a(p, OP_STORE_UPVAL, (u16)uv);
+        return;
+    }
+    u16 idx = str_const(p, name, len);
+    emit_op_a(p, OP_STORE_GLOBAL, idx);
+}
+
+/* Emit OP_CLOSURE plus the variable-length capture metadata that the VM
+ * uses to snapshot upvalue slots at runtime.  Format on the wire:
+ *
+ *     OP_CLOSURE   (1 byte opcode + 2-byte u16 const index)
+ *     u16          capture_count
+ *     u16 * count  outer-frame slot indices (one per upvalue)
+ */
+static void emit_closure(CandoParser *p, u16 pc_idx,
+                         const u16 *captures, u16 count)
+{
+    emit_op_a(p, OP_CLOSURE, pc_idx);
+    u32 line = p->previous.line;
+    cando_chunk_emit_byte(cur(p), (u8)(count & 0xFF), line);
+    cando_chunk_emit_byte(cur(p), (u8)(count >> 8),   line);
+    for (u16 i = 0; i < count; i++) {
+        u16 s = captures[i];
+        cando_chunk_emit_byte(cur(p), (u8)(s & 0xFF), line);
+        cando_chunk_emit_byte(cur(p), (u8)(s >> 8),   line);
     }
 }
 
@@ -692,6 +877,21 @@ static void parse_or(CandoParser *p, bool can_assign)
     patch_jump(p, end_jump);
 }
 
+/* Record a safe-chain null-guard jump.  Called from access infix handlers
+ * when in_safe_chain is true (or from the ?. / ?[ handlers themselves).
+ * The patch position is stored so parse_precedence can rewrite it to point
+ * past the entire chain once parsing finishes.                            */
+static void emit_safe_chain_guard(CandoParser *p)
+{
+    u32 patch = emit_jump(p, OP_JUMP_IF_NULL);
+    if (p->safe_chain_count <
+        (u32)(sizeof(p->safe_chain_jumps) / sizeof(p->safe_chain_jumps[0]))) {
+        p->safe_chain_jumps[p->safe_chain_count++] = patch;
+    } else {
+        error(p, "safe-access chain too long");
+    }
+}
+
 /* Property access: expr.name */
 static void parse_dot(CandoParser *p, bool can_assign)
 {
@@ -709,13 +909,38 @@ static void parse_dot(CandoParser *p, bool can_assign)
         parse_expression(p);
         emit_op_a(p, OP_SET_FIELD, idx);
     } else {
+        if (p->in_safe_chain) emit_safe_chain_guard(p);
         emit_op_a(p, OP_GET_FIELD, idx);
     }
+}
+
+/* Safe property access: expr ?. name
+ * If receiver is null, leaves null on the stack and short-circuits the rest
+ * of the chain.  Otherwise behaves like '.'.                              */
+static void parse_safe_dot(CandoParser *p, bool can_assign)
+{
+    (void)can_assign;
+    if (p->current.type != TOK_IDENT &&
+            (p->current.type < TOK_IF || p->current.type > TOK_PIPE_KW)) {
+        error_current(p, "expected property name after '?.'");
+        return;
+    }
+    advance(p);
+    u16 idx = prev_name_const(p);
+
+    /* Activate safe-chain mode for the remainder of this expression. */
+    p->in_safe_chain = true;
+    emit_safe_chain_guard(p);
+    emit_op_a(p, OP_GET_FIELD, idx);
 }
 
 /* Subscript: expr[expr] */
 static void parse_subscript(CandoParser *p, bool can_assign)
 {
+    /* If we're in a safe-chain, guard the receiver before evaluating the
+     * index so a null receiver cleanly skips index evaluation.  We emit
+     * the guard here while the receiver is still on TOS.                  */
+    if (p->in_safe_chain) emit_safe_chain_guard(p);
     parse_expression(p);
     consume(p, TOK_RBRACKET, "expected ']' after index");
     if (can_assign && match(p, TOK_ASSIGN)) {
@@ -726,10 +951,26 @@ static void parse_subscript(CandoParser *p, bool can_assign)
     }
 }
 
+/* Safe subscript: expr ?[ expr ]
+ * If receiver is null, leaves null on the stack and short-circuits the rest
+ * of the chain.  Otherwise behaves like '['.                              */
+static void parse_safe_subscript(CandoParser *p, bool can_assign)
+{
+    (void)can_assign;
+    p->in_safe_chain = true;
+    emit_safe_chain_guard(p);   /* guards the receiver before index evaluation */
+    parse_expression(p);
+    consume(p, TOK_RBRACKET, "expected ']' after index");
+    emit_op(p, OP_GET_INDEX);
+}
+
 /* Function call: expr(arg, arg, ...) */
 static void parse_call(CandoParser *p, bool can_assign)
 {
     (void)can_assign;
+    /* In a safe-access chain, calling a null callable should short-circuit
+     * to null rather than raise.  Emit the guard before evaluating args.   */
+    if (p->in_safe_chain) emit_safe_chain_guard(p);
     u16 argc = 0;
     if (!check(p, TOK_RPAREN)) {
         p->call_depth++;
@@ -769,6 +1010,13 @@ static void parse_fluent(CandoParser *p, bool can_assign)
     consume(p, TOK_IDENT, "expected method name after '::'");
     u16 name_idx = prev_name_const(p);
     consume(p, TOK_LPAREN, "expected '(' after fluent method name");
+    /* Guard the receiver in a safe-access chain. */
+    /* Note: the receiver was already on TOS when '::' was parsed; the
+     * method name is encoded as constant operand of OP_FLUENT_CALL.       */
+    /* We can't insert the guard before name parsing (already past it);
+     * but the receiver hasn't been popped — it's still on TOS — so emit
+     * the guard now, before argument evaluation.                          */
+    if (p->in_safe_chain) emit_safe_chain_guard(p);
     u16 argc = 0;
     if (!check(p, TOK_RPAREN)) {
         p->call_depth++;
@@ -796,6 +1044,8 @@ static void parse_method_call(CandoParser *p, bool can_assign)
     consume(p, TOK_IDENT, "expected method name after ':'");
     u16 name_idx = prev_name_const(p);
     consume(p, TOK_LPAREN, "expected '(' after method name");
+    /* Guard the receiver in a safe-access chain. */
+    if (p->in_safe_chain) emit_safe_chain_guard(p);
     u16 argc = 0;
     if (!check(p, TOK_RPAREN)) {
         p->call_depth++;
@@ -1000,6 +1250,34 @@ static void parse_pipe_op(CandoParser *p, bool can_assign)
     emit_op(p, OP_PIPE_END);
 }
 
+/* Ternary conditional: cond ? then_expr : else_expr
+ * Evaluates cond once, returns then_expr if cond is truthy, else else_expr.
+ * Right-associative so `a ? b : c ? d : e` parses as `a ? b : (c ? d : e)`. */
+static void parse_ternary(CandoParser *p, bool can_assign)
+{
+    (void)can_assign;
+    /* Condition is already on the stack (left operand). */
+    u32 else_jump = emit_jump(p, OP_JUMP_IF_FALSE);
+    emit_op(p, OP_POP);            /* discard truthy condition */
+    p->ternary_then_depth++;
+    parse_precedence(p, PREC_TERNARY);
+    p->ternary_then_depth--;
+    u32 end_jump = emit_jump(p, OP_JUMP);
+
+    consume(p, TOK_COLON, "expected ':' in ternary expression");
+
+    patch_jump(p, else_jump);
+    emit_op(p, OP_POP);            /* discard falsy condition */
+    /* Right-associative: parse the else branch at the same precedence so
+     * a chained ternary becomes the entire false branch.                  */
+    parse_precedence(p, PREC_TERNARY);
+    patch_jump(p, end_jump);
+
+    p->last_expr_was_call   = false;
+    p->last_expr_was_unpack = false;
+    p->last_multi_push      = 1;
+}
+
 /* Filter operator: collection ~!> predicate_expr
  *   Like pipe (~>) but null body results are dropped from the output.   */
 static void parse_filter_op(CandoParser *p, bool can_assign)
@@ -1036,6 +1314,52 @@ static void parse_filter_op(CandoParser *p, bool can_assign)
     }
 
     emit_op(p, OP_FILTER_COLLECT);
+    emit_loop(p, loop_start);
+
+    patch_jump(p, exit_jump);
+    scope_end(p);
+    emit_op(p, OP_PIPE_END);
+}
+
+/* Conditional filter operator: collection ~&> predicate_expr
+ *   Like ~!>, but the body is interpreted as a boolean predicate: when the
+ *   body returns a truthy value the *original* element (not the body
+ *   result) is kept in the output array; otherwise the element is dropped.
+ *   Identical structure to parse_filter_op except the collect opcode.    */
+static void parse_cond_filter_op(CandoParser *p, bool can_assign)
+{
+    (void)can_assign;
+
+    emit_op_a(p, OP_PIPE_INIT, 1);
+
+    scope_begin(p);
+    emit_op(p, OP_NULL);
+    u32 pipe_slot = declare_local(p, "pipe", 4, false);
+    emit_op_a(p, OP_DEF_LOCAL, (u16)pipe_slot);
+
+    u32 loop_start = cur(p)->code_len;
+    u32 exit_jump  = emit_jump(p, OP_FILTER_NEXT);
+    emit_op_a(p, OP_DEF_LOCAL, (u16)pipe_slot);
+
+    if (match(p, TOK_LBRACE)) {
+        bool saved_in_pipe    = p->in_pipe_body;
+        u32  saved_exit_count = p->pipe_exit_count;
+        p->in_pipe_body    = true;
+        p->pipe_exit_count = 0;
+
+        parse_block(p);
+
+        emit_op(p, OP_NULL);   /* fall-through default predicate value */
+        for (u32 i = 0; i < p->pipe_exit_count; i++)
+            patch_jump(p, p->pipe_exits[i]);
+
+        p->in_pipe_body    = saved_in_pipe;
+        p->pipe_exit_count = saved_exit_count;
+    } else {
+        parse_expression(p);
+    }
+
+    emit_op(p, OP_COND_FILTER_COLLECT);
     emit_loop(p, loop_start);
 
     patch_jump(p, exit_jump);
@@ -1093,9 +1417,12 @@ static void parse_thread_expr(CandoParser *p, bool can_assign)
 
     patch_jump(p, skip_body);
 
-    /* Build the closure object and immediately spawn it as a thread. */
+    /* Build the closure object and immediately spawn it as a thread.
+     * Threads don't reset/restore the parser's local table the way
+     * function bodies do, so they never accumulate upvalue captures --
+     * emit zero captures to keep the OP_CLOSURE wire format uniform. */
     u16 pc_idx = cando_chunk_add_const(cur(p), cando_number((f64)fn_start));
-    emit_op_a(p, OP_CLOSURE, pc_idx);
+    emit_closure(p, pc_idx, NULL, 0);
     emit_op(p, OP_THREAD);
 
     p->last_expr_was_call = true;  /* await + multi-return spreading works */
@@ -1139,6 +1466,7 @@ static const ParseRule RULES[TOK_COUNT] = {
     [TOK_LBRACKET]       = { parse_array_literal,  parse_subscript,  PREC_CALL_PREC  },
     [TOK_LBRACE]         = { parse_object_literal, NULL,             PREC_NONE       },
     [TOK_FUNCTION]       = { parse_function_expr,  NULL,             PREC_NONE       },
+    [TOK_CLASS]          = { parse_class_expr,     NULL,             PREC_NONE       },
     [TOK_THREAD]         = { parse_thread_expr,    NULL,             PREC_NONE       },
     [TOK_AWAIT]          = { parse_await_expr,     NULL,             PREC_NONE       },
 
@@ -1183,10 +1511,16 @@ static const ParseRule RULES[TOK_COUNT] = {
     [TOK_DOT]            = { NULL,                  parse_dot,        PREC_CALL_PREC  },
     [TOK_FLUENT]         = { NULL,                 parse_fluent,     PREC_CALL_PREC  },
     [TOK_COLON]          = { NULL,                 parse_method_call,PREC_CALL_PREC  },
+    [TOK_QDOT]           = { NULL,                 parse_safe_dot,   PREC_CALL_PREC  },
+    [TOK_QLBRACKET]      = { NULL,                 parse_safe_subscript, PREC_CALL_PREC },
+
+    /* Ternary conditional */
+    [TOK_QUESTION]       = { NULL,                 parse_ternary,    PREC_TERNARY    },
 
     /* Pipe / filter */
     [TOK_PIPE_OP]        = { NULL,                 parse_pipe_op,    PREC_PIPE_PREC  },
     [TOK_FILTER_OP]      = { NULL,                 parse_filter_op,  PREC_PIPE_PREC  },
+    [TOK_COND_FILTER_OP] = { NULL,                 parse_cond_filter_op, PREC_PIPE_PREC },
 };
 
 static const ParseRule *get_rule(CandoTokenType t)
@@ -1206,6 +1540,16 @@ static void parse_precedence(CandoParser *p, Precedence min_prec)
      * body and cause spurious OP_TRUNCATE_RET inside comparisons.           */
     p->last_expr_was_call = false;
 
+    /* Save and reset safe-chain state for this expression.  A '?.' / '?['
+     * encountered during this call will set in_safe_chain=true, and any
+     * subsequent member-access infix in the same chain will append a guard
+     * to safe_chain_jumps[].  After the infix loop finishes we patch all
+     * recorded jumps to land here (past the chain).                        */
+    bool saved_safe_active = p->in_safe_chain;
+    u32  saved_safe_count  = p->safe_chain_count;
+    p->in_safe_chain  = false;
+    p->safe_chain_count = saved_safe_count;  /* preserve outer entries */
+
     advance(p);
     ParseFn prefix = get_rule(p->previous.type)->prefix;
     if (!prefix) {
@@ -1217,6 +1561,9 @@ static void parse_precedence(CandoParser *p, Precedence min_prec)
     prefix(p, can_assign);
 
     while (!check(p, TOK_EOF)) {
+        /* Inside the THEN branch of a ternary, ':' is the ternary
+         * delimiter, not the method-call infix.                          */
+        if (p->ternary_then_depth > 0 && check(p, TOK_COLON)) break;
         Precedence cur_prec = get_rule(p->current.type)->precedence;
         if (cur_prec < min_prec) break;
         advance(p);
@@ -1224,6 +1571,16 @@ static void parse_precedence(CandoParser *p, Precedence min_prec)
         if (!infix) break;
         infix(p, can_assign);
     }
+
+    /* If a safe chain was opened during this expression, patch all of its
+     * null-guard jumps to land here, leaving the (possibly null) chain
+     * value on the stack.                                                 */
+    if (p->in_safe_chain) {
+        for (u32 i = saved_safe_count; i < p->safe_chain_count; i++)
+            patch_jump(p, p->safe_chain_jumps[i]);
+    }
+    p->in_safe_chain    = saved_safe_active;
+    p->safe_chain_count = saved_safe_count;
 
     if (can_assign && match(p, TOK_ASSIGN)) {
         error(p, "invalid assignment target");
@@ -1627,8 +1984,23 @@ static void parse_function_expr(CandoParser *p, bool can_assign)
     int        saved_depth = p->scope_depth;
     memcpy(saved_locals, p->locals, sizeof(CandoLocal) * saved_count);
 
-    p->local_count = 0;
-    p->scope_depth = 1;
+    /* Stash any in-flight upvalue tracking from a still-compiling outer
+     * function, then expose this function's outer scope so resolve_upvalue
+     * can capture loop-locals / block-locals declared in the enclosing
+     * frame. */
+    CandoLocal *saved_outer_locals = p->outer_locals;
+    u32         saved_outer_count  = p->outer_count;
+    u16         saved_uv_specs[CANDO_LOCAL_MAX];
+    u16         saved_uv_count     = p->upvalue_count;
+    if (saved_uv_count > 0)
+        memcpy(saved_uv_specs, p->upvalue_specs,
+               sizeof(u16) * saved_uv_count);
+
+    p->local_count    = 0;
+    p->scope_depth    = 1;
+    p->outer_locals   = saved_locals;
+    p->outer_count    = saved_count;
+    p->upvalue_count  = 0;
 
     /* Slot 0 is the function value in the call frame. */
     declare_local(p, "", 0, false);
@@ -1640,15 +2012,28 @@ static void parse_function_expr(CandoParser *p, bool can_assign)
     emit_op(p, OP_NULL);
     emit_op_a(p, OP_RETURN, 1);
 
-    /* Restore outer scope state. */
+    /* Snapshot the captures registered while parsing the body, then
+     * restore the outer compile state before emitting OP_CLOSURE. */
+    u16 body_uv_count = p->upvalue_count;
+    u16 body_uv_specs[CANDO_LOCAL_MAX];
+    if (body_uv_count > 0)
+        memcpy(body_uv_specs, p->upvalue_specs,
+               sizeof(u16) * body_uv_count);
+
     p->local_count = saved_count;
     p->scope_depth = saved_depth;
     memcpy(p->locals, saved_locals, sizeof(CandoLocal) * saved_count);
+    p->outer_locals  = saved_outer_locals;
+    p->outer_count   = saved_outer_count;
+    p->upvalue_count = saved_uv_count;
+    if (saved_uv_count > 0)
+        memcpy(p->upvalue_specs, saved_uv_specs,
+               sizeof(u16) * saved_uv_count);
 
     patch_jump(p, skip_body);
 
     u16 pc_idx = cando_chunk_add_const(cur(p), cando_number((f64)fn_start));
-    emit_op_a(p, OP_CLOSURE, pc_idx);
+    emit_closure(p, pc_idx, body_uv_specs, body_uv_count);
 
     /* The function *expression* evaluates to a closure value — it is not a
      * call.  Clear last_expr_was_call / last_expr_was_unpack so callers such
@@ -1699,8 +2084,19 @@ static void parse_function(CandoParser *p)
     int        saved_depth = p->scope_depth;
     memcpy(saved_locals, p->locals, sizeof(CandoLocal) * saved_count);
 
-    p->local_count = 0;
-    p->scope_depth = 1;
+    CandoLocal *saved_outer_locals = p->outer_locals;
+    u32         saved_outer_count  = p->outer_count;
+    u16         saved_uv_specs[CANDO_LOCAL_MAX];
+    u16         saved_uv_count     = p->upvalue_count;
+    if (saved_uv_count > 0)
+        memcpy(saved_uv_specs, p->upvalue_specs,
+               sizeof(u16) * saved_uv_count);
+
+    p->local_count    = 0;
+    p->scope_depth    = 1;
+    p->outer_locals   = saved_locals;
+    p->outer_count    = saved_count;
+    p->upvalue_count  = 0;
 
     declare_local(p, "", 0, false); /* slot 0 */
     for (u16 i = 0; i < arity; i++)
@@ -1711,115 +2107,243 @@ static void parse_function(CandoParser *p)
     emit_op(p, OP_NULL);          /* implicit return null */
     emit_op_a(p, OP_RETURN, 1);
 
+    u16 body_uv_count = p->upvalue_count;
+    u16 body_uv_specs[CANDO_LOCAL_MAX];
+    if (body_uv_count > 0)
+        memcpy(body_uv_specs, p->upvalue_specs,
+               sizeof(u16) * body_uv_count);
+
     /* Restore outer scope state. */
     p->local_count = saved_count;
     p->scope_depth = saved_depth;
     memcpy(p->locals, saved_locals, sizeof(CandoLocal) * saved_count);
+    p->outer_locals  = saved_outer_locals;
+    p->outer_count   = saved_outer_count;
+    p->upvalue_count = saved_uv_count;
+    if (saved_uv_count > 0)
+        memcpy(p->upvalue_specs, saved_uv_specs,
+               sizeof(u16) * saved_uv_count);
 
     patch_jump(p, skip_body);
 
     /* Build a closure object from the function's start PC and define it. */
     u16 pc_idx   = cando_chunk_add_const(cur(p), cando_number((f64)fn_start));
-    emit_op_a(p, OP_CLOSURE, pc_idx);
+    emit_closure(p, pc_idx, body_uv_specs, body_uv_count);
     u16 name_idx = str_const(p, fn_name, fn_len);
     emit_op_a(p, OP_DEF_GLOBAL, name_idx);
 #undef MAX_PARAMS
 }
 
-/* --- CLASS declaration --------------------------------------------------
- * Syntax:  CLASS Name { [FUNCTION method(params) { block }]* }
- */
+/* --- CLASS expression body ----------------------------------------------
+ *
+ * Both the statement form (`class Name = (params) { body }`) and the
+ * expression forms (`class [Name] (params) { body }`) share the same body
+ * compilation: a constructor function whose params and body are written
+ * exactly like `function(params) { body }`, plus the bookkeeping that
+ * makes the class callable.
+ *
+ * Preconditions when this helper is invoked:
+ *   - The class object is already on top of the stack (created by either
+ *     OP_NEW_CLASS — for a named class — or OP_NEW_OBJECT — for the
+ *     anonymous expression form).
+ *   - If `extends Parent` was parsed, the parent expression has been
+ *     compiled BEFORE the class object so the stack reads
+ *     [..., parent, class] and a single OP_INHERIT pops the parent and
+ *     records `class.__index = parent`.
+ *
+ * Emits, with the class still on TOS at the end:
+ *   1. (optional) OP_INHERIT
+ *   2. Constructor body compiled inline + OP_CLOSURE pushing the function
+ *      value, then OP_BIND_METHOD __constructor.
+ *   3. OP_BIND_DEFAULT_CALL — wires the class's __call to the VM's
+ *      default constructor wrapper.
+ * ----------------------------------------------------------------------- */
+static void emit_class_body(CandoParser *p, bool has_extends)
+{
+    if (has_extends) {
+        /* Stack: [..., parent, class] -> [..., class] */
+        emit_op(p, OP_INHERIT);
+    }
+
+    /* Parameter list is optional: `class Foo = { }` is shorthand for
+     * `class Foo = () { }` (an empty constructor that ignores any args). */
+#define MAX_PARAMS 64
+    const char *param_names[MAX_PARAMS];
+    u32         param_lens[MAX_PARAMS];
+    u16 arity = 0;
+
+    if (match(p, TOK_LPAREN)) {
+        if (!check(p, TOK_RPAREN)) {
+            do {
+                if (check(p, TOK_RPAREN)) break;
+                if (match(p, TOK_VARARG)) break;
+                consume(p, TOK_IDENT, "expected parameter name");
+                if (arity >= MAX_PARAMS) {
+                    error(p, "too many parameters");
+                    break;
+                }
+                param_names[arity] = p->previous.start;
+                param_lens[arity]  = p->previous.length;
+                arity++;
+            } while (match(p, TOK_COMMA));
+        }
+        consume(p, TOK_RPAREN, "expected ')' after class parameters");
+    }
+    consume(p, TOK_LBRACE, "expected '{' before class body");
+
+    /* Compile the constructor body inline with the same shape as a
+     * `function(params) { ... }` expression so the resulting closure can
+     * be called via cando_vm_call_value() from the default __call native. */
+    u32 skip_body = emit_jump(p, OP_JUMP);
+    u32 fn_start  = cur(p)->code_len;
+
+    CandoLocal saved_locals[CANDO_LOCAL_MAX];
+    u32        saved_count = p->local_count;
+    int        saved_depth = p->scope_depth;
+    memcpy(saved_locals, p->locals, sizeof(CandoLocal) * saved_count);
+
+    CandoLocal *saved_outer_locals = p->outer_locals;
+    u32         saved_outer_count  = p->outer_count;
+    u16         saved_uv_specs[CANDO_LOCAL_MAX];
+    u16         saved_uv_count     = p->upvalue_count;
+    if (saved_uv_count > 0)
+        memcpy(saved_uv_specs, p->upvalue_specs,
+               sizeof(u16) * saved_uv_count);
+
+    p->local_count    = 0;
+    p->scope_depth    = 1;
+    p->outer_locals   = saved_locals;
+    p->outer_count    = saved_count;
+    p->upvalue_count  = 0;
+
+    declare_local(p, "", 0, false); /* slot 0: call frame sentinel */
+    for (u16 i = 0; i < arity; i++)
+        declare_local(p, param_names[i], param_lens[i], false);
+
+    parse_block(p);
+
+    emit_op(p, OP_NULL);
+    emit_op_a(p, OP_RETURN, 1);
+
+    u16 body_uv_count = p->upvalue_count;
+    u16 body_uv_specs[CANDO_LOCAL_MAX];
+    if (body_uv_count > 0)
+        memcpy(body_uv_specs, p->upvalue_specs,
+               sizeof(u16) * body_uv_count);
+
+    p->local_count = saved_count;
+    p->scope_depth = saved_depth;
+    memcpy(p->locals, saved_locals, sizeof(CandoLocal) * saved_count);
+    p->outer_locals  = saved_outer_locals;
+    p->outer_count   = saved_outer_count;
+    p->upvalue_count = saved_uv_count;
+    if (saved_uv_count > 0)
+        memcpy(p->upvalue_specs, saved_uv_specs,
+               sizeof(u16) * saved_uv_count);
+
+    patch_jump(p, skip_body);
+
+    /* Build the constructor closure (an OBJ_FUNCTION) and bind it to
+     * the class as `__constructor`.  Using OP_CLOSURE rather than the
+     * inline-PC trick lets cando_vm_call_value() invoke it from C.       */
+    u16 ctor_pc_idx   = cando_chunk_add_const(cur(p),
+                                              cando_number((f64)fn_start));
+    emit_closure(p, ctor_pc_idx, body_uv_specs, body_uv_count);
+    static const char kCtorName[] = "__constructor";
+    u16 ctor_name_idx = str_const(p, kCtorName,
+                                  (u32)(sizeof(kCtorName) - 1));
+    emit_op_a(p, OP_BIND_METHOD, ctor_name_idx);
+
+    /* Make the class callable: class.__call = vm->default_class_call. */
+    emit_op(p, OP_BIND_DEFAULT_CALL);
+#undef MAX_PARAMS
+}
+
+/* Optional `extends Parent` clause.
+ * When present, push the parent expression onto the stack BEFORE the class
+ * object so OP_INHERIT (emitted later by emit_class_body) can pop it.
+ * Returns true if an EXTENDS clause was consumed.
+ * ----------------------------------------------------------------------- */
+static bool parse_class_extends(CandoParser *p)
+{
+    if (!match(p, TOK_EXTENDS)) return false;
+    consume(p, TOK_IDENT, "expected parent class name after EXTENDS");
+    u16 parent_idx = prev_name_const(p);
+    /* Look up the parent at the global scope; classes live in globals. */
+    emit_op_a(p, OP_LOAD_GLOBAL, parent_idx);
+    return true;
+}
+
+/* --- CLASS declaration (statement form) ---------------------------------
+ * Syntax:  class Name [extends Parent] = [(params)] { body }
+ *
+ * Desugars to: var Name = class Name [extends Parent] [(params)] { body }
+ * The class is bound as a global; its __type meta-key is set to Name.
+ * ----------------------------------------------------------------------- */
 static void parse_class(CandoParser *p)
 {
     consume(p, TOK_IDENT, "expected class name");
     u16 name_idx = prev_name_const(p);
 
-    /* Optional superclass / constructor parameters */
-    if (match(p, TOK_LPAREN)) {
-        u32 depth = 1;
-        while (!check(p, TOK_EOF) && depth > 0) {
-            if (match(p, TOK_LPAREN))      depth++;
-            else if (match(p, TOK_RPAREN)) depth--;
-            else                            advance(p);
-        }
-    }
+    bool has_extends = parse_class_extends(p);
+    /* Stack now: [..., parent?]  (nothing yet for the class).            */
 
-    consume(p, TOK_LBRACE, "expected '{' before class body");
+    /* The `=` is mandatory in the statement form -- it is what
+     * distinguishes `class Foo = (...) {...}` from a stray expression.
+     * Allow both `class Foo = (params) { body }` (with params) and
+     * `class Foo = { body }` (constructor takes no args).                */
+    consume(p, TOK_ASSIGN, "expected '=' in class declaration");
+
+    /* Now create the class object on TOS and (if needed) wire __index. */
     emit_op_a(p, OP_NEW_CLASS, name_idx);
 
-    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
-        match(p, TOK_STATIC);
-        match(p, TOK_PRIVATE);
+    emit_class_body(p, has_extends);
 
-        if (match(p, TOK_FUNCTION)) {
-            consume(p, TOK_IDENT, "expected method name");
-            u16 meth_idx = prev_name_const(p);
+    /* Statement form: bind the class as a global. */
+    emit_op_a(p, OP_DEF_GLOBAL, name_idx);
+}
 
-#define MAX_METH_PARAMS 64
-            const char *param_names[MAX_METH_PARAMS];
-            u32         param_lens[MAX_METH_PARAMS];
-            u16 arity = 0;
+/* --- CLASS expression ---------------------------------------------------
+ * Pratt prefix handler for `TOK_CLASS`.
+ *
+ * Forms:
+ *   class                (params) { body }   -- anonymous, no __type
+ *   class Name           (params) { body }   -- named, __type = "Name"
+ *   class [Name] extends Parent (params) { body }
+ *
+ * Distinguishing the expression form from the statement form is done by
+ * the caller: parse_statement matches TOK_CLASS first and dispatches to
+ * parse_class (the statement form) before parse_expr_stmt has a chance to
+ * route through this Pratt prefix.  Inside expressions (e.g. on the RHS of
+ * a `var x = ...`), this handler runs.
+ * ----------------------------------------------------------------------- */
+static void parse_class_expr(CandoParser *p, bool can_assign)
+{
+    (void)can_assign;
 
-            consume(p, TOK_LPAREN, "expected '(' after method name");
-            if (!check(p, TOK_RPAREN)) {
-                do {
-                    if (check(p, TOK_RPAREN)) break;
-                    if (match(p, TOK_VARARG)) break;
-                    consume(p, TOK_IDENT, "expected parameter name");
-                    if (arity < MAX_METH_PARAMS) {
-                        param_names[arity] = p->previous.start;
-                        param_lens[arity]  = p->previous.length;
-                        arity++;
-                    }
-                } while (match(p, TOK_COMMA));
-            }
-            consume(p, TOK_RPAREN, "expected ')' after method parameters");
-            consume(p, TOK_LBRACE, "expected '{' before method body");
-
-            u32 skip = emit_jump(p, OP_JUMP);
-            u32 meth_start = cur(p)->code_len;
-
-            /* Save and reset scope for method body (mirrors parse_function). */
-            CandoLocal saved_locals[CANDO_LOCAL_MAX];
-            u32        saved_count = p->local_count;
-            int        saved_depth = p->scope_depth;
-            memcpy(saved_locals, p->locals,
-                   sizeof(CandoLocal) * saved_count);
-
-            p->local_count = 0;
-            p->scope_depth = 1;
-
-            declare_local(p, "", 0, false); /* slot 0: call frame sentinel */
-            for (u16 i = 0; i < arity; i++)
-                declare_local(p, param_names[i], param_lens[i], false);
-
-            parse_block(p);
-
-            /* Restore outer scope. */
-            p->local_count = saved_count;
-            p->scope_depth = saved_depth;
-            memcpy(p->locals, saved_locals,
-                   sizeof(CandoLocal) * saved_count);
-
-            emit_op(p, OP_NULL);
-            emit_op_a(p, OP_RETURN, 1);
-            patch_jump(p, skip);
-#undef MAX_METH_PARAMS
-
-            /* Push method PC as number, then bind to the class on TOS.  */
-            u16 pc_idx = cando_chunk_add_const(cur(p),
-                                               cando_number((f64)meth_start));
-            emit_op_a(p, OP_CONST, pc_idx);
-            emit_op_a(p, OP_BIND_METHOD, meth_idx);
-        } else {
-            advance(p);  /* skip unknown token */
-        }
+    bool has_name = check(p, TOK_IDENT);
+    u16  name_idx = 0;
+    if (has_name) {
+        advance(p);
+        name_idx = prev_name_const(p);
     }
 
-    consume(p, TOK_RBRACE, "expected '}' after class body");
+    bool has_extends = parse_class_extends(p);
 
-    /* Store the class object as a global variable with the class name. */
-    emit_op_a(p, OP_DEF_GLOBAL, name_idx);
+    /* Push the class object: named classes get __type via OP_NEW_CLASS;
+     * anonymous classes use OP_NEW_OBJECT so __type is left unset.        */
+    if (has_name)
+        emit_op_a(p, OP_NEW_CLASS, name_idx);
+    else
+        emit_op(p, OP_NEW_OBJECT);
+
+    emit_class_body(p, has_extends);
+
+    /* The class is now on TOS as a value -- the surrounding expression
+     * (e.g. `var X = class ...`) will assign or use it.                   */
+    p->last_expr_was_call   = false;
+    p->last_expr_was_unpack = false;
+    p->last_multi_push      = 1;
 }
 
 /* --- RETURN ------------------------------------------------------------- */
@@ -1988,6 +2512,12 @@ void cando_parser_init(CandoParser *p, const char *source, usize len,
     p->in_pipe_body       = false;
     p->pipe_exit_count    = 0;
     p->last_multi_push    = 1;
+    p->in_safe_chain      = false;
+    p->safe_chain_count   = 0;
+    p->ternary_then_depth = 0;
+    p->outer_locals       = NULL;
+    p->outer_count        = 0;
+    p->upvalue_count      = 0;
     p->error_msg[0] = '\0';
 
     p->current.type = TOK_EOF;

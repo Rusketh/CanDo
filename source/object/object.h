@@ -50,6 +50,7 @@
 #define META_IDIV      "__idiv"
 #define META_LEN       "__len"
 #define META_NEWINDEX  "__newindex"
+#define META_CONSTRUCTOR "__constructor"
 
 /* -----------------------------------------------------------------------
  * Native function signature
@@ -185,11 +186,22 @@ CANDO_API bool cdo_object_rawdelete(CdoObject *obj, CdoString *key);
  * Prototype-chain lookup (__index traversal)
  *
  * Looks up key in obj; if not found AND obj has an __index field that is
- * an object, recurses up to CANDO_PROTO_DEPTH_MAX levels.
+ * a plain object or array (lookup table), recurses up to
+ * CANDO_PROTO_DEPTH_MAX levels.  A callable __index (function/native)
+ * terminates the chain -- callers can dispatch it via
+ * cdo_object_index_callable.
  * --------------------------------------------------------------------- */
 #define CANDO_PROTO_DEPTH_MAX 32
 
 CANDO_API bool cdo_object_get(CdoObject *obj, CdoString *key, CdoValue *out);
+
+/*
+ * cdo_object_index_callable -- walk the __index chain looking for the
+ * first callable (function/native/PC sentinel) __index value.  Returns
+ * true and writes *out with the callable when found.  Used by the VM
+ * layer to dispatch __index as a function after a field lookup miss.
+ */
+CANDO_API bool cdo_object_index_callable(CdoObject *obj, CdoValue *out);
 
 /* -----------------------------------------------------------------------
  * Readonly flag
@@ -238,5 +250,6 @@ extern CdoString *g_meta_unm;
 extern CdoString *g_meta_idiv;
 extern CdoString *g_meta_len;
 extern CdoString *g_meta_newindex;
+extern CdoString *g_meta_constructor;
 
 #endif /* CDO_OBJECT_H */
