@@ -8,6 +8,17 @@
 
 #include "array.h"
 
+/* Ensure items[] can hold at least `min_cap` entries.  Grows by doubling
+ * (initial capacity 8 when the array is empty).  Caller must hold the
+ * write lock.                                                          */
+static void array_ensure_cap(CdoObject *arr, u32 min_cap) {
+    if (arr->items_cap >= min_cap) return;
+    u32 new_cap = arr->items_cap ? arr->items_cap : 8;
+    while (new_cap < min_cap) new_cap *= 2;
+    arr->items     = cando_realloc(arr->items, new_cap * sizeof(CdoValue));
+    arr->items_cap = new_cap;
+}
+
 CdoObject *cdo_array_new(void) {
     return cdo_obj_alloc(OBJ_ARRAY);
 }
@@ -22,11 +33,7 @@ bool cdo_array_push(CdoObject *arr, CdoValue val) {
         return false;
     }
 
-    if (arr->items_len >= arr->items_cap) {
-        u32 new_cap = (arr->items_cap == 0) ? 8 : arr->items_cap * 2;
-        arr->items     = cando_realloc(arr->items, new_cap * sizeof(CdoValue));
-        arr->items_cap = new_cap;
-    }
+    array_ensure_cap(arr, arr->items_len + 1);
     arr->items[arr->items_len++] = cdo_value_copy(val);
 
     cando_lock_write_release(&arr->lock);
@@ -54,14 +61,12 @@ bool cdo_array_rawset_idx(CdoObject *arr, u32 idx, CdoValue val) {
         return false;
     }
 
-    if (idx >= arr->items_cap) {
-        u32 new_cap = arr->items_cap == 0 ? 8 : arr->items_cap;
-        while (new_cap <= idx) new_cap *= 2;
-        arr->items = cando_realloc(arr->items, new_cap * sizeof(CdoValue));
-        for (u32 i = arr->items_cap; i < new_cap; i++)
-            arr->items[i] = cdo_null();
-        arr->items_cap = new_cap;
-    }
+    /* Grow capacity if idx is past the end; new slots beyond the
+     * previous length are filled with null below.                      */
+    u32 prev_cap = arr->items_cap;
+    array_ensure_cap(arr, idx + 1);
+    for (u32 i = prev_cap; i < arr->items_cap; i++)
+        arr->items[i] = cdo_null();
 
     if (idx >= arr->items_len) {
         for (u32 i = arr->items_len; i < idx; i++)
@@ -95,12 +100,7 @@ bool cdo_array_insert(CdoObject *arr, u32 idx, CdoValue val) {
     if (idx > arr->items_len)
         idx = arr->items_len;
 
-    /* Grow capacity if needed. */
-    if (arr->items_len >= arr->items_cap) {
-        u32 new_cap = (arr->items_cap == 0) ? 8 : arr->items_cap * 2;
-        arr->items     = cando_realloc(arr->items, new_cap * sizeof(CdoValue));
-        arr->items_cap = new_cap;
-    }
+    array_ensure_cap(arr, arr->items_len + 1);
 
     /* Shift elements [idx .. items_len) right by one. */
     for (u32 i = arr->items_len; i > idx; i--)
