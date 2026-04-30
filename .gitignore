@@ -10,6 +10,7 @@ tests/test_core
 tests/test_lexer
 tests/test_object
 tests/test_parser
+tests/test_sockutil
 tests/test_thread
 tests/test_vm
 tests/test_sockutil
