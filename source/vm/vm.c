@@ -2269,7 +2269,9 @@ static CandoVMResult vm_run(CandoVM *vm) {
             vm->spread_extra = 0;
             /* The function value sits just below the arguments. */
             CandoValue callee = *(vm->stack_top - arg_count - 1);
+            int meta_call_depth = 0;
 
+        op_call_dispatch:
             /* Native function: negative-number sentinel convention. */
             if (IS_NATIVE_FN(callee)) {
                 u32 ni = NATIVE_INDEX(callee);
@@ -2382,6 +2384,40 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     }
                     LOAD_FRAME();
                     DISPATCH();
+                }
+
+                /* __call metamethod: look up via prototype chain.  If found
+                 * and itself callable, splice the original receiver in as
+                 * arg[0] and re-dispatch with the meta function as callee. */
+                if (fn_obj && g_meta_call && meta_call_depth < 16) {
+                    CdoValue meta = cdo_null();
+                    if (cdo_object_get(fn_obj, g_meta_call, &meta) &&
+                        meta.tag != CDO_NULL) {
+                        CandoValue meta_val = cando_bridge_to_cando(vm, meta);
+                        cdo_value_release(meta);
+
+                        if (vm->stack_top >= vm->stack + CANDO_STACK_MAX) {
+                            vm_runtime_error(vm,
+                                "stack overflow in __call dispatch");
+                            goto handle_error;
+                        }
+                        /* Stack layout before: [..., callee, a0, ..., aN-1]
+                         *               after: [..., meta,   callee, a0, ..., aN-1]
+                         * The original callee becomes the first argument so
+                         * the meta function receives the receiver as 'self'. */
+                        CandoValue *callee_slot =
+                            vm->stack_top - arg_count - 1;
+                        memmove(callee_slot + 2, callee_slot + 1,
+                                arg_count * sizeof(CandoValue));
+                        callee_slot[1] = callee;
+                        callee_slot[0] = meta_val;
+                        vm->stack_top++;
+                        arg_count++;
+                        callee = meta_val;
+                        meta_call_depth++;
+                        goto op_call_dispatch;
+                    }
+                    cdo_value_release(meta);
                 }
             }
 

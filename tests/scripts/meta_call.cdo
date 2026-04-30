@@ -1,0 +1,54 @@
+/* meta_call.cdo -- Tests for __call metamethod dispatch.
+ *
+ * When an object has a __call field that is itself callable, invoking the
+ * object as a function passes the object in as the first argument and then
+ * the explicit arguments.
+ */
+
+/* ----- Basic __call ------------------------------------------------------- */
+VAR adder = { base: 10 };
+adder.__call = function(self, x) {
+    RETURN self.base + x;
+};
+print(adder(5));         // 15
+print(adder(32));        // 42
+
+/* ----- __call with multiple arguments ------------------------------------- */
+VAR triple = { tag: "T" };
+triple.__call = function(self, a, b, c) {
+    RETURN self.tag + ":" + toString(a + b + c);
+};
+print(triple(1, 2, 3));  // T:6
+
+/* ----- __call with no extra arguments ------------------------------------- */
+VAR getter = { value: "ping" };
+getter.__call = function(self) { RETURN self.value; };
+print(getter());         // ping
+
+/* ----- __call inherited via prototype chain ------------------------------- */
+VAR base = {};
+base.__call = function(self, x) { RETURN x * 2; };
+VAR derived = {};
+object.setPrototype(derived, base);
+print(derived(7));       // 14
+
+/* ----- __call producing side effects -------------------------------------- */
+VAR counter = { count: 0 };
+counter.__call = function(self) {
+    self.count = self.count + 1;
+    RETURN self.count;
+};
+print(counter());        // 1
+print(counter());        // 2
+print(counter());        // 3
+print(counter.count);    // 3
+
+/* ----- __call chain: object whose __call is another callable object ------
+ * proxy(99) finds proxy.__call = wrap (an object), so dispatch splices proxy
+ * in as arg0 -> wrap(proxy, 99).  wrap.__call exists, so dispatch splices
+ * wrap in as arg0 -> wrap.__call(wrap, proxy, 99).                          */
+VAR wrap = {};
+wrap.__call = function(self, recv, x) { RETURN "wrap:" + toString(x); };
+VAR proxy = {};
+proxy.__call = wrap;
+print(proxy(99));         // wrap:99
