@@ -295,47 +295,55 @@ static bool skip_block_comment(CandoLexer *lex,
     return false;
 }
 
-/* Scan a double-quoted string "...". Handles \\, \", and other escapes.
- * The opening '"' has already been consumed.  Scans up to the closing '"'.
- * The token includes both delimiters. */
-static CandoToken lex_string_dq(CandoLexer *lex,
-                                 usize start_pos,
-                                 u32 start_line,
-                                 usize start_line_start)
+/* Scan a quoted string that ends with `delim` and produces token type
+ * `type`.  Backslash escapes the next character.  Newlines are
+ * permitted (the caller's choice of delimiter decides whether the
+ * language allows it -- "..." in practice contains no newlines, '...'
+ * is multiline, but lex-side both forms accept them and the parser
+ * does the per-form interpretation).                                  */
+static CandoToken lex_string_quoted(CandoLexer *lex,
+                                    usize start_pos,
+                                    u32 start_line,
+                                    usize start_line_start,
+                                    char delim,
+                                    CandoTokenType type,
+                                    const char *unterminated_msg)
 {
     while (!lex_at_end(lex)) {
         char c = lex_advance(lex);
         if (c == '\\') {
             if (lex_at_end(lex)) break;
             lex_advance(lex); /* skip escaped character */
-        } else if (c == '"') {
-            return make_token(lex, TOK_STRING_DQ,
+        } else if (c == delim) {
+            return make_token(lex, type,
                               start_pos, start_line, start_line_start);
         }
     }
     return lex_error(lex, start_pos, start_line, start_line_start,
-                     "unterminated double-quoted string");
+                     unterminated_msg);
 }
 
-/* Scan a single-quoted multiline string '...'.
- * The opening '\'' has already been consumed.  Newlines are allowed. */
-static CandoToken lex_string_sq(CandoLexer *lex,
-                                 usize start_pos,
-                                 u32 start_line,
-                                 usize start_line_start)
+/* Scan a double-quoted string "...". Opening '"' already consumed. */
+static CandoToken lex_string_dq(CandoLexer *lex,
+                                usize start_pos,
+                                u32 start_line,
+                                usize start_line_start)
 {
-    while (!lex_at_end(lex)) {
-        char c = lex_advance(lex);
-        if (c == '\\') {
-            if (lex_at_end(lex)) break;
-            lex_advance(lex);
-        } else if (c == '\'') {
-            return make_token(lex, TOK_STRING_SQ,
-                              start_pos, start_line, start_line_start);
-        }
-    }
-    return lex_error(lex, start_pos, start_line, start_line_start,
-                     "unterminated single-quoted string");
+    return lex_string_quoted(lex, start_pos, start_line, start_line_start,
+                             '"', TOK_STRING_DQ,
+                             "unterminated double-quoted string");
+}
+
+/* Scan a single-quoted multiline string '...'.  Opening '\'' already
+ * consumed.  Newlines are allowed. */
+static CandoToken lex_string_sq(CandoLexer *lex,
+                                usize start_pos,
+                                u32 start_line,
+                                usize start_line_start)
+{
+    return lex_string_quoted(lex, start_pos, start_line, start_line_start,
+                             '\'', TOK_STRING_SQ,
+                             "unterminated single-quoted string");
 }
 
 /* Scan a backtick interpolated string `...`.
