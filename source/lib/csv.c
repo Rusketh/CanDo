@@ -389,10 +389,9 @@ static bool csv_key_accum_cb(CdoString *key, CdoValue *val, u8 flags, void *ud)
  * ======================================================================= */
 static int csv_stringify(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || !cando_is_object(args[0])) {
-        cando_vm_error(vm, "csv.stringify: expected an array argument");
+    CdoObject *data;
+    if (!libutil_require_object_at(vm, args, argc, 0, "csv.stringify", &data))
         return -1;
-    }
 
     /* delimiter */
     char delim = ',';
@@ -408,7 +407,6 @@ static int csv_stringify(CandoVM *vm, int argc, CandoValue *args)
         has_hdrs = (hdr_arr->kind == OBJ_ARRAY);
     }
 
-    CdoObject *data = cando_bridge_resolve(vm, args[0].as.handle);
     if (data->kind != OBJ_ARRAY) {
         cando_vm_error(vm, "csv.stringify: data must be an array");
         return -1;

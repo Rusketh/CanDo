@@ -88,6 +88,47 @@ static inline f64 libutil_arg_num_at(CandoValue *args, int argc,
 }
 
 /* =========================================================================
+ * Argument validators -- raise vm_error and return NULL/false on miss
+ *
+ * Soft fallbacks (libutil_arg_*_at) return NULL or a default value when
+ * the argument is missing/wrong-type, leaving the caller to decide what
+ * to do.  These hard variants raise a uniform vm_error with the form
+ *   "<fn_name>: argument <idx+1> must be a <type>"
+ * and return NULL/false so the caller can immediately `return -1`.
+ *
+ * Typical use:
+ *
+ *     const char *path = libutil_require_cstr_at(vm, args, argc, 0,
+ *                                                "file.read");
+ *     if (!path) return -1;
+ *
+ *     CdoObject *obj;
+ *     if (!libutil_require_object_at(vm, args, argc, 0,
+ *                                    "object.copy", &obj))
+ *         return -1;
+ *
+ * The error message is a best-effort default; libraries that need a
+ * more specific message can still write their own validator.
+ * ======================================================================= */
+
+CANDO_API const char *libutil_require_cstr_at(CandoVM *vm, CandoValue *args,
+                                              int argc, int idx,
+                                              const char *fn_name);
+
+CANDO_API CandoString *libutil_require_str_at(CandoVM *vm, CandoValue *args,
+                                              int argc, int idx,
+                                              const char *fn_name);
+
+CANDO_API bool libutil_require_num_at(CandoVM *vm, CandoValue *args,
+                                      int argc, int idx,
+                                      const char *fn_name, f64 *out);
+
+CANDO_API bool libutil_require_object_at(CandoVM *vm, CandoValue *args,
+                                         int argc, int idx,
+                                         const char *fn_name,
+                                         CdoObject **out_obj);
+
+/* =========================================================================
  * String push helpers
  * ======================================================================= */
 

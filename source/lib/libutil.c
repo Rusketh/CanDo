@@ -9,7 +9,66 @@
 
 #include "libutil.h"
 #include "../object/string.h"
+#include "../vm/bridge.h"
 #include <string.h>
+
+/* =========================================================================
+ * Argument validators (hard error)
+ * ======================================================================= */
+
+static void libutil_arg_error(CandoVM *vm, const char *fn_name,
+                              int idx, const char *type_name)
+{
+    cando_vm_error(vm, "%s: argument %d must be a %s",
+                   fn_name, idx + 1, type_name);
+}
+
+const char *libutil_require_cstr_at(CandoVM *vm, CandoValue *args,
+                                    int argc, int idx,
+                                    const char *fn_name)
+{
+    if (idx >= argc || !cando_is_string(args[idx])) {
+        libutil_arg_error(vm, fn_name, idx, "string");
+        return NULL;
+    }
+    return args[idx].as.string->data;
+}
+
+CandoString *libutil_require_str_at(CandoVM *vm, CandoValue *args,
+                                    int argc, int idx,
+                                    const char *fn_name)
+{
+    if (idx >= argc || !cando_is_string(args[idx])) {
+        libutil_arg_error(vm, fn_name, idx, "string");
+        return NULL;
+    }
+    return args[idx].as.string;
+}
+
+bool libutil_require_num_at(CandoVM *vm, CandoValue *args,
+                            int argc, int idx,
+                            const char *fn_name, f64 *out)
+{
+    if (idx >= argc || !cando_is_number(args[idx])) {
+        libutil_arg_error(vm, fn_name, idx, "number");
+        return false;
+    }
+    *out = args[idx].as.number;
+    return true;
+}
+
+bool libutil_require_object_at(CandoVM *vm, CandoValue *args,
+                               int argc, int idx,
+                               const char *fn_name,
+                               CdoObject **out_obj)
+{
+    if (idx >= argc || !cando_is_object(args[idx])) {
+        libutil_arg_error(vm, fn_name, idx, "object");
+        return false;
+    }
+    *out_obj = cando_bridge_resolve(vm, args[idx].as.handle);
+    return true;
+}
 
 /* =========================================================================
  * String push helpers
