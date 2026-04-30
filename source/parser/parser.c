@@ -906,8 +906,11 @@ static void parse_unpack(CandoParser *p, bool can_assign)
  *   plain value        → plain_op
  *
  * `next_prec` is the precedence to re-enter parse_precedence with for
- * each comma-separated value in the user-defined list form.            */
-static void emit_multi_cmp(CandoParser *p,
+ * each comma-separated value in the user-defined list form.
+ *
+ * Returns true iff the plain-value (single-comparison) branch fired,
+ * so callers can apply the >/>= chained-comparison diagnostic.        */
+static bool emit_multi_cmp(CandoParser *p,
                            bool was_call, bool was_unpack, u32 mpush,
                            CandoOpcode plain_op,
                            CandoOpcode stack_op,
@@ -916,9 +919,13 @@ static void emit_multi_cmp(CandoParser *p,
 {
     if (was_unpack) {
         emit_op(p, spread_op);
-    } else if (mpush > 1 && !(p->call_depth == 0 && check(p, TOK_COMMA))) {
+        return false;
+    }
+    if (mpush > 1 && !(p->call_depth == 0 && check(p, TOK_COMMA))) {
         emit_op_a(p, stack_op, (u16)mpush);
-    } else if (p->call_depth == 0 && check(p, TOK_COMMA)) {
+        return false;
+    }
+    if (p->call_depth == 0 && check(p, TOK_COMMA)) {
         u16 n = (mpush > 1) ? (u16)mpush : 1;
         if (n == 1 && was_call) emit_op(p, OP_TRUNCATE_RET);
         while (match(p, TOK_COMMA)) {
@@ -931,10 +938,11 @@ static void emit_multi_cmp(CandoParser *p,
             n = (u16)(n + p->last_multi_push);
         }
         emit_op_a(p, stack_op, n);
-    } else {
-        if (was_call) emit_op(p, OP_TRUNCATE_RET);
-        emit_op(p, plain_op);
+        return false;
     }
+    if (was_call) emit_op(p, OP_TRUNCATE_RET);
+    emit_op(p, plain_op);
+    return true;
 }
 
 /* Snapshot the per-expression flags left over from the just-parsed RHS
@@ -991,8 +999,8 @@ static void parse_binary(CandoParser *p, bool can_assign)
                               : (op == TOK_NEQ) ? OP_NEQ_SPREAD
                               : (op == TOK_LT)  ? OP_LT_SPREAD
                                                 : OP_LEQ_SPREAD;
-        emit_multi_cmp(p, was_call, was_unpack, mpush,
-                       plain_op, stack_op, spread_op, next);
+        (void)emit_multi_cmp(p, was_call, was_unpack, mpush,
+                             plain_op, stack_op, spread_op, next);
         break;
     }
     case TOK_GT:
@@ -1000,17 +1008,16 @@ static void parse_binary(CandoParser *p, bool can_assign)
         /* Convergent range check: min > val < max  (or >=, <=).
          * Stack before: [..., min, val]  →  parse max  →  OP_RANGE_CHECK.
          * Multi-comparison (comma) takes priority over chained operators. */
-        bool _was_call   = p->last_expr_was_call;
-        bool _was_unpack = p->last_expr_was_unpack;
-        u32  _mpush      = p->last_multi_push;
-        p->last_expr_was_unpack = false;
-        CandoOpcode plain_op = (op == TOK_GT) ? OP_GT : OP_GEQ;
-        CandoOpcode stack_op = (op == TOK_GT) ? OP_GT_STACK : OP_GEQ_STACK;
+        bool was_call, was_unpack; u32 mpush;
+        cmp_snapshot(p, &was_call, &was_unpack, &mpush);
+        CandoOpcode plain_op  = (op == TOK_GT) ? OP_GT        : OP_GEQ;
+        CandoOpcode stack_op  = (op == TOK_GT) ? OP_GT_STACK  : OP_GEQ_STACK;
         CandoOpcode spread_op = (op == TOK_GT) ? OP_GT_SPREAD : OP_GEQ_SPREAD;
         CandoTokenType right_tok = p->current.type;
+
         if (right_tok == TOK_LT || right_tok == TOK_LEQ) {
             /* Range check — truncate RHS call to first value if needed. */
-            if (_was_call && !_was_unpack) emit_op(p, OP_TRUNCATE_RET);
+            if (was_call && !was_unpack) emit_op(p, OP_TRUNCATE_RET);
             bool left_inc  = (op == TOK_GEQ);
             bool right_inc = (right_tok == TOK_LEQ);
             advance(p);
@@ -1022,31 +1029,16 @@ static void parse_binary(CandoParser *p, bool can_assign)
                 emit_op(p, OP_TRUNCATE_RET);
             emit_op_a(p, OP_RANGE_CHECK,
                       (u16)((left_inc ? 1 : 0) | (right_inc ? 2 : 0)));
-        } else if (_was_unpack) {
-            emit_op(p, spread_op);
-        } else if (_mpush > 1 && !(p->call_depth == 0
-                                   && right_tok == TOK_COMMA)) {
-            emit_op_a(p, stack_op, (u16)_mpush);
-        } else if (p->call_depth == 0 && right_tok == TOK_COMMA) {
-            u16 _n = (_mpush > 1) ? (u16)_mpush : 1;
-            if (_n == 1 && _was_call) emit_op(p, OP_TRUNCATE_RET);
-            while (match(p, TOK_COMMA)) {
-                p->last_multi_push      = 1;
-                p->last_expr_was_call   = false;
-                p->last_expr_was_unpack = false;
-                parse_precedence(p, next);
-                if (p->last_expr_was_call && !p->last_expr_was_unpack)
-                    emit_op(p, OP_TRUNCATE_RET);
-                _n = (u16)(_n + p->last_multi_push);
-            }
-            emit_op_a(p, stack_op, _n);
-        } else {
-            if (_was_call) emit_op(p, OP_TRUNCATE_RET);
-            emit_op(p, plain_op);
-            if (right_tok == TOK_LT || right_tok == TOK_GT ||
-                right_tok == TOK_LEQ || right_tok == TOK_GEQ) {
-                error_current(p, "cannot chain comparison operators; use && to combine");
-            }
+            break;
+        }
+
+        bool plain_branch = emit_multi_cmp(p, was_call, was_unpack, mpush,
+                                           plain_op, stack_op, spread_op, next);
+        /* Chained-comparison diagnostic: only meaningful when the plain
+         * single-comparison opcode was emitted (LT/LEQ already took the
+         * range path above, so check only GT/GEQ here).                 */
+        if (plain_branch && (right_tok == TOK_GT || right_tok == TOK_GEQ)) {
+            error_current(p, "cannot chain comparison operators; use && to combine");
         }
         break;
     }
