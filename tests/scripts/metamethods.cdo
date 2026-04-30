@@ -52,90 +52,73 @@ VAR ts = toString(plain);
 print(type(ts));         // string
 
 /* ----- CLASS: basic ------------------------------------------------------- */
-CLASS Animal {
-    FUNCTION make(name) {
-        VAR inst = { name: name };
-        object.setPrototype(inst, Animal);
-        RETURN inst;
-    }
-    FUNCTION speak(self) {
-        RETURN self.name + " says hello";
-    }
-    FUNCTION getName(self) {
-        RETURN self.name;
-    }
+CLASS Animal = (self, name) {
+    self.name = name;
 }
+Animal.speak = FUNCTION(self) {
+    RETURN self.name + " says hello";
+};
+Animal.getName = FUNCTION(self) {
+    RETURN self.name;
+};
 
 print(type(Animal));         // Animal
-VAR dog = Animal.make("Rex");
+VAR dog = Animal("Rex");
 print(dog:speak());          // Rex says hello
 print(dog:getName());        // Rex
 
 /* ----- CLASS: __type propagation ------------------------------------------ */
-CLASS Point {
-    FUNCTION make(x, y) {
-        VAR p = { x: x, y: y };
-        object.setPrototype(p, Point);
-        RETURN p;
-    }
-    FUNCTION dist(self) {
-        RETURN math.sqrt(self.x * self.x + self.y * self.y);
-    }
-    FUNCTION sum(self) {
-        RETURN self.x + self.y;
-    }
+CLASS Point = (self, x, y) {
+    self.x = x;
+    self.y = y;
 }
+Point.dist = FUNCTION(self) {
+    RETURN math.sqrt(self.x * self.x + self.y * self.y);
+};
+Point.sum = FUNCTION(self) {
+    RETURN self.x + self.y;
+};
 
 print(type(Point));          // Point
-VAR p = Point.make(3, 4);
+VAR p = Point(3, 4);
 print(p:dist());             // 5
 print(p:sum());              // 7
 
-/* ----- CLASS: static method ----------------------------------------------- */
-CLASS MathUtil {
-    STATIC FUNCTION square(n) {
-        RETURN n * n;
-    }
-    STATIC FUNCTION cube(n) {
-        RETURN n * n * n;
-    }
-}
+/* ----- CLASS: static-style methods (just plain fields) -------------------- */
+CLASS MathUtil = { }
+MathUtil.square = FUNCTION(n) { RETURN n * n; };
+MathUtil.cube   = FUNCTION(n) { RETURN n * n * n; };
 
 print(MathUtil.square(7));   // 49
 print(MathUtil.cube(3));     // 27
 
 /* ----- CLASS: instance isolation ------------------------------------------ */
-CLASS Counter {
-    FUNCTION new(start) {
-        VAR inst = { count: start };
-        object.setPrototype(inst, Counter);
-        RETURN inst;
-    }
-    FUNCTION increment(self) {
-        self.count = self.count + 1;
-    }
-    FUNCTION value(self) {
-        RETURN self.count;
-    }
+CLASS Counter = (self, start) {
+    self.count = start;
 }
+Counter.increment = FUNCTION(self) {
+    self.count = self.count + 1;
+};
+Counter.value = FUNCTION(self) {
+    RETURN self.count;
+};
 
-VAR c1 = Counter.new(0);
+VAR c1 = Counter(0);
 c1:increment();
 c1:increment();
 c1:increment();
 print(c1:value());           // 3
 
-VAR c2 = Counter.new(10);
+VAR c2 = Counter(10);
 c2:increment();
 print(c2:value());           // 11
 print(c1:value());           // 3
 
 /* ----- CLASS: method shadowing -------------------------------------------- */
-CLASS Base {
-    FUNCTION greet(self) {
-        RETURN "base greet";
-    }
-}
+CLASS Base = (self) { }
+Base.greet = FUNCTION(self) {
+    RETURN "base greet";
+};
 VAR inst = { greet: FUNCTION(self) { RETURN "overridden"; } };
 object.setPrototype(inst, Base);
 print(inst:greet());         // overridden
@@ -145,102 +128,112 @@ object.setPrototype(inst2, Base);
 print(inst2:greet());        // base greet
 
 /* ----- __add -------------------------------------------------------------- */
-CLASS Vec {
-    FUNCTION make(x, y) {
-        VAR v = { x: x, y: y };
-        object.setPrototype(v, Vec);
-        RETURN v;
-    }
+CLASS Vec = (self, x, y) {
+    self.x = x;
+    self.y = y;
 }
-Vec.__add = FUNCTION(a, b) { RETURN Vec.make(a.x + b.x, a.y + b.y); };
-VAR v1 = Vec.make(1, 2);
-VAR v2 = Vec.make(3, 4);
+Vec.__add = FUNCTION(a, b) { RETURN Vec(a.x + b.x, a.y + b.y); };
+VAR v1 = Vec(1, 2);
+VAR v2 = Vec(3, 4);
 VAR v3 = v1 + v2;
 print(v3.x);                // 4
 print(v3.y);                // 6
 
 /* ----- __sub -------------------------------------------------------------- */
-Vec.__sub = FUNCTION(a, b) { RETURN Vec.make(a.x - b.x, a.y - b.y); };
-VAR v4 = Vec.make(10, 20);
-VAR v5 = Vec.make(3, 5);
+Vec.__sub = FUNCTION(a, b) { RETURN Vec(a.x - b.x, a.y - b.y); };
+VAR v4 = Vec(10, 20);
+VAR v5 = Vec(3, 5);
 VAR v6 = v4 - v5;
 print(v6.x);                // 7
 print(v6.y);                // 15
 
 /* ----- __mul -------------------------------------------------------------- */
-Vec.__mul = FUNCTION(a, b) { RETURN Vec.make(a.x * b.x, a.y * b.y); };
-VAR v7 = Vec.make(3, 4);
-VAR v8 = Vec.make(2, 5);
+Vec.__mul = FUNCTION(a, b) { RETURN Vec(a.x * b.x, a.y * b.y); };
+VAR v7 = Vec(3, 4);
+VAR v8 = Vec(2, 5);
 VAR v9 = v7 * v8;
 print(v9.x);                // 6
 print(v9.y);                // 20
 
 /* ----- __div -------------------------------------------------------------- */
-Vec.__div = FUNCTION(a, b) { RETURN Vec.make(a.x / b.x, a.y / b.y); };
-VAR v10 = Vec.make(10, 20);
-VAR v11 = Vec.make(2, 4);
+Vec.__div = FUNCTION(a, b) { RETURN Vec(a.x / b.x, a.y / b.y); };
+VAR v10 = Vec(10, 20);
+VAR v11 = Vec(2, 4);
 VAR v12 = v10 / v11;
 print(v12.x);               // 5
 print(v12.y);               // 5
 
 /* ----- __mod -------------------------------------------------------------- */
-Vec.__mod = FUNCTION(a, b) { RETURN Vec.make(a.x % b.x, a.y % b.y); };
-VAR v13 = Vec.make(10, 7);
-VAR v14 = Vec.make(3, 2);
+Vec.__mod = FUNCTION(a, b) { RETURN Vec(a.x % b.x, a.y % b.y); };
+VAR v13 = Vec(10, 7);
+VAR v14 = Vec(3, 2);
 VAR v15 = v13 % v14;
 print(v15.x);               // 1
 print(v15.y);               // 1
 
 /* ----- __pow -------------------------------------------------------------- */
-Vec.__pow = FUNCTION(a, b) { RETURN Vec.make(a.x ^ b.x, a.y ^ b.y); };
-VAR v16 = Vec.make(2, 3);
-VAR v17 = Vec.make(3, 2);
+Vec.__pow = FUNCTION(a, b) { RETURN Vec(a.x ^ b.x, a.y ^ b.y); };
+VAR v16 = Vec(2, 3);
+VAR v17 = Vec(3, 2);
 VAR v18 = v16 ^ v17;
 print(v18.x);               // 8
 print(v18.y);               // 9
 
 /* ----- __unm (unary minus) ------------------------------------------------ */
-Vec.__unm = FUNCTION(v) { RETURN Vec.make(-v.x, -v.y); };
-VAR v19 = Vec.make(5, -3);
+Vec.__unm = FUNCTION(v) { RETURN Vec(-v.x, -v.y); };
+VAR v19 = Vec(5, -3);
 VAR v20 = -v19;
 print(v20.x);               // -5
 print(v20.y);               // 3
 
 /* ----- __eq --------------------------------------------------------------- */
 Vec.__eq = FUNCTION(a, b) { RETURN a.x == b.x && a.y == b.y; };
-VAR eq1 = Vec.make(1, 2);
-VAR eq2 = Vec.make(1, 2);
-VAR eq3 = Vec.make(1, 3);
+VAR eq1 = Vec(1, 2);
+VAR eq2 = Vec(1, 2);
+VAR eq3 = Vec(1, 3);
 print(eq1 == eq2);          // true
 print(eq1 == eq3);          // false
 print(eq1 != eq3);          // true
 
 /* ----- __lt --------------------------------------------------------------- */
 Vec.__lt = FUNCTION(a, b) { RETURN (a.x * a.x + a.y * a.y) < (b.x * b.x + b.y * b.y); };
-VAR lt1 = Vec.make(1, 1);
-VAR lt2 = Vec.make(3, 4);
+VAR lt1 = Vec(1, 1);
+VAR lt2 = Vec(3, 4);
 print(lt1 < lt2);           // true
 print(lt2 < lt1);           // false
 print(lt2 > lt1);           // true
 
 /* ----- __le --------------------------------------------------------------- */
 Vec.__le = FUNCTION(a, b) { RETURN (a.x * a.x + a.y * a.y) <= (b.x * b.x + b.y * b.y); };
-VAR le1 = Vec.make(3, 4);
-VAR le2 = Vec.make(3, 4);
-VAR le3 = Vec.make(1, 1);
+VAR le1 = Vec(3, 4);
+VAR le2 = Vec(3, 4);
+VAR le3 = Vec(1, 1);
 print(le1 <= le2);          // true
 print(le3 <= le1);          // true
 print(le1 >= le3);          // true
 
 /* ----- __len -------------------------------------------------------------- */
 Vec.__len = FUNCTION(v) { RETURN v.x + v.y; };
-VAR vlen = Vec.make(10, 25);
+VAR vlen = Vec(10, 25);
 print(#vlen);                // 35
 
 /* ----- __tostring --------------------------------------------------------- */
 Vec.__tostring = FUNCTION(v) { RETURN "Vec(" + toString(v.x) + "," + toString(v.y) + ")"; };
-VAR vts = Vec.make(7, 8);
+VAR vts = Vec(7, 8);
 print(toString(vts));        // Vec(7,8)
+
+/* ----- CLASS: extends + parent dispatch ----------------------------------- */
+CLASS Dog EXTENDS Animal = (self, name, breed) {
+    Animal.__constructor(self, name);
+    self.breed = breed;
+}
+Dog.bark = FUNCTION(self) {
+    RETURN Dog.__index.speak(self) + " (woof, " + self.breed + ")";
+};
+VAR rex = Dog("Rex", "labrador");
+print(type(rex));            // Dog
+print(rex:speak());          // Rex says hello
+print(rex:bark());           // Rex says hello (woof, labrador)
 
 /* ----- __newindex --------------------------------------------------------- */
 VAR log_obj = {};
@@ -253,3 +246,30 @@ VAR ni_proto = {
 object.setPrototype(log_obj, ni_proto);
 log_obj.foo = 1;
 print(ni_log[0]);            // set:foo
+
+/* ----- __index as a function (computed properties) ----------------------- */
+VAR computed = {};
+computed.__index = FUNCTION(self, key) {
+    RETURN "looked_up:" + key;
+};
+print(computed.anything);    // looked_up:anything
+print(computed.other);       // looked_up:other
+
+/* Function __index after a prototype-table chain still dispatches. */
+VAR base_tbl = { explicit: "base_value" };
+base_tbl.__index = FUNCTION(self, key) {
+    RETURN "fallback:" + key;
+};
+VAR layered = {};
+object.setPrototype(layered, base_tbl);
+print(layered.explicit);     // base_value         (table hit short-circuits)
+print(layered.unknown);      // fallback:unknown   (callable __index dispatches)
+
+/* ----- __type as a function ---------------------------------------------- */
+VAR typed_fn = {};
+typed_fn.__type = FUNCTION(self) { RETURN "DynamicType"; };
+print(type(typed_fn));       // DynamicType
+
+/* ----- __tostring as a literal string ------------------------------------ */
+VAR ts_str = { __tostring: "literal-form" };
+print(toString(ts_str));     // literal-form

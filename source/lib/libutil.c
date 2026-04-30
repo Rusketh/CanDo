@@ -93,10 +93,12 @@ void libutil_set_method(CandoVM *vm, CdoObject *obj,
                         const char *name, CandoNativeFn fn)
 {
     CandoValue sentinel = cando_vm_add_native(vm, fn);
-    /* If cando_vm_add_native returns null the native table is full: the
-     * sentinel number would be 0 which OP_CALL misinterprets as a script-
-     * function PC, causing silent infinite loops.  Catch this loudly. */
-    CANDO_ASSERT(cando_is_number(sentinel) && "native table full — increase CANDO_NATIVE_MAX");
+    /* cando_vm_add_native returns null only if the underlying realloc
+     * failed (the registry grows on demand and is otherwise unbounded).
+     * A null sentinel would be a 0 number which OP_CALL would misinterpret
+     * as a script-function PC, so abort loudly rather than corrupt state. */
+    CANDO_ASSERT(cando_is_number(sentinel) &&
+                 "native registry allocation failed");
     CdoString *key      = cdo_string_intern(name, (u32)strlen(name));
     cdo_object_rawset(obj, key, cdo_number(sentinel.as.number), FIELD_NONE);
     cdo_string_release(key);

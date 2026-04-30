@@ -3,14 +3,16 @@
  *
  * Registers a global `csv` object with the following methods:
  *
- *   csv.parse(str, delim?, header?)   → array of arrays | array of objects
+ *   csv.parse(str, delim?, header?)   → array of objects | array of arrays
  *   csv.stringify(data, delim?, headers?) → string
  *
  * csv.parse():
  *   str    -- the CSV text to parse
  *   delim  -- optional single-character delimiter string (default: ",")
- *   header -- optional bool; if true the first row becomes field names and
- *             subsequent rows are returned as objects (default: false)
+ *   header -- optional bool; when true (the default) the first row supplies
+ *             the field names and subsequent rows are returned as objects
+ *             keyed by those names.  Pass false to get a plain array of
+ *             arrays of strings instead.
  *
  * csv.stringify():
  *   data    -- array of arrays  OR  array of objects
@@ -45,5 +47,20 @@
  * VM has been initialised with cando_vm_init().
  */
 CANDO_API void cando_lib_csv_register(CandoVM *vm);
+
+/*
+ * cando_lib_csv_parse_buffer -- parse a CSV document from a raw byte
+ * buffer and store the resulting array (of arrays, or of objects when
+ * `header` is true) in *out.  Returns true on success.  On VM error
+ * returns false with *out set to cando_null().  The `where` string is
+ * used as the prefix on any VM error message (e.g. "csv.parse" or
+ * "include").  Provided so other library code can reuse the CSV parser
+ * without going through the VM-level csv.parse native.
+ */
+CANDO_API bool cando_lib_csv_parse_buffer(CandoVM *vm,
+                                          const char *src, usize len,
+                                          char delim, bool header,
+                                          const char *where,
+                                          CandoValue *out);
 
 #endif /* CANDO_LIB_CSV_H */

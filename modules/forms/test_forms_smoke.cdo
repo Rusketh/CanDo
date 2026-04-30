@@ -1,0 +1,30 @@
+// modules/forms/test_forms_smoke.cdo -- platform-agnostic smoke test.
+//
+// Verifies that forms.dll / forms.so loads and exposes its public surface.
+// Constructors are NOT exercised here (they are Windows-only); see
+// test_forms.cdo for the full integration.
+
+VAR forms = NULL;
+TRY {
+    forms = include("./forms.dll");
+} CATCH (e) {
+    TRY {
+        forms = include("./forms.so");
+    } CATCH (e2) {
+        forms = include("./forms.dylib");
+    }
+}
+
+print("forms.VERSION   =", forms.VERSION);
+print("forms.platform  =", forms.platform);
+print("forms.supported =", forms.supported);
+
+VAR fail = 0;
+IF (forms.VERSION == NULL)   { print("FAIL: VERSION missing"); fail = fail + 1; }
+IF (forms.platform == NULL)  { print("FAIL: platform missing"); fail = fail + 1; }
+
+IF fail > 0 {
+    print(fail, "smoke check(s) failed.");
+} ELSE {
+    print("forms smoke test OK.");
+}

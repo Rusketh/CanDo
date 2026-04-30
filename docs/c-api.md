@@ -59,6 +59,7 @@ void cando_open_arraylib(CandoVM *vm);            /* array prototype       */
 void cando_open_objectlib(CandoVM *vm);           /* object.*              */
 void cando_open_jsonlib(CandoVM *vm);             /* json.*                */
 void cando_open_csvlib(CandoVM *vm);              /* csv.*                 */
+void cando_open_yamllib(CandoVM *vm);             /* yaml.*                */
 void cando_open_threadlib(CandoVM *vm);           /* thread.*              */
 void cando_open_oslib(CandoVM *vm);               /* os.*                  */
 void cando_open_datetimelib(CandoVM *vm);         /* datetime.*            */
@@ -69,6 +70,7 @@ void cando_open_evallib(CandoVM *vm);             /* eval()                */
 void cando_open_includelib(CandoVM *vm);          /* include()             */
 void cando_open_httplib(CandoVM *vm);             /* http.* + fetch()      */
 void cando_open_httpslib(CandoVM *vm);            /* https.*               */
+void cando_open_metalib(CandoVM *vm);             /* `_meta` registry      */
 ```
 
 Each opener is idempotent.  `cando_openlibs` registers the libraries

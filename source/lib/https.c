@@ -13,6 +13,7 @@
 #include "https.h"
 #include "http.h"
 #include "httputil.h"
+#include "sockutil.h"
 #include "libutil.h"
 #include "../vm/bridge.h"
 #include "../vm/vm.h"
@@ -20,10 +21,6 @@
 #include "../object/string.h"
 
 #include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <openssl/pem.h>
-#include <openssl/bio.h>
-#include <openssl/x509.h>
 
 #include <string.h>
 
@@ -78,70 +75,6 @@ static CdoString *opts_get_string_field(CdoObject *obj, const char *name)
     return s;
 }
 
-static SSL_CTX *build_server_ctx(const char *cert_pem, u32 cert_len,
-                                 const char *key_pem,  u32 key_len,
-                                 char *err, usize errlen)
-{
-    http_one_time_init();
-
-    SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
-    if (!ctx) { snprintf(err, errlen, "SSL_CTX_new failed"); return NULL; }
-
-    /* Load certificate (supports chains: repeatedly read X509 from BIO). */
-    BIO *cbio = BIO_new_mem_buf(cert_pem, (int)cert_len);
-    if (!cbio) { SSL_CTX_free(ctx); snprintf(err, errlen, "cert BIO failed"); return NULL; }
-
-    X509 *first = PEM_read_bio_X509(cbio, NULL, NULL, NULL);
-    if (!first) {
-        BIO_free(cbio);
-        SSL_CTX_free(ctx);
-        snprintf(err, errlen, "invalid PEM certificate");
-        return NULL;
-    }
-    if (SSL_CTX_use_certificate(ctx, first) != 1) {
-        X509_free(first);
-        BIO_free(cbio);
-        SSL_CTX_free(ctx);
-        snprintf(err, errlen, "SSL_CTX_use_certificate failed");
-        return NULL;
-    }
-    X509_free(first);
-    /* Add any extra chain certs. */
-    X509 *extra;
-    while ((extra = PEM_read_bio_X509(cbio, NULL, NULL, NULL)) != NULL) {
-        if (SSL_CTX_add_extra_chain_cert(ctx, extra) != 1) {
-            X509_free(extra);
-            /* non-fatal */
-            break;
-        }
-        /* ownership transferred to ctx on success */
-    }
-    BIO_free(cbio);
-
-    /* Load private key. */
-    BIO *kbio = BIO_new_mem_buf(key_pem, (int)key_len);
-    if (!kbio) { SSL_CTX_free(ctx); snprintf(err, errlen, "key BIO failed"); return NULL; }
-
-    EVP_PKEY *pkey = PEM_read_bio_PrivateKey(kbio, NULL, NULL, NULL);
-    BIO_free(kbio);
-    if (!pkey) { SSL_CTX_free(ctx); snprintf(err, errlen, "invalid PEM private key"); return NULL; }
-
-    if (SSL_CTX_use_PrivateKey(ctx, pkey) != 1) {
-        EVP_PKEY_free(pkey);
-        SSL_CTX_free(ctx);
-        snprintf(err, errlen, "SSL_CTX_use_PrivateKey failed");
-        return NULL;
-    }
-    EVP_PKEY_free(pkey);
-
-    if (SSL_CTX_check_private_key(ctx) != 1) {
-        SSL_CTX_free(ctx);
-        snprintf(err, errlen, "cert/key mismatch");
-        return NULL;
-    }
-    return ctx;
-}
-
 static int https_create_server_fn(CandoVM *vm, int argc, CandoValue *args)
 {
     if (argc < 2) {
@@ -162,10 +95,11 @@ static int https_create_server_fn(CandoVM *vm, int argc, CandoValue *args)
         return -1;
     }
 
-    char errmsg[128];
-    SSL_CTX *ctx = build_server_ctx(cert->data, cert->length,
-                                    key->data,  key->length,
-                                    errmsg, sizeof(errmsg));
+    char errmsg[128] = {0};
+    SSL_CTX *ctx = sockutil_build_server_ssl_ctx(cert->data, cert->length,
+                                                 key->data,  key->length,
+                                                 NULL,
+                                                 errmsg, sizeof(errmsg));
     cdo_string_release(cert);
     cdo_string_release(key);
     if (!ctx) {
@@ -193,4 +127,8 @@ void cando_lib_https_register(CandoVM *vm)
     libutil_set_method(vm, https_obj, "createServer", https_create_server_fn);
 
     cando_vm_set_global(vm, "https", https_val, true);
+
+    /* Share the same `_meta` tables as http: TLS only changes the transport,
+     * not the request/response shape, so users register methods once. */
+    http_register_meta_tables(vm);
 }

@@ -1,0 +1,78 @@
+/* lib_socket.cdo -- Integration tests for the `socket` library.
+ *
+ * Verifies the non-blocking server contract (`:listen` returns immediately),
+ * the connection callback model (per-connection child VM thread), the
+ * imperative recv/send loop, the user-extensible `_meta.tcp_socket`
+ * metatable, and the multi-roundtrip flow.
+ *
+ * Each scenario uses a private high port so tests cannot collide with
+ * locally running services.  Expected output is registered in
+ * tests/integration/run_tests.sh.
+ */
+
+/* CanDo string literals do not decode \n, so a real LF must be expressed
+ * via a single-quoted multi-line string. */
+VAR LF = '
+';
+
+/* ----- 1. Non-blocking listen + simple echo round-trip ------------------ */
+VAR srv1 = socket.createServer(FUNCTION(conn) {
+    VAR data = conn:recv(4096);
+    WHILE data != "" {
+        conn:sendAll(data);
+        data = conn:recv(4096);
+    }
+    conn:close();
+});
+srv1:listen(18801);
+print("after listen");          /* expected: after listen */
+
+thread.sleep(50);
+
+VAR c1 = socket.connect("127.0.0.1", 18801);
+c1:sendAll("ping" + LF);
+print(c1:recvLine());           /* expected: ping */
+c1:close();
+srv1:close();
+
+/* ----- 2. User-defined writeLine on _meta.tcp_socket -------------------- */
+_meta.tcp_socket.writeLine = FUNCTION(self, line) {
+    self:sendAll(line + LF);
+};
+VAR srv2 = socket.createServer(FUNCTION(conn) {
+    VAR line = conn:recvLine();
+    WHILE line != "" {
+        conn:writeLine("echo:" + line);
+        line = conn:recvLine();
+    }
+    conn:close();
+});
+srv2:listen(18802);
+thread.sleep(50);
+
+VAR c2 = socket.connect("127.0.0.1", 18802);
+c2:writeLine("first");
+print(c2:recvLine());           /* expected: echo:first */
+c2:writeLine("second");
+print(c2:recvLine());           /* expected: echo:second */
+c2:close();
+srv2:close();
+
+/* ----- 3. Multi-connection accept loop ---------------------------------- */
+VAR srv3 = socket.createServer(FUNCTION(conn) {
+    conn:writeLine("hi");
+    conn:close();
+});
+srv3:listen(18803);
+thread.sleep(50);
+
+VAR a = socket.connect("127.0.0.1", 18803);
+print(a:recvLine());            /* expected: hi */
+a:close();
+VAR b = socket.connect("127.0.0.1", 18803);
+print(b:recvLine());            /* expected: hi */
+b:close();
+
+srv3:close();
+
+print("done");                  /* expected: done */

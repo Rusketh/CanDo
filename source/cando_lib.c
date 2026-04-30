@@ -29,13 +29,17 @@
 #include "core/common.h"
 #include "core/thread_platform.h"
 #include "vm/vm.h"
+#include "vm/bridge.h"
 #include "vm/chunk.h"
 #include "vm/debug.h"
 #include "parser/parser.h"
 #include "object/object.h"
+#include "object/array.h"
+#include "object/string.h"
 #include "natives.h"
 
 /* Library registration headers */
+#include "lib/gc.h"
 #include "lib/math.h"
 #include "lib/file.h"
 #include "lib/eval.h"
@@ -43,16 +47,22 @@
 #include "lib/include.h"
 #include "lib/json.h"
 #include "lib/csv.h"
+#include "lib/yaml.h"
 #include "lib/thread.h"
 #include "lib/os.h"
+#include "lib/app.h"
 #include "lib/datetime.h"
 #include "lib/array.h"
 #include "lib/object.h"
 #include "lib/crypto.h"
 #include "lib/process.h"
 #include "lib/net.h"
+#include "lib/socket.h"
+#include "lib/secure_socket.h"
 #include "lib/http.h"
 #include "lib/https.h"
+#include "lib/stream.h"
+#include "lib/meta.h"
 
 /* cando.h error codes and CANDO_API */
 #include "../include/cando.h"
@@ -115,9 +125,17 @@ CANDO_API CandoVM *cando_open(void)
     }
     cando_os_mutex_unlock(&g_state_mutex);
 
+    /* Allocate the memory controller alongside the VM.  The memctrl
+     * tracks every CdoObject / CdoThread the VM allocates so they can
+     * be reclaimed at cando_close instead of leaking until process
+     * exit.  Child VMs (spawned threads) share this same controller via
+     * vm->mem so allocations from any thread land in one registry.    */
+    CandoMemCtrl *mem = (CandoMemCtrl *)cando_alloc(sizeof(CandoMemCtrl));
+    cando_memctrl_init(mem);
+
     /* Allocate and initialise the VM. */
     CandoVM *vm = (CandoVM *)cando_alloc(sizeof(CandoVM));
-    cando_vm_init(vm, NULL);
+    cando_vm_init(vm, mem);
 
     /* Register core native functions (print, type, toString). */
     for (u32 i = 0; cando_native_names[i] && cando_native_table[i]; i++) {
@@ -132,10 +150,23 @@ CANDO_API void cando_close(CandoVM *vm)
 {
     if (!vm) return;
 
-    /* Wait for any spawned threads before destroying the VM. */
-    cando_vm_wait_all_threads(vm);
+    /* Wait for any subsystem holding the app open: spawned threads,
+     * native window render threads, accept-loop servers, etc.
+     * Lifelines and threads share the same counter. */
+    cando_vm_wait_all_lifelines(vm);
+
+    /* Capture the memctrl pointer before vm_destroy clears it; the
+     * memctrl outlives the VM struct so we can sweep its registry
+     * here, after the VM has finished releasing its own roots and
+     * before we lose the pointer.                                     */
+    CandoMemCtrl *mem = vm->mem;
     cando_vm_destroy(vm);
     cando_free(vm);
+
+    if (mem) {
+        cando_memctrl_destroy(mem);
+        cando_free(mem);
+    }
 
     /* Tear down the global object layer when the last VM is closed. */
     cando_os_mutex_lock(&g_state_mutex);
@@ -153,6 +184,11 @@ CANDO_API void cando_close(CandoVM *vm)
 
 CANDO_API void cando_openlibs(CandoVM *vm)
 {
+    /* `_meta` is registered first so any other library can populate its
+     * subtables during its own registration. */
+    cando_lib_meta_register(vm);
+
+    cando_lib_gc_register(vm);
     cando_lib_math_register(vm);
     cando_lib_file_register(vm);
     cando_lib_eval_register(vm);
@@ -160,18 +196,29 @@ CANDO_API void cando_openlibs(CandoVM *vm)
     cando_lib_include_register(vm);
     cando_lib_json_register(vm);
     cando_lib_csv_register(vm);
+    cando_lib_yaml_register(vm);
     cando_lib_thread_register(vm);
     cando_lib_os_register(vm);
+    cando_lib_app_register(vm);
     cando_lib_datetime_register(vm);
     cando_lib_array_register(vm);
     cando_lib_object_register(vm);
     cando_lib_crypto_register(vm);
     cando_lib_process_register(vm);
     cando_lib_net_register(vm);
+    /* socket sits above net but below http/https; the latter still use the
+     * legacy HttpConn wrappers (now backed by sockutil) so the registration
+     * order is "low-level transports first, protocol libs after". */
+    cando_lib_socket_register(vm);
+    cando_lib_secure_socket_register(vm);
     /* http/https must register after json so res.json(value) can look up
      * the json.stringify method on the child VM's shared globals. */
     cando_lib_http_register(vm);
     cando_lib_https_register(vm);
+    /* Stream registers last so any earlier library can later expose
+     * `:stream()` accessors that build on it without registration ordering
+     * concerns. */
+    cando_lib_stream_register(vm);
 }
 
 CANDO_API void cando_open_mathlib(CandoVM *vm)     { cando_lib_math_register(vm);     }
@@ -181,16 +228,21 @@ CANDO_API void cando_open_arraylib(CandoVM *vm)    { cando_lib_array_register(vm
 CANDO_API void cando_open_objectlib(CandoVM *vm)   { cando_lib_object_register(vm);   }
 CANDO_API void cando_open_jsonlib(CandoVM *vm)     { cando_lib_json_register(vm);     }
 CANDO_API void cando_open_csvlib(CandoVM *vm)      { cando_lib_csv_register(vm);      }
+CANDO_API void cando_open_yamllib(CandoVM *vm)     { cando_lib_yaml_register(vm);     }
 CANDO_API void cando_open_threadlib(CandoVM *vm)   { cando_lib_thread_register(vm);   }
 CANDO_API void cando_open_oslib(CandoVM *vm)       { cando_lib_os_register(vm);       }
 CANDO_API void cando_open_datetimelib(CandoVM *vm) { cando_lib_datetime_register(vm); }
 CANDO_API void cando_open_cryptolib(CandoVM *vm)   { cando_lib_crypto_register(vm);   }
 CANDO_API void cando_open_processlib(CandoVM *vm)  { cando_lib_process_register(vm);  }
 CANDO_API void cando_open_netlib(CandoVM *vm)      { cando_lib_net_register(vm);      }
+CANDO_API void cando_open_socketlib(CandoVM *vm)        { cando_lib_socket_register(vm);        }
+CANDO_API void cando_open_secure_socketlib(CandoVM *vm) { cando_lib_secure_socket_register(vm); }
 CANDO_API void cando_open_evallib(CandoVM *vm)     { cando_lib_eval_register(vm);     }
 CANDO_API void cando_open_includelib(CandoVM *vm)  { cando_lib_include_register(vm);  }
 CANDO_API void cando_open_httplib(CandoVM *vm)     { cando_lib_http_register(vm);     }
 CANDO_API void cando_open_httpslib(CandoVM *vm)    { cando_lib_https_register(vm);    }
+CANDO_API void cando_open_metalib(CandoVM *vm)     { cando_lib_meta_register(vm);     }
+CANDO_API void cando_open_streamlib(CandoVM *vm)   { cando_lib_stream_register(vm);   }
 
 /* =========================================================================
  * Internal: compile source into a chunk
@@ -211,10 +263,12 @@ static int compile_source(CandoVM *vm,
                  err ? err : "parse error");
         vm->has_error = true;
         cando_chunk_free(chunk);
+        cando_parser_free(&parser);
         *chunk_out = NULL;
         return CANDO_ERR_PARSE;
     }
 
+    cando_parser_free(&parser);
     *chunk_out = chunk;
     return CANDO_OK;
 }
@@ -303,6 +357,27 @@ CANDO_API int cando_loadstring(CandoVM *vm, const char *src, const char *name,
                                 CandoChunk **chunk_out)
 {
     return compile_source(vm, src, strlen(src), name, chunk_out);
+}
+
+/* =========================================================================
+ * Command-line arguments
+ * ====================================================================== */
+
+CANDO_API void cando_set_args(CandoVM *vm, int argc, const char *const *argv)
+{
+    if (!vm) return;
+
+    CandoValue arr_val = cando_bridge_new_array(vm);
+    CdoObject *arr     = cando_bridge_resolve(vm, arr_val.as.handle);
+
+    for (int i = 0; i < argc; i++) {
+        const char *s = (argv && argv[i]) ? argv[i] : "";
+        CdoString *cs = cdo_string_new(s, (u32)strlen(s));
+        cdo_array_push(arr, cdo_string_value(cs));
+        cdo_string_release(cs);
+    }
+
+    cando_vm_set_global(vm, "args", arr_val, true);
 }
 
 /* =========================================================================

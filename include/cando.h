@@ -83,6 +83,7 @@
 #include "lib/include.h"
 #include "lib/json.h"
 #include "lib/csv.h"
+#include "lib/yaml.h"
 #include "lib/thread.h"
 #include "lib/os.h"
 #include "lib/datetime.h"
@@ -91,6 +92,8 @@
 #include "lib/crypto.h"
 #include "lib/process.h"
 #include "lib/net.h"
+#include "lib/socket.h"
+#include "lib/secure_socket.h"
 #include "lib/http.h"
 #include "lib/https.h"
 
@@ -146,16 +149,21 @@ CANDO_API void cando_open_arraylib(CandoVM *vm);     /**< array prototype   */
 CANDO_API void cando_open_objectlib(CandoVM *vm);    /**< object.*          */
 CANDO_API void cando_open_jsonlib(CandoVM *vm);      /**< json.*            */
 CANDO_API void cando_open_csvlib(CandoVM *vm);       /**< csv.*             */
+CANDO_API void cando_open_yamllib(CandoVM *vm);      /**< yaml.*            */
 CANDO_API void cando_open_threadlib(CandoVM *vm);    /**< thread.*          */
 CANDO_API void cando_open_oslib(CandoVM *vm);        /**< os.*              */
 CANDO_API void cando_open_datetimelib(CandoVM *vm);  /**< datetime.*        */
 CANDO_API void cando_open_cryptolib(CandoVM *vm);    /**< crypto.*          */
 CANDO_API void cando_open_processlib(CandoVM *vm);   /**< process.*         */
 CANDO_API void cando_open_netlib(CandoVM *vm);       /**< net.*             */
-CANDO_API void cando_open_evallib(CandoVM *vm);      /**< eval()            */
+CANDO_API void cando_open_socketlib(CandoVM *vm);        /**< socket.*       */
+CANDO_API void cando_open_secure_socketlib(CandoVM *vm); /**< secure_socket.*/
+CANDO_API void cando_open_evallib(CandoVM *vm);          /**< eval()         */
 CANDO_API void cando_open_includelib(CandoVM *vm);   /**< include()         */
 CANDO_API void cando_open_httplib(CandoVM *vm);      /**< http.* + fetch()  */
 CANDO_API void cando_open_httpslib(CandoVM *vm);     /**< https.*           */
+CANDO_API void cando_open_metalib(CandoVM *vm);      /**< _meta registry    */
+CANDO_API void cando_open_streamlib(CandoVM *vm);    /**< stream.*          */
 
 /* =========================================================================
  * Load and execute
@@ -185,6 +193,26 @@ CANDO_API int cando_dofile(CandoVM *vm, const char *path);
  * Returns CANDO_OK, CANDO_ERR_PARSE, or CANDO_ERR_RUNTIME.
  */
 CANDO_API int cando_dostring(CandoVM *vm, const char *src, const char *name);
+
+/**
+ * cando_set_args — expose command-line arguments to the script.
+ *
+ * Registers a global named `args` containing an array of strings.  By
+ * convention `argv` is the list of arguments passed to the script (the
+ * caller decides whether to include the script path itself); the strings
+ * are copied, so the source buffer may be freed or reused after this call.
+ *
+ * The global is registered with const semantics — scripts cannot rebind
+ * `args` to a different value.  Calling cando_set_args() more than once
+ * on the same VM is a no-op after the first call.
+ *
+ * Typical usage from a host:
+ *   cando_set_args(vm, argc - 2, (const char *const *)&argv[2]);
+ *
+ * From inside a script:
+ *   IF args.length() > 0 { print(args[0]); }
+ */
+CANDO_API void cando_set_args(CandoVM *vm, int argc, const char *const *argv);
 
 /**
  * cando_loadstring — compile a source string without executing it.

@@ -112,4 +112,12 @@ CANDO_API u16 cando_chunk_add_const(CandoChunk *chunk, CandoValue val);
 CANDO_API u16 cando_chunk_add_string_const(CandoChunk *chunk, const char *str,
                                   u32 len);
 
+/* cando_chunk_intern_string -- like cando_chunk_add_string_const but
+ * scans the existing pool by raw bytes first and only allocates a new
+ * CandoString on miss.  Used by the parser, which would otherwise
+ * heap-allocate (and immediately release) a CandoString for every
+ * identifier reference.                                                  */
+CANDO_API u16 cando_chunk_intern_string(CandoChunk *chunk, const char *str,
+                                        u32 len);
+
 #endif /* CANDO_CHUNK_H */

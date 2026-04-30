@@ -1,0 +1,56 @@
+/* lib_csv.cdo -- Integration tests for the csv standard library.
+ *
+ * Each test prints a labelled result to stdout.  Expected output is
+ * registered in tests/integration/run_tests.sh.
+ */
+
+/* ----- csv.parse: default header mode → array of objects ----------------- */
+VAR rows = csv.parse("name,age,city
+alice,30,NYC
+bob,25,LA
+");
+print(#rows);                       /* 2          */
+print(rows[0].name);                /* alice      */
+print(rows[0].age);                 /* 30         */
+print(rows[0].city);                /* NYC        */
+print(rows[1].name);                /* bob        */
+print(rows[1].city);                /* LA         */
+
+/* ----- csv.parse: explicit header=false → array of arrays ---------------- */
+VAR raw = csv.parse("a,b,c
+1,2,3
+", ",", false);
+print(#raw);                        /* 2          */
+print(raw[0][0]);                   /* a          */
+print(raw[1][1]);                   /* 2          */
+
+/* ----- csv.parse: custom delimiter --------------------------------------- */
+VAR semi = csv.parse("k1;k2
+v1;v2
+", ";");
+print(semi[0].k1);                  /* v1         */
+print(semi[0].k2);                  /* v2         */
+
+/* ----- csv.parse: quoted fields with embedded commas/quotes -------------- */
+VAR q = csv.parse('name,note
+alice,"hello, world"
+bob,"she said ""hi"""
+');
+print(q[0].note);                   /* hello, world      */
+print(q[1].note);                   /* she said "hi"     */
+
+/* ----- csv.stringify: array of objects round-trip ------------------------ */
+VAR data = [
+    { name: "alice", age: "30" },
+    { name: "bob",   age: "25" },
+];
+VAR text = csv.stringify(data);
+VAR back = csv.parse(text);
+print(back[0].name);                /* alice      */
+print(back[1].age);                 /* 25         */
+
+/* ----- csv.stringify: explicit headers controls column order ------------- */
+VAR text2 = csv.stringify(data, ",", ["age", "name"]);
+VAR back2 = csv.parse(text2);
+print(back2[0].age);                /* 30         */
+print(back2[1].name);               /* bob        */

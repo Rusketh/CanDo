@@ -1,0 +1,64 @@
+/* test_cert.cdo -- vendored self-signed RSA-2048 certificate + private
+ * key for use by lib_secure_socket.cdo.  Generated once with:
+ *
+ *   openssl req -x509 -newkey rsa:2048 \
+ *           -keyout key.pem -out cert.pem \
+ *           -sha256 -days 36500 -nodes -subj "/CN=localhost"
+ *
+ * Self-signed and only ever bound to 127.0.0.1, so the CN/SAN are
+ * irrelevant for the integration test.  The cert expires in the year 2126
+ * which is comfortably beyond any reasonable test horizon.
+ */
+
+VAR TEST_CERT = '-----BEGIN CERTIFICATE-----
+MIIDCzCCAfOgAwIBAgIUDkhUaBDG6ILN54QzUTYX8/ZubMwwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDQyODE5MDAwOFoYDzIxMjYw
+NDA0MTkwMDA4WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQC1hwIcv6++a7KG40HdrqW9HGd952ZRIbcOgmkjL4IG
+scjO7jOcFAjcKll+gxAdfysdXVu2Rlb/7Hyr06TNZX1Ri91Hx0+mXr3TLixzD0h4
+rMBEuiAKM/JMVFa7xhIWdZDkSPrQRukyEHlOPIrwdFERZXBfFJ2JB99uxo7prtDm
+hMZ5jo1imW77f/DfLzjK74mHaY+9o6LIXYnXGP3hhJgXbnUcIcyuLsS6R7fnH9tT
+HXcO36v0kgtm0r57UkBTbR4Tw5aI2CJtQll2OKO+ExLT3UAHLD3NAkvUrFmKA1Wa
+gYruHI8IXiM3ZDUwTpNcxLMTYxNoJCBbiJzV7c+ZsIPzAgMBAAGjUzBRMB0GA1Ud
+DgQWBBSSnQnAxxu5j1Yv0oEJP8QLA4W78zAfBgNVHSMEGDAWgBSSnQnAxxu5j1Yv
+0oEJP8QLA4W78zAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQC1
+hmjLFO5cHykmpjMHUUcjebWHx7LdWJN4h+v6vsnxks5SnSYLaaVXmXJLO7ntqzvi
+PSMvv1dKwRl3yoAVKedcMxxBvsGfGrta7q2I8SYfOVApa3AbLNHxJwsRMU56AwbU
++c48P6+VrOwF4S5F9R/sG2m40EavihxRI3l3H7++zS7S3jYKq0HVblvXY3FeNRjh
+TGqANa2v7xGVaaaXqLvpO0OdfOn2qUWwV0+lkiER24uVw6eRhIQoCgU3+lUdJ8LX
+Z0h5pBY+Fgd01V5nnL4AKCezmCPC4QcUoJHMml4ZmgntXB1yd3dS32dMQz7fFV92
+Tc1etuPiBa5BmxViRpn/
+-----END CERTIFICATE-----
+';
+
+VAR TEST_KEY = '-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC1hwIcv6++a7KG
+40HdrqW9HGd952ZRIbcOgmkjL4IGscjO7jOcFAjcKll+gxAdfysdXVu2Rlb/7Hyr
+06TNZX1Ri91Hx0+mXr3TLixzD0h4rMBEuiAKM/JMVFa7xhIWdZDkSPrQRukyEHlO
+PIrwdFERZXBfFJ2JB99uxo7prtDmhMZ5jo1imW77f/DfLzjK74mHaY+9o6LIXYnX
+GP3hhJgXbnUcIcyuLsS6R7fnH9tTHXcO36v0kgtm0r57UkBTbR4Tw5aI2CJtQll2
+OKO+ExLT3UAHLD3NAkvUrFmKA1WagYruHI8IXiM3ZDUwTpNcxLMTYxNoJCBbiJzV
+7c+ZsIPzAgMBAAECggEAUmjq2BNb3TZ2c49LcTEe9CYng7ygMjf8q30f7wXb4V8n
+222/h11/Eji1rV4h3EpF0Ax4nNz9FS2PAdDREiA/jtxQxovhCJYdVnixXED1dTd0
+CB95eThRCT8GqzOGNaUE9OZ+2zw+FOjusUqCBxy/SwcCx1+MD1BAKsHA0qz3EJc0
++YbJtQa5Gh7UM8UjQJkMaDzMjqT74sgKedz6l7eyGk5JVmq3VaYvolQNX27TCIbo
+bcdgKqM+a81czAtD53/dvQtryLtnOeO/XtnnPjyqBe28783qDaZ+SnF/VZ8LZEK3
+Usra0YtpzGSd2bC6CmVKyLmAjVeoKKSZiKwjhQX6eQKBgQDtv9niNCUE2K5cqhKb
+bG2J58lJ22ufpA9nXGkvY5YLhUoqGyHYjGmqXooCscFLQX33Y0fWLssa20+Wb84z
+6qrrHgk1dg/u2//SRdgP+s/HpCqd3PJPvmpn4fF30nfohWmjnfQmn+6yRNjrab1z
+/Gvm8artJ1i3LHX/E1Q5dBZg6wKBgQDDdk5L+e0M41dFIyFP/0J8VzbzBBXFaGi2
+Eeh1NAXGEbgNwJd7bWkK/JNfdCLdxXvixNgbALertt33Lo5uFmQ0FEa7/DuZPxa/
+P+NzzzTaeSaOadJ0od5mJjYi3RGxLKJE1nK+cGjWt3jMufgxFCTnN8zDU4dXk60u
+xmbNWufnGQKBgF2cCGH0Pg8mcaCyphjkHE0MIkkeR8XXhukfjZrHDzECDi19+VmW
+D5SxHI3rBzxmUP6y7Hn8eqPcbf3Bj+MJJrrkXKPcFHHr1VIpheTk0CK/FLiLYizb
+wHGemMCg8e1veiSd8J+0oPs3+GDYhWvBm4qW5MHzmA6nRt5j8emdN6J5AoGBAK+l
+h7S0sfXr8geaCxyFSSzNfv6hBCNysO40Z42zIyEb2SbalAYBiuypjpGvnolmJu7g
+b0bMvUDcwtiWiL2a947pTasufiw3Smywr+fpIxjU1/YQWGQg9ecbnXh06qopbuSn
+RVOnVj7lfvOShtsrvAHf3e0FCdGETpODDOyrLUw5AoGBAJDB5s92J+HrqLH/7iGJ
+yQMp7EHzy2ZT27wC57iWqkQRRSmx4z81/my8TdKv9NKtUTduPbnCCSoo4wbjN6ez
+uP3sFBBlKeqmOdMqKZ8e1hudd6OTZY1qRWOWvpR3WXM37cTIXe6Ro0op4p9q3juA
+lPZE12SLAuk0PsS87eqdBxfG
+-----END PRIVATE KEY-----
+';
+
+RETURN { cert: TEST_CERT, key: TEST_KEY };

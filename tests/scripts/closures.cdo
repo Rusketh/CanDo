@@ -1,0 +1,46 @@
+/* closures.cdo -- regression tests for true (Lua-style) upvalue closures.
+ *
+ * Pre-fix the parser/VM treated OP_CLOSURE captures as snapshot copies:
+ * each closure had its own private slot, so two closures capturing the
+ * same outer local could not see each other's writes.  After enabling
+ * shared open upvalues with refcounted lifetimes, sibling closures
+ * share the variable while it lives on the stack and continue to share
+ * its closed copy after the outer function returns.
+ */
+
+/* ----- 1. Counter mutates its own captured slot across calls ---------- */
+function counter() {
+    var n = 0;
+    return function() { n = n + 1; return n; };
+}
+var c = counter();
+print(c());   /* expect 1 */
+print(c());   /* expect 2 */
+print(c());   /* expect 3 */
+
+/* ----- 2. Sibling closures share the captured slot -------------------- */
+function pair() {
+    var n = 0;
+    var inc = function() { n = n + 1; return n; };
+    var get = function() { return n; };
+    return inc, get;
+}
+var inc, get = pair();
+print(inc());   /* expect 1 */
+print(inc());   /* expect 2 */
+print(get());   /* expect 2 -- sees the same n that inc just mutated */
+print(inc());   /* expect 3 */
+print(get());   /* expect 3 */
+
+/* ----- 3. Independent calls produce independent closures -------------- */
+function make() {
+    var n = 0;
+    return function() { n = n + 1; return n; };
+}
+var a = make();
+var b = make();
+print(a());   /* expect 1 */
+print(a());   /* expect 2 */
+print(b());   /* expect 1 -- independent of a */
+print(a());   /* expect 3 */
+print(b());   /* expect 2 */

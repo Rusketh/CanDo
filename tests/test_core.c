@@ -440,114 +440,89 @@ TEST(test_handle_gc_marks) {
 
 /* -----------------------------------------------------------------------
  * memory.h / memory.c tests
+ *
+ * The Stage 1 memctrl tracks live objects so they can be reclaimed at
+ * VM teardown.  Tests below use a small (object, destroy_count++)
+ * helper since the registry doesn't allocate the objects itself.
  * --------------------------------------------------------------------- */
-TEST(test_memctrl_alloc_free) {
-    CandoMemCtrl mc;
-    cando_memctrl_init(&mc);
 
-    HandleIndex h = cando_memctrl_alloc(&mc, 64);
-    EXPECT_NEQ(h, CANDO_INVALID_HANDLE);
-    EXPECT_EQ(mc.handles.count, 1u);
-    EXPECT_EQ(mc.live_count, 1u);
-
-    void *p = cando_memctrl_get_ptr(&mc, h);
-    EXPECT_TRUE(p != NULL);
-    /* Payload should be zero-initialised */
-    unsigned char *bytes = p;
-    bool all_zero = true;
-    for (u32 i = 0; i < 64; i++)
-        if (bytes[i] != 0) { all_zero = false; break; }
-    EXPECT_TRUE(all_zero);
-
-    /* Write to payload and read back */
-    *(int *)p = 0xDEADBEEF;
-    EXPECT_EQ(*(int *)cando_memctrl_get_ptr(&mc, h), (int)0xDEADBEEF);
-
-    cando_memctrl_free(&mc, h);
-    EXPECT_EQ(mc.handles.count, 0u);
-    EXPECT_EQ(mc.live_count, 0u);
-
-    cando_memctrl_destroy(&mc);
+typedef struct { u32 *destroyed_count; } TrackedDummy;
+static void tracked_dummy_destroy(void *p) {
+    TrackedDummy *d = (TrackedDummy *)p;
+    if (d->destroyed_count) (*d->destroyed_count)++;
+    cando_free(d);
 }
 
-TEST(test_memctrl_get_header) {
-    CandoMemCtrl mc;
-    cando_memctrl_init(&mc);
-
-    HandleIndex h = cando_memctrl_alloc(&mc, 32);
-    CandoBlockHeader *hdr = cando_memctrl_get_header(&mc, h);
-
-    EXPECT_TRUE(hdr != NULL);
-    EXPECT_EQ(hdr->handle, h);
-    EXPECT_EQ(hdr->user_size, 32u);
-
-    /* Block header embeds a valid (unlocked) lock. */
-    EXPECT_EQ(atomic_load(&hdr->lock.lock_id), 0ull);
-    EXPECT_EQ(atomic_load(&hdr->lock.readers), 0u);
-
-    cando_memctrl_free(&mc, h);
-    cando_memctrl_destroy(&mc);
+static TrackedDummy *tracked_dummy_new(u32 *counter) {
+    TrackedDummy *d = (TrackedDummy *)cando_alloc(sizeof(*d));
+    d->destroyed_count = counter;
+    return d;
 }
 
-TEST(test_gc_collect_sweep) {
+TEST(test_memctrl_track_destroy) {
     CandoMemCtrl mc;
     cando_memctrl_init(&mc);
 
-    HandleIndex h1 = cando_memctrl_alloc(&mc, 16);
-    HandleIndex h2 = cando_memctrl_alloc(&mc, 16); CANDO_UNUSED(h2);
-    HandleIndex h3 = cando_memctrl_alloc(&mc, 16);
+    u32 destroyed = 0;
+    TrackedDummy *a = tracked_dummy_new(&destroyed);
+    TrackedDummy *b = tracked_dummy_new(&destroyed);
+    TrackedDummy *c = tracked_dummy_new(&destroyed);
+
+    cando_memctrl_track(&mc, a, tracked_dummy_destroy);
+    cando_memctrl_track(&mc, b, tracked_dummy_destroy);
+    cando_memctrl_track(&mc, c, tracked_dummy_destroy);
     EXPECT_EQ(mc.live_count, 3u);
 
-    /* Collect with only h1 and h3 as roots; h2 should be swept. */
-    HandleIndex roots[] = { h1, h3 };
-    cando_gc_collect(&mc, roots, 2);
+    cando_memctrl_destroy(&mc);
+    EXPECT_EQ(destroyed, 3u);
+}
 
+TEST(test_memctrl_untrack_no_double_free) {
+    CandoMemCtrl mc;
+    cando_memctrl_init(&mc);
+
+    u32 destroyed = 0;
+    TrackedDummy *a = tracked_dummy_new(&destroyed);
+    TrackedDummy *b = tracked_dummy_new(&destroyed);
+
+    cando_memctrl_track(&mc, a, tracked_dummy_destroy);
+    cando_memctrl_track(&mc, b, tracked_dummy_destroy);
     EXPECT_EQ(mc.live_count, 2u);
-    EXPECT_EQ(mc.handles.count, 2u);
 
-    /* h1 and h3 still valid; verify their handles still exist */
-    EXPECT_TRUE(cando_memctrl_get_ptr(&mc, h1) != NULL);
-    EXPECT_TRUE(cando_memctrl_get_ptr(&mc, h3) != NULL);
-
-    /* Clean up remaining live blocks */
-    cando_gc_collect(&mc, NULL, 0); /* collect with no roots — free all */
-    EXPECT_EQ(mc.live_count, 0u);
-
-    cando_memctrl_destroy(&mc);
-}
-
-TEST(test_gc_mark_preserve) {
-    CandoMemCtrl mc;
-    cando_memctrl_init(&mc);
-
-    HandleIndex h = cando_memctrl_alloc(&mc, 8);
-    *(u64 *)cando_memctrl_get_ptr(&mc, h) = 0xCAFEBABEull;
-
-    /* Full collection keeping h alive. */
-    cando_gc_collect(&mc, &h, 1);
+    /* Untrack `a` before destroy and dispose of it manually -- the
+     * memctrl sweep must not touch it.                                */
+    cando_memctrl_untrack(&mc, a);
     EXPECT_EQ(mc.live_count, 1u);
-    EXPECT_EQ(*(u64 *)cando_memctrl_get_ptr(&mc, h), 0xCAFEBABEull);
+    tracked_dummy_destroy(a);
+    EXPECT_EQ(destroyed, 1u);
 
-    cando_memctrl_free(&mc, h);
     cando_memctrl_destroy(&mc);
+    EXPECT_EQ(destroyed, 2u);  /* `b` swept now too */
 }
 
-TEST(test_block_per_object_lock) {
+TEST(test_memctrl_track_growth) {
     CandoMemCtrl mc;
     cando_memctrl_init(&mc);
 
-    HandleIndex      h   = cando_memctrl_alloc(&mc, sizeof(int));
-    CandoBlockHeader *hdr = cando_memctrl_get_header(&mc, h);
+    u32 destroyed = 0;
+    /* Beyond the initial cap (64) so the registry grows. */
+    const u32 N = 200;
+    for (u32 i = 0; i < N; i++) {
+        TrackedDummy *d = tracked_dummy_new(&destroyed);
+        cando_memctrl_track(&mc, d, tracked_dummy_destroy);
+    }
+    EXPECT_EQ(mc.live_count, N);
+    EXPECT_TRUE(mc.live_cap >= N);
 
-    cando_lock_write_acquire(&hdr->lock);
-    EXPECT_TRUE(cando_lock_is_write_held_by_me(&hdr->lock));
-    *(int *)CANDO_BLOCK_PAYLOAD(hdr) = 77;
-    cando_lock_write_release(&hdr->lock);
-    EXPECT_FALSE(cando_lock_is_write_held_by_me(&hdr->lock));
+    cando_memctrl_destroy(&mc);
+    EXPECT_EQ(destroyed, N);
+}
 
-    EXPECT_EQ(*(int *)cando_memctrl_get_ptr(&mc, h), 77);
-
-    cando_memctrl_free(&mc, h);
+TEST(test_memctrl_init_empty_destroy) {
+    /* Initialise and immediately destroy with nothing tracked: must
+     * not crash and must leak no memory.                             */
+    CandoMemCtrl mc;
+    cando_memctrl_init(&mc);
     cando_memctrl_destroy(&mc);
 }
 
@@ -588,11 +563,10 @@ int main(void) {
     run_test("gc mark/clear",         test_handle_gc_marks);
 
     printf("\n-- memory --\n");
-    run_test("alloc/free",            test_memctrl_alloc_free);
-    run_test("get header",            test_memctrl_get_header);
-    run_test("gc collect/sweep",      test_gc_collect_sweep);
-    run_test("gc mark preserve",      test_gc_mark_preserve);
-    run_test("per-object lock",       test_block_per_object_lock);
+    run_test("track / destroy sweep",   test_memctrl_track_destroy);
+    run_test("untrack no double-free",  test_memctrl_untrack_no_double_free);
+    run_test("registry growth",         test_memctrl_track_growth);
+    run_test("empty init/destroy",      test_memctrl_init_empty_destroy);
 
     printf("\n=== Results: %d/%d passed ===\n",
            g_tests_passed, g_tests_run);

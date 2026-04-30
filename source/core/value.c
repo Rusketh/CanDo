@@ -24,9 +24,9 @@ static u32 fnv1a(const char *data, u32 len) {
 CandoString *cando_string_new(const char *src, u32 length) {
     CANDO_ASSERT(src != NULL || length == 0);
     CandoString *s = cando_alloc(sizeof(CandoString) + length + 1);
-    s->ref_count = 1;
+    atomic_store_explicit(&s->ref_count, 1u, memory_order_relaxed);
     s->length    = length;
-    s->hash      = 0; /* lazy */
+    atomic_store_explicit(&s->hash,      0u, memory_order_relaxed);
     if (length > 0)
         memcpy(s->data, src, length);
     s->data[length] = '\0';
@@ -35,21 +35,32 @@ CandoString *cando_string_new(const char *src, u32 length) {
 
 CandoString *cando_string_retain(CandoString *s) {
     CANDO_ASSERT(s != NULL);
-    s->ref_count++;
+    atomic_fetch_add_explicit(&s->ref_count, 1u, memory_order_relaxed);
     return s;
 }
 
 void cando_string_release(CandoString *s) {
     if (!s) return;
-    CANDO_ASSERT(s->ref_count > 0);
-    if (--s->ref_count == 0)
+    /* fetch_sub returns the value *before* the subtraction; if it was
+     * 1 the count just hit 0 and we own the final deallocation.       */
+    u32 prev = atomic_fetch_sub_explicit(&s->ref_count, 1u,
+                                         memory_order_acq_rel);
+    CANDO_ASSERT_MSG(prev > 0, "cando_string_release: ref_count underflow");
+    if (prev == 1)
         cando_free(s);
 }
 
 static u32 cando_string_hash(CandoString *s) {
-    if (s->hash == 0)
-        s->hash = fnv1a(s->data, s->length);
-    return s->hash;
+    /* Relaxed load: any thread's previously-computed value is fine.
+     * Two threads computing it concurrently is a benign race -- they
+     * deterministically produce the same value and the last write
+     * wins.                                                            */
+    u32 h = atomic_load_explicit(&s->hash, memory_order_relaxed);
+    if (h == 0) {
+        h = fnv1a(s->data, s->length);
+        atomic_store_explicit(&s->hash, h, memory_order_relaxed);
+    }
+    return h;
 }
 
 /* -----------------------------------------------------------------------

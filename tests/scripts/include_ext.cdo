@@ -1,0 +1,32 @@
+/* include_ext.cdo -- tests for include() extension handling. */
+
+/* --- .json: parsed object --- */
+VAR data = include("modules/data.json");
+print(data.name);                   /* Cando            */
+print(data.version);                /* 1                */
+print(data.active);                 /* true             */
+print(data.tags[0]);                /* alpha            */
+print(data.tags[1]);                /* beta             */
+
+/* --- .csv: parsed array of objects keyed by header row --- */
+VAR rows = include("modules/people.csv");
+print(rows[0].name);                /* alice            */
+print(rows[1].name);                /* bob              */
+print(rows[2].name);                /* eve              */
+print(rows[1].city);                /* LA               */
+
+/* --- No extension: falls back to .cdo when no binary exists --- */
+VAR greet = include("modules/greeting");
+print(greet("Ext"));                /* Hello, Ext!      */
+
+/* --- JSON cache: same canonical path returns the same object --- */
+VAR data2 = include("modules/data.json");
+data2.name = "Mutated";
+print(data.name);                   /* Mutated (shared) */
+
+/* --- .yaml: parsed object via include() --- */
+VAR yml = include("modules/data.yaml");
+print(yml.name);                    /* Cando            */
+print(yml.version);                 /* 1                */
+print(yml.tags[0]);                 /* alpha            */
+print(yml.active);                  /* true             */

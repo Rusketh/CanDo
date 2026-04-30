@@ -10,6 +10,7 @@
 
 #include "object.h"
 #include "libutil.h"
+#include "meta.h"
 #include "../vm/bridge.h"
 #include "../object/object.h"
 #include "../object/array.h"
@@ -435,4 +436,11 @@ void cando_lib_object_register(CandoVM *vm)
     libutil_set_method(vm, proto, "values",       obj_values);
 
     cando_vm_set_global(vm, "object", proto_val, true);
+
+    /* Mirror onto `_meta.object` so users may use the same table as a
+     * prototype: `object.setPrototype(myObj, _meta.object)`.  Methods added
+     * via `_meta.object.foo = ...` show up on `object.foo` since both names
+     * resolve to the same underlying table. */
+    cando_lib_meta_register(vm);
+    cando_lib_meta_set(vm, "object", proto);
 }

@@ -35,4 +35,19 @@
  */
 CANDO_API void cando_lib_json_register(CandoVM *vm);
 
+/*
+ * cando_lib_json_parse_buffer -- parse a JSON document from a raw byte
+ * buffer and store the resulting Cando value in *out.  Returns true on
+ * success.  On failure sets a VM error (with the supplied `where` string
+ * used as the prefix, e.g. "json.parse" or "include") and returns false;
+ * *out is left as cando_null() in that case.
+ *
+ * Provided so other library code (notably include()) can reuse the JSON
+ * parser without going through the VM-level json.parse native.
+ */
+CANDO_API bool cando_lib_json_parse_buffer(CandoVM *vm,
+                                           const char *src, usize len,
+                                           const char *where,
+                                           CandoValue *out);
+
 #endif /* CANDO_LIB_JSON_H */
