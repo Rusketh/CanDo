@@ -51,7 +51,7 @@
 #define CANDO_FRAMES_MAX       256    /* maximum call depth                 */
 #define CANDO_TRY_MAX          64     /* maximum nested try blocks          */
 #define CANDO_LOOP_MAX         64     /* maximum nested loop depth          */
-#define CANDO_NATIVE_MAX      256     /* maximum registered native functions */
+#define CANDO_NATIVE_MAX      512     /* maximum registered native functions */
 #define CANDO_MAX_THROW_ARGS   32     /* maximum values in one THROW        */
 
 /* Forward declaration — CandoClosure is defined below. */
