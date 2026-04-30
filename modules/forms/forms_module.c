@@ -1145,20 +1145,28 @@ static void dispatch_one(FormsEvent ev)
     if (!name) return;
 
     CdoObject *inst = cando_bridge_resolve(&g_dispatch_vm, s->inst_val.as.handle);
-    if (!inst) return;
+    if (!inst) {
+        fprintf(stderr, "[forms] dispatch %s: no inst for slot %d\n",
+                name, ev.slot);
+        return;
+    }
 
     CdoString *key = cdo_string_intern(name, (u32)strlen(name));
     CdoValue   field;
     bool       have = cdo_object_get(inst, key, &field);
     cdo_string_release(key);
-    if (!have) return;
+    if (!have) return;          /* no handler installed -- silent */
 
     bool callable = (field.tag == CDO_FUNCTION) ||
                     (field.tag == CDO_NATIVE)   ||
                     (field.tag == CDO_OBJECT &&
                      field.as.object &&
                      field.as.object->kind == OBJ_FUNCTION);
-    if (!callable) return;
+    if (!callable) {
+        fprintf(stderr, "[forms] dispatch %s: handler is not callable "
+                "(tag=%d)\n", name, (int)field.tag);
+        return;
+    }
 
     CandoValue fn = cando_bridge_to_cando(&g_dispatch_vm, field);
 
@@ -1200,6 +1208,10 @@ static void dispatch_one(FormsEvent ev)
     }
 
     cando_vm_call_value(&g_dispatch_vm, fn, argv, argc);
+    if (g_dispatch_vm.has_error) {
+        fprintf(stderr, "[forms] %s handler error: %s\n",
+                name, g_dispatch_vm.error_msg);
+    }
     g_dispatch_vm.stack_top   = g_dispatch_vm.stack;
     g_dispatch_vm.frame_count = 0;
     g_dispatch_vm.has_error   = false;

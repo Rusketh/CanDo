@@ -839,7 +839,11 @@ static void mgr_render_frame(void)
          * the flag, so checking it per frame is safe. */
         if (glfwWindowShouldClose(s->handle)) {
             if (g_dispatch_vm_inited && s->inst_val_held) {
-                dispatch_call(s, "quit", NULL, 0);
+                /* `onClose` is the canonical name (matches modules/forms);
+                 * `quit` is kept as a back-compat alias.  Both fire so
+                 * existing scripts continue to work. */
+                dispatch_call(s, "onClose", NULL, 0);
+                dispatch_call(s, "quit",    NULL, 0);
             }
             slot_teardown(s);
             continue;

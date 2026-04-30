@@ -115,7 +115,13 @@ w.mousemoved    = FUNCTION(self, x, y) { ... };
 w.wheelmoved    = FUNCTION(self, dx, dy) { ... };
 w.resize       = FUNCTION(self, width, height) { ... };
 w.focus        = FUNCTION(self, focused) { ... };
+w.onClose      = FUNCTION(self) { ... };               // close button / X
 ```
+
+`onClose` fires once when the window's close button is pressed (or the
+underlying GLFW window is otherwise asked to close), just before the
+slot is torn down.  `quit` is kept as a back-compat alias and fires
+alongside `onClose`.
 
 Default handlers may be installed once on the prototype:
 
