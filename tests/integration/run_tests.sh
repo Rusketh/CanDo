@@ -82,6 +82,9 @@ run_test "functions" "$SCRIPTS/functions.cdo" \
 run_test "inline_functions" "$SCRIPTS/inline_functions.cdo" \
     "$(printf '42\n3\n42\n42\n43\n42\n43\n43 44 45')"
 
+run_test "closures" "$SCRIPTS/closures.cdo" \
+    "$(printf '1\n2\n3\n1\n2\n2\n3\n3\n1\n2\n1\n3\n2')"
+
 run_test "strings" "$SCRIPTS/strings.cdo" \
     "$(printf 'hello world\n5\nstring\nnumber\nbool\nnull\n42\n3.1400000000000001\ntrue\ntrue\nfalse\ntrue\n5\nworld\nhello world\nHELLO WORLD\nhi\nabc\ndef\nababab\n6\na\nb\nc\ncount: 99')"
 
@@ -104,7 +107,7 @@ run_test "math_lib" "$SCRIPTS/math_lib.cdo" \
     "$(printf '7\n3\n3\n4\n3\n2\n5\n2\n1\n8\n10\n0\n5\n1024\n0\npi_ok\ne_ok')"
 
 run_test "pipe" "$SCRIPTS/pipe.cdo" \
-    "$(printf '10\n20\n50\n2\n6\n2\n4\n4\n5\n1\n5\n1\n1\n2\n2\n3\n1\n3')"
+    "$(printf '10\n20\n50\n2\n6\n2\n4\n4\n5\n1\n5\n1\n1\n2\n2\n3\n1\n3\n100\n7\n21')"
 
 run_test "eval" "$SCRIPTS/eval.cdo" \
     "$(printf '6\n50\nfrom_sandbox\n10\ncontained\n42')"

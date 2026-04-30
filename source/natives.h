@@ -32,6 +32,7 @@ int cando_native_tostring(CandoVM *vm, int argc, CandoValue *args);
  * nested arrays/objects beyond that level.  Returns 1. */
 int cando_native_inspect(CandoVM *vm, int argc, CandoValue *args);
 
+
 /* Static dispatch table for the small set of *core* natives that ship
  * inside libcando itself (print, type, toString, inspect, ...).  Sized to
  * CANDO_NATIVE_MAX with unused trailing slots left NULL; iterate until a

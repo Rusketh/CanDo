@@ -36,12 +36,18 @@ typedef u32 HandleIndex;
 
 /* -----------------------------------------------------------------------
  * CandoString -- ref-counted, immutable heap string
+ *
+ * ref_count and hash are atomic so retain/release and the lazy-hash
+ * fast path are safe to call concurrently from multiple threads (a
+ * single CandoString may be shared across thread boundaries via a
+ * VM stack value or a captured closure upvalue).  Same pattern as
+ * CdoString in source/object/string.h.
  * --------------------------------------------------------------------- */
 typedef struct CandoString {
-    u32   ref_count;   /* Managed by cando_string_retain / _release       */
-    u32   length;      /* Byte length, excluding NUL                      */
-    u32   hash;        /* FNV-1a hash (0 = not yet computed)              */
-    char  data[];      /* Flexible array member; NUL-terminated           */
+    _Atomic(u32) ref_count; /* Managed by cando_string_retain / _release  */
+    u32          length;    /* Byte length, excluding NUL                 */
+    _Atomic(u32) hash;      /* FNV-1a hash (0 = not yet computed)         */
+    char         data[];    /* Flexible array member; NUL-terminated      */
 } CandoString;
 
 CANDO_API CandoString *cando_string_new(const char *src, u32 length);

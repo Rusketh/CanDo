@@ -60,3 +60,23 @@ function getPos() { return 1, 2, 3; }
 var x, z = (~.~) getPos();
 print(x);  /* expected: 1  */
 print(z);  /* expected: 3  */
+
+/* ----- Nested pipe body with returns on both sides of the inner pipe ----
+ * Regression test: each pipe body's `return` patches must land at its
+ * own OP_NULL fallthrough.  Previously the parser reset pipe_exit_count
+ * to 0 when entering a nested body, so an inner return would overwrite
+ * an outer return's already-recorded patch position; the outer scope
+ * then re-patched the inner's bytecode and corrupted the program.
+ * ---------------------------------------------------------------------- */
+var nested = [1, 2, 3] ~> {
+    if pipe == 1 { return 100; }
+    var inner = [10, 20] ~> {
+        if pipe == 10 { return 7; }
+        return pipe + 1;
+    };
+    if pipe == 2 { return inner[0]; }
+    return inner[1];
+};
+print(nested[0]);  /* expected: 100 */
+print(nested[1]);  /* expected: 7   */
+print(nested[2]);  /* expected: 21  */

@@ -24,8 +24,18 @@
  * band (OP_LOAD_GLOBAL / OP_STORE_GLOBAL / OP_DEF_GLOBAL).
  * At scope_depth  > 0 (inside a block or function) they use the local band
  * (OP_LOAD_LOCAL / OP_STORE_LOCAL / OP_DEF_LOCAL) with a slot index.
+ *
+ * The locals[] / upvalue_specs[] tables grow dynamically: starting at
+ * CANDO_LOCAL_INITIAL_CAP and doubling on demand up to CANDO_LOCAL_MAX,
+ * which is set to the bytecode encoding ceiling (slot indices are u16).
  * ------------------------------------------------------------------------ */
-#define CANDO_LOCAL_MAX 256
+#define CANDO_LOCAL_MAX         UINT16_MAX  /* hard cap = bytecode u16 limit */
+#define CANDO_LOCAL_INITIAL_CAP 16          /* starting capacity per scope    */
+
+/* Maximum number of named parameters in a function or class declaration.
+ * Used to size the parser's stack-local param-name buffers; raising this
+ * just costs a bit of compile-time stack space per function compiled.   */
+#define CANDO_MAX_PARAMS        64
 
 typedef struct {
     const char *name;     /* pointer into the source text (not owning)    */
@@ -47,8 +57,9 @@ typedef struct {
     char         error_msg[512];
 
     /* Scope tracking ---------------------------------------------------- */
-    CandoLocal   locals[CANDO_LOCAL_MAX];
+    CandoLocal  *locals;          /* heap buffer, grown via cando_realloc   */
     u32          local_count;
+    u32          local_capacity;  /* allocated slots in locals[]            */
     int          scope_depth;    /* 0 = global scope                        */
 
     /* Multi-return spreading -------------------------------------------- */
@@ -70,8 +81,9 @@ typedef struct {
      * emits an expression + OP_JUMP (patched later) instead of OP_RETURN,
      * so it does not exit the enclosing function.                         */
     bool         in_pipe_body;
-    u32          pipe_exits[16];     /* patch-list of OP_JUMP offsets      */
+    u32         *pipe_exits;         /* heap patch-list of OP_JUMP offsets */
     u32          pipe_exit_count;
+    u32          pipe_exit_capacity;
 
     /* Mask multi-push tracking ----------------------------------------- */
     /* Set by parse_mask to indicate how many values were actually pushed
@@ -95,8 +107,9 @@ typedef struct {
      * capture metadata so the VM can snapshot them at runtime.         */
     CandoLocal  *outer_locals;
     u32          outer_count;
-    u16          upvalue_specs[CANDO_LOCAL_MAX];
+    u16         *upvalue_specs;   /* heap buffer, grown via cando_realloc   */
     u16          upvalue_count;
+    u32          upvalue_capacity;
 
     /* Safe-access chain tracking (?., ?[) ------------------------------ */
     /* When true, every member-access infix in the current expression also
@@ -104,8 +117,9 @@ typedef struct {
      * remainder of the chain.  Patches are recorded in safe_chain_jumps[]
      * and rewritten to point past the chain when parse_precedence finishes. */
     bool         in_safe_chain;
-    u32          safe_chain_jumps[32];
+    u32         *safe_chain_jumps;   /* heap patch-list of guard jumps   */
     u32          safe_chain_count;
+    u32          safe_chain_capacity;
 } CandoParser;
 
 /* Initialise parser; `chunk` receives all emitted bytecode.
@@ -115,6 +129,10 @@ CANDO_API void cando_parser_init(CandoParser *p, const char *source, usize len,
 
 /* Compile full source.  Returns true on success. */
 CANDO_API bool cando_parse(CandoParser *p);
+
+/* Release any heap buffers owned by the parser (locals / upvalue_specs).
+ * Safe to call once after cando_parser_init regardless of cando_parse outcome. */
+CANDO_API void cando_parser_free(CandoParser *p);
 
 /* Last error string, or NULL if no error. */
 CANDO_API const char *cando_parser_error(const CandoParser *p);

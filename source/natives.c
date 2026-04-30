@@ -32,10 +32,10 @@ static bool meta_is_callable(CdoValue v)
  * (NULL), so callers can iterate until they hit a NULL entry.
  * ===================================================================== */
 CandoNativeFn cando_native_table[CANDO_NATIVE_MAX] = {
-    cando_native_print,     /* index 0, sentinel -1.0 */
-    cando_native_type,      /* index 1, sentinel -2.0 */
-    cando_native_tostring,  /* index 2, sentinel -3.0 */
-    cando_native_inspect,   /* index 3, sentinel -4.0 */
+    cando_native_print,      /* index 0, sentinel -1.0 */
+    cando_native_type,       /* index 1, sentinel -2.0 */
+    cando_native_tostring,   /* index 2, sentinel -3.0 */
+    cando_native_inspect,    /* index 3, sentinel -4.0 */
 };
 
 const char *cando_native_names[CANDO_NATIVE_MAX] = {
@@ -476,3 +476,4 @@ int cando_native_inspect(CandoVM *vm, int argc, CandoValue *args)
     cando_vm_push(vm, cando_string_value(s));
     return 1;
 }
+

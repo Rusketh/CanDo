@@ -274,9 +274,11 @@ static bool load_script(CandoVM *vm, const char *canonical_path,
         cando_free(source);
         cando_vm_error(vm, "include parse error in '%s': %s",
                        canonical_path, cando_parser_error(&parser));
+        cando_parser_free(&parser);
         cando_chunk_free(chunk);
         return false;
     }
+    cando_parser_free(&parser);
     cando_free(source);
 
     CandoVMResult res = cando_vm_exec_eval_module(vm, chunk, results_out,

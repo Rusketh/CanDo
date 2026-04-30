@@ -12,6 +12,7 @@
 #endif
 
 #include "object.h"
+#include "../core/memory.h"
 #include <string.h>
 
 /* -----------------------------------------------------------------------
@@ -53,55 +54,63 @@ CdoString *g_meta_constructor = NULL;
 
 /* -----------------------------------------------------------------------
  * Global initialisation
+ *
+ * Each metamethod has a globally-cached interned CdoString* so the VM
+ * can compare against it by pointer.  Init and teardown are identical
+ * cookie-cutter loops over the same pair-list; we drive both from one
+ * table so adding a new metamethod only requires one new entry.
  * --------------------------------------------------------------------- */
+typedef struct {
+    CdoString **slot;     /* address of the g_meta_* global to populate */
+    const char *name;     /* META_* literal (e.g. "__index")            */
+    u32         len;      /* byte length of name                         */
+} MetaKeyEntry;
+
+#define META_ENTRY(slot, lit) { &(slot), (lit), (u32)(sizeof(lit) - 1) }
+
+static const MetaKeyEntry META_KEYS[] = {
+    META_ENTRY(g_meta_index,       META_INDEX),
+    META_ENTRY(g_meta_call,        META_CALL),
+    META_ENTRY(g_meta_type,        META_TYPE),
+    META_ENTRY(g_meta_tostring,    META_TOSTRING),
+    META_ENTRY(g_meta_eq,          META_EQ),
+    META_ENTRY(g_meta_lt,          META_LT),
+    META_ENTRY(g_meta_le,          META_LE),
+    META_ENTRY(g_meta_add,         META_ADD),
+    META_ENTRY(g_meta_sub,         META_SUB),
+    META_ENTRY(g_meta_mul,         META_MUL),
+    META_ENTRY(g_meta_div,         META_DIV),
+    META_ENTRY(g_meta_mod,         META_MOD),
+    META_ENTRY(g_meta_pow,         META_POW),
+    META_ENTRY(g_meta_unm,         META_UNM),
+    META_ENTRY(g_meta_idiv,        META_IDIV),
+    META_ENTRY(g_meta_len,         META_LEN),
+    META_ENTRY(g_meta_newindex,    META_NEWINDEX),
+    META_ENTRY(g_meta_constructor, META_CONSTRUCTOR),
+};
+
+#undef META_ENTRY
+
 void cdo_object_init(void) {
     cdo_intern_init();
-
-#define INTERN_META(var, name) \
-    var = cdo_string_intern(name, (u32)(sizeof(name) - 1))
-
-    INTERN_META(g_meta_index,    META_INDEX);
-    INTERN_META(g_meta_call,     META_CALL);
-    INTERN_META(g_meta_type,     META_TYPE);
-    INTERN_META(g_meta_tostring, META_TOSTRING);
-    INTERN_META(g_meta_eq,       META_EQ);
-    INTERN_META(g_meta_lt,       META_LT);
-    INTERN_META(g_meta_le,       META_LE);
-    INTERN_META(g_meta_add,      META_ADD);
-    INTERN_META(g_meta_sub,      META_SUB);
-    INTERN_META(g_meta_mul,      META_MUL);
-    INTERN_META(g_meta_div,      META_DIV);
-    INTERN_META(g_meta_mod,      META_MOD);
-    INTERN_META(g_meta_pow,      META_POW);
-    INTERN_META(g_meta_unm,      META_UNM);
-    INTERN_META(g_meta_idiv,     META_IDIV);
-    INTERN_META(g_meta_len,      META_LEN);
-    INTERN_META(g_meta_newindex, META_NEWINDEX);
-    INTERN_META(g_meta_constructor, META_CONSTRUCTOR);
-
-#undef INTERN_META
+    /* Idempotent: cando_open and cando_vm_init both call this.  When
+     * the META keys are already populated, skipping the second pass
+     * avoids inflating their refcount via cdo_string_intern's dedup
+     * retain (which previously left them with refcount = 3 instead
+     * of 2 and leaked them at process exit).                         */
+    if (g_meta_index) return;
+    for (usize i = 0; i < CANDO_ARRAY_LEN(META_KEYS); i++) {
+        const MetaKeyEntry *e = &META_KEYS[i];
+        *e->slot = cdo_string_intern(e->name, e->len);
+    }
 }
 
 void cdo_object_destroy_globals(void) {
-    cdo_string_release(g_meta_index);    g_meta_index    = NULL;
-    cdo_string_release(g_meta_call);     g_meta_call     = NULL;
-    cdo_string_release(g_meta_type);     g_meta_type     = NULL;
-    cdo_string_release(g_meta_tostring); g_meta_tostring = NULL;
-    cdo_string_release(g_meta_eq);       g_meta_eq       = NULL;
-    cdo_string_release(g_meta_lt);       g_meta_lt       = NULL;
-    cdo_string_release(g_meta_le);       g_meta_le       = NULL;
-    cdo_string_release(g_meta_add);      g_meta_add      = NULL;
-    cdo_string_release(g_meta_sub);      g_meta_sub      = NULL;
-    cdo_string_release(g_meta_mul);      g_meta_mul      = NULL;
-    cdo_string_release(g_meta_div);      g_meta_div      = NULL;
-    cdo_string_release(g_meta_mod);      g_meta_mod      = NULL;
-    cdo_string_release(g_meta_pow);      g_meta_pow      = NULL;
-    cdo_string_release(g_meta_unm);      g_meta_unm      = NULL;
-    cdo_string_release(g_meta_idiv);     g_meta_idiv     = NULL;
-    cdo_string_release(g_meta_len);      g_meta_len      = NULL;
-    cdo_string_release(g_meta_newindex); g_meta_newindex = NULL;
-    cdo_string_release(g_meta_constructor); g_meta_constructor = NULL;
-
+    for (usize i = 0; i < CANDO_ARRAY_LEN(META_KEYS); i++) {
+        const MetaKeyEntry *e = &META_KEYS[i];
+        cdo_string_release(*e->slot);
+        *e->slot = NULL;
+    }
     cdo_intern_destroy();
 }
 
@@ -115,6 +124,7 @@ CdoObject *cdo_obj_alloc(ObjectKind kind) {
     atomic_store(&obj->user_lock_depth, (u32)0);
     obj->kind            = (u8)kind;
     obj->readonly        = false;
+    obj->handle_idx      = CANDO_INVALID_HANDLE;
     obj->slots           = NULL;
     obj->slot_cap        = 0;
     obj->field_count     = 0;
@@ -125,6 +135,9 @@ CdoObject *cdo_obj_alloc(ObjectKind kind) {
     obj->items_len       = 0;
     obj->items_cap       = 0;
     memset(&obj->fn, 0, sizeof(obj->fn));
+    /* Register on the active VM's memctrl so the object is reclaimed
+     * at VM teardown.  No-op outside any VM (unit tests etc.).         */
+    cando_gc_track(obj, (void (*)(void *))cdo_object_destroy);
     return obj;
 }
 
@@ -158,6 +171,13 @@ void cdo_object_destroy(CdoObject *obj) {
         for (u32 i = 0; i < obj->fn.script.upvalue_count; i++)
             cdo_value_release(obj->fn.script.upvalues[i]);
         cando_free(obj->fn.script.upvalues);
+    }
+
+    /* If a VM-layer bytecode object (e.g. CandoClosure) is attached,
+     * dispose of it via the callback the producer registered.        */
+    if (obj->kind == OBJ_FUNCTION && obj->fn.script.bytecode &&
+        obj->fn.script.bytecode_free) {
+        obj->fn.script.bytecode_free(obj->fn.script.bytecode);
     }
 
     cando_free(obj);
@@ -396,40 +416,95 @@ bool cdo_object_rawdelete(CdoObject *obj, CdoString *key) {
 }
 
 /* -----------------------------------------------------------------------
- * Prototype-chain lookup
+ * GC tracer
+ *
+ * Walk every heap-typed child reachable from `obj` and feed it to the
+ * caller's mark callback.  The mark is responsible for de-duplication
+ * (returning false when re-visiting an entry) so cycles terminate.
+ * --------------------------------------------------------------------- */
+static void mark_cdo_value(CdoValue v, CdoMarkFn mark, void *ud) {
+    switch (v.tag) {
+        case CDO_OBJECT:
+        case CDO_ARRAY:
+        case CDO_FUNCTION:
+        case CDO_NATIVE:
+            if (v.as.object) mark(v.as.object, ud);
+            break;
+        default: break;
+    }
+}
+
+void cdo_object_trace(CdoObject *obj, CdoMarkFn mark, void *ud) {
+    if (!obj) return;
+    /* Hash-table fields. */
+    u32 idx = obj->fifo_head;
+    while (idx != UINT32_MAX) {
+        ObjSlot *s = &obj->slots[idx];
+        u32 next   = s->fifo_next;
+        mark_cdo_value(s->value, mark, ud);
+        idx = next;
+    }
+    /* Dense array items. */
+    if (obj->items) {
+        for (u32 i = 0; i < obj->items_len; i++)
+            mark_cdo_value(obj->items[i], mark, ud);
+    }
+    /* OBJ_FUNCTION: captured upvalues + closure-side trace.            */
+    if (obj->kind == OBJ_FUNCTION) {
+        if (obj->fn.script.upvalues) {
+            for (u32 i = 0; i < obj->fn.script.upvalue_count; i++)
+                mark_cdo_value(obj->fn.script.upvalues[i], mark, ud);
+        }
+        if (obj->fn.script.bytecode && obj->fn.script.bytecode_trace) {
+            obj->fn.script.bytecode_trace(obj->fn.script.bytecode, mark, ud);
+        }
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * Prototype-chain helpers
  *
  * __index can be:
  *   - a plain object or array (lookup table): traversal continues into it
  *   - a function/native (callable): traversal stops; the VM layer dispatches
  *     the callable via cdo_object_index_callable + cando_vm_dispatch_callable
  * --------------------------------------------------------------------- */
+
+/* Look up __index on `obj`.  Uses the cached g_meta_index when
+ * cdo_object_init has run, falling back to a non-retaining weak intern
+ * lookup so prototype walking still works during early bring-up.
+ * Returns true and writes *out on hit; false otherwise.               */
+static bool obj_get_meta_index(CdoObject *obj, CdoValue *out) {
+    CdoString *meta_index = g_meta_index
+        ? g_meta_index
+        : cdo_intern_weak(META_INDEX, (u32)(sizeof(META_INDEX) - 1));
+    if (!meta_index) return false;
+    return cdo_object_rawget(obj, meta_index, out);
+}
+
+/* Decide whether `idx_val` advances the prototype chain from `cur`.
+ * Returns the next CdoObject to walk into, or NULL if the value is not
+ * a traversable lookup table (objects/arrays only) or would form a
+ * self-loop.  Callable __index values are NOT traversable -- they end
+ * the chain and the per-caller logic decides what to do with them.    */
+static CdoObject *proto_step_via(CdoValue idx_val, CdoObject *cur) {
+    if (idx_val.tag != CDO_OBJECT && idx_val.tag != CDO_ARRAY) return NULL;
+    if (!idx_val.as.object) return NULL;
+    if (idx_val.as.object == cur) return NULL;
+    return idx_val.as.object;
+}
+
+/* -----------------------------------------------------------------------
+ * Prototype-chain field lookup
+ * --------------------------------------------------------------------- */
 bool cdo_object_get(CdoObject *obj, CdoString *key, CdoValue *out) {
     CdoObject *cur = obj;
-
     for (int depth = 0; depth < CANDO_PROTO_DEPTH_MAX; depth++) {
-        if (cdo_object_rawget(cur, key, out))
-            return true;
-
-        CdoString *meta_index = g_meta_index
-            ? g_meta_index
-            : cdo_intern_weak(META_INDEX, (u32)(sizeof(META_INDEX) - 1));
-        if (!meta_index)
-            return false;
-
+        if (cdo_object_rawget(cur, key, out)) return true;
         CdoValue idx_val;
-        if (!cdo_object_rawget(cur, meta_index, &idx_val))
-            return false;
-
-        /* Only plain objects and arrays act as lookup tables; callables
-         * (functions/natives/PC sentinels) terminate the chain. */
-        if (idx_val.tag != CDO_OBJECT && idx_val.tag != CDO_ARRAY)
-            return false;
-        if (!idx_val.as.object)
-            return false;
-
-        CdoObject *next = idx_val.as.object;
-        if (next == cur)
-            return false; /* self-loop guard */
+        if (!obj_get_meta_index(cur, &idx_val)) return false;
+        CdoObject *next = proto_step_via(idx_val, cur);
+        if (!next) return false;
         cur = next;
     }
     return false;
@@ -445,32 +520,16 @@ bool cdo_object_get(CdoObject *obj, CdoString *key, CdoValue *out) {
  * --------------------------------------------------------------------- */
 bool cdo_object_index_callable(CdoObject *obj, CdoValue *out) {
     CdoObject *cur = obj;
-
     for (int depth = 0; depth < CANDO_PROTO_DEPTH_MAX; depth++) {
-        CdoString *meta_index = g_meta_index
-            ? g_meta_index
-            : cdo_intern_weak(META_INDEX, (u32)(sizeof(META_INDEX) - 1));
-        if (!meta_index)
-            return false;
-
         CdoValue idx_val;
-        if (!cdo_object_rawget(cur, meta_index, &idx_val))
-            return false;
-
+        if (!obj_get_meta_index(cur, &idx_val)) return false;
         if (idx_val.tag == CDO_FUNCTION || idx_val.tag == CDO_NATIVE ||
             idx_val.tag == CDO_NUMBER) {
             *out = idx_val;
             return true;
         }
-
-        if (idx_val.tag != CDO_OBJECT && idx_val.tag != CDO_ARRAY)
-            return false;
-        if (!idx_val.as.object)
-            return false;
-
-        CdoObject *next = idx_val.as.object;
-        if (next == cur)
-            return false; /* self-loop guard */
+        CdoObject *next = proto_step_via(idx_val, cur);
+        if (!next) return false;
         cur = next;
     }
     return false;

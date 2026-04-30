@@ -125,9 +125,11 @@ static int native_eval(CandoVM *vm, int argc, CandoValue *args)
 
     if (!cando_parse(&parser)) {
         cando_vm_error(vm, "eval parse error: %s", cando_parser_error(&parser));
+        cando_parser_free(&parser);
         cando_chunk_free(chunk);
         return -1;
     }
+    cando_parser_free(&parser);
 
     /* --- Execute, optionally inside a sandboxed global environment --- */
     CandoGlobalEnv *saved_globals = NULL;

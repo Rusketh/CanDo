@@ -194,3 +194,27 @@ u16 cando_chunk_add_string_const(CandoChunk *chunk, const char *str,
     CandoString *s = cando_string_new(str, len);
     return cando_chunk_add_const(chunk, cando_string_value(s));
 }
+
+u16 cando_chunk_intern_string(CandoChunk *chunk, const char *str, u32 len) {
+    /* Look up existing string constant by raw bytes; on hit, return its
+     * index without touching the heap.  This is the fast path: in a typical
+     * script most identifier references hit a name that has already been
+     * interned (the function name itself, common locals, etc.).            */
+    for (u32 i = 0; i < chunk->const_count; i++) {
+        CandoValue v = chunk->constants[i];
+        if (!cando_is_string(v)) continue;
+        CandoString *s = v.as.string;
+        if (s->length == len && memcmp(s->data, str, len) == 0)
+            return (u16)i;
+    }
+    /* Miss: allocate and append directly.  We've already proved the pool
+     * doesn't contain this string, so go through the same path as
+     * cando_chunk_add_const but skip its (now redundant) dedup scan.      */
+    CANDO_ASSERT_MSG(chunk->const_count < 65535,
+                     "constant pool overflow (max 65535 entries)");
+    chunk_ensure_const(chunk, 1);
+    u16 idx = (u16)chunk->const_count;
+    CandoString *s = cando_string_new(str, len);
+    chunk->constants[chunk->const_count++] = cando_string_value(s);
+    return idx;
+}

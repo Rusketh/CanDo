@@ -67,6 +67,9 @@ static CompileResult compile(const char *src)
     r.chunk = cando_chunk_new("<test>", 0, false);
     cando_parser_init(&r.parser, src, strlen(src), r.chunk);
     r.ok = cando_parse(&r.parser);
+    /* error_msg is an inline buffer in CandoParser, so it remains valid
+     * after the dynamic locals/upvalues tables are freed.                 */
+    cando_parser_free(&r.parser);
     return r;
 }
 
