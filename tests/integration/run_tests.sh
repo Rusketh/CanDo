@@ -104,7 +104,7 @@ run_test "math_lib" "$SCRIPTS/math_lib.cdo" \
     "$(printf '7\n3\n3\n4\n3\n2\n5\n2\n1\n8\n10\n0\n5\n1024\n0\npi_ok\ne_ok')"
 
 run_test "pipe" "$SCRIPTS/pipe.cdo" \
-    "$(printf '10\n20\n50\n2\n6\n2\n4\n4\n5\n1\n5\n1\n1\n2\n2\n3\n1\n3')"
+    "$(printf '10\n20\n50\n2\n6\n2\n4\n4\n5\n1\n5\n1\n1\n2\n2\n3\n1\n3\n100\n7\n21')"
 
 run_test "eval" "$SCRIPTS/eval.cdo" \
     "$(printf '6\n50\nfrom_sandbox\n10\ncontained\n42')"

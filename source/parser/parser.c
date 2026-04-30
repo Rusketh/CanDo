@@ -1464,21 +1464,26 @@ static void compile_pipe_body(CandoParser *p,
 
     /* Parse body (expression or block). */
     if (match(p, TOK_LBRACE)) {
-        bool saved_in_pipe    = p->in_pipe_body;
-        u32  saved_exit_count = p->pipe_exit_count;
-        p->in_pipe_body    = true;
-        p->pipe_exit_count = 0;
+        bool saved_in_pipe = p->in_pipe_body;
+        /* This body owns pipe_exits entries pushed at indices >= base.
+         * The previous version reset pipe_exit_count to 0, which made a
+         * nested pipe body push over the top of an outer body's existing
+         * patch positions and then re-patch them when the outer scope
+         * finished -- corrupting the bytecode.  Tracking a base index
+         * leaves earlier (outer) entries intact.                         */
+        u32 base = p->pipe_exit_count;
+        p->in_pipe_body = true;
 
         parse_block(p);
 
         /* Fallthrough (no return statement executed): push null as result. */
         emit_op(p, OP_NULL);
-        /* Patch all early-return exits to jump here (past the null). */
-        for (u32 i = 0; i < p->pipe_exit_count; i++)
+        /* Patch only this body's early-return exits to jump here. */
+        for (u32 i = base; i < p->pipe_exit_count; i++)
             patch_jump(p, p->pipe_exits[i]);
 
         p->in_pipe_body    = saved_in_pipe;
-        p->pipe_exit_count = saved_exit_count;
+        p->pipe_exit_count = base;
     } else {
         parse_expression(p);
     }
