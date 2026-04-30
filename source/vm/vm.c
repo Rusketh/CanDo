@@ -311,7 +311,15 @@ void cando_vm_destroy(CandoVM *vm) {
     }
     cando_free(vm->eval_results);
 
-    /* Release module cache. */
+    /* Release module cache.
+     *
+     * Binary modules may export an optional `cando_module_shutdown` symbol
+     * that lets them stop manager threads, release OS handles, etc. before
+     * the shared library is unloaded.  Unloading the .so while a thread it
+     * spawned is still running unmaps the thread's instruction pointer and
+     * deadlocks the dlclose call -- so we always invoke shutdown first
+     * when the symbol is exported. */
+    typedef void (*CandoModuleShutdownFn)(void);
     for (u32 i = 0; i < vm->module_cache_count; i++) {
         CandoModuleEntry *e = &vm->module_cache[i];
         cando_free(e->path);
@@ -323,8 +331,14 @@ void cando_vm_destroy(CandoVM *vm) {
         cando_chunk_free(e->chunk);     /* NULL-safe; chunk owned by module entry  */
         if (e->dl_handle) {
 #if defined(_WIN32) || defined(_WIN64)
+            CandoModuleShutdownFn shutdown_fn = (CandoModuleShutdownFn)(void *)
+                GetProcAddress((HMODULE)e->dl_handle, "cando_module_shutdown");
+            if (shutdown_fn) shutdown_fn();
             FreeLibrary((HMODULE)e->dl_handle);
 #else
+            CandoModuleShutdownFn shutdown_fn = (CandoModuleShutdownFn)(uintptr_t)
+                dlsym(e->dl_handle, "cando_module_shutdown");
+            if (shutdown_fn) shutdown_fn();
             dlclose(e->dl_handle);
 #endif
         }

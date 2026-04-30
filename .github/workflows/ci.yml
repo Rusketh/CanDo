@@ -267,7 +267,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     name: Publish release zips
-    needs: [linux, windows]
+    needs: [linux, windows, vscode-extension]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -286,12 +286,29 @@ jobs:
           name: cando-windows-x86_64
           path: cando-windows-x86_64
 
+      - name: Download VS Code extension artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vscode-cando-extension
+          path: vscode-cando-extension
+
+      - name: Bundle VS Code extension into platform artifacts
+        # Ship the .vsix alongside each platform binary so a single
+        # download gives users both the interpreter and the editor
+        # integration.  Also publish it standalone on its own channel.
+        run: |
+          set -e
+          mkdir -p cando-linux-x86_64/editors cando-windows-x86_64/editors
+          cp vscode-cando-extension/vscode-cando.vsix cando-linux-x86_64/editors/
+          cp vscode-cando-extension/vscode-cando.vsix cando-windows-x86_64/editors/
+
       - name: Zip platform artifacts
         run: |
           set -e
-          (cd cando-linux-x86_64   && zip -r ../cando-linux-x86_64.zip   .)
-          (cd cando-windows-x86_64 && zip -r ../cando-windows-x86_64.zip .)
-          ls -l cando-linux-x86_64.zip cando-windows-x86_64.zip
+          (cd cando-linux-x86_64       && zip -r ../cando-linux-x86_64.zip       .)
+          (cd cando-windows-x86_64     && zip -r ../cando-windows-x86_64.zip     .)
+          cp vscode-cando-extension/vscode-cando.vsix vscode-cando.vsix
+          ls -l cando-linux-x86_64.zip cando-windows-x86_64.zip vscode-cando.vsix
 
       - name: Publish Linux release channel
         uses: softprops/action-gh-release@v2
@@ -314,5 +331,17 @@ jobs:
             Rolling release of the latest green Windows build.
             Built from commit ${{ github.sha }} on `${{ github.ref_name }}`.
           files: cando-windows-x86_64.zip
+          prerelease: true
+          make_latest: false
+
+      - name: Publish VS Code extension release channel
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: vscode-latest
+          name: CanDo (VS Code extension, latest)
+          body: |
+            Rolling release of the latest green VS Code extension build.
+            Built from commit ${{ github.sha }} on `${{ github.ref_name }}`.
+          files: vscode-cando.vsix
           prerelease: true
           make_latest: false

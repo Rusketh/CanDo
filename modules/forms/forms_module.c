@@ -1043,6 +1043,14 @@ static void mgr_shutdown(void)
 #endif
 }
 
+/* Exported module shutdown hook.  cando_vm_destroy looks this symbol up
+ * via dlsym and calls it before unloading the module so the manager
+ * thread is stopped while the .so is still mapped.  Idempotent. */
+void cando_module_shutdown(void)
+{
+    mgr_shutdown();
+}
+
 static int ensure_manager(void)
 {
     sync_init_once();
