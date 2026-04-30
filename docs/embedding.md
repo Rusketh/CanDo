@@ -27,7 +27,7 @@ gcc myapp.c -lcando -Iinclude -o myapp
 
 ```c
 CandoVM *vm = cando_open();        // allocate + initialise
-cando_openlibs(vm);                // register all 17 standard libraries
+cando_openlibs(vm);                // register all 19 standard libraries
 // … run scripts …
 cando_close(vm);                   // tear down and free
 ```
@@ -59,12 +59,12 @@ Available openers, each corresponding to a global:
 math      string     array       object       thread
 os        datetime   crypto      process      net
 file      json       csv         include      eval
-http      https
+http      https      socket      secure_socket
 ```
 
-`include`, `eval`, and the `http`/`https` server mean you usually want
-a full `cando_openlibs` for trusted scripts and a curated set for
-untrusted input.
+`include`, `eval`, and the `http`/`https`/`socket`/`secure_socket`
+server functions mean you usually want a full `cando_openlibs` for
+trusted scripts and a curated set for untrusted input.
 
 ## Running scripts
 

@@ -27,8 +27,22 @@
  * ===================================================================== */
 _Thread_local static CdoThread *tl_current_thread = NULL;
 
+/* Thread-local: VM currently owning the calling OS thread.  Set by
+ * cando_vm_init / cando_vm_init_child (and the thread trampoline) so
+ * allocators -- which run synchronously on whichever OS thread is
+ * compiling, evaluating, or executing the script -- can find the
+ * active memctrl to register their allocations against.  May be NULL
+ * for callers that never enter a VM (e.g. unit tests that exercise the
+ * lexer in isolation), in which case allocations are not tracked and
+ * leak as before.                                                      */
+_Thread_local static CandoVM *tl_current_vm = NULL;
+
 CdoThread *cando_current_thread(void) {
     return tl_current_thread;
+}
+
+CandoVM *cando_current_vm(void) {
+    return tl_current_vm;
 }
 
 void cando_vm_wait_all_threads(CandoVM *vm) {
@@ -40,31 +54,117 @@ void cando_vm_wait_all_threads(CandoVM *vm) {
     cando_os_mutex_unlock(&reg->mutex);
 }
 
+void cando_vm_wait_all_lifelines(CandoVM *vm) {
+    /* Currently aliased to wait_all_threads -- the registry counts both
+     * `thread { }` blocks and native lifelines via the same counter. */
+    cando_vm_wait_all_threads(vm);
+}
+
+void cando_vm_lifeline_acquire(CandoVM *vm, const char *kind) {
+    (void)kind;  /* reserved for diagnostics in a later commit */
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return;
+    cando_os_mutex_lock(&reg->mutex);
+    reg->count++;
+    cando_os_mutex_unlock(&reg->mutex);
+}
+
+void cando_vm_lifeline_release(CandoVM *vm) {
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return;
+    cando_os_mutex_lock(&reg->mutex);
+    if (reg->count > 0) reg->count--;
+    cando_os_cond_broadcast(&reg->cond);
+    cando_os_mutex_unlock(&reg->mutex);
+}
+
+void cando_vm_request_quit(CandoVM *vm, int exit_code) {
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return;
+    cando_os_mutex_lock(&reg->mutex);
+    reg->quit_requested = 1;
+    reg->exit_code      = exit_code;
+    cando_os_cond_broadcast(&reg->cond);
+    cando_os_mutex_unlock(&reg->mutex);
+}
+
+bool cando_vm_quit_requested(CandoVM *vm) {
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return false;
+    cando_os_mutex_lock(&reg->mutex);
+    bool q = reg->quit_requested != 0;
+    cando_os_mutex_unlock(&reg->mutex);
+    return q;
+}
+
+int cando_vm_get_exit_code(CandoVM *vm) {
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return 0;
+    cando_os_mutex_lock(&reg->mutex);
+    int c = reg->exit_code;
+    cando_os_mutex_unlock(&reg->mutex);
+    return c;
+}
+
+void cando_vm_set_exit_code(CandoVM *vm, int exit_code) {
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return;
+    cando_os_mutex_lock(&reg->mutex);
+    reg->exit_code = exit_code;
+    cando_os_mutex_unlock(&reg->mutex);
+}
+
+u32 cando_vm_lifeline_count(CandoVM *vm) {
+    CandoThreadRegistry *reg = vm ? vm->thread_registry : NULL;
+    if (!reg) return 0;
+    cando_os_mutex_lock(&reg->mutex);
+    u32 c = reg->count;
+    cando_os_mutex_unlock(&reg->mutex);
+    return c;
+}
+
 /* =========================================================================
  * Internal forward declarations
  * ===================================================================== */
 static CandoVMResult  vm_run(CandoVM *vm);
 static void           vm_runtime_error(CandoVM *vm, const char *fmt, ...);
 static bool           vm_call(CandoVM *vm, CandoClosure *closure, u32 arg_count);
+static bool           vm_push_frame(CandoVM *vm, CandoClosure *closure,
+                                    u8 *ip, u32 arg_count, bool is_fluent);
 static CandoUpvalue  *vm_capture_upvalue(CandoVM *vm, CandoValue *local);
 static void           vm_close_upvalues(CandoVM *vm, CandoValue *last);
+static void           vm_upvalue_release(CandoUpvalue *uv);
+static void           vm_closure_trace_adapter(void *bytecode,
+                                               CdoMarkFn mark, void *ud);
 static bool           vm_is_truthy(CandoValue v);
 static bool           vm_is_truthy_meta(CandoVM *vm, CandoValue v, bool *ok);
 static u32            vm_global_hash(const char *str, u32 len);
 static void           vm_call_closure_with_args(CandoVM *vm, CdoObject *fn_obj,
                                                  CandoValue *args, u32 argc);
+static int            vm_native_class_default_call(CandoVM *vm, int argc,
+                                                    CandoValue *args);
 
 /* =========================================================================
  * VM lifecycle
  * ===================================================================== */
 
 void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
+    /* Make the new VM the active one for this OS thread BEFORE any
+     * downstream code allocates a CdoObject (the object/native libs
+     * register heap-allocated metatables during cando_openlibs etc.,
+     * and those allocations need to land in the right registry).      */
+    tl_current_vm = vm;
+    cando_gc_set_active_memctrl(mem);
+
     vm->stack_top      = vm->stack;
     vm->frame_count    = 0;
     vm->try_depth      = 0;
     vm->loop_depth     = 0;
     vm->open_upvalues  = NULL;
+    /* Native registry: lazily grown on first cando_vm_register_native(). */
+    vm->native_fns     = NULL;
     vm->native_count   = 0;
+    vm->native_cap     = 0;
     vm->mem            = mem;
     vm->has_error       = false;
     vm->error_val_count = 0;
@@ -82,6 +182,8 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) vm->thread_results[i] = cando_null();
     vm->string_proto    = cando_null();
     vm->array_proto     = cando_null();
+    vm->thread_proto    = cando_null();
+    vm->default_class_call = cando_null();
 
     /* Module cache — initially empty. */
     vm->module_cache       = NULL;
@@ -92,7 +194,9 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     vm->thread_registry_owned = (CandoThreadRegistry *)cando_alloc(sizeof(CandoThreadRegistry));
     cando_os_mutex_init(&vm->thread_registry_owned->mutex);
     cando_os_cond_init(&vm->thread_registry_owned->cond);
-    vm->thread_registry_owned->count = 0;
+    vm->thread_registry_owned->count          = 0;
+    vm->thread_registry_owned->quit_requested = 0;
+    vm->thread_registry_owned->exit_code      = 0;
     vm->thread_registry = vm->thread_registry_owned;
 
     /* Initialise object layer and handle table (root VM owns both). */
@@ -110,9 +214,19 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
                                        64 * sizeof(CandoGlobalEntry));
     memset(vm->globals_owned->entries, 0, 64 * sizeof(CandoGlobalEntry));
     vm->globals = vm->globals_owned;
+
+    /* Register the default class __call wrapper as an unnamed native. */
+    vm->default_class_call =
+        cando_vm_add_native(vm, vm_native_class_default_call);
 }
 
 void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
+    /* The child VM runs on a different OS thread; pin the thread-local
+     * to it so allocations in this thread land in the shared memctrl
+     * via the child rather than (incorrectly) the parent's pointer.   */
+    tl_current_vm = child;
+    cando_gc_set_active_memctrl(parent->mem);
+
     /* Start with a clean state. */
     child->stack_top      = child->stack;
     child->frame_count    = 0;
@@ -136,6 +250,8 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) child->thread_results[i] = cando_null();
     child->string_proto    = cando_value_copy(parent->string_proto);
     child->array_proto     = cando_value_copy(parent->array_proto);
+    child->thread_proto    = cando_value_copy(parent->thread_proto);
+    child->default_class_call = parent->default_class_call;
 
     /* Module cache: child VMs do not cache modules independently. */
     child->module_cache       = NULL;
@@ -153,10 +269,19 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
     child->globals_owned = NULL;
     child->globals       = parent->globals;   /* shared, locked on access */
 
-    /* Copy native function registry (read-only after init; safe to share). */
+    /* Copy native function registry (read-only after init; child gets its
+     * own buffer so subsequent registrations on either VM cannot disturb
+     * the other). */
     child->native_count = parent->native_count;
-    for (u32 i = 0; i < parent->native_count; i++)
-        child->native_fns[i] = parent->native_fns[i];
+    child->native_cap   = parent->native_count;
+    if (parent->native_count > 0) {
+        child->native_fns = (CandoNativeFn *)cando_alloc(
+            parent->native_count * sizeof(CandoNativeFn));
+        for (u32 i = 0; i < parent->native_count; i++)
+            child->native_fns[i] = parent->native_fns[i];
+    } else {
+        child->native_fns = NULL;
+    }
 
     /* NOTE: cdo_object_init() is intentionally NOT called here.
      * The parent VM's cando_vm_init() already initialized the global
@@ -195,15 +320,23 @@ void cando_vm_destroy(CandoVM *vm) {
         cando_value_release(*--vm->stack_top);
     }
 
-    /* Release open upvalues. */
-    CandoUpvalue *uv = vm->open_upvalues;
-    while (uv) {
-        CandoUpvalue *next = uv->next;
-        cando_free(uv);
-        uv = next;
+    /* Drop the open-list reference on every still-open upvalue.  Any
+     * upvalue still referenced by a live closure survives until that
+     * closure is released; orphans are freed here.                     */
+    while (vm->open_upvalues) {
+        CandoUpvalue *uv = vm->open_upvalues;
+        vm->open_upvalues = uv->next;
+        vm_upvalue_release(uv);
     }
 
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) cando_value_release(vm->error_vals[i]);
+
+    /* Release the native registry.  Each VM owns its own buffer (see the
+     * fork path in cando_vm_init_child) so freeing here is unconditional. */
+    cando_free(vm->native_fns);
+    vm->native_fns   = NULL;
+    vm->native_count = 0;
+    vm->native_cap   = 0;
 
     /* Release eval results. */
     for (u32 i = 0; i < vm->eval_result_count; i++) {
@@ -211,7 +344,15 @@ void cando_vm_destroy(CandoVM *vm) {
     }
     cando_free(vm->eval_results);
 
-    /* Release module cache. */
+    /* Release module cache.
+     *
+     * Binary modules may export an optional `cando_module_shutdown` symbol
+     * that lets them stop manager threads, release OS handles, etc. before
+     * the shared library is unloaded.  Unloading the .so while a thread it
+     * spawned is still running unmaps the thread's instruction pointer and
+     * deadlocks the dlclose call -- so we always invoke shutdown first
+     * when the symbol is exported. */
+    typedef void (*CandoModuleShutdownFn)(void);
     for (u32 i = 0; i < vm->module_cache_count; i++) {
         CandoModuleEntry *e = &vm->module_cache[i];
         cando_free(e->path);
@@ -223,8 +364,14 @@ void cando_vm_destroy(CandoVM *vm) {
         cando_chunk_free(e->chunk);     /* NULL-safe; chunk owned by module entry  */
         if (e->dl_handle) {
 #if defined(_WIN32) || defined(_WIN64)
+            CandoModuleShutdownFn shutdown_fn = (CandoModuleShutdownFn)(void *)
+                GetProcAddress((HMODULE)e->dl_handle, "cando_module_shutdown");
+            if (shutdown_fn) shutdown_fn();
             FreeLibrary((HMODULE)e->dl_handle);
 #else
+            CandoModuleShutdownFn shutdown_fn = (CandoModuleShutdownFn)(uintptr_t)
+                dlsym(e->dl_handle, "cando_module_shutdown");
+            if (shutdown_fn) shutdown_fn();
             dlclose(e->dl_handle);
 #endif
         }
@@ -261,9 +408,193 @@ CandoClosure *cando_closure_new(CandoChunk *chunk) {
 
 void cando_closure_free(CandoClosure *closure) {
     if (!closure) return;
-    /* Upvalue objects are managed by the VM; we only free the pointer array. */
+    /* Drop our reference on each captured upvalue.  An upvalue may be
+     * shared with sibling closures and/or the open list; vm_upvalue_release
+     * frees and cleans up the captured value only once the last owner
+     * lets go.                                                          */
+    for (u32 i = 0; i < closure->upvalue_count; i++)
+        vm_upvalue_release(closure->upvalues[i]);
     cando_free(closure->upvalues);
     cando_free(closure);
+}
+
+void cando_closure_trace(CandoClosure *closure, CandoVM *vm,
+                         CandoClosureMarkFn mark, void *ud) {
+    if (!closure || !vm || !mark) return;
+    for (u32 i = 0; i < closure->upvalue_count; i++) {
+        CandoUpvalue *uv = closure->upvalues[i];
+        if (!uv || !uv->location) continue;
+        CandoValue v = *uv->location;
+        if (v.tag != TYPE_OBJECT) continue;
+        void *obj = cando_handle_get(vm->handles, v.as.handle);
+        if (obj) mark(obj, ud);
+    }
+}
+
+/* =========================================================================
+ * GC root walker + collect cycle (Stage 2)
+ *
+ * The collector runs as a single sweep on the VM's memctrl, with the
+ * VM stack quiesced (the dispatch loop is paused if invoked from a
+ * native function -- safe because the caller's args are roots).
+ * ===================================================================== */
+
+/* Trace context threaded through every mark callback so the per-kind
+ * tracers can resolve handles via the active VM without breaking the
+ * object-layer's no-vm.h-dependency rule.                              */
+typedef struct {
+    CandoVM      *vm;
+    CandoMemCtrl *mem;
+} TraceCtx;
+
+/* Mark `obj` and recursively trace its children if it transitioned
+ * from unmarked to marked (i.e. was just discovered).                  */
+static bool gc_mark_obj(void *obj, void *ud);
+
+/* Resolve a CandoValue's heap target to a tracked-object pointer, or
+ * NULL if the value is not a heap reference.                           */
+static void *gc_resolve_cv(CandoVM *vm, CandoValue v) {
+    if (v.tag != TYPE_OBJECT) return NULL;
+    return cando_handle_get(vm->handles, v.as.handle);
+}
+
+static void gc_mark_cv(CandoValue v, TraceCtx *ctx) {
+    void *obj = gc_resolve_cv(ctx->vm, v);
+    if (obj) gc_mark_obj(obj, ctx);
+}
+
+/* Adapter so the object-layer tracer's CdoThread{Resolve,Mark}Fn
+ * signature can drive into our gc_mark_obj.                            */
+static void *gc_thread_resolve(CandoValue v, void *ud) {
+    return gc_resolve_cv(((TraceCtx *)ud)->vm, v);
+}
+static bool gc_thread_mark(void *obj, void *ud) {
+    return gc_mark_obj(obj, ud);
+}
+
+/* Adapter so OBJ_FUNCTION's bytecode_trace (untyped (void *bytecode,
+ * CdoMarkFn, void *)) can drive cando_closure_trace.                  */
+static void vm_closure_trace_adapter(void *bytecode,
+                                     CdoMarkFn mark, void *ud) {
+    TraceCtx *ctx = (TraceCtx *)ud;
+    cando_closure_trace((CandoClosure *)bytecode, ctx->vm,
+                        (CandoClosureMarkFn)mark, ud);
+}
+
+static bool gc_mark_obj(void *obj, void *ud) {
+    if (!obj) return false;
+    TraceCtx *ctx = (TraceCtx *)ud;
+    if (!cando_memctrl_mark(ctx->mem, obj))
+        return false;   /* already marked or not in registry */
+    /* Dispatch by kind for the trace.  CdoObject and CdoThread share
+     * the kind byte at offset 16.                                    */
+    u8 kind = *((u8 *)obj + 16);
+    if (kind == OBJ_THREAD) {
+        cdo_thread_trace((CdoThread *)obj,
+                         gc_thread_resolve, gc_thread_mark, ctx);
+    } else {
+        cdo_object_trace((CdoObject *)obj, gc_mark_obj, ctx);
+    }
+    return true;
+}
+
+/* Walk every root the VM holds and mark each one (recursively traced
+ * via gc_mark_obj's per-kind dispatch).                                */
+static void gc_mark_roots(TraceCtx *ctx) {
+    CandoVM *vm = ctx->vm;
+
+    /* Active value stack.  Frame->slots pointers index into this
+     * region so they don't need separate enumeration.                  */
+    for (CandoValue *p = vm->stack; p < vm->stack_top; p++)
+        gc_mark_cv(*p, ctx);
+
+    /* Globals. */
+    if (vm->globals) {
+        for (u32 i = 0; i < vm->globals->capacity; i++) {
+            CandoGlobalEntry *e = &vm->globals->entries[i];
+            if (e->key) gc_mark_cv(e->value, ctx);
+        }
+    }
+
+    /* Frame closures' upvalue closed-state.  Each frame holds a
+     * CandoClosure pointer; the closure isn't itself a tracked object,
+     * but the values its upvalues point at may be.                     */
+    for (u32 fi = 0; fi < vm->frame_count; fi++) {
+        CandoClosure *c = vm->frames[fi].closure;
+        if (!c) continue;
+        cando_closure_trace(c, vm, gc_mark_obj, ctx);
+    }
+
+    /* Open upvalues: their `location` aliases a stack slot which is
+     * already a root, so the value itself is covered above.  Nothing
+     * extra to do here for Stage 2.                                   */
+
+    /* Pending error and thread-result buffers. */
+    for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++)
+        gc_mark_cv(vm->error_vals[i], ctx);
+    for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++)
+        gc_mark_cv(vm->thread_results[i], ctx);
+
+    /* Eval-mode result buffer (set when an embedded eval is in
+     * progress; lifted out by the caller).                            */
+    if (vm->eval_results) {
+        for (u32 i = 0; i < vm->eval_result_count; i++)
+            gc_mark_cv(vm->eval_results[i], ctx);
+    }
+
+    /* Cached prototypes / class-call dispatcher. */
+    gc_mark_cv(vm->string_proto,       ctx);
+    gc_mark_cv(vm->array_proto,        ctx);
+    gc_mark_cv(vm->thread_proto,       ctx);
+    gc_mark_cv(vm->default_class_call, ctx);
+}
+
+/* Free the handle slot owned by `obj` so the table doesn't grow
+ * unbounded across collections.  Called for every entry the sweep is
+ * about to destroy.                                                   */
+static void gc_free_handle(void *handle_user, void *obj) {
+    CandoVM *vm = (CandoVM *)handle_user;
+    if (!vm || !vm->handles) return;
+    HandleIndex h;
+    u8 kind = *((u8 *)obj + 16);
+    if (kind == OBJ_THREAD) {
+        h = ((CdoThread *)obj)->handle_idx;
+    } else {
+        h = ((CdoObject *)obj)->handle_idx;
+    }
+    if (h != CANDO_INVALID_HANDLE) cando_handle_free(vm->handles, h);
+}
+
+u32 cando_vm_gc_collect(CandoVM *vm) {
+    if (!vm || !vm->mem) return 0;
+    u32 before = vm->mem->live_count;
+
+    TraceCtx ctx = { vm, vm->mem };
+    cando_memctrl_clear_marks(vm->mem);
+    gc_mark_roots(&ctx);
+    cando_memctrl_sweep(vm->mem, gc_free_handle, vm);
+
+    u32 after = vm->mem->live_count;
+    /* Self-tuning threshold: collect again after the live set doubles.
+     * Floor at 256 so very small programs don't ping-pong.            */
+    u32 next = after * 2;
+    if (next < 256) next = 256;
+    vm->mem->next_collect_threshold = next;
+    return before - after;
+}
+
+/* Called from the dispatch loop after every allocating instruction.
+ * Cheap fast-path (one comparison) when the threshold isn't reached.
+ * Safe call site: between instructions, when the freshly-allocated
+ * object has already been pushed onto the value stack so it counts as
+ * a root.                                                              */
+static inline void vm_gc_maybe_collect(CandoVM *vm) {
+    if (CANDO_UNLIKELY(vm->mem &&
+                       vm->mem->next_collect_threshold > 0 &&
+                       vm->mem->live_count >=
+                           vm->mem->next_collect_threshold)) {
+        cando_vm_gc_collect(vm);
+    }
 }
 
 /* =========================================================================
@@ -402,9 +733,20 @@ static bool vm_set_global_str(CandoVM *vm, CandoString *key,
  * Native function registration
  * ===================================================================== */
 
+/* Ensure vm->native_fns has room for at least one more entry.  Doubles the
+ * capacity (starting at 16) so amortised registration is O(1).  Aborts on
+ * allocation failure via cando_realloc, matching the rest of the codebase. */
+static void vm_native_reserve_one(CandoVM *vm) {
+    if (vm->native_count < vm->native_cap) return;
+    u32 new_cap = vm->native_cap ? vm->native_cap * 2 : 16;
+    vm->native_fns = (CandoNativeFn *)cando_realloc(
+        vm->native_fns, new_cap * sizeof(CandoNativeFn));
+    vm->native_cap = new_cap;
+}
+
 bool cando_vm_register_native(CandoVM *vm, const char *name,
                                CandoNativeFn fn) {
-    if (vm->native_count >= CANDO_NATIVE_MAX) return false;
+    vm_native_reserve_one(vm);
     u32 idx = vm->native_count++;
     vm->native_fns[idx] = fn;
     /* Sentinel value: native #idx → -(idx+1) */
@@ -414,21 +756,108 @@ bool cando_vm_register_native(CandoVM *vm, const char *name,
 }
 
 CandoValue cando_vm_add_native(CandoVM *vm, CandoNativeFn fn) {
-    if (vm->native_count >= CANDO_NATIVE_MAX) return cando_null();
+    vm_native_reserve_one(vm);
     u32 idx = vm->native_count++;
     vm->native_fns[idx] = fn;
     return cando_number(-(f64)(idx + 1));
 }
 
 /* =========================================================================
+ * Default class __call wrapper
+ *
+ * Bound as the __call metamethod of every CLASS object.  When the class is
+ * invoked --  Vector(1, 2, 3)  --  OP_CALL routes the call here with:
+ *     args[0]      = the class object itself
+ *     args[1..N-1] = the user-supplied constructor arguments
+ *
+ * Behaviour:
+ *   1. Allocate a fresh instance object.
+ *   2. Set instance.__index = class so methods on the class are reachable
+ *      via the prototype chain.
+ *   3. If the class has a __constructor field, invoke it with
+ *      (instance, args[1..N-1]).  Discard its return values.
+ *   4. Push the instance onto the value stack and return 1.
+ * ===================================================================== */
+static int vm_native_class_default_call(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1 || !cando_is_object(args[0])) {
+        vm_runtime_error(vm, "class __call: missing class receiver");
+        return -1;
+    }
+
+    CandoValue cls_val  = args[0];
+    CdoObject *cls_obj  = cando_bridge_resolve(vm, cls_val.as.handle);
+    if (!cls_obj) {
+        vm_runtime_error(vm, "class __call: invalid class handle");
+        return -1;
+    }
+
+    /* 1. Allocate the instance. */
+    CandoValue inst_val = cando_bridge_new_object(vm);
+    CdoObject *inst_obj = cando_bridge_resolve(vm, inst_val.as.handle);
+
+    /* 2. instance.__index = class. */
+    if (g_meta_index) {
+        CdoValue cls_cdo = cando_bridge_to_cdo(vm, cls_val);
+        cdo_object_rawset(inst_obj, g_meta_index, cls_cdo, FIELD_NONE);
+        cdo_value_release(cls_cdo);
+    }
+
+    /* 3. Look up __constructor on the class (raw, no proto traversal: a
+     * subclass declares its own constructor and we don't want to silently
+     * borrow the parent's body when none is given). */
+    CdoValue ctor_cdo = cdo_null();
+    bool has_ctor = false;
+    if (g_meta_constructor) {
+        has_ctor = cdo_object_rawget(cls_obj, g_meta_constructor, &ctor_cdo);
+    }
+
+    if (has_ctor) {
+        CandoValue ctor_val = cando_bridge_to_cando(vm, ctor_cdo);
+        cdo_value_release(ctor_cdo);
+
+        /* Build the constructor argument list:
+         *   ctor_args[0]      = the new instance
+         *   ctor_args[1..]    = the original user args
+         */
+        u32 ctor_argc = (u32)argc;  /* same total: replace cls with instance */
+        CandoValue *ctor_args = (CandoValue *)cando_alloc(
+            ctor_argc * sizeof(CandoValue));
+        ctor_args[0] = inst_val;
+        for (int i = 1; i < argc; i++) ctor_args[i] = args[i];
+
+        int ret = cando_vm_call_value(vm, ctor_val, ctor_args, ctor_argc);
+        cando_value_release(ctor_val);
+        cando_free(ctor_args);
+
+        if (vm->has_error) {
+            cando_value_release(inst_val);
+            return -1;
+        }
+        /* Pop and discard any return values from the constructor; the
+         * instance, not the body's return value, is what __call yields. */
+        for (int i = 0; i < ret; i++)
+            cando_value_release(cando_vm_pop(vm));
+    }
+
+    /* 4. Push the instance as the result of the call. */
+    cando_vm_push(vm, inst_val);
+    return 1;
+}
+
+/* =========================================================================
  * Upvalue management
  * ===================================================================== */
 
-/* vm_capture_upvalue -- used by OP_CLOSURE (full closure support pending). */
-static CandoUpvalue *vm_capture_upvalue(CandoVM *vm, CandoValue *local)
-    __attribute__((unused));
+/* vm_capture_upvalue -- find or create an open upvalue aliasing the
+ * given live stack slot.  The open list is sorted by `location`
+ * descending so close-on-return can pop the head while the head's
+ * location is still inside the closing frame.  On dedup hit the
+ * existing upvalue is returned with its refcount unchanged; on miss a
+ * fresh upvalue is created with refcount = 1 (for the open-list slot).
+ * Callers (OP_CLOSURE) bump the refcount once more when they store the
+ * pointer into a CandoClosure.                                        */
 static CandoUpvalue *vm_capture_upvalue(CandoVM *vm, CandoValue *local) {
-    /* Walk the open list looking for an upvalue already pointing here. */
     CandoUpvalue *prev = NULL;
     CandoUpvalue *cur  = vm->open_upvalues;
     while (cur && cur->location > local) {
@@ -439,20 +868,42 @@ static CandoUpvalue *vm_capture_upvalue(CandoVM *vm, CandoValue *local) {
 
     CandoUpvalue *uv = (CandoUpvalue *)cando_alloc(sizeof(CandoUpvalue));
     cando_lock_init(&uv->lock);
-    uv->location     = local;
-    uv->closed       = cando_null();
-    uv->next         = cur;
+    uv->location = local;
+    uv->closed   = cando_null();
+    uv->next     = cur;
+    atomic_store_explicit(&uv->refcount, 1u, memory_order_relaxed);
     if (prev) prev->next       = uv;
     else      vm->open_upvalues = uv;
     return uv;
 }
 
+/* Drop a reference held by either the open list or a closure.  Frees
+ * and releases the closed value once the last owner goes away.        */
+static void vm_upvalue_release(CandoUpvalue *uv) {
+    if (!uv) return;
+    if (atomic_fetch_sub_explicit(&uv->refcount, 1u, memory_order_acq_rel)
+        == 1u) {
+        /* If we owned the last ref, the upvalue must be closed (the
+         * open-list slot would otherwise still hold one ref).         */
+        if (uv->location == &uv->closed)
+            cando_value_release(uv->closed);
+        cando_free(uv);
+    }
+}
+
+/* Close every open upvalue whose location lies within the frame slab
+ * being torn down.  Each upvalue retains its own copy of the live value
+ * (so the stack-slot release that follows in OP_RETURN doesn't dangle
+ * the closure's view) and drops its open-list reference.              */
 static void vm_close_upvalues(CandoVM *vm, CandoValue *last) {
     while (vm->open_upvalues && vm->open_upvalues->location >= last) {
         CandoUpvalue *uv = vm->open_upvalues;
-        uv->closed       = *uv->location;
-        uv->location     = &uv->closed;
+        cando_lock_write_acquire(&uv->lock);
+        uv->closed   = cando_value_copy(*uv->location);
+        uv->location = &uv->closed;
+        cando_lock_write_release(&uv->lock);
         vm->open_upvalues = uv->next;
+        vm_upvalue_release(uv);
     }
 }
 
@@ -460,16 +911,10 @@ static void vm_close_upvalues(CandoVM *vm, CandoValue *last) {
  * Meta-method dispatch helper
  * ===================================================================== */
 
-bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
-                         struct CdoString *meta_key,
-                         CandoValue *args, u32 argc) {
-    CdoObject *obj = cando_bridge_resolve(vm, h);
-    if (!obj || !meta_key) return false;
-
-    CdoValue raw;
-    if (!cdo_object_get(obj, (CdoString *)meta_key, &raw))
-        return false;
-
+bool cando_vm_dispatch_callable(CandoVM *vm, const struct CdoValue *raw_p,
+                                 CandoValue *args, u32 argc) {
+    if (!raw_p) return false;
+    CdoValue raw = *raw_p;
     CandoValue callee = cando_bridge_to_cando(vm, raw);
 
     /* Native sentinel: dispatch via vm->native_fns table. */
@@ -506,28 +951,20 @@ bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
             vm->thread_results[i] = cando_null();
         }
 
-        cando_vm_push(vm, cando_null()); /* slot-0 sentinel */
-
-        if (vm->frame_count >= CANDO_FRAMES_MAX) {
-            cando_vm_pop(vm);
-            vm->thread_stop_frame = saved_stop;
-            vm_runtime_error(vm, "call stack overflow in meta-method");
-            return false;
-        }
-
-        CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-        new_frame->closure   = cur_frame->closure;
-        new_frame->ip        = cur_frame->closure->chunk->code + pc;
-        new_frame->slots     = vm->stack_top - 1;
-        new_frame->ret_count = 0;
-        new_frame->is_fluent = false;
-
+        /* Stack the sentinel + args first so vm_push_frame's slot-vs-arg
+         * arithmetic matches the regular call path.                    */
+        u32 stack_before = (u32)(vm->stack_top - vm->stack);
+        cando_vm_push(vm, cando_null());
         for (u32 i = 0; i < argc; i++)
             cando_vm_push(vm, cando_value_copy(args[i]));
-        u32 np = argc + 1;
-        if (cur_frame->closure->chunk->local_count > np) {
-            for (u32 i = np; i < cur_frame->closure->chunk->local_count; i++)
-                cando_vm_push(vm, cando_null());
+
+        if (!vm_push_frame(vm, cur_frame->closure,
+                           cur_frame->closure->chunk->code + pc,
+                           argc, false)) {
+            while ((u32)(vm->stack_top - vm->stack) > stack_before)
+                cando_value_release(cando_vm_pop(vm));
+            vm->thread_stop_frame = saved_stop;
+            return false;
         }
 
         vm_run(vm);
@@ -585,6 +1022,19 @@ bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
 
     vm_runtime_error(vm, "meta-method is not callable");
     return false;
+}
+
+bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
+                         struct CdoString *meta_key,
+                         CandoValue *args, u32 argc) {
+    CdoObject *obj = cando_bridge_resolve(vm, h);
+    if (!obj || !meta_key) return false;
+
+    CdoValue raw;
+    if (!cdo_object_get(obj, (CdoString *)meta_key, &raw))
+        return false;
+
+    return cando_vm_dispatch_callable(vm, &raw, args, argc);
 }
 
 /* =========================================================================
@@ -657,41 +1107,48 @@ static void vm_runtime_error(CandoVM *vm, const char *fmt, ...) {
  * Function call
  * ===================================================================== */
 
-static bool vm_call(CandoVM *vm, CandoClosure *closure, u32 arg_count) {
-    CandoChunk *chunk = closure->chunk;
-
-    if (!chunk->has_vararg && arg_count != chunk->arity) {
-        vm_runtime_error(vm,
-            "function '%s' expects %u argument(s) but got %u",
-            chunk->name, chunk->arity, arg_count);
-        return false;
-    }
-
+/* Push a new call frame for `closure`, starting at `ip` (a byte address
+ * inside closure->chunk->code).  The caller is responsible for arranging
+ * the value stack so the function-value sentinel sits at
+ *      vm->stack_top - arg_count - 1
+ * with the `arg_count` arguments occupying the slots above it.  After
+ * this returns, dispatch loop callers must reload their local frame/ip
+ * via LOAD_FRAME().  Returns false (and raises a runtime error) on
+ * frame_count overflow.                                                 */
+static bool vm_push_frame(CandoVM *vm, CandoClosure *closure, u8 *ip,
+                          u32 arg_count, bool is_fluent) {
     if (vm->frame_count >= CANDO_FRAMES_MAX) {
         vm_runtime_error(vm, "call stack overflow");
         return false;
     }
-
+    CandoChunk     *chunk = closure->chunk;
     CandoCallFrame *frame = &vm->frames[vm->frame_count++];
     frame->closure   = closure;
-    frame->ip        = chunk->code;
-    /* The function itself is just below the arguments on the stack. */
+    frame->ip        = ip;
     frame->slots     = vm->stack_top - arg_count - 1;
     frame->ret_count = 0;
-    frame->is_fluent = false;
-
-    /* Pre-allocate null slots for all local variables so the expression
-     * evaluation stack always sits above the local variable area.
-     * Without this, pushes during expression evaluation overwrite locals.
-     * n_present = slot 0 (fn sentinel) + all arguments already on stack.
-     * We push (local_count - n_present) nulls to fill the gap.           */
-    u32 n_present = arg_count + 1; /* sentinel + args */
+    frame->is_fluent = is_fluent;
+    /* Pre-allocate null slots for the function's remaining locals so
+     * expression evaluation never overwrites them; n_present = slot-0
+     * sentinel + the args already on the stack.                        */
+    u32 n_present = arg_count + 1;
     if (chunk->local_count > n_present) {
         u32 n_extra = chunk->local_count - n_present;
         for (u32 i = 0; i < n_extra; i++)
             cando_vm_push(vm, cando_null());
     }
     return true;
+}
+
+static bool vm_call(CandoVM *vm, CandoClosure *closure, u32 arg_count) {
+    CandoChunk *chunk = closure->chunk;
+    if (!chunk->has_vararg && arg_count != chunk->arity) {
+        vm_runtime_error(vm,
+            "function '%s' expects %u argument(s) but got %u",
+            chunk->name, chunk->arity, arg_count);
+        return false;
+    }
+    return vm_push_frame(vm, closure, chunk->code, arg_count, false);
 }
 
 /* =========================================================================
@@ -710,31 +1167,22 @@ static bool vm_call(CandoVM *vm, CandoClosure *closure, u32 arg_count) {
 #define READ_I16()     ((i16)READ_U16())
 #define READ_CONST()   (frame->closure->chunk->constants[READ_U16()])
 
-#define PUSH(v)        cando_vm_push(vm, (v))
-#define POP()          cando_vm_pop(vm)
-#define PEEK(d)        cando_vm_peek(vm, (d))
-
-/* Numerical binary operation macro. */
-#define BINARY_NUM_OP(op_sym)  do {                                      \
-    CandoValue _b = POP(), _a = POP();                                   \
-    if (CANDO_UNLIKELY(!cando_is_number(_a) || !cando_is_number(_b))) {  \
-        vm_runtime_error(vm, "operands must be numbers (got %s and %s)", \
-            cando_value_type_name((TypeTag)_a.tag),                      \
-            cando_value_type_name((TypeTag)_b.tag));                     \
-        goto handle_error;                                               \
-    }                                                                    \
-    PUSH(cando_number(_a.as.number op_sym _b.as.number));                \
+/* Hot-path stack ops: raw pointer arithmetic instead of going through
+ * the public cando_vm_push/pop/peek helpers (which add a function call
+ * and a bounds assertion).  The dispatch loop visits these macros
+ * millions of times per second; the parser already guarantees per-op
+ * arity so the assertions are redundant inside vm_run.  The public
+ * helpers remain for native-function callers.
+ *
+ * PUSH evaluates its argument into a temporary first to avoid sequence-
+ * point UB when the argument also reads vm->stack_top (e.g. PEEK).    */
+#define PUSH(v)        do {                                              \
+    CandoValue _pv = (v);                                                \
+    *vm->stack_top++ = _pv;                                              \
 } while (0)
-
-/* Comparison operator (returns bool). */
-#define CMP_OP(op_sym)  do {                                             \
-    CandoValue _b = POP(), _a = POP();                                   \
-    if (!cando_is_number(_a) || !cando_is_number(_b)) {                  \
-        vm_runtime_error(vm, "comparison requires numbers");             \
-        goto handle_error;                                               \
-    }                                                                    \
-    PUSH(cando_bool(_a.as.number op_sym _b.as.number));                  \
-} while (0)
+#define POP()          (*--vm->stack_top)
+#define DROP()         ((void)(--vm->stack_top))   /* discard top, no read */
+#define PEEK(d)        (vm->stack_top[-1 - (ptrdiff_t)(d)])
 
 /* Saved frame-local ip back to the frame struct before any call. */
 #define SYNC_IP()  (frame->ip = ip)
@@ -880,26 +1328,14 @@ CandoVMResult cando_vm_exec_closure(CandoVM *vm, CandoClosure *closure,
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++)
         vm->thread_results[i] = cando_null();
 
-    /* Push slot-0 sentinel and create a call frame at fn_pc. */
+    /* Push slot-0 sentinel and create a call frame at fn_pc.  No args:
+     * vm_push_frame handles local-null fill from arg_count = 0.        */
     cando_vm_push(vm, cando_null());
-    if (vm->frame_count >= CANDO_FRAMES_MAX) {
-        vm_runtime_error(vm, "call stack overflow in thread");
+    if (!vm_push_frame(vm, closure, closure->chunk->code + fn_pc, 0, false)) {
+        cando_value_release(cando_vm_pop(vm));
         vm->thread_stop_frame   = saved_stop;
         vm->thread_result_count = saved_count;
-        cando_vm_pop(vm);
         return VM_RUNTIME_ERR;
-    }
-    CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-    new_frame->closure   = closure;
-    new_frame->ip        = closure->chunk->code + fn_pc;
-    new_frame->slots     = vm->stack_top - 1; /* just the sentinel */
-    new_frame->ret_count = 0;
-    new_frame->is_fluent = false;
-
-    /* Pre-allocate null locals. */
-    if (closure->chunk->local_count > 1) {
-        for (u32 i = 1; i < closure->chunk->local_count; i++)
-            cando_vm_push(vm, cando_null());
     }
 
     CandoVMResult res = vm_run(vm);
@@ -933,30 +1369,20 @@ static void vm_call_closure_with_args(CandoVM *vm, CdoObject *fn_obj,
         vm->thread_results[i] = cando_null();
     }
 
-    /* Push slot-0 sentinel. */
+    /* Push slot-0 sentinel + the passed args, then build the frame.
+     * Uses argc (not closure->chunk->arity, which is the top-level
+     * script's arity = 0) because all nested functions share the flat
+     * chunk.                                                           */
+    u32 stack_before = (u32)(vm->stack_top - vm->stack);
     cando_vm_push(vm, cando_null());
-    if (vm->frame_count >= CANDO_FRAMES_MAX) {
-        cando_vm_pop(vm);
-        vm->thread_stop_frame = saved_stop;
-        return;
-    }
-
-    CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-    new_frame->closure   = closure;
-    new_frame->ip        = closure->chunk->code + fn_pc;
-    new_frame->slots     = vm->stack_top - 1;   /* points at slot-0 */
-    new_frame->ret_count = 0;
-    new_frame->is_fluent = false;
-
-    /* Push the passed arguments as parameter slots, then nulls for any
-     * remaining local variable slots declared by the main chunk.
-     * We use argc (not closure->chunk->arity which is the top-level script's
-     * arity=0) because all nested functions share the flat chunk. */
     for (u32 i = 0; i < argc; i++)
         cando_vm_push(vm, cando_value_copy(args[i]));
-    if (closure->chunk->local_count > 1 + argc) {
-        for (u32 i = 1 + argc; i < closure->chunk->local_count; i++)
-            cando_vm_push(vm, cando_null());
+
+    if (!vm_push_frame(vm, closure, closure->chunk->code + fn_pc, argc, false)) {
+        while ((u32)(vm->stack_top - vm->stack) > stack_before)
+            cando_value_release(cando_vm_pop(vm));
+        vm->thread_stop_frame = saved_stop;
+        return;
     }
 
     vm_run(vm);
@@ -1105,6 +1531,8 @@ static CANDO_THREAD_RETURN vm_thread_trampoline(void *raw_arg) {
 cleanup:
     tl_current_thread = NULL;
     cando_vm_destroy(&child);
+    tl_current_vm     = NULL;
+    cando_gc_set_active_memctrl(NULL);
     cando_value_release(ta->fn_val);
     /* Capture the registry pointer before freeing ta. */
     CandoThreadRegistry *reg = ta->parent_vm->thread_registry;
@@ -1192,6 +1620,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         [OP_JUMP]             = &&lbl_OP_JUMP,
         [OP_JUMP_IF_FALSE]    = &&lbl_OP_JUMP_IF_FALSE,
         [OP_JUMP_IF_TRUE]     = &&lbl_OP_JUMP_IF_TRUE,
+        [OP_JUMP_IF_NULL]     = &&lbl_OP_JUMP_IF_NULL,
         [OP_LOOP]             = &&lbl_OP_LOOP,
         [OP_BREAK]            = &&lbl_OP_BREAK,
         [OP_CONTINUE]         = &&lbl_OP_CONTINUE,
@@ -1218,6 +1647,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         [OP_PIPE_END]         = &&lbl_OP_PIPE_END,
         [OP_PIPE_COLLECT]     = &&lbl_OP_PIPE_COLLECT,
         [OP_FILTER_COLLECT]   = &&lbl_OP_FILTER_COLLECT,
+        [OP_COND_FILTER_COLLECT] = &&lbl_OP_COND_FILTER_COLLECT,
         [OP_TRY_BEGIN]        = &&lbl_OP_TRY_BEGIN,
         [OP_TRY_END]          = &&lbl_OP_TRY_END,
         [OP_CATCH_BEGIN]      = &&lbl_OP_CATCH_BEGIN,
@@ -1228,9 +1658,10 @@ static CandoVMResult vm_run(CandoVM *vm) {
         [OP_AWAIT]            = &&lbl_OP_AWAIT,
         [OP_YIELD]            = &&lbl_OP_YIELD,
         [OP_THREAD]           = &&lbl_OP_THREAD,
-        [OP_NEW_CLASS]        = &&lbl_OP_NEW_CLASS,
-        [OP_BIND_METHOD]      = &&lbl_OP_BIND_METHOD,
-        [OP_INHERIT]          = &&lbl_OP_INHERIT,
+        [OP_NEW_CLASS]         = &&lbl_OP_NEW_CLASS,
+        [OP_BIND_METHOD]       = &&lbl_OP_BIND_METHOD,
+        [OP_INHERIT]           = &&lbl_OP_INHERIT,
+        [OP_BIND_DEFAULT_CALL] = &&lbl_OP_BIND_DEFAULT_CALL,
         [OP_MASK_PASS]        = &&lbl_OP_MASK_PASS,
         [OP_MASK_SKIP]        = &&lbl_OP_MASK_SKIP,
         [OP_MASK_APPLY]       = &&lbl_OP_MASK_APPLY,
@@ -1412,7 +1843,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             /* String concatenation or numeric addition. */
             CandoValue b = PEEK(0), a = PEEK(1);
             if (cando_is_string(a) && cando_is_string(b)) {
-                POP(); POP();
+                DROP(); DROP();
                 u32 la = a.as.string->length, lb = b.as.string->length;
                 u32 total = la + lb;
                 char *buf = cando_alloc(total + 1);
@@ -1543,151 +1974,86 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 6: Comparison ─────────────────────────────────────── */
+
+        /* Try a comparison metamethod and DISPATCH on success.  `swap` is
+         * true for GT/GEQ which forward to __lt/__le on the swapped pair;
+         * `negate` is true for NEQ which negates the __eq result.  The
+         * comparison ops also share a number-only fallback for the cases
+         * where no meta is involved -- CMP_NUM_FALLBACK below.            */
+#define TRY_CMP_META(meta_key, swap, negate, _a, _b)                          \
+    if ((meta_key) && (cando_is_object(_a) || cando_is_object(_b))) {         \
+        HandleIndex _h = cando_is_object(_a) ? (_a).as.handle                 \
+                                              : (_b).as.handle;               \
+        CandoValue _buf[2] = { (swap) ? (_b) : (_a),                          \
+                                (swap) ? (_a) : (_b) };                       \
+        if (cando_vm_call_meta(vm, _h,                                        \
+                               (struct CdoString *)(meta_key), _buf, 2)) {    \
+            if (negate) {                                                     \
+                CandoValue _r = cando_vm_pop(vm);                             \
+                PUSH(cando_bool(!vm_is_truthy(_r)));                          \
+                cando_value_release(_r);                                      \
+            }                                                                 \
+            cando_value_release(_a); cando_value_release(_b);                 \
+            DISPATCH();                                                       \
+        }                                                                     \
+        if (vm->has_error) {                                                  \
+            cando_value_release(_a); cando_value_release(_b);                 \
+            goto handle_error;                                                \
+        }                                                                     \
+    }
+
+#define CMP_NUM_FALLBACK(_a, _b, op_sym)  do {                                \
+    if (!cando_is_number(_a) || !cando_is_number(_b)) {                       \
+        cando_value_release(_a); cando_value_release(_b);                     \
+        vm_runtime_error(vm, "comparison requires numbers");                  \
+        goto handle_error;                                                    \
+    }                                                                         \
+    PUSH(cando_bool((_a).as.number op_sym (_b).as.number));                   \
+    cando_value_release(_a); cando_value_release(_b);                         \
+} while (0)
+
         OP_CASE(OP_EQ): {
             CandoValue b = POP(), a = POP();
-            if (g_meta_eq && (cando_is_object(a) || cando_is_object(b))) {
-                HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue buf[2] = {a, b};
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_eq,
-                                       buf, 2)) {
-                    cando_value_release(a); cando_value_release(b);
-                    DISPATCH();
-                }
-                if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-            }
+            TRY_CMP_META(g_meta_eq, false, false, a, b);
             PUSH(cando_bool(cando_value_equal(a, b)));
             cando_value_release(a); cando_value_release(b);
             DISPATCH();
         }
         OP_CASE(OP_NEQ): {
             CandoValue b = POP(), a = POP();
-            if (g_meta_eq && (cando_is_object(a) || cando_is_object(b))) {
-                HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue buf[2] = {a, b};
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_eq,
-                                       buf, 2)) {
-                    CandoValue r = cando_vm_pop(vm);
-                    PUSH(cando_bool(!vm_is_truthy(r)));
-                    cando_value_release(r);
-                    cando_value_release(a); cando_value_release(b);
-                    DISPATCH();
-                }
-                if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-            }
+            TRY_CMP_META(g_meta_eq, false, true, a, b);
             PUSH(cando_bool(!cando_value_equal(a, b)));
             cando_value_release(a); cando_value_release(b);
             DISPATCH();
         }
         OP_CASE(OP_LT): {
             CandoValue b = POP(), a = POP();
-            if (g_meta_lt && (cando_is_object(a) || cando_is_object(b))) {
-                HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue buf[2] = {a, b};
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_lt,
-                                       buf, 2)) {
-                    cando_value_release(a); cando_value_release(b);
-                    DISPATCH();
-                }
-                if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-            }
-            if (!cando_is_number(a) || !cando_is_number(b)) {
-                cando_value_release(a); cando_value_release(b);
-                vm_runtime_error(vm, "comparison requires numbers");
-                goto handle_error;
-            }
-            PUSH(cando_bool(a.as.number < b.as.number));
-            cando_value_release(a); cando_value_release(b);
+            TRY_CMP_META(g_meta_lt, false, false, a, b);
+            CMP_NUM_FALLBACK(a, b, <);
             DISPATCH();
         }
         OP_CASE(OP_GT): {
             /* a > b is implemented as __lt(b, a) — swap the arguments. */
             CandoValue b = POP(), a = POP();
-            if (g_meta_lt && (cando_is_object(a) || cando_is_object(b))) {
-                HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue buf[2] = {b, a}; /* swapped for __lt */
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_lt,
-                                       buf, 2)) {
-                    cando_value_release(a); cando_value_release(b);
-                    DISPATCH();
-                }
-                if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-            }
-            if (!cando_is_number(a) || !cando_is_number(b)) {
-                cando_value_release(a); cando_value_release(b);
-                vm_runtime_error(vm, "comparison requires numbers");
-                goto handle_error;
-            }
-            PUSH(cando_bool(a.as.number > b.as.number));
-            cando_value_release(a); cando_value_release(b);
+            TRY_CMP_META(g_meta_lt, true, false, a, b);
+            CMP_NUM_FALLBACK(a, b, >);
             DISPATCH();
         }
         OP_CASE(OP_LEQ): {
             CandoValue b = POP(), a = POP();
-            if (g_meta_le && (cando_is_object(a) || cando_is_object(b))) {
-                HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue buf[2] = {a, b};
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_le,
-                                       buf, 2)) {
-                    cando_value_release(a); cando_value_release(b);
-                    DISPATCH();
-                }
-                if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-            }
-            if (!cando_is_number(a) || !cando_is_number(b)) {
-                cando_value_release(a); cando_value_release(b);
-                vm_runtime_error(vm, "comparison requires numbers");
-                goto handle_error;
-            }
-            PUSH(cando_bool(a.as.number <= b.as.number));
-            cando_value_release(a); cando_value_release(b);
+            TRY_CMP_META(g_meta_le, false, false, a, b);
+            CMP_NUM_FALLBACK(a, b, <=);
             DISPATCH();
         }
         OP_CASE(OP_GEQ): {
             /* a >= b is implemented as __le(b, a) — swap the arguments. */
             CandoValue b = POP(), a = POP();
-            if (g_meta_le && (cando_is_object(a) || cando_is_object(b))) {
-                HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue buf[2] = {b, a}; /* swapped for __le */
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_le,
-                                       buf, 2)) {
-                    cando_value_release(a); cando_value_release(b);
-                    DISPATCH();
-                }
-                if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-            }
-            if (!cando_is_number(a) || !cando_is_number(b)) {
-                cando_value_release(a); cando_value_release(b);
-                vm_runtime_error(vm, "comparison requires numbers");
-                goto handle_error;
-            }
-            PUSH(cando_bool(a.as.number >= b.as.number));
-            cando_value_release(a); cando_value_release(b);
+            TRY_CMP_META(g_meta_le, true, false, a, b);
+            CMP_NUM_FALLBACK(a, b, >=);
             DISPATCH();
         }
+#undef TRY_CMP_META
+#undef CMP_NUM_FALLBACK
 
         /* Multi-value comparisons: pop A right-hand values, then left. */
         OP_CASE(OP_EQ_STACK): {
@@ -1830,6 +2196,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 8: Logical ────────────────────────────────────────── */
+        /* ── Band 8: Logical / short-circuit ────────────────────────── */
         OP_CASE(OP_NOT): {
             CandoValue a = POP();
             {
@@ -1869,8 +2236,10 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 9: Objects / arrays ───────────────────────────────── */
+        /* ── Band 9: Object / array construction & access ───────────── */
         OP_CASE(OP_NEW_OBJECT): {
             PUSH(cando_bridge_new_object(vm));
+            vm_gc_maybe_collect(vm);
             DISPATCH();
         }
         OP_CASE(OP_NEW_ARRAY): {
@@ -1887,12 +2256,14 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CandoValue *base = vm->stack_top - n;
                 for (u32 i = 0; i < n; i++) {
                     CdoValue item = cando_bridge_to_cdo(vm, base[i]);
-                    cdo_array_push(arr, item);
+                    cdo_array_push(arr, item);   /* retains internally */
+                    cdo_value_release(item);
                     cando_value_release(base[i]);
                 }
                 vm->stack_top -= n;
             }
             PUSH(arr_val);
+            vm_gc_maybe_collect(vm);
             DISPATCH();
         }
         OP_CASE(OP_GET_FIELD): {
@@ -1930,12 +2301,43 @@ static CandoVMResult vm_run(CandoVM *vm) {
             CandoString *ks = frame->closure->chunk->constants[ci].as.string;
             CdoString   *key = cando_bridge_intern_key(ks);
             CdoValue     result;
+            bool         got = false;
             /* Use cdo_object_get for __index prototype-chain traversal. */
             if (cdo_object_get(obj, key, &result)) {
-                PUSH(cando_bridge_to_cando(vm, result));
-            } else {
-                PUSH(cando_null());
+                got = true;
+            } else if (obj->kind == OBJ_THREAD &&
+                       cando_is_object(vm->thread_proto)) {
+                /* Thread instances have no slot table; fall back to the
+                 * cached `_meta.thread` prototype for method lookups. */
+                CdoObject *tproto = cando_bridge_resolve(
+                    vm, vm->thread_proto.as.handle);
+                if (cdo_object_get(tproto, key, &result)) got = true;
             }
+            if (!got) {
+                /* Try a callable __index: __index(obj, key) -> value. */
+                CdoValue idx_callable;
+                if (cdo_object_index_callable(obj, &idx_callable)) {
+                    CandoValue idx_args[2];
+                    idx_args[0] = obj_val;
+                    idx_args[1] = cando_string_value(
+                        cando_string_new(key->data, key->length));
+                    bool ok = cando_vm_dispatch_callable(
+                        vm, &idx_callable, idx_args, 2);
+                    cando_value_release(idx_args[1]);
+                    if (vm->has_error) {
+                        cdo_string_release(key);
+                        cando_value_release(obj_val);
+                        goto handle_error;
+                    }
+                    if (ok) {
+                        cdo_string_release(key);
+                        cando_value_release(obj_val);
+                        DISPATCH();
+                    }
+                }
+            }
+            if (got) PUSH(cando_bridge_to_cando(vm, result));
+            else     PUSH(cando_null());
             cdo_string_release(key);
             cando_value_release(obj_val);
             DISPATCH();
@@ -1973,7 +2375,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 }
             }
             CdoValue cdo_val = cando_bridge_to_cdo(vm, val);
-            cdo_object_rawset(obj, key, cdo_val, FIELD_NONE);
+            cdo_object_rawset(obj, key, cdo_val, FIELD_NONE);  /* retains */
+            cdo_value_release(cdo_val);
             cdo_string_release(key);
             cando_value_release(val);
             DISPATCH();
@@ -2029,7 +2432,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             CdoValue   cdo_val = cando_bridge_to_cdo(vm, val);
             if (cando_is_number(idx_val)) {
                 u32 idx = (u32)idx_val.as.number;
-                cdo_array_rawset_idx(obj, idx, cdo_val);
+                cdo_array_rawset_idx(obj, idx, cdo_val);   /* retains */
             } else if (cando_is_string(idx_val)) {
                 CdoString *key = cando_bridge_intern_key(idx_val.as.string);
                 CdoValue   existing;
@@ -2038,30 +2441,35 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     if (cando_vm_call_meta(vm, obj_val.as.handle,
                                            (struct CdoString *)g_meta_newindex,
                                            args, 3)) {
+                        cdo_value_release(cdo_val);
                         cdo_string_release(key);
                         cando_value_release(val);
                         cando_value_release(idx_val);
                         DISPATCH();
                     }
                     if (vm->has_error) {
+                        cdo_value_release(cdo_val);
                         cdo_string_release(key);
                         cando_value_release(val);
                         cando_value_release(idx_val);
                         goto handle_error;
                     }
                 }
-                cdo_object_rawset(obj, key, cdo_val, FIELD_NONE);
+                cdo_object_rawset(obj, key, cdo_val, FIELD_NONE);   /* retains */
                 cdo_string_release(key);
             } else {
+                cdo_value_release(cdo_val);
                 cando_value_release(val);
                 cando_value_release(idx_val);
                 vm_runtime_error(vm, "index must be a number or string");
                 goto handle_error;
             }
+            cdo_value_release(cdo_val);
             cando_value_release(val);
             cando_value_release(idx_val);
             DISPATCH();
         }
+        /* ── Band 10: Collection introspection ──────────────────────── */
         OP_CASE(OP_LEN): {
             CandoValue a = POP();
             if (cando_is_string(a)) {
@@ -2141,6 +2549,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 10: Control flow ──────────────────────────────────── */
+        /* ── Band 11: Control flow (jumps, loops, break/continue) ───── */
         OP_CASE(OP_JUMP): {
             i16 offset = READ_I16();
             ip += offset;
@@ -2160,6 +2569,14 @@ static CandoVMResult vm_run(CandoVM *vm) {
             bool truthy = vm_is_truthy_meta(vm, PEEK(0), &meta_ok);
             if (!meta_ok) goto handle_error;
             if (truthy) ip += offset;
+            DISPATCH();
+        }
+        OP_CASE(OP_JUMP_IF_NULL): {
+            /* Peek TOS; jump if exactly null (no pop). Used by the safety
+             * indexer (?. / ?[) so that hitting null mid-chain leaves the
+             * null on the stack as the chain's result.                     */
+            i16 offset = READ_I16();
+            if (cando_is_null(PEEK(0))) ip += offset;
             DISPATCH();
         }
         OP_CASE(OP_LOOP): {
@@ -2241,21 +2658,64 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 11: Functions ─────────────────────────────────────── */
+        /* ── Band 12: Closures, calls, returns ──────────────────────── */
         OP_CASE(OP_CLOSURE): {
             /* The constant at index ci is a cando_number(fn_pc) — the byte
              * offset of the function body within the current chunk.
-             * We wrap (current closure, fn_pc) in a CdoObject of kind
-             * OBJ_FUNCTION so the function value carries its home chunk
-             * and can be called correctly even after crossing module
-             * boundaries via include().                                  */
+             * Following the operand the parser writes:
+             *
+             *     u16 capture_count
+             *     u16 outer_slot[capture_count]
+             *
+             * For each captured slot we snapshot the current frame's value
+             * into a fresh CandoUpvalue and attach the array to a fresh
+             * CandoClosure -- so each invocation of OP_CLOSURE produces a
+             * function whose OP_LOAD_UPVAL/OP_STORE_UPVAL access *its*
+             * captures, not whatever the parent frame happened to share. */
             u16 ci    = READ_U16();
             u32 fn_pc = (u32)frame->closure->chunk->constants[ci].as.number;
 
+            u16 cap_count = READ_U16();
+
+            CandoClosure *new_closure = (CandoClosure *)cando_alloc(
+                sizeof(CandoClosure));
+            new_closure->chunk         = frame->closure->chunk;
+            new_closure->upvalue_count = cap_count;
+            new_closure->upvalues      = NULL;
+            if (cap_count > 0) {
+                new_closure->upvalues = (CandoUpvalue **)cando_alloc(
+                    cap_count * sizeof(CandoUpvalue *));
+                for (u16 ui = 0; ui < cap_count; ui++) {
+                    u16 slot = READ_U16();
+                    /* Capture a live alias of the outer frame's slot;
+                     * sibling closures that close the same slot get the
+                     * *same* CandoUpvalue, so they share the variable. */
+                    CandoUpvalue *uv = vm_capture_upvalue(vm,
+                                                          &frame->slots[slot]);
+                    atomic_fetch_add_explicit(&uv->refcount, 1u,
+                                              memory_order_relaxed);
+                    new_closure->upvalues[ui] = uv;
+                }
+            }
+
             CdoObject  *fn_obj = cdo_function_new(fn_pc,
-                                                  (void *)frame->closure,
+                                                  (void *)new_closure,
                                                   NULL, 0);
-            HandleIndex h = cando_handle_alloc(vm->handles, fn_obj);
+            /* Tell cdo_object_destroy how to dispose of the attached
+             * CandoClosure when the OBJ_FUNCTION is reclaimed, and how
+             * to trace the closure's upvalues during GC mark.           */
+            fn_obj->fn.script.bytecode_free =
+                (void (*)(void *))cando_closure_free;
+            /* Wrapper so cando_closure_trace's signature
+             *   (CandoClosure*, CandoVM*, mark, ud)
+             * adapts to the object-layer's
+             *   (bytecode, CdoMarkFn, ud)
+             * without exposing CandoVM to object/.  ud is a TraceCtx*
+             * the VM-side root walker passes through.                  */
+            fn_obj->fn.script.bytecode_trace = vm_closure_trace_adapter;
+            HandleIndex h = cando_bridge_track_obj(vm, fn_obj);
             PUSH(cando_object_value(h));
+            vm_gc_maybe_collect(vm);
             DISPATCH();
         }
         OP_CASE(OP_CALL): {
@@ -2317,32 +2777,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * in the current chunk (parser emits cando_number((f64)fn_start)). */
             if (cando_is_number(callee)) {
                 u32 pc = (u32)callee.as.number;
-                CandoChunk *chunk = frame->closure->chunk;
-
-                if (vm->frame_count >= CANDO_FRAMES_MAX) {
-                    vm_runtime_error(vm, "call stack overflow");
-                    goto handle_error;
-                }
-
                 SYNC_IP();
-                CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                new_frame->closure   = frame->closure; /* same chunk */
-                new_frame->ip        = chunk->code + pc;
-                new_frame->slots     = vm->stack_top - arg_count - 1;
-                new_frame->ret_count = 0;
-                new_frame->is_fluent = false;
-
-                /* Pre-allocate null slots for local variables so expression
-                 * evaluation never overwrites them (same logic as vm_call). */
-                {
-                    u32 np = arg_count + 1;
-                    if (chunk->local_count > np) {
-                        u32 ne = chunk->local_count - np;
-                        for (u32 i = 0; i < ne; i++)
-                            cando_vm_push(vm, cando_null());
-                    }
-                }
-
+                if (!vm_push_frame(vm, frame->closure,
+                                   frame->closure->chunk->code + pc,
+                                   arg_count, false))
+                    goto handle_error;
                 LOAD_FRAME();
                 DISPATCH();
             }
@@ -2364,60 +2803,49 @@ static CandoVMResult vm_run(CandoVM *vm) {
                         (CandoClosure *)fn_obj->fn.script.bytecode;
                     u32 fn_pc = fn_obj->fn.script.param_count;
 
-                    if (vm->frame_count >= CANDO_FRAMES_MAX) {
-                        vm_runtime_error(vm, "call stack overflow");
-                        goto handle_error;
-                    }
                     SYNC_IP();
-                    CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                    new_frame->closure   = fn_closure;
-                    new_frame->ip        = fn_closure->chunk->code + fn_pc;
-                    new_frame->slots     = vm->stack_top - arg_count - 1;
-                    new_frame->ret_count = 0;
-                    new_frame->is_fluent = false;
-
-                    u32 np = arg_count + 1;
-                    if (fn_closure->chunk->local_count > np) {
-                        u32 ne = fn_closure->chunk->local_count - np;
-                        for (u32 i = 0; i < ne; i++)
-                            cando_vm_push(vm, cando_null());
-                    }
+                    if (!vm_push_frame(vm, fn_closure,
+                                       fn_closure->chunk->code + fn_pc,
+                                       arg_count, false))
+                        goto handle_error;
                     LOAD_FRAME();
                     DISPATCH();
                 }
 
-                /* __call metamethod: look up via prototype chain.  If found
-                 * and itself callable, splice the original receiver in as
-                 * arg[0] and re-dispatch with the meta function as callee. */
-                if (fn_obj && g_meta_call && meta_call_depth < 16) {
-                    CdoValue meta = cdo_null();
-                    if (cdo_object_get(fn_obj, g_meta_call, &meta) &&
-                        meta.tag != CDO_NULL) {
-                        CandoValue meta_val = cando_bridge_to_cando(vm, meta);
-                        cdo_value_release(meta);
-
+                /* __call meta-method: invoking a non-function object whose
+                 * __call is a callable.  Splice the original receiver in as
+                 * the first argument and re-enter dispatch with the meta
+                 * function as the new callee.  Used by CLASS objects: every
+                 * class binds vm->default_class_call to its __call.        */
+                if (fn_obj && g_meta_call) {
+                    CdoValue meta_val;
+                    if (cdo_object_get(fn_obj, g_meta_call, &meta_val)) {
                         if (vm->stack_top >= vm->stack + CANDO_STACK_MAX) {
                             vm_runtime_error(vm,
                                 "stack overflow in __call dispatch");
                             goto handle_error;
                         }
-                        /* Stack layout before: [..., callee, a0, ..., aN-1]
-                         *               after: [..., meta,   callee, a0, ..., aN-1]
-                         * The original callee becomes the first argument so
-                         * the meta function receives the receiver as 'self'. */
-                        CandoValue *callee_slot =
-                            vm->stack_top - arg_count - 1;
-                        memmove(callee_slot + 2, callee_slot + 1,
-                                arg_count * sizeof(CandoValue));
-                        callee_slot[1] = callee;
-                        callee_slot[0] = meta_val;
+                        CandoValue meta_callee =
+                            cando_bridge_to_cando(vm, meta_val);
+                        /* Layout before splice (arg_count = N):
+                         *     base[0]   = callee
+                         *     base[1..N] = args
+                         *     stack_top = base + N + 1
+                         * Layout after splice (new arg_count = N+1):
+                         *     base[0]   = meta_callee
+                         *     base[1]   = original callee (now first arg)
+                         *     base[2..N+1] = original args
+                         *     stack_top = base + N + 2
+                         */
+                        CandoValue *base = vm->stack_top - arg_count - 1;
+                        for (int i = (int)arg_count; i >= 0; i--)
+                            base[i + 1] = base[i];
+                        base[0] = meta_callee;
                         vm->stack_top++;
                         arg_count++;
-                        callee = meta_val;
-                        meta_call_depth++;
+                        callee = meta_callee;
                         goto op_call_dispatch;
                     }
-                    cdo_value_release(meta);
                 }
             }
 
@@ -2453,6 +2881,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
                         CdoObject *aproto = cando_bridge_resolve(vm, vm->array_proto.as.handle);
                         cdo_object_get(aproto, key, &method_cdo);
                     }
+                } else if (robj->kind == OBJ_THREAD && cando_is_object(vm->thread_proto)) {
+                    /* Thread instances have no slot table; methods live on
+                     * the cached `_meta.thread` prototype. */
+                    CdoObject *tproto = cando_bridge_resolve(vm, vm->thread_proto.as.handle);
+                    cdo_object_get(tproto, key, &method_cdo);
                 } else {
                     cdo_object_get(robj, key, &method_cdo);
                 }
@@ -2569,41 +3002,27 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 if (fn_obj->kind == OBJ_FUNCTION && fn_obj->fn.script.bytecode) {
                     CandoClosure *fn_closure = (CandoClosure *)fn_obj->fn.script.bytecode;
                     u32 fn_pc = fn_obj->fn.script.param_count;
-                    if (vm->frame_count >= CANDO_FRAMES_MAX) {
-                        vm_runtime_error(vm, "call stack overflow");
-                        goto handle_error;
-                    }
                     SYNC_IP();
-                    CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                    new_frame->closure   = fn_closure;
-                    new_frame->ip        = fn_closure->chunk->code + fn_pc;
-                    new_frame->slots     = base;
-                    new_frame->ret_count = 0;
-                    new_frame->is_fluent = is_fluent;
-                    u32 np = total_argc + 1;
-                    if (fn_closure->chunk->local_count > np) {
-                        u32 ne = fn_closure->chunk->local_count - np;
-                        for (u32 i = 0; i < ne; i++) cando_vm_push(vm, cando_null());
-                    }
+                    if (!vm_push_frame(vm, fn_closure,
+                                       fn_closure->chunk->code + fn_pc,
+                                       total_argc, is_fluent))
+                        goto handle_error;
                     LOAD_FRAME();
                     DISPATCH();
                 }
             }
 
-            /* Raw PC number */
+            /* Raw PC number: inline function in the same chunk.  Unlike
+             * OP_CALL's number-callee branch this site historically did
+             * not pre-allocate local nulls; vm_push_frame will fill them
+             * if the chunk declares any (no-op when local_count == 0).  */
             if (cando_is_number(method)) {
                 u32 pc = (u32)method.as.number;
-                if (vm->frame_count >= CANDO_FRAMES_MAX) {
-                    vm_runtime_error(vm, "call stack overflow");
-                    goto handle_error;
-                }
                 SYNC_IP();
-                CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                new_frame->closure   = frame->closure;
-                new_frame->ip        = frame->closure->chunk->code + pc;
-                new_frame->slots     = base;
-                new_frame->ret_count = 0;
-                new_frame->is_fluent = is_fluent;
+                if (!vm_push_frame(vm, frame->closure,
+                                   frame->closure->chunk->code + pc,
+                                   total_argc, is_fluent))
+                    goto handle_error;
                 LOAD_FRAME();
                 DISPATCH();
             }
@@ -2724,6 +3143,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 12: Varargs ───────────────────────────────────────── */
+        /* ── Band 13: Vararg / unpack ───────────────────────────────── */
         OP_CASE(OP_LOAD_VARARG): {
             /* TODO: vararg access requires vararg calling convention.     */
             u16 slot = READ_U16(); CANDO_UNUSED(slot);
@@ -2763,6 +3183,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 13: Iteration ─────────────────────────────────────── */
+        /* ── Band 14: Ranges & iteration ────────────────────────────── */
         OP_CASE(OP_RANGE_ASC): {
             CandoValue b = POP(), a = POP();
             if (!cando_is_number(a) || !cando_is_number(b)) {
@@ -3006,6 +3427,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             }
             DISPATCH();
         }
+        /* ── Band 15: Pipe / filter ─────────────────────────────────── */
         OP_CASE(OP_PIPE_INIT): {
             /* Pop source value, create result array, expand source elements.
              * Pipe/filter (~> / ~!>) only operate on arrays; a non-array
@@ -3098,7 +3520,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
             CdoObject  *arr = cando_bridge_resolve(vm,
                                   (HandleIndex)arr_ptr->as.handle);
             CdoValue cdo_result = cando_bridge_to_cdo(vm, result);
-            cdo_array_push(arr, cdo_result);
+            cdo_array_push(arr, cdo_result);   /* retains */
+            cdo_value_release(cdo_result);
             cando_value_release(result);
             DISPATCH();
         }
@@ -3112,13 +3535,40 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CdoObject  *arr = cando_bridge_resolve(vm,
                                       (HandleIndex)arr_ptr->as.handle);
                 CdoValue cdo_result = cando_bridge_to_cdo(vm, result);
-                cdo_array_push(arr, cdo_result);
+                cdo_array_push(arr, cdo_result);   /* retains */
+                cdo_value_release(cdo_result);
             }
             cando_value_release(result);
             DISPATCH();
         }
+        OP_CASE(OP_COND_FILTER_COLLECT): {
+            /* Conditional filter (~&>): body produced a predicate result.
+             * If truthy, append the *original source element* (not the body
+             * result) to result_arr.  src_idx was already incremented by
+             * OP_FILTER_NEXT, so the iterated element sits at src_idx-1.   */
+            CandoValue pred = POP();
+            bool keep = vm_is_truthy(pred);
+            cando_value_release(pred);
+            if (keep) {
+                f64 src_idx_f = (vm->stack_top - 1)->as.number;
+                f64 count_f   = (vm->stack_top - 2)->as.number;
+                i64 N   = (i64)count_f;
+                i64 idx = (i64)src_idx_f - 1;
+                CandoValue *val_ptr = vm->stack_top - 2 - N + idx;
+                CandoValue *arr_ptr = vm->stack_top - 3 - N;
+                CdoObject  *arr = cando_bridge_resolve(vm,
+                                      (HandleIndex)arr_ptr->as.handle);
+                CandoValue elem_copy = cando_value_copy(*val_ptr);
+                CdoValue cdo_elem = cando_bridge_to_cdo(vm, elem_copy);
+                cdo_array_push(arr, cdo_elem);   /* retains */
+                cdo_value_release(cdo_elem);
+                cando_value_release(elem_copy);
+            }
+            DISPATCH();
+        }
 
         /* ── Band 14: Error handling ────────────────────────────────── */
+        /* ── Band 16: Exceptions (try / catch / finally / throw) ────── */
         OP_CASE(OP_TRY_BEGIN): {
             i16 catch_off = READ_I16();
             CANDO_ASSERT_MSG(vm->try_depth < CANDO_TRY_MAX,
@@ -3191,6 +3641,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 15: Threads ───────────────────────────────────────── */
+        /* ── Band 17: Concurrency (async / await / yield / thread) ──── */
         OP_CASE(OP_ASYNC): {
             vm_runtime_error(vm, "ASYNC not implemented (use 'thread' instead)");
             goto handle_error;
@@ -3297,9 +3748,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cando_value_release(fn_val);
                 cando_value_release(ta->fn_val);
                 cando_free(ta);
+                /* Untrack so the upcoming destroy isn't followed by a
+                 * second sweep at VM teardown.  cdo_thread_destroy now
+                 * frees the struct itself, so no separate cando_free.   */
+                cando_gc_untrack(t);
                 cdo_thread_destroy(t);
                 cando_handle_free(vm->handles, h);
-                cando_free(t);
                 vm_runtime_error(vm, "thread: failed to create OS thread");
                 goto handle_error;
             }
@@ -3308,10 +3762,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
 
             cando_value_release(fn_val);
             PUSH(thread_val);
+            vm_gc_maybe_collect(vm);
             DISPATCH();
         }
 
-        /* ── Band 16: Classes ───────────────────────────────────────── */
+        /* ── Band 18: OOP (classes, inheritance, method binding) ────── */
         OP_CASE(OP_NEW_CLASS): {
             u16 ci = READ_U16();
             CandoValue name_val = frame->closure->chunk->constants[ci];
@@ -3327,6 +3782,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cdo_string_release(cdo_key);
             }
             PUSH(cls_val);
+            vm_gc_maybe_collect(vm);
             DISPATCH();
         }
         OP_CASE(OP_BIND_METHOD): {
@@ -3353,11 +3809,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
         OP_CASE(OP_INHERIT): {
             /* Stack: [..., parent_class, child_class]
-             * Set child.__index = parent so instances find methods on both. */
+             * Set child.__index = parent and leave only child on TOS. */
             CandoValue child_val  = POP();
-            CandoValue parent_val = PEEK(0);
+            CandoValue parent_val = POP();
             if (!cando_is_object(child_val) || !cando_is_object(parent_val)) {
                 cando_value_release(child_val);
+                cando_value_release(parent_val);
                 vm_runtime_error(vm, "INHERIT: expected class objects");
                 goto handle_error;
             }
@@ -3367,11 +3824,30 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cdo_object_rawset(child, g_meta_index, pv, FIELD_NONE);
                 cdo_value_release(pv);
             }
+            cando_value_release(parent_val);
             PUSH(child_val);
+            DISPATCH();
+        }
+        OP_CASE(OP_BIND_DEFAULT_CALL): {
+            /* Stack: [..., class_obj]
+             * Set class.__call to the VM-wide default constructor wrapper.
+             * Class stays on TOS so further bindings can proceed.          */
+            CandoValue cls_val = PEEK(0);
+            if (!cando_is_object(cls_val)) {
+                vm_runtime_error(vm, "BIND_DEFAULT_CALL: expected class object");
+                goto handle_error;
+            }
+            if (g_meta_call) {
+                CdoObject *cls = cando_bridge_resolve(vm, cls_val.as.handle);
+                CdoValue   cv  = cando_bridge_to_cdo(vm, vm->default_class_call);
+                cdo_object_rawset(cls, g_meta_call, cv, FIELD_NONE);
+                cdo_value_release(cv);
+            }
             DISPATCH();
         }
 
         /* ── Band 17: Mask / selector ───────────────────────────────── */
+        /* ── Band 19: Multi-return masks & spread ───────────────────── */
         OP_CASE(OP_MASK_PASS): {
             /* No-op at the VM level; the compiler handles stack picking. */
             DISPATCH();
@@ -3521,6 +3997,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Sentinels ──────────────────────────────────────────────── */
+        /* ── Band 20: Misc (NOP, HALT) ──────────────────────────────── */
         OP_CASE(OP_NOP): {
             DISPATCH();
         }

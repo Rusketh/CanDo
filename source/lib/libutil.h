@@ -88,6 +88,47 @@ static inline f64 libutil_arg_num_at(CandoValue *args, int argc,
 }
 
 /* =========================================================================
+ * Argument validators -- raise vm_error and return NULL/false on miss
+ *
+ * Soft fallbacks (libutil_arg_*_at) return NULL or a default value when
+ * the argument is missing/wrong-type, leaving the caller to decide what
+ * to do.  These hard variants raise a uniform vm_error with the form
+ *   "<fn_name>: argument <idx+1> must be a <type>"
+ * and return NULL/false so the caller can immediately `return -1`.
+ *
+ * Typical use:
+ *
+ *     const char *path = libutil_require_cstr_at(vm, args, argc, 0,
+ *                                                "file.read");
+ *     if (!path) return -1;
+ *
+ *     CdoObject *obj;
+ *     if (!libutil_require_object_at(vm, args, argc, 0,
+ *                                    "object.copy", &obj))
+ *         return -1;
+ *
+ * The error message is a best-effort default; libraries that need a
+ * more specific message can still write their own validator.
+ * ======================================================================= */
+
+CANDO_API const char *libutil_require_cstr_at(CandoVM *vm, CandoValue *args,
+                                              int argc, int idx,
+                                              const char *fn_name);
+
+CANDO_API CandoString *libutil_require_str_at(CandoVM *vm, CandoValue *args,
+                                              int argc, int idx,
+                                              const char *fn_name);
+
+CANDO_API bool libutil_require_num_at(CandoVM *vm, CandoValue *args,
+                                      int argc, int idx,
+                                      const char *fn_name, f64 *out);
+
+CANDO_API bool libutil_require_object_at(CandoVM *vm, CandoValue *args,
+                                         int argc, int idx,
+                                         const char *fn_name,
+                                         CdoObject **out_obj);
+
+/* =========================================================================
  * String push helpers
  * ======================================================================= */
 
@@ -116,5 +157,36 @@ CANDO_API void libutil_push_cstr(CandoVM *vm, const char *str);
  */
 CANDO_API void libutil_set_method(CandoVM *vm, CdoObject *obj,
                         const char *name, CandoNativeFn fn);
+
+/*
+ * LibutilMethodEntry -- one row in a static method table.
+ * A NULL `name` terminates the table when used with the variadic-loop
+ * form below; the count form uses an explicit length and ignores name.
+ */
+typedef struct {
+    const char    *name;
+    CandoNativeFn  fn;
+} LibutilMethodEntry;
+
+/*
+ * libutil_register_methods -- bulk variant of libutil_set_method.
+ *
+ * Walks `entries[0..count)` and registers each row.  The recommended
+ * pattern is to define a static const table next to a library's
+ * register function:
+ *
+ *     static const LibutilMethodEntry mylib_methods[] = {
+ *         { "foo", mylib_foo },
+ *         { "bar", mylib_bar },
+ *     };
+ *     libutil_register_methods(vm, obj, mylib_methods,
+ *                              CANDO_ARRAY_LEN(mylib_methods));
+ *
+ * Adding a new method becomes one new row instead of one row + one
+ * matching libutil_set_method call.
+ */
+CANDO_API void libutil_register_methods(CandoVM *vm, CdoObject *obj,
+                                        const LibutilMethodEntry *entries,
+                                        usize count);
 
 #endif /* CANDO_LIB_LIBUTIL_H */

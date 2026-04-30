@@ -94,12 +94,27 @@ typedef struct CdoThread {
 CdoThread *cdo_thread_new(CandoValue fn_val);
 
 /*
- * cdo_thread_destroy -- release all resources owned by the thread object.
+ * cdo_thread_destroy -- release all resources owned by the thread object
+ * and free the struct itself.
  *
  * Must only be called after the thread has finished (state >= DONE).
- * Does NOT free the CdoThread pointer itself (caller must cando_free it).
+ * Used both as the memctrl destroy callback (sweeping at VM teardown)
+ * and explicitly by error paths in OP_THREAD setup.
  */
 void cdo_thread_destroy(CdoThread *t);
+
+/*
+ * cdo_thread_trace -- visit every heap-typed CandoValue stored on the
+ * thread (fn_val, results, error, then_fn, catch_fn) and resolve each
+ * via `resolve` (which converts the value to a tracked-object pointer)
+ * before feeding it to `mark`.  Used by the GC root walker.
+ */
+typedef void *(*CdoThreadResolveFn)(CandoValue v, void *ud);
+typedef bool  (*CdoThreadMarkFn)(void *target_obj, void *ud);
+void cdo_thread_trace(CdoThread *t,
+                      CdoThreadResolveFn resolve,
+                      CdoThreadMarkFn    mark,
+                      void              *ud);
 
 /* -------------------------------------------------------------------------
  * State transitions

@@ -18,16 +18,109 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc make libssl-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc make libssl-dev libldap2-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
+            libgl1-mesa-dev libxkbcommon-dev libxext-dev \
+            xvfb
 
       - name: Run tests
         run: make test
 
-      - name: Upload binary
+      - name: Build modules
+        run: make modules
+
+      - name: Test modules (C unit tests)
+        run: make modules-test
+
+      - name: Test modules (script integration -- ldap)
+        run: ./cando modules/ldap/test_ldap.cdo
+
+      - name: Test modules (script integration -- sqlite)
+        run: ./cando modules/sqlite/test_sqlite.cdo
+
+      - name: Smoke-test modules (script integration -- sql)
+        # The sql module talks to PostgreSQL and MySQL servers.  CI
+        # runs without those dependencies, so only the no-server smoke
+        # test is invoked here -- full coverage in test_sql.cdo runs
+        # against locally-provisioned servers.
+        run: ./cando modules/sql/test_sql_smoke.cdo
+
+      - name: Smoke-test modules (script integration -- window)
+        # window.so loads OK and registers _meta.window even on a
+        # display-less host (no glfwInit needed for module init).
+        run: ./cando modules/window/test_window_smoke.cdo
+
+      - name: Smoke-test modules (script integration -- draw)
+        run: ./cando modules/draw/test_draw_smoke.cdo
+
+      - name: Smoke-test modules (script integration -- forms)
+        # forms.so loads on Linux as a stub backend; the smoke test
+        # checks the public surface is registered.  The full Windows
+        # backend ships in forms.dll and is exercised by the matching
+        # smoke step in the Windows job.
+        run: cd modules/forms && ../../cando test_forms_smoke.cdo
+
+      - name: Generate test PNG for the draw script test
+        # The full draw test exercises stb_image; bake a 4x4 RGBA PNG
+        # so we have something deterministic to load.
+        run: |
+          python3 - <<'PY'
+          import struct, zlib
+          def png(w, h, rgba):
+              sig = b'\x89PNG\r\n\x1a\n'
+              def chunk(t, d):
+                  c = zlib.crc32(t + d) & 0xffffffff
+                  return struct.pack('>I', len(d)) + t + d + struct.pack('>I', c)
+              ihdr = struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)
+              raw = b''
+              for y in range(h):
+                  raw += b'\x00' + bytes(rgba[y*w*4:(y+1)*w*4])
+              return sig + chunk(b'IHDR', ihdr) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
+          pix = []
+          for y in range(4):
+              for x in range(4):
+                  if x < 2 and y < 2:    pix += [255, 0, 0, 255]
+                  elif x >=2 and y >= 2: pix += [0, 0, 255, 255]
+                  else:                   pix += [0, 255, 0, 255]
+          open('/tmp/test4x4.png', 'wb').write(png(4, 4, pix))
+          PY
+
+      - name: Full window script test (xvfb)
+        run: |
+          # cd into the module dir so include("./window.so") works.
+          cd modules/window && xvfb-run -a ../../cando test_window.cdo
+
+      - name: Full draw script test (xvfb)
+        run: |
+          cd modules/draw && xvfb-run -a ../../cando test_draw.cdo
+
+      - name: Stage release artifact
+        # actions/upload-artifact@v4 strips the lowest common ancestor of
+        # the matched paths, so we collect everything in a dist/ directory
+        # first.  Uploading dist/* makes the artifact ZIP extract cleanly
+        # to "cando" + "modules/<name>/<name>.so".
+        run: |
+          set -e
+          mkdir -p dist/modules
+          cp cando dist/
+          for so in modules/*/*.so; do
+            mod=$(basename "$(dirname "$so")")
+            mkdir -p "dist/modules/$mod"
+            cp "$so" "dist/modules/$mod/"
+            if [ -f "modules/$mod/README.md" ]; then
+              cp "modules/$mod/README.md" "dist/modules/$mod/"
+            fi
+          done
+          ls -lR dist
+
+      - name: Upload binary + modules
         uses: actions/upload-artifact@v4
         with:
           name: cando-linux-x86_64
-          path: cando
+          path: dist/*
 
   # ---------------------------------------------------------------------------
   # Windows build (MinGW-w64 via MSYS2, includes OpenSSL)
@@ -54,10 +147,201 @@ jobs:
       - name: Build cando.exe
         run: make cando.exe MINGW_CC=gcc WINDRES=windres
 
-      - name: Upload binary
+      - name: Build modules (Windows)
+        run: make modules-windows MINGW_CC=gcc
+
+      - name: Smoke-test modules (Windows -- ldap)
+        # Verify LoadLibrary + cando_module_init succeed and the public
+        # API surface is registered.
+        run: ./cando.exe modules/ldap/test_ldap_smoke.cdo
+
+      - name: Smoke-test modules (Windows -- sqlite)
+        run: ./cando.exe modules/sqlite/test_sqlite_smoke.cdo
+
+      - name: Smoke-test modules (Windows -- sql)
+        run: ./cando.exe modules/sql/test_sql_smoke.cdo
+
+      - name: Smoke-test modules (Windows -- window)
+        run: ./cando.exe modules/window/test_window_smoke.cdo
+
+      - name: Smoke-test modules (Windows -- draw)
+        run: ./cando.exe modules/draw/test_draw_smoke.cdo
+
+      - name: Smoke-test modules (Windows -- forms)
+        # Verifies forms.dll loads and registers all 14 constructors +
+        # the forms_control meta table without actually opening a form.
+        run: cd modules/forms && ../../cando.exe test_forms_smoke.cdo
+
+      - name: Verify no MinGW runtime DLL deps
+        run: |
+          set -e
+          echo "=== cando.exe imports ==="
+          objdump -p cando.exe | grep "DLL Name" || true
+          echo "=== libcando.dll imports ==="
+          objdump -p libcando.dll | grep "DLL Name" || true
+          for bin in cando.exe libcando.dll modules/sqlite/sqlite.dll modules/sql/sql.dll modules/window/window.dll modules/draw/draw.dll modules/forms/forms.dll; do
+            for dll in libwinpthread-1.dll libgcc_s_seh-1.dll libstdc++-6.dll libssl-3-x64.dll libcrypto-3-x64.dll; do
+              if objdump -p "$bin" | grep -qi "DLL Name: $dll"; then
+                echo "ERROR: $bin still imports $dll"
+                exit 1
+              fi
+            done
+          done
+          echo "OK: no MinGW runtime DLL dependencies."
+
+      - name: Stage release artifact
+        # See the Linux job for the rationale -- collect everything under
+        # dist/ so the artifact ZIP extracts cleanly to "cando.exe" +
+        # "libcando.dll" + "modules/<name>/<name>.dll".
+        run: |
+          set -e
+          mkdir -p dist/modules
+          cp cando.exe libcando.dll dist/
+          for dll in modules/*/*.dll; do
+            mod=$(basename "$(dirname "$dll")")
+            mkdir -p "dist/modules/$mod"
+            cp "$dll" "dist/modules/$mod/"
+            if [ -f "modules/$mod/README.md" ]; then
+              cp "modules/$mod/README.md" "dist/modules/$mod/"
+            fi
+          done
+          ls -lR dist
+
+      - name: Upload binary + modules
         uses: actions/upload-artifact@v4
         with:
           name: cando-windows-x86_64
-          path: |
-            cando.exe
-            libcando.dll
+          path: dist/*
+
+  # ---------------------------------------------------------------------------
+  # VS Code extension build + package
+  # ---------------------------------------------------------------------------
+  vscode-extension:
+    name: Build (VS Code extension)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode-cando
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        # `npm install` (not `ci`) because the repo intentionally does not
+        # commit a package-lock.json; this lets minor patch updates of the
+        # language-server libs flow in automatically.
+        run: npm install --no-audit --no-fund
+
+      - name: Compile TypeScript (client + server)
+        run: npm run compile
+
+      - name: Drop dev dependencies before packaging
+        # Keep only runtime deps in node_modules so the .vsix doesn't ship
+        # TypeScript, vsce, @types, etc.
+        run: npm prune --omit=dev
+
+      - name: Package extension (.vsix)
+        run: npx --yes @vscode/vsce package --out vscode-cando.vsix
+
+      - name: Show package contents
+        run: npx --yes @vscode/vsce ls
+
+      - name: Upload .vsix
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-cando-extension
+          path: editors/vscode-cando/vscode-cando.vsix
+
+  # ---------------------------------------------------------------------------
+  # Publish release zips
+  #
+  # Runs only on pushes to the trunk branches (skipped for PRs) once both the
+  # Linux and Windows build jobs succeed.  Each platform is published to its
+  # own rolling release ("channel"): the `linux-latest` and `windows-latest`
+  # tags are force-moved to the just-built commit, so users always have a
+  # stable URL for the most recent green build.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish release zips
+    needs: [linux, windows, vscode-extension]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cando-linux-x86_64
+          path: cando-linux-x86_64
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cando-windows-x86_64
+          path: cando-windows-x86_64
+
+      - name: Download VS Code extension artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vscode-cando-extension
+          path: vscode-cando-extension
+
+      - name: Bundle VS Code extension into platform artifacts
+        # Ship the .vsix alongside each platform binary so a single
+        # download gives users both the interpreter and the editor
+        # integration.  Also publish it standalone on its own channel.
+        run: |
+          set -e
+          mkdir -p cando-linux-x86_64/editors cando-windows-x86_64/editors
+          cp vscode-cando-extension/vscode-cando.vsix cando-linux-x86_64/editors/
+          cp vscode-cando-extension/vscode-cando.vsix cando-windows-x86_64/editors/
+
+      - name: Zip platform artifacts
+        run: |
+          set -e
+          (cd cando-linux-x86_64       && zip -r ../cando-linux-x86_64.zip       .)
+          (cd cando-windows-x86_64     && zip -r ../cando-windows-x86_64.zip     .)
+          cp vscode-cando-extension/vscode-cando.vsix vscode-cando.vsix
+          ls -l cando-linux-x86_64.zip cando-windows-x86_64.zip vscode-cando.vsix
+
+      - name: Publish Linux release channel
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: linux-latest
+          name: CanDo (Linux, latest)
+          body: |
+            Rolling release of the latest green Linux build.
+            Built from commit ${{ github.sha }} on `${{ github.ref_name }}`.
+          files: cando-linux-x86_64.zip
+          prerelease: true
+          make_latest: false
+
+      - name: Publish Windows release channel
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: windows-latest
+          name: CanDo (Windows, latest)
+          body: |
+            Rolling release of the latest green Windows build.
+            Built from commit ${{ github.sha }} on `${{ github.ref_name }}`.
+          files: cando-windows-x86_64.zip
+          prerelease: true
+          make_latest: false
+
+      - name: Publish VS Code extension release channel
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: vscode-latest
+          name: CanDo (VS Code extension, latest)
+          body: |
+            Rolling release of the latest green VS Code extension build.
+            Built from commit ${{ github.sha }} on `${{ github.ref_name }}`.
+          files: vscode-cando.vsix
+          prerelease: true
+          make_latest: false

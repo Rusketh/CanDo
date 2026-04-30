@@ -41,6 +41,17 @@ CANDO_API CandoValue cando_bridge_new_array(CandoVM *vm);
 CANDO_API CdoString *cando_bridge_intern_key(CandoString *cs);
 
 /*
+ * cando_bridge_track_obj -- "I just allocated this CdoObject; give it a
+ * handle and remember which slot owns it."  Equivalent to
+ *     HandleIndex h = cando_handle_alloc(vm->handles, obj);
+ *     obj->handle_idx = h;
+ * kept in one place so every script-visible object follows the same
+ * pattern -- the GC sweep can then free the handle slot when reclaiming
+ * the object so the table doesn't grow unbounded across collections.
+ */
+CANDO_API HandleIndex cando_bridge_track_obj(CandoVM *vm, CdoObject *obj);
+
+/*
  * cando_bridge_to_cando -- convert an object-layer CdoValue to a VM CandoValue.
  * For object subtypes a new handle is allocated in vm->handles.
  */

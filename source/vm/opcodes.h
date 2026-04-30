@@ -124,6 +124,7 @@ typedef enum {
     OP_JUMP,            /* unconditional; A = signed i16 byte offset      */
     OP_JUMP_IF_FALSE,   /* pop, jump if falsy; A = signed i16 offset      */
     OP_JUMP_IF_TRUE,    /* pop, jump if truthy; A = signed i16 offset     */
+    OP_JUMP_IF_NULL,    /* peek, jump if TOS is null (no pop)             */
     OP_LOOP,            /* unconditional backward; A = unsigned back bytes */
     /* Break/continue: A encodes loop depth (0 = innermost).
      * The VM walks the loop-frame stack A levels up and jumps.           */
@@ -161,6 +162,7 @@ typedef enum {
     OP_PIPE_END,        /* clean up pipe state; result_arr stays on stack */
     OP_PIPE_COLLECT,    /* pop body result and append to result array     */
     OP_FILTER_COLLECT,  /* like PIPE_COLLECT but skips null results       */
+    OP_COND_FILTER_COLLECT, /* (~&>) keep src element if body result truthy */
 
     /* ===== Band 14: Error handling ====================================== */
     OP_TRY_BEGIN,       /* push try frame; A = signed offset to catch     */
@@ -179,9 +181,10 @@ typedef enum {
                            push CdoThread handle                          */
 
     /* ===== Band 16: Class sugar ========================================= */
-    OP_NEW_CLASS,       /* create class obj; A = name constant index      */
-    OP_BIND_METHOD,     /* bind method at constants[A] to class on TOS    */
-    OP_INHERIT,         /* set __index on child class to parent class     */
+    OP_NEW_CLASS,         /* create class obj; A = name constant index      */
+    OP_BIND_METHOD,       /* bind method at constants[A] to class on TOS    */
+    OP_INHERIT,           /* set __index on child class to parent; pops parent */
+    OP_BIND_DEFAULT_CALL, /* set __call on class on TOS to vm default ctor  */
 
     /* ===== Band 17: Mask / selector operators =========================== */
     /* These implement the ~ (consume/pass) and . (skip) selector prefixes.
@@ -238,6 +241,10 @@ CandoOpFmt cando_opcode_fmt(CandoOpcode op);
 
 /* -------------------------------------------------------------------------
  * Convenience: byte-size of the full instruction (opcode + operands).
+ *
+ * NOTE: variable-width opcodes (currently OP_CLOSURE, whose tail carries
+ * an inline capture-spec table) cannot be sized from the opcode alone --
+ * use cando_instr_size_at() with the chunk byte buffer for those.
  * ---------------------------------------------------------------------- */
 CANDO_INLINE u32 cando_opcode_size(CandoOpcode op) {
     switch (cando_opcode_fmt(op)) {
@@ -247,6 +254,14 @@ CANDO_INLINE u32 cando_opcode_size(CandoOpcode op) {
         default:         return 1;
     }
 }
+
+/* -------------------------------------------------------------------------
+ * cando_instr_size_at -- byte-size of the instruction at `code[offset]`,
+ * including any variable-length tail (currently the capture metadata that
+ * follows OP_CLOSURE).  Use this when walking a chunk's bytecode rather
+ * than cando_opcode_size().
+ * ---------------------------------------------------------------------- */
+u32 cando_instr_size_at(const u8 *code, u32 offset);
 
 /* -------------------------------------------------------------------------
  * Operand read/write helpers — little-endian u16 stored in bytecode.

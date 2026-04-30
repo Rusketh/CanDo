@@ -141,15 +141,72 @@ Inside functions you should always use `VAR` to keep a variable local.
 | Bitwise | `&  \|  \|&` (xor) `~` (not) `<<  >>` |
 | Assignment | `=  +=  -=  *=  /=  %=  ^=` |
 | Indexing | `a[i]   obj.field   obj["field"]` |
+| Safe indexing | `obj?.field   obj?[expr]`  (null short-circuits) |
 | Call | `f(...)   obj:method(...)   obj::method(...)` |
 | Range | `1 -> 10`  (ascending)  `10 <- 1`  (descending) |
 | Length | `#x` |
-| Pipe | `arr ~> pipe * 2`  (map)  `arr ~!> { … }`  (filter) |
+| Pipe | `arr ~> pipe * 2`  (map)  `arr ~!> { … }`  (filter)  `arr ~&> { … }`  (conditional filter) |
+| Conditional | `cond ? then_expr : else_expr` |
 | Mask | `(~.~) expr`  (selector, see below) |
 | Vararg/spread | `...args` in parameters;  `...expr` in call-site |
 
 Precedence follows C conventions.  `^` is right-associative and binds
-tighter than `*`; `&&` short-circuits before `||`.
+tighter than `*`; `&&` short-circuits before `||`.  The ternary `?:` is
+right-associative and binds looser than `||`, so
+`a || b ? c : d` parses as `(a || b) ? c : d` and
+`a ? b : c ? d : e` parses as `a ? b : (c ? d : e)`.
+
+### Logical `||` and `&&` (Lua-style short-circuit)
+
+`||` returns its **left operand** if that value is truthy; otherwise it
+returns its **right operand** verbatim — the result is *not* coerced to a
+boolean.  `&&` mirrors the rule: it returns the left operand if falsy,
+otherwise the right operand.
+
+```cando
+print(FALSE || 0);          // 0
+print(NULL  || "fallback"); // fallback
+print(FALSE || FALSE);      // false
+print("first" || "second"); // first
+```
+
+Only `NULL` and `FALSE` are falsy.  `0`, `""`, and empty
+arrays/objects are all truthy.
+
+### Ternary conditional `? :`
+
+```cando
+VAR label = score >= 50 ? "pass" : "fail";
+```
+
+The condition is evaluated once.  Only the chosen branch is evaluated, so
+`?:` short-circuits like `IF`/`ELSE`.  Right-associativity makes
+chains read top-to-bottom:
+
+```cando
+VAR grade = pct >= 90 ? "A"
+          : pct >= 80 ? "B"
+          : pct >= 70 ? "C" : "F";
+```
+
+### Safe access `?.` and `?[]`
+
+`obj?.field` and `obj?[expr]` evaluate the receiver first; if it is `NULL`
+the whole chain short-circuits to `NULL` without evaluating the rest of
+the access.  Once the chain is "safe", every subsequent `.`, `[`, `:`, or
+`(` in the same expression also short-circuits if it sees `NULL`, so a
+gap anywhere in the chain propagates cleanly:
+
+```cando
+VAR obj = { a: { b: 42 } };
+print(obj?.a.b);      // 42
+print(obj?.x.y.z);    // null  -- stops at obj.x
+print(obj?["a"].b);   // 42
+print(NULL?.a.b);     // null  -- never dereferences NULL
+```
+
+Use `?.` to safely walk possibly-missing nested data without ringing the
+runtime "field access on non-object" error.
 
 ### Method call: `:` and `::`
 
@@ -380,47 +437,112 @@ VAR nums = [1, 2, 3, 4, 5];
 VAR tens   = nums ~> pipe * 10;                      // [10,20,30,40,50]
 VAR evens  = nums ~!> { IF pipe % 2 == 0 { RETURN pipe; } };
 VAR big    = nums ~!> { IF pipe > 3 { RETURN pipe; } };
+VAR evens2 = nums ~&> pipe % 2 == 0;                 // [2, 4]
+VAR small  = nums ~&> { RETURN pipe < 3; };          // [1, 2]
 ```
 
 - `~>` (pipe) always produces an array of the same length — the body's
   last expression, or explicit `RETURN` value, is the mapped element.
 - `~!>` (filter) produces an array containing only the elements for
-  which the body returns a non-null value.
+  which the body returns a non-null value.  The body's *return value*
+  is what ends up in the output, so `~!>` doubles as a map+filter.
+- `~&>` (conditional filter) treats the body as a boolean predicate.
+  When the body returns a truthy value the **original element** is
+  kept (the body's return value is discarded); when it returns a
+  falsy value the element is dropped.  Use `~&>` when you want a
+  pure filter without the map.
 
 `pipe` is lexically scoped to the body.  Nested pipes work, each with
 their own `pipe` binding.
 
 ## Classes
 
-`CLASS` defines an object whose methods are stored as fields and
-accessible via the `__index` prototype chain.  Method calls with `:`
-pass the receiver as the first argument (`self`).
-
-A factory method should call `object.setPrototype(inst, ClassName)` so
-that instances inherit the class methods:
+`CLASS` defines a callable table.  Calling the class
+(`Vector(1, 2, 3)`) produces a fresh instance whose `__index` points back
+at the class so methods are reachable via the prototype chain.  The body
+between the braces is the **constructor body**; the parameter list comes
+right after the `=` sign:
 
 ```cando
-CLASS Point {
-    FUNCTION make(x, y) {
-        VAR p = { x: x, y: y };
-        object.setPrototype(p, Point);    // p.__index = Point
-        RETURN p;
-    }
-    FUNCTION dist(self) {
-        RETURN math.sqrt(self.x * self.x + self.y * self.y);
-    }
+CLASS Vector = (self, x, y, z) {
+    self.x = x;
+    self.y = y;
+    self.z = z;
 }
 
-print(type(Point));        // Point  (__type set by CLASS)
-VAR p = Point.make(3, 4);
-print(p:dist());           // 5
+VAR v = Vector(1, 2, 3);
+print(type(v));            // Vector
+print(v.x, v.y, v.z);      // 1 2 3
 ```
 
-`CLASS` automatically sets `__type` to the class name (immutable).
-Method declarations inside a class body may be preceded by `STATIC`
-and/or `PRIVATE`, which are accepted by the parser as field-flag hints.
-See [metamethods.md](metamethods.md) for the full prototype system and
-all available meta-keys.
+Methods, including operator metamethods, are added afterwards as ordinary
+field assignments on the class:
+
+```cando
+Vector.__add = FUNCTION(a, b) {
+    RETURN Vector(a.x + b.x, a.y + b.y, a.z + b.z);
+};
+Vector.length = FUNCTION(self) {
+    RETURN math.sqrt(self.x * self.x +
+                     self.y * self.y +
+                     self.z * self.z);
+};
+
+VAR sum = Vector(1, 2, 3) + Vector(4, 5, 6);
+print(sum:length());       // ~10.49
+```
+
+### Three forms
+
+```cando
+// Statement form -- declares a global named after the class.
+//   - The leading `=` is required.
+//   - __type is set to the class name.
+class Vector = (self, x, y, z) { ... }
+
+// Anonymous expression form -- no __type is set.
+var Vector = class (self, x, y, z) { ... };
+
+// Named expression form -- __type = "Vector".
+var Vector = class Vector (self, x, y, z) { ... };
+```
+
+The parameter list is optional; `class Foo = { }` declares an empty
+class with no constructor arguments.
+
+### Inheritance
+
+`EXTENDS` records a parent class so that field lookups fall through the
+parent when a key is not present on the child or its instance.  Use the
+parent's class object directly (via `Child.__index`) to call a parent
+method explicitly -- there is no `super` keyword:
+
+```cando
+class Animal = (self, name) { self.name = name; }
+Animal.speak = FUNCTION(self) { RETURN self.name + " says hello"; };
+
+class Dog extends Animal = (self, name, breed) {
+    Animal.__constructor(self, name);   // call the parent constructor
+    self.breed = breed;
+}
+Dog.bark = FUNCTION(self) {
+    // Dog.__index points at Animal.
+    RETURN Dog.__index.speak(self) + " (woof, " + self.breed + ")";
+};
+
+VAR rex = Dog("Rex", "labrador");
+print(rex:bark());     // Rex says hello (woof, labrador)
+```
+
+### Keyword case
+
+CanDo keywords are case-insensitive but reject mixed-case spellings.
+`class`, `CLASS`, `var`, `VAR`, `extends`, `EXTENDS` etc. all work; a
+mixed-case form like `Class` or `eXtEnDs` is treated as an ordinary
+identifier.
+
+See [metamethods.md](metamethods.md) for the full prototype system,
+the desugaring of `class`, and all available meta-keys.
 
 ## Threads
 

@@ -17,6 +17,7 @@
  */
 
 #include "eval.h"
+#include "libutil.h"
 #include "../parser/parser.h"
 #include "../vm/chunk.h"
 #include "../vm/bridge.h"
@@ -79,12 +80,8 @@ static void sandbox_exit(CandoVM *vm, CandoGlobalEnv **saved)
  * ---------------------------------------------------------------------- */
 static int native_eval(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "eval: first argument must be a string");
-        return -1;
-    }
-
-    CandoString *src = args[0].as.string;
+    CandoString *src = libutil_require_str_at(vm, args, argc, 0, "eval");
+    if (!src) return -1;
 
     /* --- Parse options from an optional second argument (object) --- */
     char        name_buf[256];
@@ -125,9 +122,11 @@ static int native_eval(CandoVM *vm, int argc, CandoValue *args)
 
     if (!cando_parse(&parser)) {
         cando_vm_error(vm, "eval parse error: %s", cando_parser_error(&parser));
+        cando_parser_free(&parser);
         cando_chunk_free(chunk);
         return -1;
     }
+    cando_parser_free(&parser);
 
     /* --- Execute, optionally inside a sandboxed global environment --- */
     CandoGlobalEnv *saved_globals = NULL;

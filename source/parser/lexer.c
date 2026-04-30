@@ -26,99 +26,106 @@
  * ======================================================================= */
 
 /* Maps every CandoTokenType to a short printable name. */
+static const char *const TOKEN_TYPE_NAMES[TOK_COUNT] = {
+    [TOK_NUMBER]         = "NUMBER",
+    [TOK_STRING_DQ]      = "STRING_DQ",
+    [TOK_STRING_SQ]      = "STRING_SQ",
+    [TOK_STRING_BT]      = "STRING_BT",
+    [TOK_IDENT]          = "IDENT",
+
+    [TOK_IF]             = "IF",
+    [TOK_ELSE]           = "ELSE",
+    [TOK_WHILE]          = "WHILE",
+    [TOK_FOR]            = "FOR",
+    [TOK_FUNCTION]       = "FUNCTION",
+    [TOK_CLASS]          = "CLASS",
+    [TOK_EXTENDS]        = "EXTENDS",
+    [TOK_RETURN]         = "RETURN",
+    [TOK_THROW]          = "THROW",
+    [TOK_TRY]            = "TRY",
+    [TOK_CATCH]          = "CATCH",
+    [TOK_FINALY]         = "FINALY",
+    [TOK_CONST]          = "CONST",
+    [TOK_VAR]            = "VAR",
+    [TOK_GLOBAL]         = "GLOBAL",
+    [TOK_STATIC]         = "STATIC",
+    [TOK_PRIVATE]        = "PRIVATE",
+    [TOK_ASYNC]          = "ASYNC",
+    [TOK_AWAIT]          = "AWAIT",
+    [TOK_THREAD]         = "THREAD",
+    [TOK_NULL_KW]        = "NULL",
+    [TOK_TRUE_KW]        = "TRUE",
+    [TOK_FALSE_KW]       = "FALSE",
+    [TOK_IN]             = "IN",
+    [TOK_OF]             = "OF",
+    [TOK_OVER]           = "OVER",
+    [TOK_CONTINUE]       = "CONTINUE",
+    [TOK_BREAK]          = "BREAK",
+    [TOK_PIPE_KW]        = "pipe",
+
+    [TOK_PIPE_OP]        = "~>",
+    [TOK_FILTER_OP]      = "~!>",
+    [TOK_COND_FILTER_OP] = "~&>",
+    [TOK_QDOT]           = "?.",
+    [TOK_QLBRACKET]      = "?[",
+    [TOK_RANGE_ASC]      = "->",
+    [TOK_RANGE_DESC]     = "<-",
+    [TOK_FLUENT]         = "::",
+    [TOK_VARARG]         = "...",
+    [TOK_FAT_ARROW]      = "=>",
+    [TOK_AND]            = "&&",
+    [TOK_OR]             = "||",
+    [TOK_EQ]             = "==",
+    [TOK_NEQ]            = "!=",
+    [TOK_LEQ]            = "<=",
+    [TOK_GEQ]            = ">=",
+    [TOK_LSHIFT]         = "<<",
+    [TOK_RSHIFT]         = ">>",
+    [TOK_BITXOR]         = "|&",
+    [TOK_PLUS_ASSIGN]    = "+=",
+    [TOK_MINUS_ASSIGN]   = "-=",
+    [TOK_STAR_ASSIGN]    = "*=",
+    [TOK_SLASH_ASSIGN]   = "/=",
+    [TOK_PERCENT_ASSIGN] = "%=",
+    [TOK_CARET_ASSIGN]   = "^=",
+    [TOK_INCR]           = "++",
+    [TOK_DECR]           = "--",
+
+    [TOK_PLUS]           = "+",
+    [TOK_MINUS]          = "-",
+    [TOK_STAR]           = "*",
+    [TOK_SLASH]          = "/",
+    [TOK_PERCENT]        = "%",
+    [TOK_CARET]          = "^",
+    [TOK_AMP]            = "&",
+    [TOK_BITOR]          = "|",
+    [TOK_LT]             = "<",
+    [TOK_GT]             = ">",
+    [TOK_ASSIGN]         = "=",
+    [TOK_BANG]           = "!",
+    [TOK_TILDE]          = "~",
+    [TOK_DOT]            = ".",
+    [TOK_HASH]           = "#",
+    [TOK_LPAREN]         = "(",
+    [TOK_RPAREN]         = ")",
+    [TOK_LBRACE]         = "{",
+    [TOK_RBRACE]         = "}",
+    [TOK_LBRACKET]       = "[",
+    [TOK_RBRACKET]       = "]",
+    [TOK_SEMI]           = ";",
+    [TOK_COMMA]          = ",",
+    [TOK_COLON]          = ":",
+    [TOK_QUESTION]       = "?",
+
+    [TOK_EOF]             = "EOF",
+    [TOK_ERROR]           = "ERROR",
+};
+
 const char *cando_token_type_name(CandoTokenType t)
 {
-    switch (t) {
-    case TOK_NUMBER:         return "NUMBER";
-    case TOK_STRING_DQ:      return "STRING_DQ";
-    case TOK_STRING_SQ:      return "STRING_SQ";
-    case TOK_STRING_BT:      return "STRING_BT";
-    case TOK_IDENT:          return "IDENT";
-
-    case TOK_IF:             return "IF";
-    case TOK_ELSE:           return "ELSE";
-    case TOK_WHILE:          return "WHILE";
-    case TOK_FOR:            return "FOR";
-    case TOK_FUNCTION:       return "FUNCTION";
-    case TOK_CLASS:          return "CLASS";
-    case TOK_RETURN:         return "RETURN";
-    case TOK_THROW:          return "THROW";
-    case TOK_TRY:            return "TRY";
-    case TOK_CATCH:          return "CATCH";
-    case TOK_FINALY:         return "FINALY";
-    case TOK_CONST:          return "CONST";
-    case TOK_VAR:            return "VAR";
-    case TOK_GLOBAL:         return "GLOBAL";
-    case TOK_STATIC:         return "STATIC";
-    case TOK_PRIVATE:        return "PRIVATE";
-    case TOK_ASYNC:          return "ASYNC";
-    case TOK_AWAIT:          return "AWAIT";
-    case TOK_THREAD:         return "THREAD";
-    case TOK_NULL_KW:        return "NULL";
-    case TOK_TRUE_KW:        return "TRUE";
-    case TOK_FALSE_KW:       return "FALSE";
-    case TOK_IN:             return "IN";
-    case TOK_OF:             return "OF";
-    case TOK_OVER:           return "OVER";
-    case TOK_CONTINUE:       return "CONTINUE";
-    case TOK_BREAK:          return "BREAK";
-    case TOK_PIPE_KW:        return "pipe";
-
-    case TOK_PIPE_OP:        return "~>";
-    case TOK_FILTER_OP:      return "~!>";
-    case TOK_RANGE_ASC:      return "->";
-    case TOK_RANGE_DESC:     return "<-";
-    case TOK_FLUENT:         return "::";
-    case TOK_VARARG:         return "...";
-    case TOK_FAT_ARROW:      return "=>";
-    case TOK_AND:            return "&&";
-    case TOK_OR:             return "||";
-    case TOK_EQ:             return "==";
-    case TOK_NEQ:            return "!=";
-    case TOK_LEQ:            return "<=";
-    case TOK_GEQ:            return ">=";
-    case TOK_LSHIFT:         return "<<";
-    case TOK_RSHIFT:         return ">>";
-    case TOK_BITXOR:         return "|&";
-    case TOK_PLUS_ASSIGN:    return "+=";
-    case TOK_MINUS_ASSIGN:   return "-=";
-    case TOK_STAR_ASSIGN:    return "*=";
-    case TOK_SLASH_ASSIGN:   return "/=";
-    case TOK_PERCENT_ASSIGN: return "%=";
-    case TOK_CARET_ASSIGN:   return "^=";
-    case TOK_INCR:           return "++";
-    case TOK_DECR:           return "--";
-
-    case TOK_PLUS:           return "+";
-    case TOK_MINUS:          return "-";
-    case TOK_STAR:           return "*";
-    case TOK_SLASH:          return "/";
-    case TOK_PERCENT:        return "%";
-    case TOK_CARET:          return "^";
-    case TOK_AMP:            return "&";
-    case TOK_BITOR:          return "|";
-    case TOK_LT:             return "<";
-    case TOK_GT:             return ">";
-    case TOK_ASSIGN:         return "=";
-    case TOK_BANG:           return "!";
-    case TOK_TILDE:          return "~";
-    case TOK_DOT:            return ".";
-    case TOK_HASH:           return "#";
-    case TOK_LPAREN:         return "(";
-    case TOK_RPAREN:         return ")";
-    case TOK_LBRACE:         return "{";
-    case TOK_RBRACE:         return "}";
-    case TOK_LBRACKET:       return "[";
-    case TOK_RBRACKET:       return "]";
-    case TOK_SEMI:           return ";";
-    case TOK_COMMA:          return ",";
-    case TOK_COLON:          return ":";
-
-    case TOK_EOF:            return "EOF";
-    case TOK_ERROR:          return "ERROR";
-    case TOK_COUNT:          return "<COUNT>";
-    }
-    return "<unknown>";
+    if ((unsigned)t >= (unsigned)TOK_COUNT) return "<unknown>";
+    const char *name = TOKEN_TYPE_NAMES[t];
+    return name ? name : "<unknown>";
 }
 
 /* -------------------------------------------------------------------------
@@ -139,6 +146,7 @@ static const KeywordEntry KEYWORDS[] = {
     { "FOR",      3,  TOK_FOR      },
     { "FUNCTION", 8,  TOK_FUNCTION },
     { "CLASS",    5,  TOK_CLASS    },
+    { "EXTENDS",  7,  TOK_EXTENDS  },
     { "RETURN",   6,  TOK_RETURN   },
     { "THROW",    5,  TOK_THROW    },
     { "TRY",      3,  TOK_TRY      },
@@ -233,6 +241,18 @@ static bool lex_match(CandoLexer *lex, char expected)
     return true;
 }
 
+/* Consume the next *two* characters only if they match `c1` followed
+ * by `c2`.  Used for three-character operators like `~!>` and `~&>`
+ * after the leading character has been consumed.                       */
+static bool lex_match2(CandoLexer *lex, char c1, char c2)
+{
+    if (lex->pos + 1 >= lex->source_len)            return false;
+    if (lex->source[lex->pos]     != c1)            return false;
+    if (lex->source[lex->pos + 1] != c2)            return false;
+    lex->pos += 2;
+    return true;
+}
+
 /* Build a token at the given start position. */
 static CandoToken make_token(const CandoLexer *lex,
                               CandoTokenType type,
@@ -287,47 +307,55 @@ static bool skip_block_comment(CandoLexer *lex,
     return false;
 }
 
-/* Scan a double-quoted string "...". Handles \\, \", and other escapes.
- * The opening '"' has already been consumed.  Scans up to the closing '"'.
- * The token includes both delimiters. */
-static CandoToken lex_string_dq(CandoLexer *lex,
-                                 usize start_pos,
-                                 u32 start_line,
-                                 usize start_line_start)
+/* Scan a quoted string that ends with `delim` and produces token type
+ * `type`.  Backslash escapes the next character.  Newlines are
+ * permitted (the caller's choice of delimiter decides whether the
+ * language allows it -- "..." in practice contains no newlines, '...'
+ * is multiline, but lex-side both forms accept them and the parser
+ * does the per-form interpretation).                                  */
+static CandoToken lex_string_quoted(CandoLexer *lex,
+                                    usize start_pos,
+                                    u32 start_line,
+                                    usize start_line_start,
+                                    char delim,
+                                    CandoTokenType type,
+                                    const char *unterminated_msg)
 {
     while (!lex_at_end(lex)) {
         char c = lex_advance(lex);
         if (c == '\\') {
             if (lex_at_end(lex)) break;
             lex_advance(lex); /* skip escaped character */
-        } else if (c == '"') {
-            return make_token(lex, TOK_STRING_DQ,
+        } else if (c == delim) {
+            return make_token(lex, type,
                               start_pos, start_line, start_line_start);
         }
     }
     return lex_error(lex, start_pos, start_line, start_line_start,
-                     "unterminated double-quoted string");
+                     unterminated_msg);
 }
 
-/* Scan a single-quoted multiline string '...'.
- * The opening '\'' has already been consumed.  Newlines are allowed. */
-static CandoToken lex_string_sq(CandoLexer *lex,
-                                 usize start_pos,
-                                 u32 start_line,
-                                 usize start_line_start)
+/* Scan a double-quoted string "...". Opening '"' already consumed. */
+static CandoToken lex_string_dq(CandoLexer *lex,
+                                usize start_pos,
+                                u32 start_line,
+                                usize start_line_start)
 {
-    while (!lex_at_end(lex)) {
-        char c = lex_advance(lex);
-        if (c == '\\') {
-            if (lex_at_end(lex)) break;
-            lex_advance(lex);
-        } else if (c == '\'') {
-            return make_token(lex, TOK_STRING_SQ,
-                              start_pos, start_line, start_line_start);
-        }
-    }
-    return lex_error(lex, start_pos, start_line, start_line_start,
-                     "unterminated single-quoted string");
+    return lex_string_quoted(lex, start_pos, start_line, start_line_start,
+                             '"', TOK_STRING_DQ,
+                             "unterminated double-quoted string");
+}
+
+/* Scan a single-quoted multiline string '...'.  Opening '\'' already
+ * consumed.  Newlines are allowed. */
+static CandoToken lex_string_sq(CandoLexer *lex,
+                                usize start_pos,
+                                u32 start_line,
+                                usize start_line_start)
+{
+    return lex_string_quoted(lex, start_pos, start_line, start_line_start,
+                             '\'', TOK_STRING_SQ,
+                             "unterminated single-quoted string");
 }
 
 /* Scan a backtick interpolated string `...`.
@@ -441,31 +469,30 @@ restart:
     u32   start_line       = lex->line;
     usize start_line_start = lex->line_start;
 
+    /* Local shorthand: every token in this function shares the same
+     * captured-trio start_pos / start_line / start_line_start.            */
+#define EMIT(type)  make_token(lex, (type), start_pos, start_line, start_line_start)
+#define EMIT_ERR(msg) lex_error(lex, start_pos, start_line, start_line_start, (msg))
+
     char c = lex_advance(lex);
 
     /* ---- Single-character tokens whose first char is unambiguous -------- */
     switch (c) {
-    case '(': return make_token(lex, TOK_LPAREN,   start_pos, start_line, start_line_start);
-    case ')': return make_token(lex, TOK_RPAREN,   start_pos, start_line, start_line_start);
-    case '{': return make_token(lex, TOK_LBRACE,   start_pos, start_line, start_line_start);
-    case '}': return make_token(lex, TOK_RBRACE,   start_pos, start_line, start_line_start);
-    case '[': return make_token(lex, TOK_LBRACKET, start_pos, start_line, start_line_start);
-    case ']': return make_token(lex, TOK_RBRACKET, start_pos, start_line, start_line_start);
-    case ';': return make_token(lex, TOK_SEMI,     start_pos, start_line, start_line_start);
-    case ',': return make_token(lex, TOK_COMMA,    start_pos, start_line, start_line_start);
-    case '#': return make_token(lex, TOK_HASH,     start_pos, start_line, start_line_start);
+    case '(': return EMIT(TOK_LPAREN);
+    case ')': return EMIT(TOK_RPAREN);
+    case '{': return EMIT(TOK_LBRACE);
+    case '}': return EMIT(TOK_RBRACE);
+    case '[': return EMIT(TOK_LBRACKET);
+    case ']': return EMIT(TOK_RBRACKET);
+    case ';': return EMIT(TOK_SEMI);
+    case ',': return EMIT(TOK_COMMA);
+    case '#': return EMIT(TOK_HASH);
     case '^':
-        if (lex_match(lex, '='))
-            return make_token(lex, TOK_CARET_ASSIGN, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_CARET, start_pos, start_line, start_line_start);
+        return EMIT(lex_match(lex, '=') ? TOK_CARET_ASSIGN   : TOK_CARET);
     case '%':
-        if (lex_match(lex, '='))
-            return make_token(lex, TOK_PERCENT_ASSIGN, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_PERCENT, start_pos, start_line, start_line_start);
+        return EMIT(lex_match(lex, '=') ? TOK_PERCENT_ASSIGN : TOK_PERCENT);
     case '*':
-        if (lex_match(lex, '='))
-            return make_token(lex, TOK_STAR_ASSIGN, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_STAR, start_pos, start_line, start_line_start);
+        return EMIT(lex_match(lex, '=') ? TOK_STAR_ASSIGN    : TOK_STAR);
 
     /* ---- '/' : divide, /=, or comment ---------------------------------- */
     case '/':
@@ -482,111 +509,84 @@ restart:
                 return err;
             goto restart;
         }
-        if (lex_match(lex, '='))
-            return make_token(lex, TOK_SLASH_ASSIGN, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_SLASH, start_pos, start_line, start_line_start);
+        return EMIT(lex_match(lex, '=') ? TOK_SLASH_ASSIGN : TOK_SLASH);
 
     /* ---- '+' : plus, +=, ++ -------------------------------------------- */
     case '+':
-        if (lex_match(lex, '+'))
-            return make_token(lex, TOK_INCR, start_pos, start_line, start_line_start);
-        if (lex_match(lex, '='))
-            return make_token(lex, TOK_PLUS_ASSIGN, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_PLUS, start_pos, start_line, start_line_start);
+        if (lex_match(lex, '+'))   return EMIT(TOK_INCR);
+        if (lex_match(lex, '='))   return EMIT(TOK_PLUS_ASSIGN);
+        return EMIT(TOK_PLUS);
 
     /* ---- '-' : minus, -=, --, -> --------------------------------------- */
     case '-':
-        if (lex_match(lex, '-'))
-            return make_token(lex, TOK_DECR, start_pos, start_line, start_line_start);
-        if (lex_match(lex, '='))
-            return make_token(lex, TOK_MINUS_ASSIGN, start_pos, start_line, start_line_start);
-        if (lex_match(lex, '>'))
-            return make_token(lex, TOK_RANGE_ASC, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_MINUS, start_pos, start_line, start_line_start);
+        if (lex_match(lex, '-'))   return EMIT(TOK_DECR);
+        if (lex_match(lex, '='))   return EMIT(TOK_MINUS_ASSIGN);
+        if (lex_match(lex, '>'))   return EMIT(TOK_RANGE_ASC);
+        return EMIT(TOK_MINUS);
 
     /* ---- '<' : lt, <=, <<, <- ------------------------------------------ */
     case '<':
-        if (lex_match(lex, '='))
-            return make_token(lex, TOK_LEQ, start_pos, start_line, start_line_start);
-        if (lex_match(lex, '<'))
-            return make_token(lex, TOK_LSHIFT, start_pos, start_line, start_line_start);
-        if (lex_match(lex, '-'))
-            return make_token(lex, TOK_RANGE_DESC, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_LT, start_pos, start_line, start_line_start);
+        if (lex_match(lex, '='))   return EMIT(TOK_LEQ);
+        if (lex_match(lex, '<'))   return EMIT(TOK_LSHIFT);
+        if (lex_match(lex, '-'))   return EMIT(TOK_RANGE_DESC);
+        return EMIT(TOK_LT);
 
     /* ---- '>' : gt, >=, >> ---------------------------------------------- */
     case '>':
-        if (lex_match(lex, '='))
-            return make_token(lex, TOK_GEQ, start_pos, start_line, start_line_start);
-        if (lex_match(lex, '>'))
-            return make_token(lex, TOK_RSHIFT, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_GT, start_pos, start_line, start_line_start);
+        if (lex_match(lex, '='))   return EMIT(TOK_GEQ);
+        if (lex_match(lex, '>'))   return EMIT(TOK_RSHIFT);
+        return EMIT(TOK_GT);
 
     /* ---- '=' : assign, ==, => ------------------------------------------ */
     case '=':
-        if (lex_match(lex, '='))
-            return make_token(lex, TOK_EQ, start_pos, start_line, start_line_start);
-        if (lex_match(lex, '>'))
-            return make_token(lex, TOK_FAT_ARROW, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_ASSIGN, start_pos, start_line, start_line_start);
+        if (lex_match(lex, '='))   return EMIT(TOK_EQ);
+        if (lex_match(lex, '>'))   return EMIT(TOK_FAT_ARROW);
+        return EMIT(TOK_ASSIGN);
 
     /* ---- '!' : bang, != ------------------------------------------------ */
     case '!':
-        if (lex_match(lex, '='))
-            return make_token(lex, TOK_NEQ, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_BANG, start_pos, start_line, start_line_start);
+        return EMIT(lex_match(lex, '=') ? TOK_NEQ : TOK_BANG);
 
     /* ---- '&' : amp, && ------------------------------------------------- */
     case '&':
-        if (lex_match(lex, '&'))
-            return make_token(lex, TOK_AND, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_AMP, start_pos, start_line, start_line_start);
+        return EMIT(lex_match(lex, '&') ? TOK_AND : TOK_AMP);
 
     /* ---- '|' : bitor, ||, |& ------------------------------------------ */
     case '|':
-        if (lex_match(lex, '|'))
-            return make_token(lex, TOK_OR, start_pos, start_line, start_line_start);
-        if (lex_match(lex, '&'))
-            return make_token(lex, TOK_BITXOR, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_BITOR, start_pos, start_line, start_line_start);
+        if (lex_match(lex, '|'))   return EMIT(TOK_OR);
+        if (lex_match(lex, '&'))   return EMIT(TOK_BITXOR);
+        return EMIT(TOK_BITOR);
 
     /* ---- ':' : colon, :: ----------------------------------------------- */
     case ':':
-        if (lex_match(lex, ':'))
-            return make_token(lex, TOK_FLUENT, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_COLON, start_pos, start_line, start_line_start);
+        return EMIT(lex_match(lex, ':') ? TOK_FLUENT : TOK_COLON);
 
     /* ---- '.' : dot or ... (vararg) ------------------------------------- */
     case '.':
         if (lex_peek_char(lex) == '.' && lex_peek_char2(lex) == '.') {
             lex_advance(lex); /* second '.' */
             lex_advance(lex); /* third  '.' */
-            return make_token(lex, TOK_VARARG, start_pos, start_line, start_line_start);
+            return EMIT(TOK_VARARG);
         }
-        return make_token(lex, TOK_DOT, start_pos, start_line, start_line_start);
+        return EMIT(TOK_DOT);
 
-    /* ---- '~' : tilde, ~>, ~!> ----------------------------------------- */
+    /* ---- '~' : tilde, ~>, ~!>, ~&> ----------------------------------- */
     case '~':
-        if (lex_peek_char(lex) == '!') {
-            /* Could be ~!> */
-            if (lex->pos + 1 < lex->source_len &&
-                lex->source[lex->pos + 1] == '>') {
-                lex_advance(lex); /* '!' */
-                lex_advance(lex); /* '>' */
-                return make_token(lex, TOK_FILTER_OP, start_pos, start_line, start_line_start);
-            }
-        }
-        if (lex_match(lex, '>'))
-            return make_token(lex, TOK_PIPE_OP, start_pos, start_line, start_line_start);
-        return make_token(lex, TOK_TILDE, start_pos, start_line, start_line_start);
+        if (lex_match2(lex, '!', '>'))  return EMIT(TOK_FILTER_OP);
+        if (lex_match2(lex, '&', '>'))  return EMIT(TOK_COND_FILTER_OP);
+        if (lex_match(lex, '>'))        return EMIT(TOK_PIPE_OP);
+        return EMIT(TOK_TILDE);
+
+    /* ---- '?' : question, ?., ?[ --------------------------------------- */
+    case '?':
+        if (lex_match(lex, '.'))   return EMIT(TOK_QDOT);
+        if (lex_match(lex, '['))   return EMIT(TOK_QLBRACKET);
+        return EMIT(TOK_QUESTION);
 
     /* ---- String literals ----------------------------------------------- */
-    case '"':
-        return lex_string_dq(lex, start_pos, start_line, start_line_start);
-    case '\'':
-        return lex_string_sq(lex, start_pos, start_line, start_line_start);
-    case '`':
-        return lex_string_bt(lex, start_pos, start_line, start_line_start);
+    case '"':  return lex_string_dq(lex, start_pos, start_line, start_line_start);
+    case '\'': return lex_string_sq(lex, start_pos, start_line, start_line_start);
+    case '`':  return lex_string_bt(lex, start_pos, start_line, start_line_start);
 
     default:
         break;
@@ -608,8 +608,11 @@ restart:
         snprintf(msg, sizeof(msg),
                  "unexpected character '\\x%02X' (line %u)",
                  (unsigned char)c, start_line);
-        return lex_error(lex, start_pos, start_line, start_line_start, msg);
+        return EMIT_ERR(msg);
     }
+
+#undef EMIT
+#undef EMIT_ERR
 }
 
 CandoToken cando_lexer_peek(CandoLexer *lex)

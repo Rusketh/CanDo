@@ -19,6 +19,7 @@
 
 #include "thread.h"
 #include "libutil.h"
+#include "meta.h"
 #include "../vm/bridge.h"
 #include "../object/object.h"
 #include "../object/thread.h"
@@ -379,21 +380,51 @@ static int thread_catch(CandoVM *vm, int argc, CandoValue *args)
  * Registration
  * ======================================================================= */
 
+static const LibutilMethodEntry thread_methods[] = {
+    { "sleep",   thread_sleep   },
+    { "id",      thread_id      },
+    { "done",    thread_done    },
+    { "join",    thread_join    },
+    { "cancel",  thread_cancel  },
+    { "state",   thread_state   },
+    { "error",   thread_error   },
+    { "current", thread_current },
+    { "then",    thread_then    },
+    { "catch",   thread_catch   },
+};
+
 void cando_lib_thread_register(CandoVM *vm)
 {
     CandoValue thread_val = cando_bridge_new_object(vm);
     CdoObject *thread_obj = cando_bridge_resolve(vm, thread_val.as.handle);
 
-    libutil_set_method(vm, thread_obj, "sleep",   thread_sleep);
-    libutil_set_method(vm, thread_obj, "id",      thread_id);
-    libutil_set_method(vm, thread_obj, "done",    thread_done);
-    libutil_set_method(vm, thread_obj, "join",    thread_join);
-    libutil_set_method(vm, thread_obj, "cancel",  thread_cancel);
-    libutil_set_method(vm, thread_obj, "state",   thread_state);
-    libutil_set_method(vm, thread_obj, "error",   thread_error);
-    libutil_set_method(vm, thread_obj, "current", thread_current);
-    libutil_set_method(vm, thread_obj, "then",    thread_then);
-    libutil_set_method(vm, thread_obj, "catch",   thread_catch);
+    libutil_register_methods(vm, thread_obj, thread_methods,
+                             CANDO_ARRAY_LEN(thread_methods));
 
     cando_vm_set_global(vm, "thread", thread_val, true);
+
+    /* Build `_meta.thread` -- the per-instance method table for OBJ_THREAD
+     * receivers.  These are the subset of the thread library that operate on
+     * a thread argument, exposed under the colon-call form (`t:done()`,
+     * `t:join()`, ...).  We alias the existing native sentinels off the
+     * `thread` global instead of re-registering, both to keep the VM's
+     * fixed-size native table from filling up and so that user overrides
+     * applied to `thread.foo` are observed via `t:foo()` and vice-versa.
+     * vm->thread_proto caches a handle so the VM dispatcher can find the
+     * table without a global lookup on every method call. */
+    cando_lib_meta_register(vm);
+    CdoObject *t_meta = cando_lib_meta_table(vm, "thread");
+    if (t_meta) {
+        cando_lib_meta_alias(t_meta, "done",   thread_obj, "done");
+        cando_lib_meta_alias(t_meta, "join",   thread_obj, "join");
+        cando_lib_meta_alias(t_meta, "cancel", thread_obj, "cancel");
+        cando_lib_meta_alias(t_meta, "state",  thread_obj, "state");
+        cando_lib_meta_alias(t_meta, "error",  thread_obj, "error");
+        cando_lib_meta_alias(t_meta, "then",   thread_obj, "then");
+        cando_lib_meta_alias(t_meta, "catch",  thread_obj, "catch");
+
+        /* Cache the meta table handle for fast OBJ_THREAD method dispatch. */
+        HandleIndex h = cando_bridge_track_obj(vm, t_meta);
+        vm->thread_proto = cando_object_value(h);
+    }
 }

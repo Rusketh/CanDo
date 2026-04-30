@@ -41,7 +41,7 @@ typedef enum {
 /* -----------------------------------------------------------------------
  * CdoValue -- the object layer's tagged value
  * --------------------------------------------------------------------- */
-typedef struct {
+typedef struct CdoValue {
     u8 tag;  /* CdoTypeTag stored as u8 */
     union {
         bool        boolean;   /* CDO_BOOL                                */

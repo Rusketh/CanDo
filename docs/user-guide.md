@@ -427,32 +427,33 @@ print(evens);            // [2, 4]
 
 ## Classes
 
-`CLASS` creates a prototype-based object:
+A `CLASS` is a callable table.  Calling it builds a fresh instance whose
+`__index` points back at the class.  The body between the braces is the
+constructor body; methods are added afterwards as field assignments.
 
 ```cando
-CLASS Point {
-    FUNCTION make(x, y) {
-        RETURN { x: x, y: y };
-    }
-
-    FUNCTION dist(self) {
-        RETURN math.sqrt(self.x ^ 2 + self.y ^ 2);
-    }
-
-    FUNCTION add(self, other) {
-        RETURN Point.make(self.x + other.x, self.y + other.y);
-    }
+CLASS Point = (self, x, y) {
+    self.x = x;
+    self.y = y;
 }
 
-VAR a = Point.make(3, 0);
-VAR b = Point.make(0, 4);
+Point.dist = FUNCTION(self) {
+    RETURN math.sqrt(self.x ^ 2 + self.y ^ 2);
+};
+Point.add = FUNCTION(self, other) {
+    RETURN Point(self.x + other.x, self.y + other.y);
+};
+
+VAR a = Point(3, 0);
+VAR b = Point(0, 4);
 VAR c = a:add(b);
 print(c:dist());         // 5
-print(c.x, c.y);        // 3 4
+print(c.x, c.y);         // 3 4
 ```
 
 Methods called with `:` receive the object as the first argument (`self`
-by convention).
+by convention).  See [metamethods.md](metamethods.md) for the full
+desugaring, the `extends` clause, and operator metamethods.
 
 ## Threads
 
@@ -614,9 +615,9 @@ VAR res2 = fetch("https://httpbin.org/post", {
 
 ```cando
 VAR server = http.createServer(FUNCTION(req, res) {
-    res.status = 200;
-    res.headers["Content-Type"] = "text/plain";
-    res.body = `Hello! You requested ${req.path}`;
+    res:status(200);
+    res:setHeader("Content-Type", "text/plain");
+    res:send(`Hello! You requested ${req.path}`);
 });
 
 server:listen(8080);
@@ -624,6 +625,33 @@ print("listening on :8080");
 ```
 
 Each request runs on its own thread.  Call `server:close()` to shut down.
+
+`res` follows the prototype chain to `_meta.http_response`, so you can add
+helpers globally:
+
+```cando
+_meta.http_response.write = FUNCTION(self, data) {
+    self.body = self.body + data;
+};
+
+http.createServer(FUNCTION(req, res) {
+    res:write("Hello, ");
+    res:write("world!");
+    res:send();           // sends the accumulated `body`
+});
+```
+
+`res:send()` does **not** have to run inside the handler.  Stash `res` and
+call `:send()` later from another thread:
+
+```cando
+VAR pending = NULL;
+http.createServer(FUNCTION(req, res) { pending = res; });
+thread {
+    thread.sleep(100);
+    pending:send("delayed");
+};
+```
 
 ## Crypto
 
@@ -724,15 +752,15 @@ a JSON report:
 VAR text = file.read("scores.csv");
 IF text == NULL { print("file not found"); os.exit(1); }
 
+// csv.parse() defaults to header mode: rows are objects keyed by the
+// first line's column names (e.g. "name,score").
 VAR rows = csv.parse(text);
-VAR header = rows[0];
 
-// Process data rows (skip header)
 VAR results = [];
-FOR i IN 1 -> #rows - 1 {
+FOR i IN 0 -> #rows - 1 {
     VAR row = rows[i];
-    VAR name = row[0];
-    VAR score = +row[1];         // +x coerces string to number
+    VAR name = row.name;
+    VAR score = +row.score;      // +x coerces string to number
 
     VAR grade = "F";
     IF score >= 90 { grade = "A"; }

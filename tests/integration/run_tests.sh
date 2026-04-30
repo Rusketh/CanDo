@@ -82,8 +82,14 @@ run_test "functions" "$SCRIPTS/functions.cdo" \
 run_test "inline_functions" "$SCRIPTS/inline_functions.cdo" \
     "$(printf '42\n3\n42\n42\n43\n42\n43\n43 44 45')"
 
+run_test "closures" "$SCRIPTS/closures.cdo" \
+    "$(printf '1\n2\n3\n1\n2\n2\n3\n3\n1\n2\n1\n3\n2')"
+
 run_test "strings" "$SCRIPTS/strings.cdo" \
     "$(printf 'hello world\n5\nstring\nnumber\nbool\nnull\n42\n3.1400000000000001\ntrue\ntrue\nfalse\ntrue\n5\nworld\nhello world\nHELLO WORLD\nhi\nabc\ndef\nababab\n6\na\nb\nc\ncount: 99')"
+
+run_test "template_strings" "$SCRIPTS/template_strings.cdo" \
+    "$(printf 'hello\nhi world!\nworld\n3 = three\na42b43c\nbool=true null=null\nprepost\nauth=user:pass')"
 
 run_test "arrays" "$SCRIPTS/arrays.cdo" \
     "$(printf '3\n10\n20\n30\n99\n15\n1\n2\n3\n4\n0\n1\n4\n9\n15')"
@@ -101,7 +107,7 @@ run_test "math_lib" "$SCRIPTS/math_lib.cdo" \
     "$(printf '7\n3\n3\n4\n3\n2\n5\n2\n1\n8\n10\n0\n5\n1024\n0\npi_ok\ne_ok')"
 
 run_test "pipe" "$SCRIPTS/pipe.cdo" \
-    "$(printf '10\n20\n50\n2\n6\n2\n4\n4\n5\n1\n5\n1\n1\n2\n2\n3\n1\n3')"
+    "$(printf '10\n20\n50\n2\n6\n2\n4\n4\n5\n1\n5\n1\n1\n2\n2\n3\n1\n3\n100\n7\n21')"
 
 run_test "eval" "$SCRIPTS/eval.cdo" \
     "$(printf '6\n50\nfrom_sandbox\n10\ncontained\n42')"
@@ -111,6 +117,15 @@ run_test "include" "$SCRIPTS/include.cdo" \
 
 run_test "include_16" "$SCRIPTS/include_16.cdo" \
     "$(printf '1\n8\n16\ntrue\ntrue\ntrue')"
+
+run_test "include_ext" "$SCRIPTS/include_ext.cdo" \
+    "$(printf 'Cando\n1\ntrue\nalpha\nbeta\nalice\nbob\neve\nLA\nHello, Ext!\nMutated\nCando\n1\nalpha\ntrue')"
+
+run_test "lib_csv" "$SCRIPTS/lib_csv.cdo" \
+    "$(printf '2\nalice\n30\nNYC\nbob\nLA\n2\na\n2\nv1\nv2\nhello, world\nshe said "hi"\nalice\n25\n30\nbob')"
+
+run_test "lib_yaml" "$SCRIPTS/lib_yaml.cdo" \
+    "$(printf '42\n3.5\ntrue\nfalse\nnull\nnull\ntrue\nfalse\nhello\n42\nAlice\n30\ntrue\none\n2\ntrue\nnull\nlocalhost\n8080\ndebug\nverbose\nalice\n30\nbob\n25\n1\n3\n1\nhello\ntrue\n12\n14\nvalue\na\nb\ntrue\n3\n5\n5\n7\n6\nCando\n1\na\nb\ntrue\n3\n3\nflow_error_caught')"
 
 run_test "threads" "$SCRIPTS/threads.cdo" \
     "$(printf '42\n10\n20\ntrue\nsleep_ok\nid_ok\n99\ntrue\nnull\n7\n1\n2\n3\ndone\nerror\nbad\ntrue\ntrue\n77\n88\ncaught_err\nalready\nfalse')"
@@ -125,13 +140,31 @@ run_test "lib_array" "$SCRIPTS/lib_array.cdo" \
     "$(printf '3\n4\n4\n3\n2\n4\n6\n4\n6\n6')"
 
 run_test "metamethods" "$SCRIPTS/metamethods.cdo" \
-    "$(printf '10\n20\nhello\n99\n10\nfrom_a\nproto\nVec3\nnumber\nstring\nnull\nbool\n3\n4\nstring\nAnimal\nRex says hello\nRex\nPoint\n5\n7\n49\n27\n3\n11\n3\noverridden\nbase greet\n4\n6\n7\n15\n6\n20\n5\n5\n1\n1\n8\n9\n-5\n3\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\n35\nVec(7,8)\nset:foo')"
+    "$(printf '10\n20\nhello\n99\n10\nfrom_a\nproto\nVec3\nnumber\nstring\nnull\nbool\n3\n4\nstring\nAnimal\nRex says hello\nRex\nPoint\n5\n7\n49\n27\n3\n11\n3\noverridden\nbase greet\n4\n6\n7\n15\n6\n20\n5\n5\n1\n1\n8\n9\n-5\n3\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\n35\nVec(7,8)\nDog\nRex says hello\nRex says hello (woof, labrador)\nset:foo\nlooked_up:anything\nlooked_up:other\nbase_value\nfallback:unknown\nDynamicType\nliteral-form')"
 
 run_test "meta_call" "$SCRIPTS/meta_call.cdo" \
     "$(printf '15\n42\nT:6\nping\n14\n1\n2\n3\n3\nwrap:99')"
 
 run_test "lib_object" "$SCRIPTS/lib_object.cdo" \
     "$(printf '1\n99\n2\n1\n2\n3\n10\n99\n30\n20\nalice\nbob\nhello\nc\na\nb\n3\n1\n2\nfalse\ntrue\nfalse')"
+
+run_test "inspect" "$SCRIPTS/inspect.cdo" \
+    "$(printf 'null\ntrue\nfalse\n0\n42\n-7\n"hi"\n"a\\nb"\n[]\n[\n  1,\n  2,\n  3\n]\n[\n  1,\n  "two",\n  null\n]\n{}\n{\n  a: 1\n}\n{\n  a: 1,\n  b: 2\n}\n{\n  "with space": 1\n}\n{\n  list: [\n    1,\n    2,\n    [\n      3,\n      4\n    ]\n  ]\n}\n{\n  a: {\n    b: {\n      c: 1\n    }\n  }\n}\n{\n  a: {...}\n}\n{\n  a: {\n    b: {...}\n  }\n}\n{\n  a: {\n    b: {\n      c: 1\n    }\n  }\n}\n[\n  [...]\n]\n[\n  [\n    [...]\n  ]\n]\n[\n  1,\n  <circular>\n]\n{\n  x: 1,\n  self: <circular>\n}\n[\n  [\n    9\n  ],\n  [\n    9\n  ]\n]')"
+
+run_test "lib_meta" "$SCRIPTS/lib_meta.cdo" \
+    "$(printf 'object\nhttp_response\nhttp_request\nhttp_server\nhttp_client_response\nobject\nobject\nobject\nthread\nHI!\nYES!\n10\n42\ntrue\ndone\nobject\ngreeter\nhi, world')"
+
+run_test "lib_http" "$SCRIPTS/lib_http.cdo" \
+    "$(printf '200\nok-1\nbasic\nhello world\ndelayed\nhi alice')"
+
+run_test "lib_socket" "$SCRIPTS/lib_socket.cdo" \
+    "$(printf 'after listen\nping\necho:first\necho:second\nhi\nhi\ndone')"
+
+run_test "lib_secure_socket" "$SCRIPTS/lib_secure_socket.cdo" \
+    "$(printf 'after listen\ntls-echo:hello\ntrue\ntrue\ndone')"
+
+run_test "lib_stream" "$SCRIPTS/lib_stream.cdo" \
+    "$(printf 'memory\nhello, world\n'\'''\''\nfalse\n1600\n1600\n1600\nfinal\n'\'''\''\ntrue\nfile\nalpha-bravo\n'\'''\''\nthrew\n20\npiped through memory\n29\nCanDo streams compose nicely.\nfrom thread\nchannel\nhello-from-channel\ntcp\nECHO:hello\nfile-piped-as-response\npayload-from-http\n0\nspawned-output\n800\nnull\nstreamed-from-server\nHELLO, WORLD\ntransform\nPIPED THROUGH TRANSFORM\nok')"
 
 run_test "lib_crypto" "$SCRIPTS/lib_crypto.cdo" \
     "$(printf 'md5_ok\nsha256_ok\naGVsbG8gd29ybGQA\nhello world')"
@@ -144,6 +177,9 @@ run_test "lib_enhance" "$SCRIPTS/lib_enhance.cdo" \
 
 run_test "break_continue" "$SCRIPTS/break_continue.cdo" \
     "$(printf '0\n1\n2\n1\n2\n4\n5\n10\n20\n10\n20\n40\n50\n0\n1\n0\n1\n2\n0\n1\n3\n4\n0\n10\n20\ndone')"
+
+run_test "new_syntax" "$SCRIPTS/new_syntax.cdo" \
+    "$(printf 'yes\nno\na\nb\nc\nbig\n2 4\n3 4 5\n\n1 2 3 4 5\n99\nnull\nnull\n99\n99\nnull\nnull\nnull\n0\nfallback\nfalse\nfirst')"
 
 run_smoke "test_array"          "$SCRIPTS/test_array.cdo"
 run_smoke "test_array_ext"      "$SCRIPTS/test_array_ext.cdo"
