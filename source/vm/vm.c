@@ -962,28 +962,6 @@ static bool vm_call(CandoVM *vm, CandoClosure *closure, u32 arg_count) {
 #define POP()          cando_vm_pop(vm)
 #define PEEK(d)        cando_vm_peek(vm, (d))
 
-/* Numerical binary operation macro. */
-#define BINARY_NUM_OP(op_sym)  do {                                      \
-    CandoValue _b = POP(), _a = POP();                                   \
-    if (CANDO_UNLIKELY(!cando_is_number(_a) || !cando_is_number(_b))) {  \
-        vm_runtime_error(vm, "operands must be numbers (got %s and %s)", \
-            cando_value_type_name((TypeTag)_a.tag),                      \
-            cando_value_type_name((TypeTag)_b.tag));                     \
-        goto handle_error;                                               \
-    }                                                                    \
-    PUSH(cando_number(_a.as.number op_sym _b.as.number));                \
-} while (0)
-
-/* Comparison operator (returns bool). */
-#define CMP_OP(op_sym)  do {                                             \
-    CandoValue _b = POP(), _a = POP();                                   \
-    if (!cando_is_number(_a) || !cando_is_number(_b)) {                  \
-        vm_runtime_error(vm, "comparison requires numbers");             \
-        goto handle_error;                                               \
-    }                                                                    \
-    PUSH(cando_bool(_a.as.number op_sym _b.as.number));                  \
-} while (0)
-
 /* Saved frame-local ip back to the frame struct before any call. */
 #define SYNC_IP()  (frame->ip = ip)
 
