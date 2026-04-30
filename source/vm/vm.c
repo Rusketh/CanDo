@@ -1986,6 +1986,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 8: Logical ────────────────────────────────────────── */
+        /* ── Band 8: Logical / short-circuit ────────────────────────── */
         OP_CASE(OP_NOT): {
             CandoValue a = POP();
             {
@@ -2025,6 +2026,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 9: Objects / arrays ───────────────────────────────── */
+        /* ── Band 9: Object / array construction & access ───────────── */
         OP_CASE(OP_NEW_OBJECT): {
             PUSH(cando_bridge_new_object(vm));
             DISPATCH();
@@ -2249,6 +2251,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             cando_value_release(idx_val);
             DISPATCH();
         }
+        /* ── Band 10: Collection introspection ──────────────────────── */
         OP_CASE(OP_LEN): {
             CandoValue a = POP();
             if (cando_is_string(a)) {
@@ -2328,6 +2331,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 10: Control flow ──────────────────────────────────── */
+        /* ── Band 11: Control flow (jumps, loops, break/continue) ───── */
         OP_CASE(OP_JUMP): {
             i16 offset = READ_I16();
             ip += offset;
@@ -2436,6 +2440,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 11: Functions ─────────────────────────────────────── */
+        /* ── Band 12: Closures, calls, returns ──────────────────────── */
         OP_CASE(OP_CLOSURE): {
             /* The constant at index ci is a cando_number(fn_pc) — the byte
              * offset of the function body within the current chunk.
@@ -2906,6 +2911,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 12: Varargs ───────────────────────────────────────── */
+        /* ── Band 13: Vararg / unpack ───────────────────────────────── */
         OP_CASE(OP_LOAD_VARARG): {
             /* TODO: vararg access requires vararg calling convention.     */
             u16 slot = READ_U16(); CANDO_UNUSED(slot);
@@ -2945,6 +2951,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 13: Iteration ─────────────────────────────────────── */
+        /* ── Band 14: Ranges & iteration ────────────────────────────── */
         OP_CASE(OP_RANGE_ASC): {
             CandoValue b = POP(), a = POP();
             if (!cando_is_number(a) || !cando_is_number(b)) {
@@ -3188,6 +3195,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             }
             DISPATCH();
         }
+        /* ── Band 15: Pipe / filter ─────────────────────────────────── */
         OP_CASE(OP_PIPE_INIT): {
             /* Pop source value, create result array, expand source elements.
              * Pipe/filter (~> / ~!>) only operate on arrays; a non-array
@@ -3325,6 +3333,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 14: Error handling ────────────────────────────────── */
+        /* ── Band 16: Exceptions (try / catch / finally / throw) ────── */
         OP_CASE(OP_TRY_BEGIN): {
             i16 catch_off = READ_I16();
             CANDO_ASSERT_MSG(vm->try_depth < CANDO_TRY_MAX,
@@ -3397,6 +3406,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 15: Threads ───────────────────────────────────────── */
+        /* ── Band 17: Concurrency (async / await / yield / thread) ──── */
         OP_CASE(OP_ASYNC): {
             vm_runtime_error(vm, "ASYNC not implemented (use 'thread' instead)");
             goto handle_error;
@@ -3518,6 +3528,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 16: Classes ───────────────────────────────────────── */
+        /* ── Band 18: OOP (classes, inheritance, method binding) ────── */
         OP_CASE(OP_NEW_CLASS): {
             u16 ci = READ_U16();
             CandoValue name_val = frame->closure->chunk->constants[ci];
@@ -3597,6 +3608,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 17: Mask / selector ───────────────────────────────── */
+        /* ── Band 19: Multi-return masks & spread ───────────────────── */
         OP_CASE(OP_MASK_PASS): {
             /* No-op at the VM level; the compiler handles stack picking. */
             DISPATCH();
@@ -3746,6 +3758,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Sentinels ──────────────────────────────────────────────── */
+        /* ── Band 20: Misc (NOP, HALT) ──────────────────────────────── */
         OP_CASE(OP_NOP): {
             DISPATCH();
         }
