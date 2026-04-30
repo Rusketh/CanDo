@@ -121,6 +121,12 @@ typedef struct CandoUpvalue {
     CandoValue        *location;  /* current storage of the captured value   */
     CandoValue         closed;    /* heap copy after stack frame is gone     */
     struct CandoUpvalue *next;    /* intrusive linked list of open upvalues  */
+    /* Joint-ownership refcount: "1 while in vm->open_upvalues" + 1 per
+     * CandoClosure that captured this slot.  Atomic because closures may
+     * be released from any thread.  When it hits zero the upvalue is
+     * freed and `closed` is released (only meaningful if location ==
+     * &closed, i.e. the upvalue was already closed).                     */
+    _Atomic(u32)       refcount;
 } CandoUpvalue;
 
 /* =========================================================================

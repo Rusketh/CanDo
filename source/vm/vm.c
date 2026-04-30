@@ -117,6 +117,7 @@ static void           vm_runtime_error(CandoVM *vm, const char *fmt, ...);
 static bool           vm_call(CandoVM *vm, CandoClosure *closure, u32 arg_count);
 static CandoUpvalue  *vm_capture_upvalue(CandoVM *vm, CandoValue *local);
 static void           vm_close_upvalues(CandoVM *vm, CandoValue *last);
+static void           vm_upvalue_release(CandoUpvalue *uv);
 static bool           vm_is_truthy(CandoValue v);
 static bool           vm_is_truthy_meta(CandoVM *vm, CandoValue v, bool *ok);
 static u32            vm_global_hash(const char *str, u32 len);
@@ -288,12 +289,13 @@ void cando_vm_destroy(CandoVM *vm) {
         cando_value_release(*--vm->stack_top);
     }
 
-    /* Release open upvalues. */
-    CandoUpvalue *uv = vm->open_upvalues;
-    while (uv) {
-        CandoUpvalue *next = uv->next;
-        cando_free(uv);
-        uv = next;
+    /* Drop the open-list reference on every still-open upvalue.  Any
+     * upvalue still referenced by a live closure survives until that
+     * closure is released; orphans are freed here.                     */
+    while (vm->open_upvalues) {
+        CandoUpvalue *uv = vm->open_upvalues;
+        vm->open_upvalues = uv->next;
+        vm_upvalue_release(uv);
     }
 
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) cando_value_release(vm->error_vals[i]);
@@ -375,7 +377,12 @@ CandoClosure *cando_closure_new(CandoChunk *chunk) {
 
 void cando_closure_free(CandoClosure *closure) {
     if (!closure) return;
-    /* Upvalue objects are managed by the VM; we only free the pointer array. */
+    /* Drop our reference on each captured upvalue.  An upvalue may be
+     * shared with sibling closures and/or the open list; vm_upvalue_release
+     * frees and cleans up the captured value only once the last owner
+     * lets go.                                                          */
+    for (u32 i = 0; i < closure->upvalue_count; i++)
+        vm_upvalue_release(closure->upvalues[i]);
     cando_free(closure->upvalues);
     cando_free(closure);
 }
@@ -632,11 +639,15 @@ static int vm_native_class_default_call(CandoVM *vm, int argc, CandoValue *args)
  * Upvalue management
  * ===================================================================== */
 
-/* vm_capture_upvalue -- used by OP_CLOSURE (full closure support pending). */
-static CandoUpvalue *vm_capture_upvalue(CandoVM *vm, CandoValue *local)
-    __attribute__((unused));
+/* vm_capture_upvalue -- find or create an open upvalue aliasing the
+ * given live stack slot.  The open list is sorted by `location`
+ * descending so close-on-return can pop the head while the head's
+ * location is still inside the closing frame.  On dedup hit the
+ * existing upvalue is returned with its refcount unchanged; on miss a
+ * fresh upvalue is created with refcount = 1 (for the open-list slot).
+ * Callers (OP_CLOSURE) bump the refcount once more when they store the
+ * pointer into a CandoClosure.                                        */
 static CandoUpvalue *vm_capture_upvalue(CandoVM *vm, CandoValue *local) {
-    /* Walk the open list looking for an upvalue already pointing here. */
     CandoUpvalue *prev = NULL;
     CandoUpvalue *cur  = vm->open_upvalues;
     while (cur && cur->location > local) {
@@ -647,20 +658,42 @@ static CandoUpvalue *vm_capture_upvalue(CandoVM *vm, CandoValue *local) {
 
     CandoUpvalue *uv = (CandoUpvalue *)cando_alloc(sizeof(CandoUpvalue));
     cando_lock_init(&uv->lock);
-    uv->location     = local;
-    uv->closed       = cando_null();
-    uv->next         = cur;
+    uv->location = local;
+    uv->closed   = cando_null();
+    uv->next     = cur;
+    atomic_store_explicit(&uv->refcount, 1u, memory_order_relaxed);
     if (prev) prev->next       = uv;
     else      vm->open_upvalues = uv;
     return uv;
 }
 
+/* Drop a reference held by either the open list or a closure.  Frees
+ * and releases the closed value once the last owner goes away.        */
+static void vm_upvalue_release(CandoUpvalue *uv) {
+    if (!uv) return;
+    if (atomic_fetch_sub_explicit(&uv->refcount, 1u, memory_order_acq_rel)
+        == 1u) {
+        /* If we owned the last ref, the upvalue must be closed (the
+         * open-list slot would otherwise still hold one ref).         */
+        if (uv->location == &uv->closed)
+            cando_value_release(uv->closed);
+        cando_free(uv);
+    }
+}
+
+/* Close every open upvalue whose location lies within the frame slab
+ * being torn down.  Each upvalue retains its own copy of the live value
+ * (so the stack-slot release that follows in OP_RETURN doesn't dangle
+ * the closure's view) and drops its open-list reference.              */
 static void vm_close_upvalues(CandoVM *vm, CandoValue *last) {
     while (vm->open_upvalues && vm->open_upvalues->location >= last) {
         CandoUpvalue *uv = vm->open_upvalues;
-        uv->closed       = *uv->location;
-        uv->location     = &uv->closed;
+        cando_lock_write_acquire(&uv->lock);
+        uv->closed   = cando_value_copy(*uv->location);
+        uv->location = &uv->closed;
+        cando_lock_write_release(&uv->lock);
         vm->open_upvalues = uv->next;
+        vm_upvalue_release(uv);
     }
 }
 
@@ -2526,12 +2559,13 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     cap_count * sizeof(CandoUpvalue *));
                 for (u16 ui = 0; ui < cap_count; ui++) {
                     u16 slot = READ_U16();
-                    CandoUpvalue *uv = (CandoUpvalue *)cando_alloc(
-                        sizeof(CandoUpvalue));
-                    cando_lock_init(&uv->lock);
-                    uv->closed   = cando_value_copy(frame->slots[slot]);
-                    uv->location = &uv->closed;
-                    uv->next     = NULL;
+                    /* Capture a live alias of the outer frame's slot;
+                     * sibling closures that close the same slot get the
+                     * *same* CandoUpvalue, so they share the variable. */
+                    CandoUpvalue *uv = vm_capture_upvalue(vm,
+                                                          &frame->slots[slot]);
+                    atomic_fetch_add_explicit(&uv->refcount, 1u,
+                                              memory_order_relaxed);
                     new_closure->upvalues[ui] = uv;
                 }
             }
