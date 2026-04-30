@@ -634,6 +634,43 @@ static int do_create_form(FormsCommand *c)
     return 1;
 }
 
+/* Panel subclass.  STATIC's default wndproc swallows WM_COMMAND /
+ * WM_HSCROLL / WM_VSCROLL — meaning a button (or any notifying child)
+ * parented to a Panel never delivers BN_CLICKED to the top-level form,
+ * so user-supplied onClick handlers silently never fire.  We work
+ * around this by subclassing every panel: notification messages from
+ * children walk up the parent chain via SendMessageW until they reach
+ * a real form_wndproc that can translate them into FormsEvents.       */
+static LRESULT CALLBACK panel_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
+{
+    int slot = slot_from_hwnd(h);
+    WNDPROC orig = (slot > 0 && slot < FORMS_MAX_SLOTS)
+                   ? g_slots[slot].orig_proc : NULL;
+    switch (msg) {
+    case WM_COMMAND:
+    case WM_HSCROLL:
+    case WM_VSCROLL:
+    case WM_NOTIFY: {
+        HWND parent = GetAncestor(h, GA_PARENT);
+        if (parent) return SendMessageW(parent, msg, w, l);
+        break;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORSCROLLBAR: {
+        /* Same forwarding for child colour overrides so panel children
+         * pick up custom fore/back colours stored on the form. */
+        HWND parent = GetAncestor(h, GA_PARENT);
+        if (parent) return SendMessageW(parent, msg, w, l);
+        break;
+    }
+    }
+    if (orig) return CallWindowProcW(orig, h, msg, w, l);
+    return DefWindowProcW(h, msg, w, l);
+}
+
 /* Create a child control parented to an existing form/panel slot. */
 static int do_create_control(FormsCommand *c)
 {
@@ -750,6 +787,15 @@ static int do_create_control(FormsCommand *c)
     s->hwnd = hwnd;
     s->x = x; s->y = y; s->w = w; s->h = h;
     s->visible = 1;
+
+    /* Subclass panels so notifications from their children (BN_CLICKED,
+     * EN_CHANGE, ...) reach the form's WndProc -- the default STATIC
+     * wndproc would otherwise swallow them. */
+    if (c->kind == KIND_PANEL) {
+        WNDPROC prev = (WNDPROC)SetWindowLongPtrW(
+            hwnd, GWLP_WNDPROC, (LONG_PTR)panel_wndproc);
+        s->orig_proc = prev;
+    }
     return 1;
 }
 
