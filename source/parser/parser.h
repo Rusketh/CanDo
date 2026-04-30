@@ -32,6 +32,11 @@
 #define CANDO_LOCAL_MAX         UINT16_MAX  /* hard cap = bytecode u16 limit */
 #define CANDO_LOCAL_INITIAL_CAP 16          /* starting capacity per scope    */
 
+/* Maximum number of named parameters in a function or class declaration.
+ * Used to size the parser's stack-local param-name buffers; raising this
+ * just costs a bit of compile-time stack space per function compiled.   */
+#define CANDO_MAX_PARAMS        64
+
 typedef struct {
     const char *name;     /* pointer into the source text (not owning)    */
     u32         len;      /* byte length of the name                      */

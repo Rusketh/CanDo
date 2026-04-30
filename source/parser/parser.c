@@ -2083,12 +2083,11 @@ static void parse_function_expr(CandoParser *p, bool can_assign)
 {
     (void)can_assign;
 
-#define MAX_PARAMS 64
-    const char *param_names[MAX_PARAMS];
-    u32         param_lens[MAX_PARAMS];
+    const char *param_names[CANDO_MAX_PARAMS];
+    u32         param_lens[CANDO_MAX_PARAMS];
 
     consume(p, TOK_LPAREN, "expected '(' after 'function'");
-    u16 arity = parse_param_list(p, param_names, param_lens, MAX_PARAMS,
+    u16 arity = parse_param_list(p, param_names, param_lens, CANDO_MAX_PARAMS,
                                  "expected ')' after parameters");
 
     u32 fn_start, skip_body;
@@ -2112,7 +2111,6 @@ static void parse_function_expr(CandoParser *p, bool can_assign)
     p->last_expr_was_call   = false;
     p->last_expr_was_unpack = false;
     p->last_multi_push      = 1;
-#undef MAX_PARAMS
 }
 
 /* --- FUNCTION declaration -----------------------------------------------
@@ -2126,10 +2124,9 @@ static void parse_function(CandoParser *p)
 
     consume(p, TOK_LPAREN, "expected '(' after function name");
 
-#define MAX_PARAMS 64
-    const char *param_names[MAX_PARAMS];
-    u32         param_lens[MAX_PARAMS];
-    u16 arity = parse_param_list(p, param_names, param_lens, MAX_PARAMS,
+    const char *param_names[CANDO_MAX_PARAMS];
+    u32         param_lens[CANDO_MAX_PARAMS];
+    u16 arity = parse_param_list(p, param_names, param_lens, CANDO_MAX_PARAMS,
                                  "expected ')' after parameters");
 
     u32 fn_start, skip_body;
@@ -2148,7 +2145,6 @@ static void parse_function(CandoParser *p)
     cando_free(body_uv_specs);
     u16 name_idx = str_const(p, fn_name, fn_len);
     emit_op_a(p, OP_DEF_GLOBAL, name_idx);
-#undef MAX_PARAMS
 }
 
 /* --- CLASS expression body ----------------------------------------------
@@ -2184,13 +2180,12 @@ static void emit_class_body(CandoParser *p, bool has_extends)
 
     /* Parameter list is optional: `class Foo = { }` is shorthand for
      * `class Foo = () { }` (an empty constructor that ignores any args). */
-#define MAX_PARAMS 64
-    const char *param_names[MAX_PARAMS];
-    u32         param_lens[MAX_PARAMS];
+    const char *param_names[CANDO_MAX_PARAMS];
+    u32         param_lens[CANDO_MAX_PARAMS];
     u16 arity = 0;
 
     if (match(p, TOK_LPAREN)) {
-        arity = parse_param_list(p, param_names, param_lens, MAX_PARAMS,
+        arity = parse_param_list(p, param_names, param_lens, CANDO_MAX_PARAMS,
                                  "expected ')' after class parameters");
     }
 
@@ -2221,7 +2216,6 @@ static void emit_class_body(CandoParser *p, bool has_extends)
 
     /* Make the class callable: class.__call = vm->default_class_call. */
     emit_op(p, OP_BIND_DEFAULT_CALL);
-#undef MAX_PARAMS
 }
 
 /* Optional `extends Parent` clause.
