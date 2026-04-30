@@ -53,55 +53,57 @@ CdoString *g_meta_constructor = NULL;
 
 /* -----------------------------------------------------------------------
  * Global initialisation
+ *
+ * Each metamethod has a globally-cached interned CdoString* so the VM
+ * can compare against it by pointer.  Init and teardown are identical
+ * cookie-cutter loops over the same pair-list; we drive both from one
+ * table so adding a new metamethod only requires one new entry.
  * --------------------------------------------------------------------- */
+typedef struct {
+    CdoString **slot;     /* address of the g_meta_* global to populate */
+    const char *name;     /* META_* literal (e.g. "__index")            */
+    u32         len;      /* byte length of name                         */
+} MetaKeyEntry;
+
+#define META_ENTRY(slot, lit) { &(slot), (lit), (u32)(sizeof(lit) - 1) }
+
+static const MetaKeyEntry META_KEYS[] = {
+    META_ENTRY(g_meta_index,       META_INDEX),
+    META_ENTRY(g_meta_call,        META_CALL),
+    META_ENTRY(g_meta_type,        META_TYPE),
+    META_ENTRY(g_meta_tostring,    META_TOSTRING),
+    META_ENTRY(g_meta_eq,          META_EQ),
+    META_ENTRY(g_meta_lt,          META_LT),
+    META_ENTRY(g_meta_le,          META_LE),
+    META_ENTRY(g_meta_add,         META_ADD),
+    META_ENTRY(g_meta_sub,         META_SUB),
+    META_ENTRY(g_meta_mul,         META_MUL),
+    META_ENTRY(g_meta_div,         META_DIV),
+    META_ENTRY(g_meta_mod,         META_MOD),
+    META_ENTRY(g_meta_pow,         META_POW),
+    META_ENTRY(g_meta_unm,         META_UNM),
+    META_ENTRY(g_meta_idiv,        META_IDIV),
+    META_ENTRY(g_meta_len,         META_LEN),
+    META_ENTRY(g_meta_newindex,    META_NEWINDEX),
+    META_ENTRY(g_meta_constructor, META_CONSTRUCTOR),
+};
+
+#undef META_ENTRY
+
 void cdo_object_init(void) {
     cdo_intern_init();
-
-#define INTERN_META(var, name) \
-    var = cdo_string_intern(name, (u32)(sizeof(name) - 1))
-
-    INTERN_META(g_meta_index,    META_INDEX);
-    INTERN_META(g_meta_call,     META_CALL);
-    INTERN_META(g_meta_type,     META_TYPE);
-    INTERN_META(g_meta_tostring, META_TOSTRING);
-    INTERN_META(g_meta_eq,       META_EQ);
-    INTERN_META(g_meta_lt,       META_LT);
-    INTERN_META(g_meta_le,       META_LE);
-    INTERN_META(g_meta_add,      META_ADD);
-    INTERN_META(g_meta_sub,      META_SUB);
-    INTERN_META(g_meta_mul,      META_MUL);
-    INTERN_META(g_meta_div,      META_DIV);
-    INTERN_META(g_meta_mod,      META_MOD);
-    INTERN_META(g_meta_pow,      META_POW);
-    INTERN_META(g_meta_unm,      META_UNM);
-    INTERN_META(g_meta_idiv,     META_IDIV);
-    INTERN_META(g_meta_len,      META_LEN);
-    INTERN_META(g_meta_newindex, META_NEWINDEX);
-    INTERN_META(g_meta_constructor, META_CONSTRUCTOR);
-
-#undef INTERN_META
+    for (usize i = 0; i < CANDO_ARRAY_LEN(META_KEYS); i++) {
+        const MetaKeyEntry *e = &META_KEYS[i];
+        *e->slot = cdo_string_intern(e->name, e->len);
+    }
 }
 
 void cdo_object_destroy_globals(void) {
-    cdo_string_release(g_meta_index);    g_meta_index    = NULL;
-    cdo_string_release(g_meta_call);     g_meta_call     = NULL;
-    cdo_string_release(g_meta_type);     g_meta_type     = NULL;
-    cdo_string_release(g_meta_tostring); g_meta_tostring = NULL;
-    cdo_string_release(g_meta_eq);       g_meta_eq       = NULL;
-    cdo_string_release(g_meta_lt);       g_meta_lt       = NULL;
-    cdo_string_release(g_meta_le);       g_meta_le       = NULL;
-    cdo_string_release(g_meta_add);      g_meta_add      = NULL;
-    cdo_string_release(g_meta_sub);      g_meta_sub      = NULL;
-    cdo_string_release(g_meta_mul);      g_meta_mul      = NULL;
-    cdo_string_release(g_meta_div);      g_meta_div      = NULL;
-    cdo_string_release(g_meta_mod);      g_meta_mod      = NULL;
-    cdo_string_release(g_meta_pow);      g_meta_pow      = NULL;
-    cdo_string_release(g_meta_unm);      g_meta_unm      = NULL;
-    cdo_string_release(g_meta_idiv);     g_meta_idiv     = NULL;
-    cdo_string_release(g_meta_len);      g_meta_len      = NULL;
-    cdo_string_release(g_meta_newindex); g_meta_newindex = NULL;
-    cdo_string_release(g_meta_constructor); g_meta_constructor = NULL;
-
+    for (usize i = 0; i < CANDO_ARRAY_LEN(META_KEYS); i++) {
+        const MetaKeyEntry *e = &META_KEYS[i];
+        cdo_string_release(*e->slot);
+        *e->slot = NULL;
+    }
     cdo_intern_destroy();
 }
 
