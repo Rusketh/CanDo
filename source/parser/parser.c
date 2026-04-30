@@ -893,6 +893,61 @@ static void parse_unpack(CandoParser *p, bool can_assign)
  * Infix parse functions
  * ======================================================================= */
 
+/* Emit a comparison opcode for parse_binary that handles multi-value
+ * RHS forms.  Caller has already parsed the RHS and snapshotted the
+ * resulting per-expression flags (so the >/>= range-check branch can
+ * inspect the same values before dispatching here).
+ *
+ * Rules:
+ *   ...myfunc()        → spread_op  (compare against all return values)
+ *   (~.~) myfunc()     → stack_op n (compare against n mask-selected values)
+ *   plain call         → OP_TRUNCATE_RET + plain_op (first return only)
+ *   a, b, c            → stack_op n (user-defined list; truncates any calls)
+ *   plain value        → plain_op
+ *
+ * `next_prec` is the precedence to re-enter parse_precedence with for
+ * each comma-separated value in the user-defined list form.            */
+static void emit_multi_cmp(CandoParser *p,
+                           bool was_call, bool was_unpack, u32 mpush,
+                           CandoOpcode plain_op,
+                           CandoOpcode stack_op,
+                           CandoOpcode spread_op,
+                           Precedence next_prec)
+{
+    if (was_unpack) {
+        emit_op(p, spread_op);
+    } else if (mpush > 1 && !(p->call_depth == 0 && check(p, TOK_COMMA))) {
+        emit_op_a(p, stack_op, (u16)mpush);
+    } else if (p->call_depth == 0 && check(p, TOK_COMMA)) {
+        u16 n = (mpush > 1) ? (u16)mpush : 1;
+        if (n == 1 && was_call) emit_op(p, OP_TRUNCATE_RET);
+        while (match(p, TOK_COMMA)) {
+            p->last_multi_push      = 1;
+            p->last_expr_was_call   = false;
+            p->last_expr_was_unpack = false;
+            parse_precedence(p, next_prec);
+            if (p->last_expr_was_call && !p->last_expr_was_unpack)
+                emit_op(p, OP_TRUNCATE_RET);
+            n = (u16)(n + p->last_multi_push);
+        }
+        emit_op_a(p, stack_op, n);
+    } else {
+        if (was_call) emit_op(p, OP_TRUNCATE_RET);
+        emit_op(p, plain_op);
+    }
+}
+
+/* Snapshot the per-expression flags left over from the just-parsed RHS
+ * and clear last_expr_was_unpack (the comparison consumed it).         */
+static inline void cmp_snapshot(CandoParser *p,
+                                bool *was_call, bool *was_unpack, u32 *mpush)
+{
+    *was_call   = p->last_expr_was_call;
+    *was_unpack = p->last_expr_was_unpack;
+    *mpush      = p->last_multi_push;
+    p->last_expr_was_unpack = false;
+}
+
 static void parse_binary(CandoParser *p, bool can_assign)
 {
     (void)can_assign;
@@ -906,48 +961,6 @@ static void parse_binary(CandoParser *p, bool can_assign)
     p->last_expr_was_unpack = false;
     parse_precedence(p, next);
 
-    /* Helper: emit the right comparison opcode based on the RHS.
-     *
-     * Rules:
-     *   ...myfunc()        → spread_op  (compare against all return values)
-     *   (~.~) myfunc()     → stack_op n (compare against n mask-selected values)
-     *   myfunc()           → OP_TRUNCATE_RET + plain_op (first return only)
-     *   a, b, c            → stack_op n (user-defined list; truncates any calls)
-     *   plain value        → plain_op
-     */
-#define MULTI_CMP(plain_op, stack_op, spread_op)                          \
-    do {                                                                  \
-        bool _was_call   = p->last_expr_was_call;                         \
-        bool _was_unpack = p->last_expr_was_unpack;                       \
-        u32  _mpush      = p->last_multi_push;                            \
-        p->last_expr_was_unpack = false;                                  \
-        if (_was_unpack) {                                                \
-            /* ...myfunc() — compare against all return values */         \
-            emit_op(p, spread_op);                                        \
-        } else if (_mpush > 1 && !(p->call_depth == 0                    \
-                                   && check(p, TOK_COMMA))) {             \
-            /* (~.~) myfunc() with no trailing comma — mask multi-push */ \
-            emit_op_a(p, stack_op, (u16)_mpush);                          \
-        } else if (p->call_depth == 0 && check(p, TOK_COMMA)) {          \
-            /* user-defined comma list */                                  \
-            u16 _n = (_mpush > 1) ? (u16)_mpush : 1;                     \
-            if (_n == 1 && _was_call) emit_op(p, OP_TRUNCATE_RET);       \
-            while (match(p, TOK_COMMA)) {                                 \
-                p->last_multi_push      = 1;                              \
-                p->last_expr_was_call   = false;                          \
-                p->last_expr_was_unpack = false;                          \
-                parse_precedence(p, next);                                \
-                if (p->last_expr_was_call && !p->last_expr_was_unpack)    \
-                    emit_op(p, OP_TRUNCATE_RET);                          \
-                _n = (u16)(_n + p->last_multi_push);                      \
-            }                                                             \
-            emit_op_a(p, stack_op, _n);                                   \
-        } else {                                                          \
-            if (_was_call) emit_op(p, OP_TRUNCATE_RET);                   \
-            emit_op(p, plain_op);                                         \
-        }                                                                 \
-    } while (0)
-
     switch (op) {
     case TOK_PLUS:       emit_op(p, OP_ADD);       break;
     case TOK_MINUS:      emit_op(p, OP_SUB);       break;
@@ -960,10 +973,28 @@ static void parse_binary(CandoParser *p, bool can_assign)
     case TOK_BITXOR:     emit_op(p, OP_BIT_XOR);   break;
     case TOK_LSHIFT:     emit_op(p, OP_LSHIFT);    break;
     case TOK_RSHIFT:     emit_op(p, OP_RSHIFT);    break;
-    case TOK_EQ:         MULTI_CMP(OP_EQ,  OP_EQ_STACK,  OP_EQ_SPREAD);  break;
-    case TOK_NEQ:        MULTI_CMP(OP_NEQ, OP_NEQ_STACK, OP_NEQ_SPREAD); break;
-    case TOK_LT:         MULTI_CMP(OP_LT,  OP_LT_STACK,  OP_LT_SPREAD);  break;
-    case TOK_LEQ:        MULTI_CMP(OP_LEQ, OP_LEQ_STACK, OP_LEQ_SPREAD); break;
+    case TOK_EQ:
+    case TOK_NEQ:
+    case TOK_LT:
+    case TOK_LEQ: {
+        bool was_call, was_unpack; u32 mpush;
+        cmp_snapshot(p, &was_call, &was_unpack, &mpush);
+        CandoOpcode plain_op  = (op == TOK_EQ)  ? OP_EQ
+                              : (op == TOK_NEQ) ? OP_NEQ
+                              : (op == TOK_LT)  ? OP_LT
+                                                : OP_LEQ;
+        CandoOpcode stack_op  = (op == TOK_EQ)  ? OP_EQ_STACK
+                              : (op == TOK_NEQ) ? OP_NEQ_STACK
+                              : (op == TOK_LT)  ? OP_LT_STACK
+                                                : OP_LEQ_STACK;
+        CandoOpcode spread_op = (op == TOK_EQ)  ? OP_EQ_SPREAD
+                              : (op == TOK_NEQ) ? OP_NEQ_SPREAD
+                              : (op == TOK_LT)  ? OP_LT_SPREAD
+                                                : OP_LEQ_SPREAD;
+        emit_multi_cmp(p, was_call, was_unpack, mpush,
+                       plain_op, stack_op, spread_op, next);
+        break;
+    }
     case TOK_GT:
     case TOK_GEQ: {
         /* Convergent range check: min > val < max  (or >=, <=).
@@ -1023,7 +1054,6 @@ static void parse_binary(CandoParser *p, bool can_assign)
     case TOK_RANGE_DESC: emit_op(p, OP_RANGE_DESC);break;
     default: break;
     }
-#undef MULTI_CMP
     p->last_expr_was_call   = false;
     p->last_expr_was_unpack = false;
 }
