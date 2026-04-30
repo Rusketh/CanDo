@@ -1032,6 +1032,16 @@ static void mgr_shutdown(void)
 #endif
 }
 
+/* Exported module shutdown hook.  cando_vm_destroy looks this symbol up
+ * via dlsym and calls it before dlclose, so we can stop the manager
+ * thread while the .so is still mapped.  Without this, dlclose unmaps
+ * the manager thread's instructions and the process hangs in dl-close.
+ * Idempotent: mgr_shutdown bails out if the manager isn't running. */
+void cando_module_shutdown(void)
+{
+    mgr_shutdown();
+}
+
 /* Lazy start.  Returns true if the manager thread is in MGR_RUNNING.
  * Safe to call from any thread; idempotent. */
 static int ensure_manager(void)
