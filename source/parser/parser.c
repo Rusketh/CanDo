@@ -363,6 +363,87 @@ static u32 declare_local(CandoParser *p, const char *name, u32 len,
     return slot;
 }
 
+/* ---- function/class body compilation helpers --------------------------- */
+
+/* Parse a parenthesised parameter list of comma-separated identifiers.
+ *
+ * Caller has already consumed the opening '('.  The closing ')' is
+ * consumed using `close_msg` as the "expected ')'" diagnostic.  Names
+ * and lengths are stored into the caller's arrays up to `max`; past
+ * the cap an error is raised and excess parameters are skipped.
+ *
+ * A trailing '...' (TOK_VARARG) terminates the list.  This is currently
+ * accepted for forwards compatibility but not propagated to
+ * chunk->has_vararg, so behaves like an arity-fixing terminator.
+ *
+ * Returns the parsed arity.                                             */
+static u16 parse_param_list(CandoParser *p,
+                            const char **names, u32 *lens,
+                            u32 max,
+                            const char *close_msg)
+{
+    u16 arity = 0;
+    if (!check(p, TOK_RPAREN)) {
+        do {
+            if (check(p, TOK_RPAREN)) break;
+            if (match(p, TOK_VARARG)) break;
+            consume(p, TOK_IDENT, "expected parameter name");
+            if (arity >= max) { error(p, "too many parameters"); break; }
+            names[arity] = p->previous.start;
+            lens[arity]  = p->previous.length;
+            arity++;
+        } while (match(p, TOK_COMMA));
+    }
+    consume(p, TOK_RPAREN, close_msg);
+    return arity;
+}
+
+/* Compile the body of a function-style construct (function expression,
+ * function declaration, class constructor): consume the '{' opener
+ * (using `open_brace_msg` as the diagnostic), emit the jump-skip over
+ * the body, switch to a fresh inner scope, declare the call-frame
+ * sentinel slot 0 and the named parameters, parse the block, emit the
+ * implicit `return null`, and restore the outer scope.
+ *
+ * On return:
+ *   *fn_start_out   -- code offset of the function body's first byte
+ *                       (used as the constant-pool entry for OP_CLOSURE)
+ *   *skip_jump_out  -- patch position of the OP_JUMP that skips the body
+ *                       (caller must call patch_jump after the body)
+ *   *uv_specs_out   -- ownership-transferred buffer of upvalue capture
+ *                       slot indices; caller must cando_free after use.
+ *   *uv_count_out   -- number of entries in *uv_specs_out.            */
+static void compile_function_body(CandoParser *p,
+                                  const char *const *param_names,
+                                  const u32 *param_lens,
+                                  u16 arity,
+                                  const char *open_brace_msg,
+                                  u32 *fn_start_out,
+                                  u32 *skip_jump_out,
+                                  u16 **uv_specs_out,
+                                  u16 *uv_count_out)
+{
+    consume(p, TOK_LBRACE, open_brace_msg);
+
+    *skip_jump_out = emit_jump(p, OP_JUMP);
+    *fn_start_out  = cur(p)->code_len;
+
+    FnScopeSave saved;
+    enter_function_scope(p, &saved);
+
+    /* Slot 0 is the function value in the call frame. */
+    declare_local(p, "", 0, false);
+    for (u16 i = 0; i < arity; i++)
+        declare_local(p, param_names[i], param_lens[i], false);
+
+    parse_block(p);
+
+    emit_op(p, OP_NULL);
+    emit_op_a(p, OP_RETURN, 1);
+
+    leave_function_scope(p, &saved, uv_specs_out, uv_count_out);
+}
+
 /* =========================================================================
  * Prefix parse functions
  * ======================================================================= */
@@ -2060,44 +2141,18 @@ static void parse_function_expr(CandoParser *p, bool can_assign)
 #define MAX_PARAMS 64
     const char *param_names[MAX_PARAMS];
     u32         param_lens[MAX_PARAMS];
-    u16 arity = 0;
 
     consume(p, TOK_LPAREN, "expected '(' after 'function'");
-    if (!check(p, TOK_RPAREN)) {
-        do {
-            if (check(p, TOK_RPAREN)) break;
-            if (match(p, TOK_VARARG)) break;
-            consume(p, TOK_IDENT, "expected parameter name");
-            if (arity >= MAX_PARAMS) { error(p, "too many parameters"); break; }
-            param_names[arity] = p->previous.start;
-            param_lens[arity]  = p->previous.length;
-            arity++;
-        } while (match(p, TOK_COMMA));
-    }
-    consume(p, TOK_RPAREN, "expected ')' after parameters");
-    consume(p, TOK_LBRACE, "expected '{' before function body");
+    u16 arity = parse_param_list(p, param_names, param_lens, MAX_PARAMS,
+                                 "expected ')' after parameters");
 
-    u32 skip_body = emit_jump(p, OP_JUMP);
-    u32 fn_start  = cur(p)->code_len;
-
-    /* Switch to a fresh inner scope for the function body. */
-    FnScopeSave saved;
-    enter_function_scope(p, &saved);
-
-    /* Slot 0 is the function value in the call frame. */
-    declare_local(p, "", 0, false);
-    for (u16 i = 0; i < arity; i++)
-        declare_local(p, param_names[i], param_lens[i], false);
-
-    parse_block(p);
-
-    emit_op(p, OP_NULL);
-    emit_op_a(p, OP_RETURN, 1);
-
-    /* Take ownership of the body's upvalue captures and restore outer state. */
+    u32 fn_start, skip_body;
     u16 *body_uv_specs;
     u16  body_uv_count;
-    leave_function_scope(p, &saved, &body_uv_specs, &body_uv_count);
+    compile_function_body(p, param_names, param_lens, arity,
+                          "expected '{' before function body",
+                          &fn_start, &skip_body,
+                          &body_uv_specs, &body_uv_count);
 
     patch_jump(p, skip_body);
 
@@ -2129,40 +2184,16 @@ static void parse_function(CandoParser *p)
 #define MAX_PARAMS 64
     const char *param_names[MAX_PARAMS];
     u32         param_lens[MAX_PARAMS];
-    u16 arity = 0;
-    if (!check(p, TOK_RPAREN)) {
-        do {
-            if (check(p, TOK_RPAREN)) break;
-            if (match(p, TOK_VARARG)) break;
-            consume(p, TOK_IDENT, "expected parameter name");
-            if (arity >= MAX_PARAMS) { error(p, "too many parameters"); break; }
-            param_names[arity] = p->previous.start;
-            param_lens[arity]  = p->previous.length;
-            arity++;
-        } while (match(p, TOK_COMMA));
-    }
-    consume(p, TOK_RPAREN, "expected ')' after parameters");
-    consume(p, TOK_LBRACE, "expected '{' before function body");
+    u16 arity = parse_param_list(p, param_names, param_lens, MAX_PARAMS,
+                                 "expected ')' after parameters");
 
-    /* Jump over the body at definition time. */
-    u32 skip_body = emit_jump(p, OP_JUMP);
-    u32 fn_start = cur(p)->code_len;
-
-    FnScopeSave saved;
-    enter_function_scope(p, &saved);
-
-    declare_local(p, "", 0, false); /* slot 0 */
-    for (u16 i = 0; i < arity; i++)
-        declare_local(p, param_names[i], param_lens[i], false);
-
-    parse_block(p);
-
-    emit_op(p, OP_NULL);          /* implicit return null */
-    emit_op_a(p, OP_RETURN, 1);
-
+    u32 fn_start, skip_body;
     u16 *body_uv_specs;
     u16  body_uv_count;
-    leave_function_scope(p, &saved, &body_uv_specs, &body_uv_count);
+    compile_function_body(p, param_names, param_lens, arity,
+                          "expected '{' before function body",
+                          &fn_start, &skip_body,
+                          &body_uv_specs, &body_uv_count);
 
     patch_jump(p, skip_body);
 
@@ -2214,45 +2245,20 @@ static void emit_class_body(CandoParser *p, bool has_extends)
     u16 arity = 0;
 
     if (match(p, TOK_LPAREN)) {
-        if (!check(p, TOK_RPAREN)) {
-            do {
-                if (check(p, TOK_RPAREN)) break;
-                if (match(p, TOK_VARARG)) break;
-                consume(p, TOK_IDENT, "expected parameter name");
-                if (arity >= MAX_PARAMS) {
-                    error(p, "too many parameters");
-                    break;
-                }
-                param_names[arity] = p->previous.start;
-                param_lens[arity]  = p->previous.length;
-                arity++;
-            } while (match(p, TOK_COMMA));
-        }
-        consume(p, TOK_RPAREN, "expected ')' after class parameters");
+        arity = parse_param_list(p, param_names, param_lens, MAX_PARAMS,
+                                 "expected ')' after class parameters");
     }
-    consume(p, TOK_LBRACE, "expected '{' before class body");
 
-    /* Compile the constructor body inline with the same shape as a
+    /* Compile the constructor body with the same shape as a
      * `function(params) { ... }` expression so the resulting closure can
      * be called via cando_vm_call_value() from the default __call native. */
-    u32 skip_body = emit_jump(p, OP_JUMP);
-    u32 fn_start  = cur(p)->code_len;
-
-    FnScopeSave saved;
-    enter_function_scope(p, &saved);
-
-    declare_local(p, "", 0, false); /* slot 0: call frame sentinel */
-    for (u16 i = 0; i < arity; i++)
-        declare_local(p, param_names[i], param_lens[i], false);
-
-    parse_block(p);
-
-    emit_op(p, OP_NULL);
-    emit_op_a(p, OP_RETURN, 1);
-
+    u32 fn_start, skip_body;
     u16 *body_uv_specs;
     u16  body_uv_count;
-    leave_function_scope(p, &saved, &body_uv_specs, &body_uv_count);
+    compile_function_body(p, param_names, param_lens, arity,
+                          "expected '{' before class body",
+                          &fn_start, &skip_body,
+                          &body_uv_specs, &body_uv_count);
 
     patch_jump(p, skip_body);
 
