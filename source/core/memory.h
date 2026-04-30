@@ -48,6 +48,11 @@ typedef struct CandoMemCtrl {
     CandoTrackedObj *live;          /* registry of live tracked objects */
     u32              live_count;
     u32              live_cap;
+    /* Auto-collect threshold (Stage 3): when live_count reaches this
+     * after an allocation, the VM runs a collection cycle and bumps
+     * the threshold to 2 * live_count_after.  Setting to 0 disables
+     * the automatic trigger (manual gc_collect still works).         */
+    u32              next_collect_threshold;
 } CandoMemCtrl;
 
 /* -----------------------------------------------------------------------

@@ -44,6 +44,10 @@ void cando_memctrl_init(CandoMemCtrl *mc) {
     mc->live       = NULL;
     mc->live_count = 0;
     mc->live_cap   = 0;
+    /* Initial auto-collect threshold: 256 tracked objects.  After each
+     * collect this is reset to 2 * live_count so the trigger
+     * self-tunes to the working set size.                             */
+    mc->next_collect_threshold = 256;
 }
 
 void cando_memctrl_destroy(CandoMemCtrl *mc) {

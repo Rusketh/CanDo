@@ -575,7 +575,26 @@ u32 cando_vm_gc_collect(CandoVM *vm) {
     cando_memctrl_sweep(vm->mem, gc_free_handle, vm);
 
     u32 after = vm->mem->live_count;
+    /* Self-tuning threshold: collect again after the live set doubles.
+     * Floor at 256 so very small programs don't ping-pong.            */
+    u32 next = after * 2;
+    if (next < 256) next = 256;
+    vm->mem->next_collect_threshold = next;
     return before - after;
+}
+
+/* Called from the dispatch loop after every allocating instruction.
+ * Cheap fast-path (one comparison) when the threshold isn't reached.
+ * Safe call site: between instructions, when the freshly-allocated
+ * object has already been pushed onto the value stack so it counts as
+ * a root.                                                              */
+static inline void vm_gc_maybe_collect(CandoVM *vm) {
+    if (CANDO_UNLIKELY(vm->mem &&
+                       vm->mem->next_collect_threshold > 0 &&
+                       vm->mem->live_count >=
+                           vm->mem->next_collect_threshold)) {
+        cando_vm_gc_collect(vm);
+    }
 }
 
 /* =========================================================================
@@ -2220,6 +2239,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         /* ── Band 9: Object / array construction & access ───────────── */
         OP_CASE(OP_NEW_OBJECT): {
             PUSH(cando_bridge_new_object(vm));
+            vm_gc_maybe_collect(vm);
             DISPATCH();
         }
         OP_CASE(OP_NEW_ARRAY): {
@@ -2243,6 +2263,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm->stack_top -= n;
             }
             PUSH(arr_val);
+            vm_gc_maybe_collect(vm);
             DISPATCH();
         }
         OP_CASE(OP_GET_FIELD): {
@@ -2694,6 +2715,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             fn_obj->fn.script.bytecode_trace = vm_closure_trace_adapter;
             HandleIndex h = cando_bridge_track_obj(vm, fn_obj);
             PUSH(cando_object_value(h));
+            vm_gc_maybe_collect(vm);
             DISPATCH();
         }
         OP_CASE(OP_CALL): {
@@ -3739,10 +3761,10 @@ static CandoVMResult vm_run(CandoVM *vm) {
 
             cando_value_release(fn_val);
             PUSH(thread_val);
+            vm_gc_maybe_collect(vm);
             DISPATCH();
         }
 
-        /* ── Band 16: Classes ───────────────────────────────────────── */
         /* ── Band 18: OOP (classes, inheritance, method binding) ────── */
         OP_CASE(OP_NEW_CLASS): {
             u16 ci = READ_U16();
@@ -3759,6 +3781,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cdo_string_release(cdo_key);
             }
             PUSH(cls_val);
+            vm_gc_maybe_collect(vm);
             DISPATCH();
         }
         OP_CASE(OP_BIND_METHOD): {
