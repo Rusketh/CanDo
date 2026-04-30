@@ -250,6 +250,24 @@ static bool ensure_upvalues_capacity(CandoParser *p, u32 needed)
     return true;
 }
 
+/* Generic doubling helper for the parser's u32 patch-list buffers
+ * (pipe_exits, safe_chain_jumps).  Grows *buf to fit `needed` entries.
+ * Returns false (without raising a parser error -- callers do that
+ * because the diagnostic differs) past the absolute UINT16_MAX cap.   */
+static bool grow_u32_buffer(u32 **buf, u32 *cap, u32 needed)
+{
+    if (needed <= *cap) return true;
+    if (needed > UINT16_MAX) return false;
+    u32 new_cap = *cap ? *cap : 8;
+    while (new_cap < needed) {
+        if (new_cap >= UINT16_MAX / 2) { new_cap = UINT16_MAX; break; }
+        new_cap *= 2;
+    }
+    *buf = (u32 *)cando_realloc(*buf, (usize)new_cap * sizeof(u32));
+    *cap = new_cap;
+    return true;
+}
+
 /* Saved enclosing-scope state captured when entering a nested function /
  * class body.  See enter_function_scope / leave_function_scope below.    */
 typedef struct {
@@ -1106,12 +1124,12 @@ static void parse_or(CandoParser *p, bool can_assign)
 static void emit_safe_chain_guard(CandoParser *p)
 {
     u32 patch = emit_jump(p, OP_JUMP_IF_NULL);
-    if (p->safe_chain_count <
-        (u32)(sizeof(p->safe_chain_jumps) / sizeof(p->safe_chain_jumps[0]))) {
-        p->safe_chain_jumps[p->safe_chain_count++] = patch;
-    } else {
+    if (!grow_u32_buffer(&p->safe_chain_jumps, &p->safe_chain_capacity,
+                         p->safe_chain_count + 1)) {
         error(p, "safe-access chain too long");
+        return;
     }
+    p->safe_chain_jumps[p->safe_chain_count++] = patch;
 }
 
 /* Property access: expr.name */
@@ -2358,11 +2376,13 @@ static void parse_return(CandoParser *p)
             parse_expression(p);
             match(p, TOK_SEMI);
         }
-        if (p->pipe_exit_count < 16) {
-            p->pipe_exits[p->pipe_exit_count++] = emit_jump(p, OP_JUMP);
-        } else {
-            error(p, "too many return statements in pipe body (max 16)");
+        u32 patch = emit_jump(p, OP_JUMP);
+        if (!grow_u32_buffer(&p->pipe_exits, &p->pipe_exit_capacity,
+                             p->pipe_exit_count + 1)) {
+            error(p, "too many return statements in pipe body");
+            return;
         }
+        p->pipe_exits[p->pipe_exit_count++] = patch;
         return;
     }
 
@@ -2511,10 +2531,14 @@ void cando_parser_init(CandoParser *p, const char *source, usize len,
     p->eval_mode          = false;
     p->last_stmt_was_expr = false;
     p->in_pipe_body       = false;
+    p->pipe_exits         = NULL;
     p->pipe_exit_count    = 0;
+    p->pipe_exit_capacity = 0;
     p->last_multi_push    = 1;
     p->in_safe_chain      = false;
+    p->safe_chain_jumps   = NULL;
     p->safe_chain_count   = 0;
+    p->safe_chain_capacity = 0;
     p->ternary_then_depth = 0;
     p->outer_locals       = NULL;
     p->outer_count        = 0;
@@ -2539,6 +2563,14 @@ void cando_parser_free(CandoParser *p)
     p->upvalue_specs = NULL;
     p->upvalue_count = 0;
     p->upvalue_capacity = 0;
+    cando_free(p->pipe_exits);
+    p->pipe_exits = NULL;
+    p->pipe_exit_count = 0;
+    p->pipe_exit_capacity = 0;
+    cando_free(p->safe_chain_jumps);
+    p->safe_chain_jumps = NULL;
+    p->safe_chain_count = 0;
+    p->safe_chain_capacity = 0;
 }
 
 bool cando_parse(CandoParser *p)

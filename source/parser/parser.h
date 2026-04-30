@@ -81,8 +81,9 @@ typedef struct {
      * emits an expression + OP_JUMP (patched later) instead of OP_RETURN,
      * so it does not exit the enclosing function.                         */
     bool         in_pipe_body;
-    u32          pipe_exits[16];     /* patch-list of OP_JUMP offsets      */
+    u32         *pipe_exits;         /* heap patch-list of OP_JUMP offsets */
     u32          pipe_exit_count;
+    u32          pipe_exit_capacity;
 
     /* Mask multi-push tracking ----------------------------------------- */
     /* Set by parse_mask to indicate how many values were actually pushed
@@ -116,8 +117,9 @@ typedef struct {
      * remainder of the chain.  Patches are recorded in safe_chain_jumps[]
      * and rewritten to point past the chain when parse_precedence finishes. */
     bool         in_safe_chain;
-    u32          safe_chain_jumps[32];
+    u32         *safe_chain_jumps;   /* heap patch-list of guard jumps   */
     u32          safe_chain_count;
+    u32          safe_chain_capacity;
 } CandoParser;
 
 /* Initialise parser; `chunk` receives all emitted bytecode.
