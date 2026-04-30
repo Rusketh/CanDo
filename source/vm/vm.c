@@ -2729,6 +2729,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             vm->spread_extra = 0;
             /* The function value sits just below the arguments. */
             CandoValue callee = *(vm->stack_top - arg_count - 1);
+            int meta_call_depth = 0;
 
         op_call_dispatch:
             /* Native function: negative-number sentinel convention. */

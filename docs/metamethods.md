@@ -341,6 +341,42 @@ the language yet.  It is reserved for future use.
 
 ---
 
+## `__call` — make objects callable
+
+If an object is invoked as a function (`obj(args...)`) and the value is not a
+function, the VM looks up the `__call` field on it (following the `__index`
+prototype chain).  If `__call` is itself callable — a native function, a user
+function, or another object with its own `__call` — the dispatcher splices the
+original receiver in as the first argument and invokes the meta function.
+
+```cando
+VAR adder = { base: 10 };
+adder.__call = function(self, x) { RETURN self.base + x; };
+print(adder(5));    // 15
+print(adder(32));   // 42
+```
+
+The receiver is passed as the first parameter (`self`), so a `__call`
+metamethod always sees the object it was attached to as its first argument,
+followed by the explicit call arguments.
+
+Inheritance through the prototype chain works:
+
+```cando
+VAR base = {};
+base.__call = function(self, x) { RETURN x * 2; };
+VAR derived = {};
+object.setPrototype(derived, base);
+print(derived(7));   // 14
+```
+
+Chained `__call` (an object whose `__call` is itself another callable object)
+is supported up to a fixed depth of 16 levels per call site, after which the
+chain falls through to the standard "can only call functions" error.  This
+guards against accidental cycles like `obj.__call = obj`.
+
+---
+
 ## C-level API
 
 ```c
