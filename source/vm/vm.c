@@ -959,9 +959,22 @@ static bool vm_call(CandoVM *vm, CandoClosure *closure, u32 arg_count) {
 #define READ_I16()     ((i16)READ_U16())
 #define READ_CONST()   (frame->closure->chunk->constants[READ_U16()])
 
-#define PUSH(v)        cando_vm_push(vm, (v))
-#define POP()          cando_vm_pop(vm)
-#define PEEK(d)        cando_vm_peek(vm, (d))
+/* Hot-path stack ops: raw pointer arithmetic instead of going through
+ * the public cando_vm_push/pop/peek helpers (which add a function call
+ * and a bounds assertion).  The dispatch loop visits these macros
+ * millions of times per second; the parser already guarantees per-op
+ * arity so the assertions are redundant inside vm_run.  The public
+ * helpers remain for native-function callers.
+ *
+ * PUSH evaluates its argument into a temporary first to avoid sequence-
+ * point UB when the argument also reads vm->stack_top (e.g. PEEK).    */
+#define PUSH(v)        do {                                              \
+    CandoValue _pv = (v);                                                \
+    *vm->stack_top++ = _pv;                                              \
+} while (0)
+#define POP()          (*--vm->stack_top)
+#define DROP()         ((void)(--vm->stack_top))   /* discard top, no read */
+#define PEEK(d)        (vm->stack_top[-1 - (ptrdiff_t)(d)])
 
 /* Saved frame-local ip back to the frame struct before any call. */
 #define SYNC_IP()  (frame->ip = ip)
@@ -1620,7 +1633,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             /* String concatenation or numeric addition. */
             CandoValue b = PEEK(0), a = PEEK(1);
             if (cando_is_string(a) && cando_is_string(b)) {
-                POP(); POP();
+                DROP(); DROP();
                 u32 la = a.as.string->length, lb = b.as.string->length;
                 u32 total = la + lb;
                 char *buf = cando_alloc(total + 1);
