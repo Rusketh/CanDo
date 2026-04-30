@@ -194,12 +194,12 @@ static void patch_loop_mark_break(CandoParser *p, u32 patch_at)
 
 /* ---- constant helpers -------------------------------------------------- */
 
-/* Intern a string constant; returns pool index. */
+/* Intern a string constant; returns pool index.  Routes through
+ * cando_chunk_intern_string so we only heap-allocate on a pool miss --
+ * every identifier reference in the script flows through here.          */
 static u16 str_const(CandoParser *p, const char *s, u32 len)
 {
-    CandoString *cs  = cando_string_new(s, len);
-    CandoValue   val = cando_string_value(cs);
-    return cando_chunk_add_const(cur(p), val);
+    return cando_chunk_intern_string(cur(p), s, len);
 }
 
 /* Intern the previous token's lexeme as a string constant. */
