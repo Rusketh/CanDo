@@ -38,10 +38,7 @@ static int https_request_fn(CandoVM *vm, int argc, CandoValue *args)
 
 static int https_get_fn(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "https.get: expected url string");
-        return -1;
-    }
+    if (!libutil_require_str_at(vm, args, argc, 0, "https.get")) return -1;
     /* Build a minimal options object with method=GET and let the workhorse
      * handle TLS and redirect (scheme will be https regardless). */
     CandoValue opts_val = cando_bridge_new_object(vm);

@@ -79,11 +79,8 @@ static const char *fopen_mode(CandoValue enc_val, char rw)
  * ======================================================================= */
 static int file_read(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "file.read: path must be a string");
-        return -1;
-    }
-    const char *path = libutil_arg_cstr(args[0]);
+    const char *path = libutil_require_cstr_at(vm, args, argc, 0, "file.read");
+    if (!path) return -1;
     const char *mode = (argc >= 2) ? fopen_mode(args[1], 'r') : "r";
 
     FILE *f = fopen(path, mode);
@@ -110,13 +107,12 @@ static int file_read(CandoVM *vm, int argc, CandoValue *args)
  * ======================================================================= */
 static int file_write(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 2 || !cando_is_string(args[0]) || !cando_is_string(args[1])) {
-        cando_vm_error(vm, "file.write: path and data must be strings");
-        return -1;
-    }
-    const char *path = libutil_arg_cstr(args[0]);
-    const char *data = libutil_arg_cstr(args[1]);
-    u32 len          = args[1].as.string->length;
+    const char *path = libutil_require_cstr_at(vm, args, argc, 0, "file.write");
+    if (!path) return -1;
+    CandoString *data_s = libutil_require_str_at(vm, args, argc, 1, "file.write");
+    if (!data_s) return -1;
+    const char *data = data_s->data;
+    u32 len          = data_s->length;
     const char *mode = (argc >= 3) ? fopen_mode(args[2], 'w') : "w";
 
     FILE *f = fopen(path, mode);
@@ -133,13 +129,12 @@ static int file_write(CandoVM *vm, int argc, CandoValue *args)
  * ======================================================================= */
 static int file_append(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 2 || !cando_is_string(args[0]) || !cando_is_string(args[1])) {
-        cando_vm_error(vm, "file.append: path and data must be strings");
-        return -1;
-    }
-    const char *path = libutil_arg_cstr(args[0]);
-    const char *data = libutil_arg_cstr(args[1]);
-    u32 len          = args[1].as.string->length;
+    const char *path = libutil_require_cstr_at(vm, args, argc, 0, "file.append");
+    if (!path) return -1;
+    CandoString *data_s = libutil_require_str_at(vm, args, argc, 1, "file.append");
+    if (!data_s) return -1;
+    const char *data = data_s->data;
+    u32 len          = data_s->length;
     const char *mode = (argc >= 3) ? fopen_mode(args[2], 'a') : "a";
 
     FILE *f = fopen(path, mode);
@@ -156,11 +151,9 @@ static int file_append(CandoVM *vm, int argc, CandoValue *args)
  * ======================================================================= */
 static int file_exists(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "file.exists: path must be a string");
-        return -1;
-    }
-    bool exists = (access(libutil_arg_cstr(args[0]), F_OK) == 0);
+    const char *path = libutil_require_cstr_at(vm, args, argc, 0, "file.exists");
+    if (!path) return -1;
+    bool exists = (access(path, F_OK) == 0);
     cando_vm_push(vm, cando_bool(exists));
     return 1;
 }
@@ -170,11 +163,9 @@ static int file_exists(CandoVM *vm, int argc, CandoValue *args)
  * ======================================================================= */
 static int file_delete(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "file.delete: path must be a string");
-        return -1;
-    }
-    cando_vm_push(vm, cando_bool(remove(libutil_arg_cstr(args[0])) == 0));
+    const char *path = libutil_require_cstr_at(vm, args, argc, 0, "file.delete");
+    if (!path) return -1;
+    cando_vm_push(vm, cando_bool(remove(path) == 0));
     return 1;
 }
 
@@ -183,14 +174,14 @@ static int file_delete(CandoVM *vm, int argc, CandoValue *args)
  * ======================================================================= */
 static int file_copy(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 2 || !cando_is_string(args[0]) || !cando_is_string(args[1])) {
-        cando_vm_error(vm, "file.copy: src and dst must be strings");
-        return -1;
-    }
-    FILE *src = fopen(libutil_arg_cstr(args[0]), "rb");
+    const char *src_path = libutil_require_cstr_at(vm, args, argc, 0, "file.copy");
+    if (!src_path) return -1;
+    const char *dst_path = libutil_require_cstr_at(vm, args, argc, 1, "file.copy");
+    if (!dst_path) return -1;
+    FILE *src = fopen(src_path, "rb");
     if (!src) { cando_vm_push(vm, cando_bool(false)); return 1; }
 
-    FILE *dst = fopen(libutil_arg_cstr(args[1]), "wb");
+    FILE *dst = fopen(dst_path, "wb");
     if (!dst) { fclose(src); cando_vm_push(vm, cando_bool(false)); return 1; }
 
     char buf[4096];
@@ -211,12 +202,11 @@ static int file_copy(CandoVM *vm, int argc, CandoValue *args)
  * ======================================================================= */
 static int file_move(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 2 || !cando_is_string(args[0]) || !cando_is_string(args[1])) {
-        cando_vm_error(vm, "file.move: src and dst must be strings");
-        return -1;
-    }
-    cando_vm_push(vm, cando_bool(rename(libutil_arg_cstr(args[0]),
-                                         libutil_arg_cstr(args[1])) == 0));
+    const char *src_path = libutil_require_cstr_at(vm, args, argc, 0, "file.move");
+    if (!src_path) return -1;
+    const char *dst_path = libutil_require_cstr_at(vm, args, argc, 1, "file.move");
+    if (!dst_path) return -1;
+    cando_vm_push(vm, cando_bool(rename(src_path, dst_path) == 0));
     return 1;
 }
 
@@ -225,12 +215,10 @@ static int file_move(CandoVM *vm, int argc, CandoValue *args)
  * ======================================================================= */
 static int file_size(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "file.size: path must be a string");
-        return -1;
-    }
+    const char *path = libutil_require_cstr_at(vm, args, argc, 0, "file.size");
+    if (!path) return -1;
     struct stat st;
-    if (stat(libutil_arg_cstr(args[0]), &st) != 0) {
+    if (stat(path, &st) != 0) {
         cando_vm_push(vm, cando_null());
         return 1;
     }
@@ -243,11 +231,8 @@ static int file_size(CandoVM *vm, int argc, CandoValue *args)
  * ======================================================================= */
 static int file_lines(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "file.lines: path must be a string");
-        return -1;
-    }
-    const char *path = libutil_arg_cstr(args[0]);
+    const char *path = libutil_require_cstr_at(vm, args, argc, 0, "file.lines");
+    if (!path) return -1;
     const char *mode = (argc >= 2) ? fopen_mode(args[1], 'r') : "r";
 
     FILE *f = fopen(path, mode);
@@ -280,14 +265,12 @@ static int file_lines(CandoVM *vm, int argc, CandoValue *args)
  * ======================================================================= */
 static int file_mkdir(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "file.mkdir: path must be a string");
-        return -1;
-    }
+    const char *path = libutil_require_cstr_at(vm, args, argc, 0, "file.mkdir");
+    if (!path) return -1;
 #if defined(_WIN32) || defined(_WIN64)
-    bool ok = (_mkdir(libutil_arg_cstr(args[0])) == 0 || errno == EEXIST);
+    bool ok = (_mkdir(path) == 0 || errno == EEXIST);
 #else
-    bool ok = (mkdir(libutil_arg_cstr(args[0]), 0755) == 0 || errno == EEXIST);
+    bool ok = (mkdir(path, 0755) == 0 || errno == EEXIST);
 #endif
     cando_vm_push(vm, cando_bool(ok));
     return 1;
@@ -298,11 +281,9 @@ static int file_mkdir(CandoVM *vm, int argc, CandoValue *args)
  * ======================================================================= */
 static int file_list(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "file.list: path must be a string");
-        return -1;
-    }
-    DIR *d = opendir(libutil_arg_cstr(args[0]));
+    const char *path = libutil_require_cstr_at(vm, args, argc, 0, "file.list");
+    if (!path) return -1;
+    DIR *d = opendir(path);
     if (!d) { cando_vm_push(vm, cando_null()); return 1; }
 
     CandoValue arr_val = cando_bridge_new_array(vm);

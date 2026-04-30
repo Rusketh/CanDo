@@ -454,10 +454,7 @@ static int http_request_fn(CandoVM *vm, int argc, CandoValue *args)
 static int http_get_fn(CandoVM *vm, int argc, CandoValue *args)
 {
     /* http.get(url) -- shortcut; force GET method. */
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "http.get: expected url string");
-        return -1;
-    }
+    if (!libutil_require_str_at(vm, args, argc, 0, "http.get")) return -1;
     /* Wrap into a tiny options object with method=GET and reuse the workhorse. */
     CandoValue opts_val = cando_bridge_new_object(vm);
     CdoObject *opts     = cando_bridge_resolve(vm, opts_val.as.handle);

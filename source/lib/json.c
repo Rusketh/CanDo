@@ -431,14 +431,12 @@ static CandoValue jp_parse_value(JParser *p)
  * ======================================================================= */
 static int json_parse(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "json.parse: expected a string argument");
-        return -1;
-    }
+    CandoString *src = libutil_require_str_at(vm, args, argc, 0, "json.parse");
+    if (!src) return -1;
 
     JParser p;
-    p.src       = args[0].as.string->data;
-    p.len       = (usize)args[0].as.string->length;
+    p.src       = src->data;
+    p.len       = (usize)src->length;
     p.pos       = 0;
     p.vm        = vm;
     p.has_error = false;

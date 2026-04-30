@@ -295,11 +295,8 @@ static bool path_is_binary(const char *p)
 
 static int native_include(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || !cando_is_string(args[0])) {
-        cando_vm_error(vm, "include: path must be a string");
-        return -1;
-    }
-    const char *raw_path = args[0].as.string->data;
+    const char *raw_path = libutil_require_cstr_at(vm, args, argc, 0, "include");
+    if (!raw_path) return -1;
 
     /* --- Resolve to canonical absolute path --- */
     char canonical[PATH_MAX];
