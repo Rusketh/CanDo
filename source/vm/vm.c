@@ -115,6 +115,8 @@ u32 cando_vm_lifeline_count(CandoVM *vm) {
 static CandoVMResult  vm_run(CandoVM *vm);
 static void           vm_runtime_error(CandoVM *vm, const char *fmt, ...);
 static bool           vm_call(CandoVM *vm, CandoClosure *closure, u32 arg_count);
+static bool           vm_push_frame(CandoVM *vm, CandoClosure *closure,
+                                    u8 *ip, u32 arg_count, bool is_fluent);
 static CandoUpvalue  *vm_capture_upvalue(CandoVM *vm, CandoValue *local);
 static void           vm_close_upvalues(CandoVM *vm, CandoValue *last);
 static void           vm_upvalue_release(CandoUpvalue *uv);
@@ -741,28 +743,20 @@ bool cando_vm_dispatch_callable(CandoVM *vm, const struct CdoValue *raw_p,
             vm->thread_results[i] = cando_null();
         }
 
-        cando_vm_push(vm, cando_null()); /* slot-0 sentinel */
-
-        if (vm->frame_count >= CANDO_FRAMES_MAX) {
-            cando_vm_pop(vm);
-            vm->thread_stop_frame = saved_stop;
-            vm_runtime_error(vm, "call stack overflow in meta-method");
-            return false;
-        }
-
-        CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-        new_frame->closure   = cur_frame->closure;
-        new_frame->ip        = cur_frame->closure->chunk->code + pc;
-        new_frame->slots     = vm->stack_top - 1;
-        new_frame->ret_count = 0;
-        new_frame->is_fluent = false;
-
+        /* Stack the sentinel + args first so vm_push_frame's slot-vs-arg
+         * arithmetic matches the regular call path.                    */
+        u32 stack_before = (u32)(vm->stack_top - vm->stack);
+        cando_vm_push(vm, cando_null());
         for (u32 i = 0; i < argc; i++)
             cando_vm_push(vm, cando_value_copy(args[i]));
-        u32 np = argc + 1;
-        if (cur_frame->closure->chunk->local_count > np) {
-            for (u32 i = np; i < cur_frame->closure->chunk->local_count; i++)
-                cando_vm_push(vm, cando_null());
+
+        if (!vm_push_frame(vm, cur_frame->closure,
+                           cur_frame->closure->chunk->code + pc,
+                           argc, false)) {
+            while ((u32)(vm->stack_top - vm->stack) > stack_before)
+                cando_value_release(cando_vm_pop(vm));
+            vm->thread_stop_frame = saved_stop;
+            return false;
         }
 
         vm_run(vm);
@@ -905,41 +899,48 @@ static void vm_runtime_error(CandoVM *vm, const char *fmt, ...) {
  * Function call
  * ===================================================================== */
 
-static bool vm_call(CandoVM *vm, CandoClosure *closure, u32 arg_count) {
-    CandoChunk *chunk = closure->chunk;
-
-    if (!chunk->has_vararg && arg_count != chunk->arity) {
-        vm_runtime_error(vm,
-            "function '%s' expects %u argument(s) but got %u",
-            chunk->name, chunk->arity, arg_count);
-        return false;
-    }
-
+/* Push a new call frame for `closure`, starting at `ip` (a byte address
+ * inside closure->chunk->code).  The caller is responsible for arranging
+ * the value stack so the function-value sentinel sits at
+ *      vm->stack_top - arg_count - 1
+ * with the `arg_count` arguments occupying the slots above it.  After
+ * this returns, dispatch loop callers must reload their local frame/ip
+ * via LOAD_FRAME().  Returns false (and raises a runtime error) on
+ * frame_count overflow.                                                 */
+static bool vm_push_frame(CandoVM *vm, CandoClosure *closure, u8 *ip,
+                          u32 arg_count, bool is_fluent) {
     if (vm->frame_count >= CANDO_FRAMES_MAX) {
         vm_runtime_error(vm, "call stack overflow");
         return false;
     }
-
+    CandoChunk     *chunk = closure->chunk;
     CandoCallFrame *frame = &vm->frames[vm->frame_count++];
     frame->closure   = closure;
-    frame->ip        = chunk->code;
-    /* The function itself is just below the arguments on the stack. */
+    frame->ip        = ip;
     frame->slots     = vm->stack_top - arg_count - 1;
     frame->ret_count = 0;
-    frame->is_fluent = false;
-
-    /* Pre-allocate null slots for all local variables so the expression
-     * evaluation stack always sits above the local variable area.
-     * Without this, pushes during expression evaluation overwrite locals.
-     * n_present = slot 0 (fn sentinel) + all arguments already on stack.
-     * We push (local_count - n_present) nulls to fill the gap.           */
-    u32 n_present = arg_count + 1; /* sentinel + args */
+    frame->is_fluent = is_fluent;
+    /* Pre-allocate null slots for the function's remaining locals so
+     * expression evaluation never overwrites them; n_present = slot-0
+     * sentinel + the args already on the stack.                        */
+    u32 n_present = arg_count + 1;
     if (chunk->local_count > n_present) {
         u32 n_extra = chunk->local_count - n_present;
         for (u32 i = 0; i < n_extra; i++)
             cando_vm_push(vm, cando_null());
     }
     return true;
+}
+
+static bool vm_call(CandoVM *vm, CandoClosure *closure, u32 arg_count) {
+    CandoChunk *chunk = closure->chunk;
+    if (!chunk->has_vararg && arg_count != chunk->arity) {
+        vm_runtime_error(vm,
+            "function '%s' expects %u argument(s) but got %u",
+            chunk->name, chunk->arity, arg_count);
+        return false;
+    }
+    return vm_push_frame(vm, closure, chunk->code, arg_count, false);
 }
 
 /* =========================================================================
@@ -1106,26 +1107,14 @@ CandoVMResult cando_vm_exec_closure(CandoVM *vm, CandoClosure *closure,
     for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++)
         vm->thread_results[i] = cando_null();
 
-    /* Push slot-0 sentinel and create a call frame at fn_pc. */
+    /* Push slot-0 sentinel and create a call frame at fn_pc.  No args:
+     * vm_push_frame handles local-null fill from arg_count = 0.        */
     cando_vm_push(vm, cando_null());
-    if (vm->frame_count >= CANDO_FRAMES_MAX) {
-        vm_runtime_error(vm, "call stack overflow in thread");
+    if (!vm_push_frame(vm, closure, closure->chunk->code + fn_pc, 0, false)) {
+        cando_value_release(cando_vm_pop(vm));
         vm->thread_stop_frame   = saved_stop;
         vm->thread_result_count = saved_count;
-        cando_vm_pop(vm);
         return VM_RUNTIME_ERR;
-    }
-    CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-    new_frame->closure   = closure;
-    new_frame->ip        = closure->chunk->code + fn_pc;
-    new_frame->slots     = vm->stack_top - 1; /* just the sentinel */
-    new_frame->ret_count = 0;
-    new_frame->is_fluent = false;
-
-    /* Pre-allocate null locals. */
-    if (closure->chunk->local_count > 1) {
-        for (u32 i = 1; i < closure->chunk->local_count; i++)
-            cando_vm_push(vm, cando_null());
     }
 
     CandoVMResult res = vm_run(vm);
@@ -1159,30 +1148,20 @@ static void vm_call_closure_with_args(CandoVM *vm, CdoObject *fn_obj,
         vm->thread_results[i] = cando_null();
     }
 
-    /* Push slot-0 sentinel. */
+    /* Push slot-0 sentinel + the passed args, then build the frame.
+     * Uses argc (not closure->chunk->arity, which is the top-level
+     * script's arity = 0) because all nested functions share the flat
+     * chunk.                                                           */
+    u32 stack_before = (u32)(vm->stack_top - vm->stack);
     cando_vm_push(vm, cando_null());
-    if (vm->frame_count >= CANDO_FRAMES_MAX) {
-        cando_vm_pop(vm);
-        vm->thread_stop_frame = saved_stop;
-        return;
-    }
-
-    CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-    new_frame->closure   = closure;
-    new_frame->ip        = closure->chunk->code + fn_pc;
-    new_frame->slots     = vm->stack_top - 1;   /* points at slot-0 */
-    new_frame->ret_count = 0;
-    new_frame->is_fluent = false;
-
-    /* Push the passed arguments as parameter slots, then nulls for any
-     * remaining local variable slots declared by the main chunk.
-     * We use argc (not closure->chunk->arity which is the top-level script's
-     * arity=0) because all nested functions share the flat chunk. */
     for (u32 i = 0; i < argc; i++)
         cando_vm_push(vm, cando_value_copy(args[i]));
-    if (closure->chunk->local_count > 1 + argc) {
-        for (u32 i = 1 + argc; i < closure->chunk->local_count; i++)
-            cando_vm_push(vm, cando_null());
+
+    if (!vm_push_frame(vm, closure, closure->chunk->code + fn_pc, argc, false)) {
+        while ((u32)(vm->stack_top - vm->stack) > stack_before)
+            cando_value_release(cando_vm_pop(vm));
+        vm->thread_stop_frame = saved_stop;
+        return;
     }
 
     vm_run(vm);
@@ -2548,32 +2527,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * in the current chunk (parser emits cando_number((f64)fn_start)). */
             if (cando_is_number(callee)) {
                 u32 pc = (u32)callee.as.number;
-                CandoChunk *chunk = frame->closure->chunk;
-
-                if (vm->frame_count >= CANDO_FRAMES_MAX) {
-                    vm_runtime_error(vm, "call stack overflow");
-                    goto handle_error;
-                }
-
                 SYNC_IP();
-                CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                new_frame->closure   = frame->closure; /* same chunk */
-                new_frame->ip        = chunk->code + pc;
-                new_frame->slots     = vm->stack_top - arg_count - 1;
-                new_frame->ret_count = 0;
-                new_frame->is_fluent = false;
-
-                /* Pre-allocate null slots for local variables so expression
-                 * evaluation never overwrites them (same logic as vm_call). */
-                {
-                    u32 np = arg_count + 1;
-                    if (chunk->local_count > np) {
-                        u32 ne = chunk->local_count - np;
-                        for (u32 i = 0; i < ne; i++)
-                            cando_vm_push(vm, cando_null());
-                    }
-                }
-
+                if (!vm_push_frame(vm, frame->closure,
+                                   frame->closure->chunk->code + pc,
+                                   arg_count, false))
+                    goto handle_error;
                 LOAD_FRAME();
                 DISPATCH();
             }
@@ -2595,24 +2553,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
                         (CandoClosure *)fn_obj->fn.script.bytecode;
                     u32 fn_pc = fn_obj->fn.script.param_count;
 
-                    if (vm->frame_count >= CANDO_FRAMES_MAX) {
-                        vm_runtime_error(vm, "call stack overflow");
-                        goto handle_error;
-                    }
                     SYNC_IP();
-                    CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                    new_frame->closure   = fn_closure;
-                    new_frame->ip        = fn_closure->chunk->code + fn_pc;
-                    new_frame->slots     = vm->stack_top - arg_count - 1;
-                    new_frame->ret_count = 0;
-                    new_frame->is_fluent = false;
-
-                    u32 np = arg_count + 1;
-                    if (fn_closure->chunk->local_count > np) {
-                        u32 ne = fn_closure->chunk->local_count - np;
-                        for (u32 i = 0; i < ne; i++)
-                            cando_vm_push(vm, cando_null());
-                    }
+                    if (!vm_push_frame(vm, fn_closure,
+                                       fn_closure->chunk->code + fn_pc,
+                                       arg_count, false))
+                        goto handle_error;
                     LOAD_FRAME();
                     DISPATCH();
                 }
@@ -2807,41 +2752,27 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 if (fn_obj->kind == OBJ_FUNCTION && fn_obj->fn.script.bytecode) {
                     CandoClosure *fn_closure = (CandoClosure *)fn_obj->fn.script.bytecode;
                     u32 fn_pc = fn_obj->fn.script.param_count;
-                    if (vm->frame_count >= CANDO_FRAMES_MAX) {
-                        vm_runtime_error(vm, "call stack overflow");
-                        goto handle_error;
-                    }
                     SYNC_IP();
-                    CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                    new_frame->closure   = fn_closure;
-                    new_frame->ip        = fn_closure->chunk->code + fn_pc;
-                    new_frame->slots     = base;
-                    new_frame->ret_count = 0;
-                    new_frame->is_fluent = is_fluent;
-                    u32 np = total_argc + 1;
-                    if (fn_closure->chunk->local_count > np) {
-                        u32 ne = fn_closure->chunk->local_count - np;
-                        for (u32 i = 0; i < ne; i++) cando_vm_push(vm, cando_null());
-                    }
+                    if (!vm_push_frame(vm, fn_closure,
+                                       fn_closure->chunk->code + fn_pc,
+                                       total_argc, is_fluent))
+                        goto handle_error;
                     LOAD_FRAME();
                     DISPATCH();
                 }
             }
 
-            /* Raw PC number */
+            /* Raw PC number: inline function in the same chunk.  Unlike
+             * OP_CALL's number-callee branch this site historically did
+             * not pre-allocate local nulls; vm_push_frame will fill them
+             * if the chunk declares any (no-op when local_count == 0).  */
             if (cando_is_number(method)) {
                 u32 pc = (u32)method.as.number;
-                if (vm->frame_count >= CANDO_FRAMES_MAX) {
-                    vm_runtime_error(vm, "call stack overflow");
-                    goto handle_error;
-                }
                 SYNC_IP();
-                CandoCallFrame *new_frame = &vm->frames[vm->frame_count++];
-                new_frame->closure   = frame->closure;
-                new_frame->ip        = frame->closure->chunk->code + pc;
-                new_frame->slots     = base;
-                new_frame->ret_count = 0;
-                new_frame->is_fluent = is_fluent;
+                if (!vm_push_frame(vm, frame->closure,
+                                   frame->closure->chunk->code + pc,
+                                   total_argc, is_fluent))
+                    goto handle_error;
                 LOAD_FRAME();
                 DISPATCH();
             }
