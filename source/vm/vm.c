@@ -1772,151 +1772,86 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 6: Comparison ─────────────────────────────────────── */
+
+        /* Try a comparison metamethod and DISPATCH on success.  `swap` is
+         * true for GT/GEQ which forward to __lt/__le on the swapped pair;
+         * `negate` is true for NEQ which negates the __eq result.  The
+         * comparison ops also share a number-only fallback for the cases
+         * where no meta is involved -- CMP_NUM_FALLBACK below.            */
+#define TRY_CMP_META(meta_key, swap, negate, _a, _b)                          \
+    if ((meta_key) && (cando_is_object(_a) || cando_is_object(_b))) {         \
+        HandleIndex _h = cando_is_object(_a) ? (_a).as.handle                 \
+                                              : (_b).as.handle;               \
+        CandoValue _buf[2] = { (swap) ? (_b) : (_a),                          \
+                                (swap) ? (_a) : (_b) };                       \
+        if (cando_vm_call_meta(vm, _h,                                        \
+                               (struct CdoString *)(meta_key), _buf, 2)) {    \
+            if (negate) {                                                     \
+                CandoValue _r = cando_vm_pop(vm);                             \
+                PUSH(cando_bool(!vm_is_truthy(_r)));                          \
+                cando_value_release(_r);                                      \
+            }                                                                 \
+            cando_value_release(_a); cando_value_release(_b);                 \
+            DISPATCH();                                                       \
+        }                                                                     \
+        if (vm->has_error) {                                                  \
+            cando_value_release(_a); cando_value_release(_b);                 \
+            goto handle_error;                                                \
+        }                                                                     \
+    }
+
+#define CMP_NUM_FALLBACK(_a, _b, op_sym)  do {                                \
+    if (!cando_is_number(_a) || !cando_is_number(_b)) {                       \
+        cando_value_release(_a); cando_value_release(_b);                     \
+        vm_runtime_error(vm, "comparison requires numbers");                  \
+        goto handle_error;                                                    \
+    }                                                                         \
+    PUSH(cando_bool((_a).as.number op_sym (_b).as.number));                   \
+    cando_value_release(_a); cando_value_release(_b);                         \
+} while (0)
+
         OP_CASE(OP_EQ): {
             CandoValue b = POP(), a = POP();
-            if (g_meta_eq && (cando_is_object(a) || cando_is_object(b))) {
-                HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue buf[2] = {a, b};
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_eq,
-                                       buf, 2)) {
-                    cando_value_release(a); cando_value_release(b);
-                    DISPATCH();
-                }
-                if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-            }
+            TRY_CMP_META(g_meta_eq, false, false, a, b);
             PUSH(cando_bool(cando_value_equal(a, b)));
             cando_value_release(a); cando_value_release(b);
             DISPATCH();
         }
         OP_CASE(OP_NEQ): {
             CandoValue b = POP(), a = POP();
-            if (g_meta_eq && (cando_is_object(a) || cando_is_object(b))) {
-                HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue buf[2] = {a, b};
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_eq,
-                                       buf, 2)) {
-                    CandoValue r = cando_vm_pop(vm);
-                    PUSH(cando_bool(!vm_is_truthy(r)));
-                    cando_value_release(r);
-                    cando_value_release(a); cando_value_release(b);
-                    DISPATCH();
-                }
-                if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-            }
+            TRY_CMP_META(g_meta_eq, false, true, a, b);
             PUSH(cando_bool(!cando_value_equal(a, b)));
             cando_value_release(a); cando_value_release(b);
             DISPATCH();
         }
         OP_CASE(OP_LT): {
             CandoValue b = POP(), a = POP();
-            if (g_meta_lt && (cando_is_object(a) || cando_is_object(b))) {
-                HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue buf[2] = {a, b};
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_lt,
-                                       buf, 2)) {
-                    cando_value_release(a); cando_value_release(b);
-                    DISPATCH();
-                }
-                if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-            }
-            if (!cando_is_number(a) || !cando_is_number(b)) {
-                cando_value_release(a); cando_value_release(b);
-                vm_runtime_error(vm, "comparison requires numbers");
-                goto handle_error;
-            }
-            PUSH(cando_bool(a.as.number < b.as.number));
-            cando_value_release(a); cando_value_release(b);
+            TRY_CMP_META(g_meta_lt, false, false, a, b);
+            CMP_NUM_FALLBACK(a, b, <);
             DISPATCH();
         }
         OP_CASE(OP_GT): {
             /* a > b is implemented as __lt(b, a) — swap the arguments. */
             CandoValue b = POP(), a = POP();
-            if (g_meta_lt && (cando_is_object(a) || cando_is_object(b))) {
-                HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue buf[2] = {b, a}; /* swapped for __lt */
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_lt,
-                                       buf, 2)) {
-                    cando_value_release(a); cando_value_release(b);
-                    DISPATCH();
-                }
-                if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-            }
-            if (!cando_is_number(a) || !cando_is_number(b)) {
-                cando_value_release(a); cando_value_release(b);
-                vm_runtime_error(vm, "comparison requires numbers");
-                goto handle_error;
-            }
-            PUSH(cando_bool(a.as.number > b.as.number));
-            cando_value_release(a); cando_value_release(b);
+            TRY_CMP_META(g_meta_lt, true, false, a, b);
+            CMP_NUM_FALLBACK(a, b, >);
             DISPATCH();
         }
         OP_CASE(OP_LEQ): {
             CandoValue b = POP(), a = POP();
-            if (g_meta_le && (cando_is_object(a) || cando_is_object(b))) {
-                HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue buf[2] = {a, b};
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_le,
-                                       buf, 2)) {
-                    cando_value_release(a); cando_value_release(b);
-                    DISPATCH();
-                }
-                if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-            }
-            if (!cando_is_number(a) || !cando_is_number(b)) {
-                cando_value_release(a); cando_value_release(b);
-                vm_runtime_error(vm, "comparison requires numbers");
-                goto handle_error;
-            }
-            PUSH(cando_bool(a.as.number <= b.as.number));
-            cando_value_release(a); cando_value_release(b);
+            TRY_CMP_META(g_meta_le, false, false, a, b);
+            CMP_NUM_FALLBACK(a, b, <=);
             DISPATCH();
         }
         OP_CASE(OP_GEQ): {
             /* a >= b is implemented as __le(b, a) — swap the arguments. */
             CandoValue b = POP(), a = POP();
-            if (g_meta_le && (cando_is_object(a) || cando_is_object(b))) {
-                HandleIndex h = cando_is_object(a) ? a.as.handle : b.as.handle;
-                CandoValue buf[2] = {b, a}; /* swapped for __le */
-                if (cando_vm_call_meta(vm, h,
-                                       (struct CdoString *)g_meta_le,
-                                       buf, 2)) {
-                    cando_value_release(a); cando_value_release(b);
-                    DISPATCH();
-                }
-                if (vm->has_error) {
-                    cando_value_release(a); cando_value_release(b);
-                    goto handle_error;
-                }
-            }
-            if (!cando_is_number(a) || !cando_is_number(b)) {
-                cando_value_release(a); cando_value_release(b);
-                vm_runtime_error(vm, "comparison requires numbers");
-                goto handle_error;
-            }
-            PUSH(cando_bool(a.as.number >= b.as.number));
-            cando_value_release(a); cando_value_release(b);
+            TRY_CMP_META(g_meta_le, true, false, a, b);
+            CMP_NUM_FALLBACK(a, b, >=);
             DISPATCH();
         }
+#undef TRY_CMP_META
+#undef CMP_NUM_FALLBACK
 
         /* Multi-value comparisons: pop A right-hand values, then left. */
         OP_CASE(OP_EQ_STACK): {
