@@ -287,6 +287,57 @@ The parser accepts RFC 4180 quoting with doubled `""` escapes.
 
 ---
 
+## `yaml`
+
+| Function | Description |
+|---|---|
+| `yaml.parse(text)` | Decode a YAML 1.2 document into CanDo values.  Throws on malformed input. |
+| `yaml.stringify(value, indent?)` | Encode a CanDo value as block-style YAML text.  `indent` (default 2, range 1..16) controls the per-level indentation. |
+
+Supported features:
+
+- Block mappings (`key: value`), block sequences (`- item`), and nested
+  combinations of both — including the common `- key: value` form for
+  sequences of mappings.
+- Flow mappings (`{a: 1, b: 2}`) and flow sequences (`[1, 2, 3]`),
+  one-line only.
+- Plain, single-quoted (`'…'` with `''` escape), and double-quoted (`"…"`
+  with JSON-style escapes plus `\xNN`, `\uNNNN`, `\UNNNNNNNN`) scalars.
+- Literal (`|`) and folded (`>`) block scalars with the default
+  chomping behaviour (single trailing newline).
+- Core-schema scalar typing — unquoted scalars become `null`, `true`,
+  `false`, integers (decimal / `0x…` / `0o…`), or floats (`1.5`,
+  `.inf`, `.nan`) when they match the corresponding grammar; otherwise
+  they remain strings.  `yes`/`no`/`on`/`off` are also accepted as
+  booleans for compatibility.
+- Line comments (`# …`).  A `#` outside a quoted string and either at
+  start-of-line or preceded by whitespace begins a comment that runs to
+  end-of-line.
+- An optional leading `---` document marker.
+
+`yaml.stringify()` quotes scalars only when ambiguity rules require it
+(empty strings, reserved scalars like `null`/`true`/`yes`, leading
+indicator characters, embedded control characters, or strings that
+would otherwise round-trip back to a non-string type).  Functions and
+natives serialise as `null`.
+
+```cdo
+VAR cfg = yaml.parse("name: cando
+version: 1
+tags:
+  - alpha
+  - beta
+");
+print(cfg.name);          // cando
+print(cfg.tags[0]);       // alpha
+
+VAR doc = yaml.stringify({ host: "localhost", port: 8080 });
+// host: localhost
+// port: 8080
+```
+
+---
+
 ## `datetime`
 
 | Function | Description |
@@ -702,6 +753,7 @@ The file extension selects the loader:
 | `.so` / `.dylib` / `.dll`| Loaded with `dlopen`; the symbol `cando_module_init(CandoVM *) → CandoValue` is called once and its return value is the module value. See [writing-extensions.md](writing-extensions.md). |
 | `.json`                  | File contents are parsed as JSON and the resulting Cando value (object/array/string/number/bool/null) is returned.                                                |
 | `.csv`                   | File contents are parsed as CSV with the default `,` delimiter and no header row; the result is an array of arrays of strings.                                    |
+| `.yaml` / `.yml`         | File contents are parsed as YAML and the resulting Cando value is returned.  See `yaml.parse` for the supported feature set.                                       |
 
 If the path has **no extension at all**, `include` probes the
 filesystem in this order and uses the first match it finds:
@@ -716,8 +768,9 @@ file does not exist, `include` raises an error rather than probing
 alternatives.
 
 Identical canonical paths share one cached value across the whole VM —
-Node.js `require()` semantics.  This applies to JSON and CSV results
-too, so mutating the returned value mutates every other holder of it.
+Node.js `require()` semantics.  This applies to JSON, CSV and YAML
+results too, so mutating the returned value mutates every other holder
+of it.
 
 Example:
 
@@ -738,6 +791,9 @@ print(cfg.port);
 
 VAR rows = include("./data.csv");       // array of arrays of strings
 print(rows[0][0]);
+
+VAR yaml = include("./settings.yaml");  // parsed YAML mapping
+print(yaml.host);
 
 VAR bin  = include("./mylib");          // tries mylib.so, .dylib, .dll, .cdo
 ```

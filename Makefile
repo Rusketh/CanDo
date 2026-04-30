@@ -118,6 +118,7 @@ CANDO_LIB_SRCS = \
     source/lib/include.c          \
     source/lib/json.c             \
     source/lib/csv.c              \
+    source/lib/yaml.c             \
     source/lib/thread.c           \
     source/lib/os.c               \
     source/lib/app.c              \
@@ -153,6 +154,7 @@ TEST_PARSER_BIN   = tests/test_parser
 TEST_VM_BIN       = tests/test_vm
 TEST_THREAD_BIN   = tests/test_thread
 TEST_SOCKUTIL_BIN = tests/test_sockutil
+TEST_YAML_BIN     = tests/test_yaml
 
 TEST_CORE_SRCS     = $(CORE_SRCS)   tests/test_core.c
 TEST_OBJECT_SRCS   = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_object.c
@@ -167,13 +169,13 @@ TEST_SOCKUTIL_SRCS = $(CORE_SRCS) source/lib/sockutil.c tests/test_sockutil.c
 
 .PHONY: all cando libcando.so libcando.a \
         test test_core test_object test_lexer test_parser test_vm test_thread \
-        test_sockutil test_integration clean \
+        test_sockutil test_yaml test_integration clean \
         modules modules-test modules-windows modules-clean
 
 all: libcando.so libcando.a $(CANDO_BIN) \
      $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) \
      $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN) \
-     $(TEST_SOCKUTIL_BIN)
+     $(TEST_SOCKUTIL_BIN) $(TEST_YAML_BIN)
 
 # ---------------------------------------------------------------------------
 # Shared library: libcando.so
@@ -235,6 +237,12 @@ $(TEST_THREAD_BIN): $(TEST_THREAD_SRCS)
 $(TEST_SOCKUTIL_BIN): $(TEST_SOCKUTIL_SRCS)
 	$(CC) $(CFLAGS_CORE) -iquote source -iquote source/lib $^ -o $@ $(LDFLAGS)
 
+# test_yaml uses the high-level embedding API so it links against libcando.so.
+$(TEST_YAML_BIN): tests/test_yaml.c libcando.so
+	$(CC) $(CFLAGS_EXE) tests/test_yaml.c \
+	    -L. -lcando -Wl,-rpath,'$$ORIGIN/..' \
+	    -o $@ $(LDFLAGS)
+
 test: all
 	./$(TEST_CORE_BIN)
 	./$(TEST_OBJECT_BIN)
@@ -243,6 +251,7 @@ test: all
 	./$(TEST_PARSER_BIN)
 	./$(TEST_VM_BIN)
 	./$(TEST_SOCKUTIL_BIN)
+	./$(TEST_YAML_BIN)
 	bash tests/integration/run_tests.sh
 
 test_integration: $(CANDO_BIN)
@@ -268,6 +277,9 @@ test_thread: $(TEST_THREAD_BIN)
 
 test_sockutil: $(TEST_SOCKUTIL_BIN)
 	./$(TEST_SOCKUTIL_BIN)
+
+test_yaml: $(TEST_YAML_BIN)
+	./$(TEST_YAML_BIN)
 
 # ---------------------------------------------------------------------------
 # Windows cross-compilation (requires mingw-w64)
@@ -363,7 +375,7 @@ modules-clean:
 clean: modules-clean
 	rm -f $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) \
 	      $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN) \
-	      $(TEST_SOCKUTIL_BIN) \
+	      $(TEST_SOCKUTIL_BIN) $(TEST_YAML_BIN) \
 	      $(CANDO_BIN) cando.exe \
 	      libcando.so libcando.a libcando.dll libcando.lib icon.res
 	rm -rf $(LIBOBJS_DIR)

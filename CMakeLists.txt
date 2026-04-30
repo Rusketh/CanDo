@@ -79,6 +79,7 @@ set(LIB_SRCS
     source/lib/include.c
     source/lib/json.c
     source/lib/csv.c
+    source/lib/yaml.c
     source/lib/thread.c
     source/lib/os.c
     source/lib/datetime.c
@@ -328,3 +329,12 @@ target_compile_options(test_sockutil PRIVATE
 target_link_libraries(test_sockutil PRIVATE
     Threads::Threads OpenSSL::SSL OpenSSL::Crypto ${PLATFORM_LIBS})
 add_test(NAME test_sockutil COMMAND $<TARGET_FILE:test_sockutil>)
+
+# test_yaml — links against libcando to drive the high-level VM/library API.
+add_executable(test_yaml tests/test_yaml.c)
+target_include_directories(test_yaml PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/source
+)
+target_link_libraries(test_yaml PRIVATE libcando)
+add_test(NAME test_yaml COMMAND $<TARGET_FILE:test_yaml>)

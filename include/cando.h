@@ -83,6 +83,7 @@
 #include "lib/include.h"
 #include "lib/json.h"
 #include "lib/csv.h"
+#include "lib/yaml.h"
 #include "lib/thread.h"
 #include "lib/os.h"
 #include "lib/datetime.h"
@@ -148,6 +149,7 @@ CANDO_API void cando_open_arraylib(CandoVM *vm);     /**< array prototype   */
 CANDO_API void cando_open_objectlib(CandoVM *vm);    /**< object.*          */
 CANDO_API void cando_open_jsonlib(CandoVM *vm);      /**< json.*            */
 CANDO_API void cando_open_csvlib(CandoVM *vm);       /**< csv.*             */
+CANDO_API void cando_open_yamllib(CandoVM *vm);      /**< yaml.*            */
 CANDO_API void cando_open_threadlib(CandoVM *vm);    /**< thread.*          */
 CANDO_API void cando_open_oslib(CandoVM *vm);        /**< os.*              */
 CANDO_API void cando_open_datetimelib(CandoVM *vm);  /**< datetime.*        */

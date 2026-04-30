@@ -23,3 +23,10 @@ print(greet("Ext"));                /* Hello, Ext!      */
 VAR data2 = include("modules/data.json");
 data2.name = "Mutated";
 print(data.name);                   /* Mutated (shared) */
+
+/* --- .yaml: parsed object via include() --- */
+VAR yml = include("modules/data.yaml");
+print(yml.name);                    /* Cando            */
+print(yml.version);                 /* 1                */
+print(yml.tags[0]);                 /* alpha            */
+print(yml.active);                  /* true             */

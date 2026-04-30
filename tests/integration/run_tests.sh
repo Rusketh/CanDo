@@ -116,7 +116,10 @@ run_test "include_16" "$SCRIPTS/include_16.cdo" \
     "$(printf '1\n8\n16\ntrue\ntrue\ntrue')"
 
 run_test "include_ext" "$SCRIPTS/include_ext.cdo" \
-    "$(printf 'Cando\n1\ntrue\nalpha\nbeta\nalice\nbob\neve\nLA\nHello, Ext!\nMutated')"
+    "$(printf 'Cando\n1\ntrue\nalpha\nbeta\nalice\nbob\neve\nLA\nHello, Ext!\nMutated\nCando\n1\nalpha\ntrue')"
+
+run_test "lib_yaml" "$SCRIPTS/lib_yaml.cdo" \
+    "$(printf '42\n3.5\ntrue\nfalse\nnull\nnull\ntrue\nfalse\nhello\n42\nAlice\n30\ntrue\none\n2\ntrue\nnull\nlocalhost\n8080\ndebug\nverbose\nalice\n30\nbob\n25\n1\n3\n1\nhello\ntrue\n12\n14\nvalue\na\nb\ntrue\n3\n5\n5\n7\n6\nCando\n1\na\nb\ntrue\n3\n3\nflow_error_caught')"
 
 run_test "threads" "$SCRIPTS/threads.cdo" \
     "$(printf '42\n10\n20\ntrue\nsleep_ok\nid_ok\n99\ntrue\nnull\n7\n1\n2\n3\ndone\nerror\nbad\ntrue\ntrue\n77\n88\ncaught_err\nalready\nfalse')"

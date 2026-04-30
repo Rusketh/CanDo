@@ -1,0 +1,8 @@
+# tests/scripts/modules/data.yaml
+# Mirror of data.json so the include() suite can exercise YAML loading.
+name: Cando
+version: 1
+active: true
+tags:
+  - alpha
+  - beta

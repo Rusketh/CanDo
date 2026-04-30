@@ -16,6 +16,7 @@ compiled to bytecode for a stack-based VM.
 | [socket.md](socket.md) | Long-form guide to the `socket` and `secure_socket` libraries |
 | [streaming.md](streaming.md) | Unified `stream` API: pipe between files, sockets, HTTP, processes, threads |
 | [threading.md](threading.md) | `thread` / `await`, the `thread` library, shared state |
+| [yaml.md](yaml.md) | YAML parse / stringify and `include()`-time loading |
 
 ## For C embedders
 
