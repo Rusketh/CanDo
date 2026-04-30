@@ -103,6 +103,19 @@ CdoThread *cdo_thread_new(CandoValue fn_val);
  */
 void cdo_thread_destroy(CdoThread *t);
 
+/*
+ * cdo_thread_trace -- visit every heap-typed CandoValue stored on the
+ * thread (fn_val, results, error, then_fn, catch_fn) and resolve each
+ * via `resolve` (which converts the value to a tracked-object pointer)
+ * before feeding it to `mark`.  Used by the GC root walker.
+ */
+typedef void *(*CdoThreadResolveFn)(CandoValue v, void *ud);
+typedef bool  (*CdoThreadMarkFn)(void *target_obj, void *ud);
+void cdo_thread_trace(CdoThread *t,
+                      CdoThreadResolveFn resolve,
+                      CdoThreadMarkFn    mark,
+                      void              *ud);
+
 /* -------------------------------------------------------------------------
  * State transitions
  * ---------------------------------------------------------------------- */

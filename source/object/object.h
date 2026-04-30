@@ -21,6 +21,7 @@
 #include "lock.h"
 #include "string.h"
 #include "value.h"
+#include "../core/value.h"   /* HandleIndex / CANDO_INVALID_HANDLE */
 
 /* -----------------------------------------------------------------------
  * Field flags
@@ -85,6 +86,11 @@ typedef enum {
 } ObjectKind;
 
 /* -----------------------------------------------------------------------
+ * GC mark callback type (forward decl; tracer impls live below).
+ * --------------------------------------------------------------------- */
+typedef bool (*CdoMarkFn)(void *target_obj, void *ud);
+
+/* -----------------------------------------------------------------------
  * CdoObject
  *
  * CandoLockHeader MUST be the first member (offset 0) so a CdoObject*
@@ -94,6 +100,11 @@ struct CdoObject {
     CandoLockHeader lock;          /* thread-safety header -- offset 0    */
     u8              kind;          /* ObjectKind                          */
     bool            readonly;      /* no new fields and no writes         */
+    HandleIndex     handle_idx;    /* CandoHandleTable slot pointing at this
+                                    * object; set right after handle_alloc.
+                                    * The GC sweeps the handle slot when it
+                                    * frees the object so the table doesn't
+                                    * grow unbounded across collections.  */
 
     /* Hash table: open addressing, linear probing, cap always power of 2 */
     ObjSlot        *slots;
@@ -128,6 +139,11 @@ struct CdoObject {
              * CandoClosure produced by OP_CLOSURE is reclaimed without
              * the object layer having to know about CandoClosure.       */
             void    (*bytecode_free)(void *);
+            /* Optional GC tracer for `bytecode`.  Called by the object
+             * tracer with `mark` / `ud` so the closure can mark every
+             * captured upvalue value without the object layer needing
+             * the CandoClosure / CandoUpvalue type definitions.         */
+            void    (*bytecode_trace)(void *bytecode, CdoMarkFn mark, void *ud);
         } script;
         struct {                   /* OBJ_NATIVE: C function wrapper      */
             CdoNativeFn fn;
@@ -159,6 +175,20 @@ CANDO_API void cdo_object_destroy_globals(void);
  * --------------------------------------------------------------------- */
 CANDO_API CdoObject *cdo_object_new(void);
 CANDO_API void       cdo_object_destroy(CdoObject *obj);
+
+/* -----------------------------------------------------------------------
+ * Garbage-collection tracer
+ *
+ * cdo_object_trace walks every heap-resident child of `obj` (slot
+ * values, dense array items, captured upvalues, the attached bytecode
+ * for OBJ_FUNCTION) and calls `mark(target_obj, ud)` on each one --
+ * where `target_obj` is the underlying CdoObject* / CdoThread* / etc.
+ *
+ * The mark callback is responsible for de-duping (returning true on
+ * the first visit, false thereafter) so the tracer can recurse safely.
+ * --------------------------------------------------------------------- */
+
+CANDO_API void cdo_object_trace(CdoObject *obj, CdoMarkFn mark, void *ud);
 
 /* -----------------------------------------------------------------------
  * Raw field access (no meta-method dispatch, no prototype chain)

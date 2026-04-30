@@ -32,10 +32,11 @@ static bool meta_is_callable(CdoValue v)
  * (NULL), so callers can iterate until they hit a NULL entry.
  * ===================================================================== */
 CandoNativeFn cando_native_table[CANDO_NATIVE_MAX] = {
-    cando_native_print,     /* index 0, sentinel -1.0 */
-    cando_native_type,      /* index 1, sentinel -2.0 */
-    cando_native_tostring,  /* index 2, sentinel -3.0 */
-    cando_native_inspect,   /* index 3, sentinel -4.0 */
+    cando_native_print,      /* index 0, sentinel -1.0 */
+    cando_native_type,       /* index 1, sentinel -2.0 */
+    cando_native_tostring,   /* index 2, sentinel -3.0 */
+    cando_native_inspect,    /* index 3, sentinel -4.0 */
+    cando_native_gc_collect, /* index 4, sentinel -5.0 */
 };
 
 const char *cando_native_names[CANDO_NATIVE_MAX] = {
@@ -43,6 +44,7 @@ const char *cando_native_names[CANDO_NATIVE_MAX] = {
     "type",
     "toString",
     "inspect",
+    "gc_collect",
 };
 
 /* =========================================================================
@@ -474,5 +476,17 @@ int cando_native_inspect(CandoVM *vm, int argc, CandoValue *args)
     free(ctx.buf);
     free(ctx.path);
     cando_vm_push(vm, cando_string_value(s));
+    return 1;
+}
+
+/* =========================================================================
+ * gc_collect() -- run a full mark-and-sweep on the active VM.
+ * Pushes the number of objects swept and returns 1.
+ * ===================================================================== */
+int cando_native_gc_collect(CandoVM *vm, int argc, CandoValue *args)
+{
+    (void)argc; (void)args;
+    u32 swept = cando_vm_gc_collect(vm);
+    cando_vm_push(vm, cando_number((f64)swept));
     return 1;
 }

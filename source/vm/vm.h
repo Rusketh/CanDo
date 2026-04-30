@@ -342,6 +342,37 @@ CANDO_API CandoClosure *cando_closure_new(CandoChunk *chunk);
 /* cando_closure_free -- release a closure (does NOT free the chunk). */
 CANDO_API void cando_closure_free(CandoClosure *closure);
 
+/* cando_closure_trace -- GC tracer for a closure attached to an
+ * OBJ_FUNCTION via fn.script.bytecode.  Resolves each captured
+ * upvalue's CandoValue closed-state to a tracked-object pointer via
+ * the VM's handle table and feeds it to the mark callback.            */
+typedef bool (*CandoClosureMarkFn)(void *target_obj, void *ud);
+typedef CandoVM *CandoClosureMarkVM;
+CANDO_API void cando_closure_trace(CandoClosure *closure,
+                                   CandoVM *vm,
+                                   CandoClosureMarkFn mark,
+                                   void *ud);
+
+/* =========================================================================
+ * Garbage collection (Stage 2: manual mark-and-sweep)
+ *
+ * cando_vm_gc_collect runs a full collection cycle on `vm`'s memctrl:
+ *   1. clear marks on every tracked entry
+ *   2. mark every root reachable from the VM (stack, globals, frame
+ *      closures, open upvalues, error/result buffers, prototypes,
+ *      default class-call handle)
+ *   3. transitively mark every reachable child object via the per-kind
+ *      tracers (cdo_object_trace, cdo_thread_trace)
+ *   4. sweep -- destroy every still-unmarked entry and free its handle
+ *      slot.
+ *
+ * Returns the number of objects swept.  Safe to call from any path
+ * that doesn't hold raw pointers into the registry; the dispatch loop
+ * is fine because all VM-stack values are roots.
+ * ===================================================================== */
+
+CANDO_API u32 cando_vm_gc_collect(CandoVM *vm);
+
 /* =========================================================================
  * Execution
  * ===================================================================== */

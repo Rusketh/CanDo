@@ -33,6 +33,10 @@ typedef struct {
      * heap state owned by the object AND free the object pointer
      * itself.                                                          */
     void (*destroy)(void *obj);
+    /* Mark-and-sweep: cleared at the start of each collection cycle,
+     * set when the marker reaches the entry, swept (destroy + remove)
+     * if still false at the end of the cycle.                          */
+    bool marked;
 } CandoTrackedObj;
 
 /* -----------------------------------------------------------------------
@@ -89,5 +93,44 @@ CandoMemCtrl *cando_gc_active_memctrl(void);
 
 void cando_gc_track(void *obj, void (*destroy)(void *));
 void cando_gc_untrack(void *obj);
+
+/* -----------------------------------------------------------------------
+ * Mark-and-sweep collection
+ *
+ * The collector's mark phase is driven from the VM layer (which knows
+ * the roots and the per-kind tracer functions).  These primitives are
+ * the agnostic plumbing the VM calls into:
+ *
+ *   1.  cando_memctrl_clear_marks(mc)  -- reset every entry's marked.
+ *   2.  cando_memctrl_mark(mc, obj)    -- set marked, returns true if
+ *                                          the entry was unmarked
+ *                                          before (so the caller knows
+ *                                          whether to recurse into it).
+ *   3.  cando_memctrl_sweep(mc, free_handle, vm)
+ *                                       -- destroy every still-unmarked
+ *                                          entry, optionally calling
+ *                                          free_handle(vm, obj) before
+ *                                          destruction so the VM can
+ *                                          release the object's handle
+ *                                          slot.
+ *
+ * Callers should hold the gc_lock during a full collection cycle if
+ * other threads might be allocating concurrently.
+ * --------------------------------------------------------------------- */
+
+void cando_memctrl_clear_marks(CandoMemCtrl *mc);
+
+/* Returns true if the entry transitioned from unmarked to marked (the
+ * caller should then trace its children); false if `obj` is not in the
+ * registry or was already marked.                                       */
+bool cando_memctrl_mark(CandoMemCtrl *mc, void *obj);
+
+/* Free every unmarked entry.  `free_handle` may be NULL; otherwise it
+ * is called with `(handle_user, entry->obj)` immediately before destroy
+ * so the caller can release any handle table slot the object owns.    */
+typedef void (*CandoFreeHandleFn)(void *handle_user, void *obj);
+void cando_memctrl_sweep(CandoMemCtrl *mc,
+                         CandoFreeHandleFn free_handle,
+                         void *handle_user);
 
 #endif /* CANDO_MEMORY_H */

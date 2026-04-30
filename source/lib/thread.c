@@ -419,7 +419,7 @@ void cando_lib_thread_register(CandoVM *vm)
         cando_lib_meta_alias(t_meta, "catch",  thread_obj, "catch");
 
         /* Cache the meta table handle for fast OBJ_THREAD method dispatch. */
-        HandleIndex h = cando_handle_alloc(vm->handles, t_meta);
+        HandleIndex h = cando_bridge_track_obj(vm, t_meta);
         vm->thread_proto = cando_object_value(h);
     }
 }

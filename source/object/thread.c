@@ -100,3 +100,26 @@ bool cdo_thread_is_done(const CdoThread *t) {
            s == CDO_THREAD_ERROR  ||
            s == CDO_THREAD_CANCELLED;
 }
+
+/* =========================================================================
+ * GC tracer
+ * ===================================================================== */
+
+static void trace_cv(CandoValue v, CdoThreadResolveFn resolve,
+                     CdoThreadMarkFn mark, void *ud) {
+    void *target = resolve(v, ud);
+    if (target) mark(target, ud);
+}
+
+void cdo_thread_trace(CdoThread *t,
+                      CdoThreadResolveFn resolve,
+                      CdoThreadMarkFn    mark,
+                      void              *ud) {
+    if (!t || !resolve || !mark) return;
+    trace_cv(t->fn_val,   resolve, mark, ud);
+    trace_cv(t->error,    resolve, mark, ud);
+    trace_cv(t->then_fn,  resolve, mark, ud);
+    trace_cv(t->catch_fn, resolve, mark, ud);
+    for (u32 i = 0; i < t->result_count; i++)
+        trace_cv(t->results[i], resolve, mark, ud);
+}

@@ -124,6 +124,7 @@ CdoObject *cdo_obj_alloc(ObjectKind kind) {
     atomic_store(&obj->user_lock_depth, (u32)0);
     obj->kind            = (u8)kind;
     obj->readonly        = false;
+    obj->handle_idx      = CANDO_INVALID_HANDLE;
     obj->slots           = NULL;
     obj->slot_cap        = 0;
     obj->field_count     = 0;
@@ -412,6 +413,52 @@ bool cdo_object_rawdelete(CdoObject *obj, CdoString *key) {
 
     cando_lock_write_release(&obj->lock);
     return true;
+}
+
+/* -----------------------------------------------------------------------
+ * GC tracer
+ *
+ * Walk every heap-typed child reachable from `obj` and feed it to the
+ * caller's mark callback.  The mark is responsible for de-duplication
+ * (returning false when re-visiting an entry) so cycles terminate.
+ * --------------------------------------------------------------------- */
+static void mark_cdo_value(CdoValue v, CdoMarkFn mark, void *ud) {
+    switch (v.tag) {
+        case CDO_OBJECT:
+        case CDO_ARRAY:
+        case CDO_FUNCTION:
+        case CDO_NATIVE:
+            if (v.as.object) mark(v.as.object, ud);
+            break;
+        default: break;
+    }
+}
+
+void cdo_object_trace(CdoObject *obj, CdoMarkFn mark, void *ud) {
+    if (!obj) return;
+    /* Hash-table fields. */
+    u32 idx = obj->fifo_head;
+    while (idx != UINT32_MAX) {
+        ObjSlot *s = &obj->slots[idx];
+        u32 next   = s->fifo_next;
+        mark_cdo_value(s->value, mark, ud);
+        idx = next;
+    }
+    /* Dense array items. */
+    if (obj->items) {
+        for (u32 i = 0; i < obj->items_len; i++)
+            mark_cdo_value(obj->items[i], mark, ud);
+    }
+    /* OBJ_FUNCTION: captured upvalues + closure-side trace.            */
+    if (obj->kind == OBJ_FUNCTION) {
+        if (obj->fn.script.upvalues) {
+            for (u32 i = 0; i < obj->fn.script.upvalue_count; i++)
+                mark_cdo_value(obj->fn.script.upvalues[i], mark, ud);
+        }
+        if (obj->fn.script.bytecode && obj->fn.script.bytecode_trace) {
+            obj->fn.script.bytecode_trace(obj->fn.script.bytecode, mark, ud);
+        }
+    }
 }
 
 /* -----------------------------------------------------------------------

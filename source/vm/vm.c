@@ -134,6 +134,8 @@ static bool           vm_push_frame(CandoVM *vm, CandoClosure *closure,
 static CandoUpvalue  *vm_capture_upvalue(CandoVM *vm, CandoValue *local);
 static void           vm_close_upvalues(CandoVM *vm, CandoValue *last);
 static void           vm_upvalue_release(CandoUpvalue *uv);
+static void           vm_closure_trace_adapter(void *bytecode,
+                                               CdoMarkFn mark, void *ud);
 static bool           vm_is_truthy(CandoValue v);
 static bool           vm_is_truthy_meta(CandoVM *vm, CandoValue v, bool *ok);
 static u32            vm_global_hash(const char *str, u32 len);
@@ -414,6 +416,166 @@ void cando_closure_free(CandoClosure *closure) {
         vm_upvalue_release(closure->upvalues[i]);
     cando_free(closure->upvalues);
     cando_free(closure);
+}
+
+void cando_closure_trace(CandoClosure *closure, CandoVM *vm,
+                         CandoClosureMarkFn mark, void *ud) {
+    if (!closure || !vm || !mark) return;
+    for (u32 i = 0; i < closure->upvalue_count; i++) {
+        CandoUpvalue *uv = closure->upvalues[i];
+        if (!uv || !uv->location) continue;
+        CandoValue v = *uv->location;
+        if (v.tag != TYPE_OBJECT) continue;
+        void *obj = cando_handle_get(vm->handles, v.as.handle);
+        if (obj) mark(obj, ud);
+    }
+}
+
+/* =========================================================================
+ * GC root walker + collect cycle (Stage 2)
+ *
+ * The collector runs as a single sweep on the VM's memctrl, with the
+ * VM stack quiesced (the dispatch loop is paused if invoked from a
+ * native function -- safe because the caller's args are roots).
+ * ===================================================================== */
+
+/* Trace context threaded through every mark callback so the per-kind
+ * tracers can resolve handles via the active VM without breaking the
+ * object-layer's no-vm.h-dependency rule.                              */
+typedef struct {
+    CandoVM      *vm;
+    CandoMemCtrl *mem;
+} TraceCtx;
+
+/* Mark `obj` and recursively trace its children if it transitioned
+ * from unmarked to marked (i.e. was just discovered).                  */
+static bool gc_mark_obj(void *obj, void *ud);
+
+/* Resolve a CandoValue's heap target to a tracked-object pointer, or
+ * NULL if the value is not a heap reference.                           */
+static void *gc_resolve_cv(CandoVM *vm, CandoValue v) {
+    if (v.tag != TYPE_OBJECT) return NULL;
+    return cando_handle_get(vm->handles, v.as.handle);
+}
+
+static void gc_mark_cv(CandoValue v, TraceCtx *ctx) {
+    void *obj = gc_resolve_cv(ctx->vm, v);
+    if (obj) gc_mark_obj(obj, ctx);
+}
+
+/* Adapter so the object-layer tracer's CdoThread{Resolve,Mark}Fn
+ * signature can drive into our gc_mark_obj.                            */
+static void *gc_thread_resolve(CandoValue v, void *ud) {
+    return gc_resolve_cv(((TraceCtx *)ud)->vm, v);
+}
+static bool gc_thread_mark(void *obj, void *ud) {
+    return gc_mark_obj(obj, ud);
+}
+
+/* Adapter so OBJ_FUNCTION's bytecode_trace (untyped (void *bytecode,
+ * CdoMarkFn, void *)) can drive cando_closure_trace.                  */
+static void vm_closure_trace_adapter(void *bytecode,
+                                     CdoMarkFn mark, void *ud) {
+    TraceCtx *ctx = (TraceCtx *)ud;
+    cando_closure_trace((CandoClosure *)bytecode, ctx->vm,
+                        (CandoClosureMarkFn)mark, ud);
+}
+
+static bool gc_mark_obj(void *obj, void *ud) {
+    if (!obj) return false;
+    TraceCtx *ctx = (TraceCtx *)ud;
+    if (!cando_memctrl_mark(ctx->mem, obj))
+        return false;   /* already marked or not in registry */
+    /* Dispatch by kind for the trace.  CdoObject and CdoThread share
+     * the kind byte at offset 16.                                    */
+    u8 kind = *((u8 *)obj + 16);
+    if (kind == OBJ_THREAD) {
+        cdo_thread_trace((CdoThread *)obj,
+                         gc_thread_resolve, gc_thread_mark, ctx);
+    } else {
+        cdo_object_trace((CdoObject *)obj, gc_mark_obj, ctx);
+    }
+    return true;
+}
+
+/* Walk every root the VM holds and mark each one (recursively traced
+ * via gc_mark_obj's per-kind dispatch).                                */
+static void gc_mark_roots(TraceCtx *ctx) {
+    CandoVM *vm = ctx->vm;
+
+    /* Active value stack.  Frame->slots pointers index into this
+     * region so they don't need separate enumeration.                  */
+    for (CandoValue *p = vm->stack; p < vm->stack_top; p++)
+        gc_mark_cv(*p, ctx);
+
+    /* Globals. */
+    if (vm->globals) {
+        for (u32 i = 0; i < vm->globals->capacity; i++) {
+            CandoGlobalEntry *e = &vm->globals->entries[i];
+            if (e->key) gc_mark_cv(e->value, ctx);
+        }
+    }
+
+    /* Frame closures' upvalue closed-state.  Each frame holds a
+     * CandoClosure pointer; the closure isn't itself a tracked object,
+     * but the values its upvalues point at may be.                     */
+    for (u32 fi = 0; fi < vm->frame_count; fi++) {
+        CandoClosure *c = vm->frames[fi].closure;
+        if (!c) continue;
+        cando_closure_trace(c, vm, gc_mark_obj, ctx);
+    }
+
+    /* Open upvalues: their `location` aliases a stack slot which is
+     * already a root, so the value itself is covered above.  Nothing
+     * extra to do here for Stage 2.                                   */
+
+    /* Pending error and thread-result buffers. */
+    for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++)
+        gc_mark_cv(vm->error_vals[i], ctx);
+    for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++)
+        gc_mark_cv(vm->thread_results[i], ctx);
+
+    /* Eval-mode result buffer (set when an embedded eval is in
+     * progress; lifted out by the caller).                            */
+    if (vm->eval_results) {
+        for (u32 i = 0; i < vm->eval_result_count; i++)
+            gc_mark_cv(vm->eval_results[i], ctx);
+    }
+
+    /* Cached prototypes / class-call dispatcher. */
+    gc_mark_cv(vm->string_proto,       ctx);
+    gc_mark_cv(vm->array_proto,        ctx);
+    gc_mark_cv(vm->thread_proto,       ctx);
+    gc_mark_cv(vm->default_class_call, ctx);
+}
+
+/* Free the handle slot owned by `obj` so the table doesn't grow
+ * unbounded across collections.  Called for every entry the sweep is
+ * about to destroy.                                                   */
+static void gc_free_handle(void *handle_user, void *obj) {
+    CandoVM *vm = (CandoVM *)handle_user;
+    if (!vm || !vm->handles) return;
+    HandleIndex h;
+    u8 kind = *((u8 *)obj + 16);
+    if (kind == OBJ_THREAD) {
+        h = ((CdoThread *)obj)->handle_idx;
+    } else {
+        h = ((CdoObject *)obj)->handle_idx;
+    }
+    if (h != CANDO_INVALID_HANDLE) cando_handle_free(vm->handles, h);
+}
+
+u32 cando_vm_gc_collect(CandoVM *vm) {
+    if (!vm || !vm->mem) return 0;
+    u32 before = vm->mem->live_count;
+
+    TraceCtx ctx = { vm, vm->mem };
+    cando_memctrl_clear_marks(vm->mem);
+    gc_mark_roots(&ctx);
+    cando_memctrl_sweep(vm->mem, gc_free_handle, vm);
+
+    u32 after = vm->mem->live_count;
+    return before - after;
 }
 
 /* =========================================================================
@@ -2519,10 +2681,18 @@ static CandoVMResult vm_run(CandoVM *vm) {
                                                   (void *)new_closure,
                                                   NULL, 0);
             /* Tell cdo_object_destroy how to dispose of the attached
-             * CandoClosure when the OBJ_FUNCTION is reclaimed.          */
+             * CandoClosure when the OBJ_FUNCTION is reclaimed, and how
+             * to trace the closure's upvalues during GC mark.           */
             fn_obj->fn.script.bytecode_free =
                 (void (*)(void *))cando_closure_free;
-            HandleIndex h = cando_handle_alloc(vm->handles, fn_obj);
+            /* Wrapper so cando_closure_trace's signature
+             *   (CandoClosure*, CandoVM*, mark, ud)
+             * adapts to the object-layer's
+             *   (bytecode, CdoMarkFn, ud)
+             * without exposing CandoVM to object/.  ud is a TraceCtx*
+             * the VM-side root walker passes through.                  */
+            fn_obj->fn.script.bytecode_trace = vm_closure_trace_adapter;
+            HandleIndex h = cando_bridge_track_obj(vm, fn_obj);
             PUSH(cando_object_value(h));
             DISPATCH();
         }
