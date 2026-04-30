@@ -242,10 +242,12 @@ static int compile_source(CandoVM *vm,
                  err ? err : "parse error");
         vm->has_error = true;
         cando_chunk_free(chunk);
+        cando_parser_free(&parser);
         *chunk_out = NULL;
         return CANDO_ERR_PARSE;
     }
 
+    cando_parser_free(&parser);
     *chunk_out = chunk;
     return CANDO_OK;
 }

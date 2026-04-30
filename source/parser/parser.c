@@ -208,6 +208,113 @@ static u16 prev_name_const(CandoParser *p)
     return str_const(p, p->previous.start, p->previous.length);
 }
 
+/* ---- dynamic local / upvalue table growth ------------------------------ */
+
+/* Grow locals[] to hold at least `needed` entries.  Returns false (and
+ * raises a parser error) if the absolute cap CANDO_LOCAL_MAX is reached. */
+static bool ensure_locals_capacity(CandoParser *p, u32 needed)
+{
+    if (needed <= p->local_capacity) return true;
+    if (needed > CANDO_LOCAL_MAX) {
+        error(p, "too many local variables in scope");
+        return false;
+    }
+    u32 new_cap = p->local_capacity ? p->local_capacity : CANDO_LOCAL_INITIAL_CAP;
+    while (new_cap < needed) {
+        if (new_cap >= CANDO_LOCAL_MAX / 2) { new_cap = CANDO_LOCAL_MAX; break; }
+        new_cap *= 2;
+    }
+    p->locals = (CandoLocal *)cando_realloc(p->locals,
+                                            (usize)new_cap * sizeof(CandoLocal));
+    p->local_capacity = new_cap;
+    return true;
+}
+
+/* Same growth strategy for the upvalue capture-spec table. */
+static bool ensure_upvalues_capacity(CandoParser *p, u32 needed)
+{
+    if (needed <= p->upvalue_capacity) return true;
+    if (needed > CANDO_LOCAL_MAX) {
+        error(p, "too many captured upvalues");
+        return false;
+    }
+    u32 new_cap = p->upvalue_capacity ? p->upvalue_capacity
+                                      : CANDO_LOCAL_INITIAL_CAP;
+    while (new_cap < needed) {
+        if (new_cap >= CANDO_LOCAL_MAX / 2) { new_cap = CANDO_LOCAL_MAX; break; }
+        new_cap *= 2;
+    }
+    p->upvalue_specs = (u16 *)cando_realloc(p->upvalue_specs,
+                                            (usize)new_cap * sizeof(u16));
+    p->upvalue_capacity = new_cap;
+    return true;
+}
+
+/* Saved enclosing-scope state captured when entering a nested function /
+ * class body.  See enter_function_scope / leave_function_scope below.    */
+typedef struct {
+    CandoLocal *locals;
+    u32         local_count;
+    u32         local_capacity;
+    int         scope_depth;
+    CandoLocal *outer_locals;
+    u32         outer_count;
+    u16        *upvalue_specs;
+    u16         upvalue_count;
+    u32         upvalue_capacity;
+} FnScopeSave;
+
+/* Snapshot the current locals/upvalues tables and replace them with fresh
+ * empty buffers so the nested function body parses against its own scope.
+ * The saved outer locals[] becomes p->outer_locals so resolve_upvalue can
+ * see captures into the immediate enclosing function.                    */
+static void enter_function_scope(CandoParser *p, FnScopeSave *s)
+{
+    s->locals           = p->locals;
+    s->local_count      = p->local_count;
+    s->local_capacity   = p->local_capacity;
+    s->scope_depth      = p->scope_depth;
+    s->outer_locals     = p->outer_locals;
+    s->outer_count      = p->outer_count;
+    s->upvalue_specs    = p->upvalue_specs;
+    s->upvalue_count    = p->upvalue_count;
+    s->upvalue_capacity = p->upvalue_capacity;
+
+    p->locals           = (CandoLocal *)cando_alloc(
+                              sizeof(CandoLocal) * CANDO_LOCAL_INITIAL_CAP);
+    p->local_count      = 0;
+    p->local_capacity   = CANDO_LOCAL_INITIAL_CAP;
+    p->scope_depth      = 1;
+    p->outer_locals     = s->locals;
+    p->outer_count      = s->local_count;
+    p->upvalue_specs    = (u16 *)cando_alloc(
+                              sizeof(u16) * CANDO_LOCAL_INITIAL_CAP);
+    p->upvalue_count    = 0;
+    p->upvalue_capacity = CANDO_LOCAL_INITIAL_CAP;
+}
+
+/* Restore enclosing scope.  The body's upvalue capture buffer is handed
+ * back to the caller (ownership transferred via *out_specs / *out_count)
+ * so it can be passed to emit_closure before being freed.                */
+static void leave_function_scope(CandoParser *p, FnScopeSave *s,
+                                 u16 **out_specs, u16 *out_count)
+{
+    *out_specs = p->upvalue_specs;
+    *out_count = p->upvalue_count;
+
+    cando_free(p->locals);
+
+    p->locals           = s->locals;
+    p->local_count      = s->local_count;
+    p->local_capacity   = s->local_capacity;
+    p->scope_depth      = s->scope_depth;
+    p->outer_locals     = s->outer_locals;
+    p->outer_count      = s->outer_count;
+    p->upvalue_specs    = s->upvalue_specs;
+    p->upvalue_count    = s->upvalue_count;
+    p->upvalue_capacity = s->upvalue_capacity;
+}
+
 /* ---- scope helpers ----------------------------------------------------- */
 
 static void scope_begin(CandoParser *p)
@@ -242,10 +349,7 @@ static int resolve_local(CandoParser *p, const char *name, u32 len)
 static u32 declare_local(CandoParser *p, const char *name, u32 len,
                           bool is_const)
 {
-    if (p->local_count >= CANDO_LOCAL_MAX) {
-        error(p, "too many local variables in scope");
-        return 0;
-    }
+    if (!ensure_locals_capacity(p, p->local_count + 1)) return 0;
     u32 slot = p->local_count;
     CandoLocal *loc = &p->locals[p->local_count++];
     loc->name     = name;
@@ -487,10 +591,8 @@ static int resolve_upvalue(CandoParser *p, const char *name, u32 len)
             for (u16 j = 0; j < p->upvalue_count; j++) {
                 if (p->upvalue_specs[j] == (u16)i) return (int)j;
             }
-            if (p->upvalue_count >= CANDO_LOCAL_MAX) {
-                error(p, "too many captured upvalues");
+            if (!ensure_upvalues_capacity(p, (u32)p->upvalue_count + 1))
                 return -1;
-            }
             p->upvalue_specs[p->upvalue_count] = (u16)i;
             return (int)p->upvalue_count++;
         }
@@ -1978,29 +2080,9 @@ static void parse_function_expr(CandoParser *p, bool can_assign)
     u32 skip_body = emit_jump(p, OP_JUMP);
     u32 fn_start  = cur(p)->code_len;
 
-    /* Save outer scope state to reset for function body (flat chunk model). */
-    CandoLocal saved_locals[CANDO_LOCAL_MAX];
-    u32        saved_count = p->local_count;
-    int        saved_depth = p->scope_depth;
-    memcpy(saved_locals, p->locals, sizeof(CandoLocal) * saved_count);
-
-    /* Stash any in-flight upvalue tracking from a still-compiling outer
-     * function, then expose this function's outer scope so resolve_upvalue
-     * can capture loop-locals / block-locals declared in the enclosing
-     * frame. */
-    CandoLocal *saved_outer_locals = p->outer_locals;
-    u32         saved_outer_count  = p->outer_count;
-    u16         saved_uv_specs[CANDO_LOCAL_MAX];
-    u16         saved_uv_count     = p->upvalue_count;
-    if (saved_uv_count > 0)
-        memcpy(saved_uv_specs, p->upvalue_specs,
-               sizeof(u16) * saved_uv_count);
-
-    p->local_count    = 0;
-    p->scope_depth    = 1;
-    p->outer_locals   = saved_locals;
-    p->outer_count    = saved_count;
-    p->upvalue_count  = 0;
+    /* Switch to a fresh inner scope for the function body. */
+    FnScopeSave saved;
+    enter_function_scope(p, &saved);
 
     /* Slot 0 is the function value in the call frame. */
     declare_local(p, "", 0, false);
@@ -2012,28 +2094,16 @@ static void parse_function_expr(CandoParser *p, bool can_assign)
     emit_op(p, OP_NULL);
     emit_op_a(p, OP_RETURN, 1);
 
-    /* Snapshot the captures registered while parsing the body, then
-     * restore the outer compile state before emitting OP_CLOSURE. */
-    u16 body_uv_count = p->upvalue_count;
-    u16 body_uv_specs[CANDO_LOCAL_MAX];
-    if (body_uv_count > 0)
-        memcpy(body_uv_specs, p->upvalue_specs,
-               sizeof(u16) * body_uv_count);
-
-    p->local_count = saved_count;
-    p->scope_depth = saved_depth;
-    memcpy(p->locals, saved_locals, sizeof(CandoLocal) * saved_count);
-    p->outer_locals  = saved_outer_locals;
-    p->outer_count   = saved_outer_count;
-    p->upvalue_count = saved_uv_count;
-    if (saved_uv_count > 0)
-        memcpy(p->upvalue_specs, saved_uv_specs,
-               sizeof(u16) * saved_uv_count);
+    /* Take ownership of the body's upvalue captures and restore outer state. */
+    u16 *body_uv_specs;
+    u16  body_uv_count;
+    leave_function_scope(p, &saved, &body_uv_specs, &body_uv_count);
 
     patch_jump(p, skip_body);
 
     u16 pc_idx = cando_chunk_add_const(cur(p), cando_number((f64)fn_start));
     emit_closure(p, pc_idx, body_uv_specs, body_uv_count);
+    cando_free(body_uv_specs);
 
     /* The function *expression* evaluates to a closure value — it is not a
      * call.  Clear last_expr_was_call / last_expr_was_unpack so callers such
@@ -2078,25 +2148,8 @@ static void parse_function(CandoParser *p)
     u32 skip_body = emit_jump(p, OP_JUMP);
     u32 fn_start = cur(p)->code_len;
 
-    /* Save and reset scope for function body. */
-    CandoLocal saved_locals[CANDO_LOCAL_MAX];
-    u32        saved_count = p->local_count;
-    int        saved_depth = p->scope_depth;
-    memcpy(saved_locals, p->locals, sizeof(CandoLocal) * saved_count);
-
-    CandoLocal *saved_outer_locals = p->outer_locals;
-    u32         saved_outer_count  = p->outer_count;
-    u16         saved_uv_specs[CANDO_LOCAL_MAX];
-    u16         saved_uv_count     = p->upvalue_count;
-    if (saved_uv_count > 0)
-        memcpy(saved_uv_specs, p->upvalue_specs,
-               sizeof(u16) * saved_uv_count);
-
-    p->local_count    = 0;
-    p->scope_depth    = 1;
-    p->outer_locals   = saved_locals;
-    p->outer_count    = saved_count;
-    p->upvalue_count  = 0;
+    FnScopeSave saved;
+    enter_function_scope(p, &saved);
 
     declare_local(p, "", 0, false); /* slot 0 */
     for (u16 i = 0; i < arity; i++)
@@ -2107,28 +2160,16 @@ static void parse_function(CandoParser *p)
     emit_op(p, OP_NULL);          /* implicit return null */
     emit_op_a(p, OP_RETURN, 1);
 
-    u16 body_uv_count = p->upvalue_count;
-    u16 body_uv_specs[CANDO_LOCAL_MAX];
-    if (body_uv_count > 0)
-        memcpy(body_uv_specs, p->upvalue_specs,
-               sizeof(u16) * body_uv_count);
-
-    /* Restore outer scope state. */
-    p->local_count = saved_count;
-    p->scope_depth = saved_depth;
-    memcpy(p->locals, saved_locals, sizeof(CandoLocal) * saved_count);
-    p->outer_locals  = saved_outer_locals;
-    p->outer_count   = saved_outer_count;
-    p->upvalue_count = saved_uv_count;
-    if (saved_uv_count > 0)
-        memcpy(p->upvalue_specs, saved_uv_specs,
-               sizeof(u16) * saved_uv_count);
+    u16 *body_uv_specs;
+    u16  body_uv_count;
+    leave_function_scope(p, &saved, &body_uv_specs, &body_uv_count);
 
     patch_jump(p, skip_body);
 
     /* Build a closure object from the function's start PC and define it. */
     u16 pc_idx   = cando_chunk_add_const(cur(p), cando_number((f64)fn_start));
     emit_closure(p, pc_idx, body_uv_specs, body_uv_count);
+    cando_free(body_uv_specs);
     u16 name_idx = str_const(p, fn_name, fn_len);
     emit_op_a(p, OP_DEF_GLOBAL, name_idx);
 #undef MAX_PARAMS
@@ -2197,24 +2238,8 @@ static void emit_class_body(CandoParser *p, bool has_extends)
     u32 skip_body = emit_jump(p, OP_JUMP);
     u32 fn_start  = cur(p)->code_len;
 
-    CandoLocal saved_locals[CANDO_LOCAL_MAX];
-    u32        saved_count = p->local_count;
-    int        saved_depth = p->scope_depth;
-    memcpy(saved_locals, p->locals, sizeof(CandoLocal) * saved_count);
-
-    CandoLocal *saved_outer_locals = p->outer_locals;
-    u32         saved_outer_count  = p->outer_count;
-    u16         saved_uv_specs[CANDO_LOCAL_MAX];
-    u16         saved_uv_count     = p->upvalue_count;
-    if (saved_uv_count > 0)
-        memcpy(saved_uv_specs, p->upvalue_specs,
-               sizeof(u16) * saved_uv_count);
-
-    p->local_count    = 0;
-    p->scope_depth    = 1;
-    p->outer_locals   = saved_locals;
-    p->outer_count    = saved_count;
-    p->upvalue_count  = 0;
+    FnScopeSave saved;
+    enter_function_scope(p, &saved);
 
     declare_local(p, "", 0, false); /* slot 0: call frame sentinel */
     for (u16 i = 0; i < arity; i++)
@@ -2225,21 +2250,9 @@ static void emit_class_body(CandoParser *p, bool has_extends)
     emit_op(p, OP_NULL);
     emit_op_a(p, OP_RETURN, 1);
 
-    u16 body_uv_count = p->upvalue_count;
-    u16 body_uv_specs[CANDO_LOCAL_MAX];
-    if (body_uv_count > 0)
-        memcpy(body_uv_specs, p->upvalue_specs,
-               sizeof(u16) * body_uv_count);
-
-    p->local_count = saved_count;
-    p->scope_depth = saved_depth;
-    memcpy(p->locals, saved_locals, sizeof(CandoLocal) * saved_count);
-    p->outer_locals  = saved_outer_locals;
-    p->outer_count   = saved_outer_count;
-    p->upvalue_count = saved_uv_count;
-    if (saved_uv_count > 0)
-        memcpy(p->upvalue_specs, saved_uv_specs,
-               sizeof(u16) * saved_uv_count);
+    u16 *body_uv_specs;
+    u16  body_uv_count;
+    leave_function_scope(p, &saved, &body_uv_specs, &body_uv_count);
 
     patch_jump(p, skip_body);
 
@@ -2249,6 +2262,7 @@ static void emit_class_body(CandoParser *p, bool has_extends)
     u16 ctor_pc_idx   = cando_chunk_add_const(cur(p),
                                               cando_number((f64)fn_start));
     emit_closure(p, ctor_pc_idx, body_uv_specs, body_uv_count);
+    cando_free(body_uv_specs);
     static const char kCtorName[] = "__constructor";
     u16 ctor_name_idx = str_const(p, kCtorName,
                                   (u32)(sizeof(kCtorName) - 1));
@@ -2502,7 +2516,10 @@ void cando_parser_init(CandoParser *p, const char *source, usize len,
     p->had_error          = false;
     p->panic_mode         = false;
     p->chunk              = chunk;
+    p->locals             = (CandoLocal *)cando_alloc(
+                                sizeof(CandoLocal) * CANDO_LOCAL_INITIAL_CAP);
     p->local_count        = 0;
+    p->local_capacity     = CANDO_LOCAL_INITIAL_CAP;
     p->scope_depth        = 0;
     p->last_expr_was_call   = false;
     p->last_expr_was_unpack = false;
@@ -2517,11 +2534,27 @@ void cando_parser_init(CandoParser *p, const char *source, usize len,
     p->ternary_then_depth = 0;
     p->outer_locals       = NULL;
     p->outer_count        = 0;
+    p->upvalue_specs      = (u16 *)cando_alloc(
+                                sizeof(u16) * CANDO_LOCAL_INITIAL_CAP);
     p->upvalue_count      = 0;
+    p->upvalue_capacity   = CANDO_LOCAL_INITIAL_CAP;
     p->error_msg[0] = '\0';
 
     p->current.type = TOK_EOF;
     advance(p);
+}
+
+void cando_parser_free(CandoParser *p)
+{
+    if (!p) return;
+    cando_free(p->locals);
+    p->locals = NULL;
+    p->local_count = 0;
+    p->local_capacity = 0;
+    cando_free(p->upvalue_specs);
+    p->upvalue_specs = NULL;
+    p->upvalue_count = 0;
+    p->upvalue_capacity = 0;
 }
 
 bool cando_parse(CandoParser *p)
