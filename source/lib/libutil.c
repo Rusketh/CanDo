@@ -103,3 +103,11 @@ void libutil_set_method(CandoVM *vm, CdoObject *obj,
     cdo_object_rawset(obj, key, cdo_number(sentinel.as.number), FIELD_NONE);
     cdo_string_release(key);
 }
+
+void libutil_register_methods(CandoVM *vm, CdoObject *obj,
+                              const LibutilMethodEntry *entries,
+                              usize count)
+{
+    for (usize i = 0; i < count; i++)
+        libutil_set_method(vm, obj, entries[i].name, entries[i].fn);
+}

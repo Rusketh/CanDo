@@ -321,20 +321,25 @@ static int arr_copy(CandoVM *vm, int argc, CandoValue *args) {
  * Registration
  * ======================================================================= */
 
+static const LibutilMethodEntry array_methods[] = {
+    { "length", arr_length },
+    { "push",   arr_push   },
+    { "pop",    arr_pop    },
+    { "splice", arr_splice },
+    { "remove", arr_remove },
+    { "copy",   arr_copy   },
+    { "map",    arr_map    },
+    { "filter", arr_filter },
+    { "reduce", arr_reduce },
+};
+
 void cando_lib_array_register(CandoVM *vm)
 {
     CandoValue proto_val = cando_bridge_new_object(vm);
     CdoObject *proto     = cando_bridge_resolve(vm, proto_val.as.handle);
 
-    libutil_set_method(vm, proto, "length", arr_length);
-    libutil_set_method(vm, proto, "push",   arr_push);
-    libutil_set_method(vm, proto, "pop",    arr_pop);
-    libutil_set_method(vm, proto, "splice", arr_splice);
-    libutil_set_method(vm, proto, "remove", arr_remove);
-    libutil_set_method(vm, proto, "copy",   arr_copy);
-    libutil_set_method(vm, proto, "map",    arr_map);
-    libutil_set_method(vm, proto, "filter", arr_filter);
-    libutil_set_method(vm, proto, "reduce", arr_reduce);
+    libutil_register_methods(vm, proto, array_methods,
+                             CANDO_ARRAY_LEN(array_methods));
 
     cando_vm_set_global(vm, "array", proto_val, true);
     vm->array_proto = proto_val;

@@ -123,17 +123,22 @@ static int os_clock(CandoVM *vm, int argc, CandoValue *args)
  * Registration
  * ======================================================================= */
 
+static const LibutilMethodEntry os_methods[] = {
+    { "getenv",  os_getenv  },
+    { "setenv",  os_setenv  },
+    { "execute", os_execute },
+    { "exit",    os_exit    },
+    { "time",    os_time    },
+    { "clock",   os_clock   },
+};
+
 void cando_lib_os_register(CandoVM *vm)
 {
     CandoValue os_val = cando_bridge_new_object(vm);
     CdoObject *os_obj = cando_bridge_resolve(vm, os_val.as.handle);
 
-    libutil_set_method(vm, os_obj, "getenv",  os_getenv);
-    libutil_set_method(vm, os_obj, "setenv",  os_setenv);
-    libutil_set_method(vm, os_obj, "execute", os_execute);
-    libutil_set_method(vm, os_obj, "exit",    os_exit);
-    libutil_set_method(vm, os_obj, "time",    os_time);
-    libutil_set_method(vm, os_obj, "clock",   os_clock);
+    libutil_register_methods(vm, os_obj, os_methods,
+                             CANDO_ARRAY_LEN(os_methods));
 
     /* Platform constants */
 #if defined(_WIN32) || defined(_WIN64)

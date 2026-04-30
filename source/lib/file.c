@@ -491,6 +491,20 @@ static int file_open(CandoVM *vm, int argc, CandoValue *args)
  * Registration
  * ======================================================================= */
 
+static const LibutilMethodEntry file_methods[] = {
+    { "read",   file_read   },
+    { "write",  file_write  },
+    { "append", file_append },
+    { "exists", file_exists },
+    { "delete", file_delete },
+    { "copy",   file_copy   },
+    { "move",   file_move   },
+    { "size",   file_size   },
+    { "lines",  file_lines  },
+    { "mkdir",  file_mkdir  },
+    { "list",   file_list   },
+};
+
 void cando_lib_file_register(CandoVM *vm)
 {
     CandoValue file_val = cando_bridge_new_object(vm);

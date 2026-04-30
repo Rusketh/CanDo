@@ -120,15 +120,20 @@ static int crypto_base64Decode(CandoVM *vm, int argc, CandoValue *args)
  * Registration
  * ======================================================================= */
 
+static const LibutilMethodEntry crypto_methods[] = {
+    { "md5",          crypto_md5          },
+    { "sha256",       crypto_sha256       },
+    { "base64Encode", crypto_base64Encode },
+    { "base64Decode", crypto_base64Decode },
+};
+
 void cando_lib_crypto_register(CandoVM *vm)
 {
     CandoValue crypto_val = cando_bridge_new_object(vm);
     CdoObject *crypto_obj = cando_bridge_resolve(vm, crypto_val.as.handle);
 
-    libutil_set_method(vm, crypto_obj, "md5",          crypto_md5);
-    libutil_set_method(vm, crypto_obj, "sha256",       crypto_sha256);
-    libutil_set_method(vm, crypto_obj, "base64Encode", crypto_base64Encode);
-    libutil_set_method(vm, crypto_obj, "base64Decode", crypto_base64Decode);
+    libutil_register_methods(vm, crypto_obj, crypto_methods,
+                             CANDO_ARRAY_LEN(crypto_methods));
 
     cando_vm_set_global(vm, "crypto", crypto_val, true);
 }

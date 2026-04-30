@@ -289,36 +289,41 @@ static void set_const(CdoObject *obj, const char *name, f64 value)
     cdo_string_release(key);
 }
 
+static const LibutilMethodEntry math_methods[] = {
+    { "clamp",  math_clamp  },
+    { "min",    math_min    },
+    { "max",    math_max    },
+    { "sin",    math_sin    },
+    { "cos",    math_cos    },
+    { "tan",    math_tan    },
+    { "asin",   math_asin   },
+    { "acos",   math_acos   },
+    { "atan",   math_atan   },
+    { "atan2",  math_atan2  },
+    { "rad",    math_rad    },
+    { "deg",    math_deg    },
+    { "sign",   math_sign   },
+    { "sinh",   math_sinh   },
+    { "cosh",   math_cosh   },
+    { "random", math_random },
+    { "round",  math_round  },
+    { "floor",  math_floor  },
+    { "ceil",   math_ceil   },
+    { "log",    math_log    },
+    { "log10",  math_log10  },
+    { "exp",    math_exp    },
+    { "abs",    math_abs    },
+    { "sqrt",   math_sqrt   },
+    { "pow",    math_pow    },
+};
+
 void cando_lib_math_register(CandoVM *vm)
 {
     CandoValue math_val = cando_bridge_new_object(vm);
     CdoObject *math_obj = cando_bridge_resolve(vm, math_val.as.handle);
 
-    libutil_set_method(vm, math_obj, "clamp",  math_clamp);
-    libutil_set_method(vm, math_obj, "min",    math_min);
-    libutil_set_method(vm, math_obj, "max",    math_max);
-    libutil_set_method(vm, math_obj, "sin",    math_sin);
-    libutil_set_method(vm, math_obj, "cos",    math_cos);
-    libutil_set_method(vm, math_obj, "tan",    math_tan);
-    libutil_set_method(vm, math_obj, "asin",   math_asin);
-    libutil_set_method(vm, math_obj, "acos",   math_acos);
-    libutil_set_method(vm, math_obj, "atan",   math_atan);
-    libutil_set_method(vm, math_obj, "atan2",  math_atan2);
-    libutil_set_method(vm, math_obj, "rad",    math_rad);
-    libutil_set_method(vm, math_obj, "deg",    math_deg);
-    libutil_set_method(vm, math_obj, "sign",   math_sign);
-    libutil_set_method(vm, math_obj, "sinh",   math_sinh);
-    libutil_set_method(vm, math_obj, "cosh",   math_cosh);
-    libutil_set_method(vm, math_obj, "random", math_random);
-    libutil_set_method(vm, math_obj, "round",  math_round);
-    libutil_set_method(vm, math_obj, "floor",  math_floor);
-    libutil_set_method(vm, math_obj, "ceil",   math_ceil);
-    libutil_set_method(vm, math_obj, "log",    math_log);
-    libutil_set_method(vm, math_obj, "log10",  math_log10);
-    libutil_set_method(vm, math_obj, "exp",    math_exp);
-    libutil_set_method(vm, math_obj, "abs",    math_abs);
-    libutil_set_method(vm, math_obj, "sqrt",   math_sqrt);
-    libutil_set_method(vm, math_obj, "pow",    math_pow);
+    libutil_register_methods(vm, math_obj, math_methods,
+                             CANDO_ARRAY_LEN(math_methods));
 
     set_const(math_obj, "pi",   3.14159265358979323846);
     set_const(math_obj, "tau",  6.28318530717958647692);
