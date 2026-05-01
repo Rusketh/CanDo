@@ -61,6 +61,16 @@ import {
     resolveIncludePath
 } from './paths';
 import { getIncludeExports } from './crossfile';
+import {
+    buildTypeEnv,
+    inferReceiverAt,
+    listMembers,
+    describeTypeForHover,
+    formatMemberDetail,
+    TypeEnv,
+    TypeRef
+} from './types';
+import { MemberSpec } from './manifest';
 
 interface CandoSettings {
     diagnostics: { enable: boolean };
@@ -91,6 +101,7 @@ interface CachedAnalysis {
     includes: Map<string, IncludeBinding>;
     objectLiterals: Map<string, string[]>;
     moduleExports: string[];
+    typeEnv: TypeEnv;
     version: number;
 }
 const analysisCache = new Map<string, CachedAnalysis>();
@@ -143,6 +154,7 @@ documents.onDidClose(e => analysisCache.delete(e.document.uri));
 function refresh(doc: TextDocument): void {
     const tokens = new Lexer(doc.getText()).tokenize();
     const result = analyze(tokens);
+    const typeEnv = buildTypeEnv(tokens, result.symbols, doc.uri, workspaceRoots);
     analysisCache.set(doc.uri, {
         tokens,
         symbols: result.symbols,
@@ -150,6 +162,7 @@ function refresh(doc: TextDocument): void {
         includes: result.includes,
         objectLiterals: result.objectLiterals,
         moduleExports: result.moduleExports,
+        typeEnv,
         version: doc.version
     });
     if (globalSettings.diagnostics.enable) {
@@ -228,20 +241,32 @@ connection.onCompletion(params => {
         }
     }
 
-    /* 2. `name.` or `name:` member access. */
-    const before = text.slice(Math.max(0, offset - 64), offset);
-    const dotMatch = /([A-Za-z_][A-Za-z0-9_]*)\s*[.:]\s*$/.exec(before);
-    if (dotMatch) {
-        const name = dotMatch[1];
-
-        /* 2a. Standard-library namespace. */
-        const ns = namespaceByName(name);
-        if (ns) return namespaceMemberCompletions(ns);
-
-        /* 2b. Local symbol resolution. */
+    /* 2. Member access after `.` or `:`. We use the type tracker to walk
+     * back through the full receiver expression, so chains like
+     * `forms.createTextBox(parent).` resolve to the TextBox type. */
+    const dotIndex = receiverDotIndex(text, offset);
+    if (dotIndex !== null) {
         const cached = analysisCache.get(params.textDocument.uri);
-        if (cached) {
-            /* `VAR x = include("./mod.cdo")` -> exports of mod.cdo */
+        if (!cached) return [];
+
+        const tokenIdx = tokenIndexAt(doc, cached.tokens, dotIndex);
+        if (tokenIdx === null) return [];
+
+        /* Try the type tracker first -- handles manifest types, in-file
+         * classes, anonymous records, and chained member calls. */
+        const ref = inferReceiverAt(cached.tokens, tokenIdx, cached.typeEnv, workspaceRoots);
+        const members = listMembers(ref, cached.typeEnv);
+        if (members.size > 0) return memberMapToCompletions(members);
+
+        /* Fallback path: handle the bare-name shapes the analyzer indexed
+         * directly, even if the type tracker bailed. */
+        const name = bareReceiverName(text, dotIndex);
+        if (name) {
+            const ns = namespaceByName(name);
+            if (ns) return namespaceMemberCompletions(ns);
+
+            /* Cross-file include with no manifest -> use the harvested
+             * exports list. */
             const inc = cached.includes.get(name);
             if (inc && globalSettings.completion.crossFile) {
                 const ex = getIncludeExports(inc.path, params.textDocument.uri, workspaceRoots);
@@ -253,31 +278,8 @@ connection.onCompletion(params => {
                     }));
                 }
             }
-
-            /* `VAR x = { foo: 1, bar: 2 }` -> foo, bar */
-            const lit = cached.objectLiterals.get(name);
-            if (lit) {
-                return lit.map<CompletionItem>(m => ({
-                    label: m,
-                    kind: CompletionItemKind.Field,
-                    detail: `${name}.${m}`
-                }));
-            }
-
-            /* `CLASS C { ... }` -> instance / static members for `C.x` / `C:x` */
-            const sym = cached.byName.get(name);
-            if (sym && sym.kind === 'class' && sym.children) {
-                return sym.children.map<CompletionItem>(child => ({
-                    label: child.name,
-                    kind: child.kind === 'method'
-                        ? CompletionItemKind.Method
-                        : CompletionItemKind.Field,
-                    detail: child.detail
-                }));
-            }
         }
-        /* Unknown member target -- fall through and offer nothing rather than
-         * a misleading list of keywords. */
+
         return [];
     }
 
@@ -359,6 +361,84 @@ function namespaceMemberCompletions(ns: NamespaceInfo): CompletionItem[] {
     }));
 }
 
+function memberMapToCompletions(members: Map<string, MemberSpec>): CompletionItem[] {
+    const out: CompletionItem[] = [];
+    for (const [name, spec] of members) {
+        const item: CompletionItem = {
+            label: name,
+            kind: memberKindToCompletion(spec),
+            detail: formatMemberDetail(spec, name)
+        };
+        if (spec.doc) {
+            item.documentation = { kind: MarkupKind.Markdown, value: spec.doc };
+        }
+        if (spec.kind === 'function' && spec.params) {
+            const placeholders = spec.params
+                .filter(p => !p.optional && !p.rest)
+                .map((p, i) => `\${${i + 1}:${p.name}}`)
+                .join(', ');
+            item.insertText = `${name}(${placeholders})$0`;
+            item.insertTextFormat = InsertTextFormat.Snippet;
+        }
+        out.push(item);
+    }
+    return out;
+}
+
+function memberKindToCompletion(spec: MemberSpec): CompletionItemKind {
+    switch (spec.kind) {
+        case 'function': return CompletionItemKind.Method;
+        case 'event':    return CompletionItemKind.Event;
+        case 'constant': return CompletionItemKind.Constant;
+        case 'value':
+        default:         return CompletionItemKind.Field;
+    }
+}
+
+/* ----- Receiver-detection helpers --------------------------------------- */
+
+/**
+ * Return the character offset of the trailing `.` or `:` before the cursor
+ * if the user is typing a member-access expression, otherwise null.
+ * Skips trailing identifier characters so `forms.cre|ate` still resolves to
+ * the dot at `forms.`.
+ */
+function receiverDotIndex(text: string, offset: number): number | null {
+    let i = offset;
+    while (i > 0 && /[A-Za-z0-9_]/.test(text[i - 1])) i--;
+    if (i <= 0) return null;
+    /* Allow whitespace between the dot and the partial member name. */
+    let j = i;
+    while (j > 0 && (text[j - 1] === ' ' || text[j - 1] === '\t')) j--;
+    if (j <= 0) return null;
+    const c = text[j - 1];
+    if (c !== '.' && c !== ':') return null;
+    return j - 1;
+}
+
+/** If the receiver is a single bare identifier, return it. */
+function bareReceiverName(text: string, dotIndex: number): string | null {
+    let i = dotIndex;
+    while (i > 0 && (text[i - 1] === ' ' || text[i - 1] === '\t')) i--;
+    const end = i;
+    while (i > 0 && /[A-Za-z0-9_]/.test(text[i - 1])) i--;
+    if (i === end) return null;
+    return text.slice(i, end);
+}
+
+/**
+ * Find the index of the first token whose start offset is greater than or
+ * equal to `offset`. Returns null when no such token exists. Used to
+ * locate the receiver expression preceding a `.` or `:` in the buffer.
+ */
+function tokenIndexAt(doc: TextDocument, tokens: Token[], offset: number): number | null {
+    for (let i = 0; i < tokens.length; i++) {
+        const startOffset = doc.offsetAt(tokens[i].range.start);
+        if (startOffset >= offset) return i;
+    }
+    return null;
+}
+
 function docSymbolKindToCompletion(k: CandoSymbol['kind']): CompletionItemKind {
     switch (k) {
         case 'function':  return CompletionItemKind.Function;
@@ -398,23 +478,27 @@ connection.onHover((params): Hover | null => {
         return md(`**${ns.name}** (standard library)\n\n${ns.doc}\n\nMembers: ${ns.members.map(m => `\`${m}\``).join(', ') || '_(none registered)_'}`);
     }
 
-    /* Namespace member: `ns.name` or `ns:name` */
+    /* Member access hover: walk back through the receiver chain via the
+     * type tracker, then look the word up on the resolved type. */
     const before = text.slice(Math.max(0, word.start - 64), word.start);
-    const m = /([A-Za-z_][A-Za-z0-9_]*)\s*[.:]\s*$/.exec(before);
-    if (m) {
-        const ownerName = m[1];
-        const owner = namespaceByName(ownerName);
-        if (owner && owner.members.includes(word.value)) {
-            const sig = namespaceMemberDetail(owner, word.value);
-            return md(`**${owner.name}.${word.value}**${sig ? `  \n\`${sig}\`` : ''}\n\nMember of the \`${owner.name}\` standard library.`);
-        }
-
+    const dotMatch = /[.:]\s*$/.test(before);
+    if (dotMatch) {
         const cached = analysisCache.get(params.textDocument.uri);
-        const inc = cached?.includes.get(ownerName);
-        if (inc) {
-            const ex = getIncludeExports(inc.path, params.textDocument.uri, workspaceRoots);
-            if (ex && ex.members.includes(word.value)) {
-                return md(`**${ownerName}.${word.value}**\n\nExported by \`${path.basename(ex.path)}\`.`);
+        if (cached) {
+            const dotIdx = receiverDotIndex(text, word.start);
+            if (dotIdx !== null) {
+                const tokIdx = tokenIndexAt(doc, cached.tokens, dotIdx);
+                if (tokIdx !== null) {
+                    const ref = inferReceiverAt(cached.tokens, tokIdx, cached.typeEnv, workspaceRoots);
+                    const member = listMembers(ref, cached.typeEnv).get(word.value);
+                    if (member) {
+                        const ownerLabel = describeTypeForHover(ref);
+                        const detail = formatMemberDetail(member, word.value);
+                        const lines = [`**${ownerLabel}.${word.value}**`, '', '`' + detail + '`'];
+                        if (member.doc) { lines.push('', member.doc); }
+                        return md(lines.join('\n'));
+                    }
+                }
             }
         }
     }
@@ -452,15 +536,34 @@ connection.onSignatureHelp((params): SignatureHelp | null => {
     const ctx = findEnclosingCall(text, offset);
     if (!ctx) return null;
 
-    /* `ns.method(` or `ns:method(` */
-    const dotMatch = /([A-Za-z_][A-Za-z0-9_]*)\s*[.:]\s*([A-Za-z_][A-Za-z0-9_]*)$/.exec(
-        text.slice(0, ctx.callerEnd)
-    );
-    if (dotMatch) {
-        const ns = namespaceByName(dotMatch[1]);
-        if (ns) {
-            const sig = namespaceMemberDetail(ns, dotMatch[2]) ?? `${ns.name}.${dotMatch[2]}(...)`;
-            return makeSignature(sig, ctx.activeParameter);
+    /* Chained call: walk back from the function name through the receiver
+     * expression so `forms.createTextBox(parent).setText("|")` finds the
+     * TextBox.setText signature. */
+    const cached = analysisCache.get(params.textDocument.uri);
+    const headMatch = /([A-Za-z_][A-Za-z0-9_]*)$/.exec(text.slice(0, ctx.callerEnd));
+    if (cached && headMatch) {
+        const fnName = headMatch[1];
+        const fnStart = ctx.callerEnd - fnName.length;
+        const dotIdx = receiverDotIndex(text, fnStart);
+        if (dotIdx !== null) {
+            const tokIdx = tokenIndexAt(doc, cached.tokens, dotIdx);
+            if (tokIdx !== null) {
+                const ref = inferReceiverAt(cached.tokens, tokIdx, cached.typeEnv, workspaceRoots);
+                const spec = listMembers(ref, cached.typeEnv).get(fnName);
+                if (spec) {
+                    const sig = formatMemberDetail(spec, fnName);
+                    return makeSignature(sig, ctx.activeParameter);
+                }
+            }
+            /* Fall through to the std-library namespace heuristic. */
+            const dotName = /([A-Za-z_][A-Za-z0-9_]*)\s*[.:]\s*$/.exec(text.slice(0, dotIdx + 1));
+            if (dotName) {
+                const ns = namespaceByName(dotName[1]);
+                if (ns) {
+                    const sig = namespaceMemberDetail(ns, fnName) ?? `${ns.name}.${fnName}(...)`;
+                    return makeSignature(sig, ctx.activeParameter);
+                }
+            }
         }
     }
 
@@ -469,7 +572,6 @@ connection.onSignatureHelp((params): SignatureHelp | null => {
     if (!bareMatch) return null;
     const name = bareMatch[1];
 
-    const cached = analysisCache.get(params.textDocument.uri);
     const sym = cached?.byName.get(name);
     if (sym && sym.parameters !== undefined) {
         const sig = `${name}(${sym.parameters.join(', ')})`;

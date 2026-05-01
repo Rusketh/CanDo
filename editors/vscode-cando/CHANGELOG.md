@@ -3,6 +3,48 @@
 All notable changes to the **CanDo Language** VS Code extension are
 documented in this file.
 
+## 0.3.0 -- 2026-05-01
+
+### Added
+
+- **Module manifests (`cando.api.json`).** Each module folder can now
+  ship a JSON file describing the value `include(...)` returns -- its
+  exported names, their parameter signatures, and the named types
+  reachable from them (`forms.TextBox`, `sql.Statement`, …). The
+  language server reads it next to any binary or `.cdo` target. Schema
+  is documented in `server/src/manifest.ts`. `forms`, `sql`, `sqlite`,
+  `ldap`, `window`, and `draw` ship a manifest in-tree.
+- **Type tracker.** The server now infers a best-effort type for every
+  variable in a buffer:
+  - `VAR mod = include("./forms.so")` → the manifest's exports type
+  - `VAR f = forms.Form()` → `forms.Form`
+  - `VAR b = forms.Button(f); b:` → completion offers every method on
+    `Button`, including those inherited from `Control` and the Derma
+    aliases (`SetText`, `MoveToFront`, …).
+  - Method chains resolve through `returns`: `forms.createTextBox(p).`
+    completes `TextBox`.
+- **Inheritance.** Manifests support both `extends` (single classical
+  parent) and `indexes` (single string or array, mirroring the
+  runtime's `__index` prototype-chain mechanism). Both are walked
+  during member lookup.
+- **`__index` in user code.** Object literals with an `__index: parent`
+  field are treated as inheriting the parent's members:
+
+      VAR Animal = { speak: FUNCTION() { } };
+      VAR dog    = { __index: Animal, bark: FUNCTION() { } };
+      dog.       // suggests bark, speak
+
+- **Manifest-aware completion / hover / signature help.**
+  - Completion items expand with parameter snippets and show
+    `member(arg: type) -> Returns` in the detail row.
+  - Hover on a member shows the resolved owner type and the formatted
+    signature pulled from the manifest.
+  - Signature help walks the receiver chain so
+    `forms.Button(f):setText("|")` highlights the right argument.
+- Manifest discovery is tolerant of missing binaries: a manifest is
+  found even when `forms.so` / `forms.dll` hasn't been built yet, so
+  completion works on a clean checkout.
+
 ## 0.2.0 -- 2026-05-01
 
 ### Added

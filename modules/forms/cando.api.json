@@ -1,0 +1,355 @@
+{
+    "$comment": "API manifest for the forms module (CanDo Windows Forms binding). Read by the vscode-cando language server to power autocompletion, hover, and signature help. Match modules/forms/README.md and modules/forms/forms_module.c when extending.",
+    "name": "forms",
+    "version": "1.0.0",
+    "doc": "Native UI toolkit. Mirrors System.Windows.Forms; method-style calls (`f:setText(...)`) pass the receiver as the first argument. On non-Windows platforms `forms.supported` is FALSE and constructors throw.",
+    "exports": {
+        "VERSION":   { "kind": "value", "type": "string", "doc": "Module version, e.g. \"1.0.0\"." },
+        "platform":  { "kind": "value", "type": "string", "doc": "\"windows\" or \"stub\"." },
+        "supported": { "kind": "value", "type": "bool",   "doc": "TRUE on Windows, FALSE everywhere else." },
+
+        "Color":         { "kind": "value", "type": "ColorPalette", "doc": "CSS-style colour palette (`forms.Color.cornflowerblue` etc.)." },
+        "Dock":          { "kind": "value", "type": "DockEnum",     "doc": "Dock side constants." },
+        "Anchor":        { "kind": "value", "type": "AnchorEnum",   "doc": "Anchor edge bitmask constants." },
+        "AutoSizeMode":  { "kind": "value", "type": "AutoSizeEnum", "doc": "Auto-size growth modes." },
+        "BorderStyle":   { "kind": "value", "type": "BorderEnum",   "doc": "Border styles for `setBorderStyle`." },
+        "Cursor":        { "kind": "value", "type": "CursorEnum",   "doc": "String aliases for `setCursor`." },
+
+        "Form":            { "kind": "function", "params": [],                                                "returns": "Form",            "doc": "Top-level form. No parent argument." },
+        "Button":          { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "Button",        "doc": "Standard `BUTTON` push-button." },
+        "Label":           { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "Label",         "doc": "Static text label." },
+        "LinkLabel":       { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "LinkLabel",     "doc": "Clickable hyperlink label (SysLink)." },
+        "TextBox":         { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "TextBox",       "doc": "Single- or multi-line text input." },
+        "CheckBox":        { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "CheckBox",      "doc": "Auto-toggle check box." },
+        "RadioButton":     { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "RadioButton",   "doc": "Auto-radio button." },
+        "ComboBox":        { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "ComboBox",      "doc": "Drop-down list of items." },
+        "ListBox":         { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "ListBox",       "doc": "Scrolling list of items." },
+        "Panel":           { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "Panel",         "doc": "Plain container." },
+        "GroupBox":        { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "GroupBox",      "doc": "Captioned container with a frame." },
+        "ProgressBar":     { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "ProgressBar",   "doc": "Horizontal progress bar." },
+        "TrackBar":        { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "TrackBar",      "doc": "Slider with optional ticks." },
+        "NumericUpDown":   { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "NumericUpDown", "doc": "Numeric edit + spin buttons." },
+        "PictureBox":      { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "PictureBox",    "doc": "Static bitmap container." },
+        "DateTimePicker":  { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "DateTimePicker","doc": "Drop-down date / time selector." },
+        "MonthCalendar":   { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "MonthCalendar", "doc": "Month-grid calendar." },
+        "StatusBar":       { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "StatusBar",     "doc": "Bottom-of-form status bar." },
+        "Spinner":         { "kind": "function", "params": [{ "name": "parent", "type": "Control" }, { "name": "options", "type": "any", "optional": true }], "returns": "Spinner",       "doc": "Standalone up/down spinner." }
+    },
+
+    "types": {
+        "Control": {
+            "doc": "Base class for every widget. All getter/setter methods that don't apply to a given control kind are silent no-ops, so script code can stay untyped.",
+            "members": {
+                "setText":           { "kind": "function", "params": [{ "name": "s", "type": "string" }],                              "returns": "Control", "aliases": ["SetText"], "doc": "Set the caption / value." },
+                "getText":           { "kind": "function", "returns": "string", "aliases": ["GetText"], "doc": "Get the current caption / value." },
+                "setLocation":       { "kind": "function", "params": [{ "name": "x", "type": "number" }, { "name": "y", "type": "number" }], "returns": "Control", "aliases": ["setPosition", "SetPos"] },
+                "getLocation":       { "kind": "function", "returns": "number", "aliases": ["getPosition", "GetPos"], "doc": "Returns `x, y` (multi-return)." },
+                "setSize":           { "kind": "function", "params": [{ "name": "w", "type": "number" }, { "name": "h", "type": "number" }], "returns": "Control", "aliases": ["SetSize"] },
+                "getSize":           { "kind": "function", "returns": "number", "doc": "Returns `w, h` (multi-return)." },
+                "setWidth":          { "kind": "function", "params": [{ "name": "w", "type": "number" }], "returns": "Control" },
+                "setHeight":         { "kind": "function", "params": [{ "name": "h", "type": "number" }], "returns": "Control" },
+                "getWidth":          { "kind": "function", "returns": "number" },
+                "getHeight":         { "kind": "function", "returns": "number" },
+
+                "sizeToContent":        { "kind": "function", "returns": "Control", "aliases": ["SizeToContents"], "doc": "Resize to the control's natural size." },
+                "sizeToContentWidth":   { "kind": "function", "returns": "Control" },
+                "sizeToContentHeight":  { "kind": "function", "returns": "Control" },
+                "getPreferredSize":     { "kind": "function", "returns": "number", "doc": "Returns `w, h` without resizing." },
+                "setAutoSize":          { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "Control" },
+                "getAutoSize":          { "kind": "function", "returns": "bool" },
+                "setAutoSizeMode":      { "kind": "function", "params": [{ "name": "mode", "type": "string", "doc": "\"grow\" or \"growShrink\"" }], "returns": "Control" },
+
+                "setPadding":   { "kind": "function", "params": [{ "name": "values", "type": "any", "rest": true }], "returns": "Control", "aliases": ["DockPadding"] },
+                "getPadding":   { "kind": "function", "returns": "number", "doc": "Returns `l, t, r, b`." },
+                "setMargin":    { "kind": "function", "params": [{ "name": "values", "type": "any", "rest": true }], "returns": "Control", "aliases": ["DockMargin"] },
+                "getMargin":    { "kind": "function", "returns": "number", "doc": "Returns `l, t, r, b`." },
+
+                "setAnchor":    { "kind": "function", "params": [{ "name": "spec", "type": "any", "doc": "string list, mask integer, or AnchorEnum value" }], "returns": "Control" },
+                "getAnchor":    { "kind": "function", "returns": "number" },
+
+                "show":         { "kind": "function", "returns": "Control" },
+                "hide":         { "kind": "function", "returns": "Control" },
+                "setVisible":   { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "Control", "aliases": ["SetVisible"] },
+                "getVisible":   { "kind": "function", "returns": "bool", "aliases": ["isVisible"] },
+
+                "setEnabled":   { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "Control", "aliases": ["SetEnabled"] },
+                "getEnabled":   { "kind": "function", "returns": "bool", "aliases": ["isEnabled"] },
+                "focus":        { "kind": "function", "returns": "Control", "doc": "Give the control keyboard focus." },
+                "hasFocus":     { "kind": "function", "returns": "bool" },
+
+                "setParent":    { "kind": "function", "params": [{ "name": "other", "type": "Control" }], "returns": "Control" },
+                "bringToFront": { "kind": "function", "returns": "Control", "aliases": ["MoveToFront"] },
+                "sendToBack":   { "kind": "function", "returns": "Control", "aliases": ["MoveToBack"] },
+                "refresh":      { "kind": "function", "returns": "Control", "aliases": ["invalidate"] },
+                "destroy":      { "kind": "function", "returns": "bool", "aliases": ["remove", "Remove"] },
+                "isOpen":       { "kind": "function", "returns": "bool" },
+
+                "setFont":         { "kind": "function", "params": [{ "name": "spec", "type": "any", "doc": "(face), (face,size), (face,size,style) or {face,size,bold,italic,underline,strikeout}" }, { "name": "rest", "type": "any", "rest": true, "optional": true }], "returns": "Control" },
+                "setFontSize":     { "kind": "function", "params": [{ "name": "n", "type": "number" }], "returns": "Control" },
+                "setBold":         { "kind": "function", "params": [{ "name": "b", "type": "bool"   }], "returns": "Control" },
+                "setItalic":       { "kind": "function", "params": [{ "name": "b", "type": "bool"   }], "returns": "Control" },
+                "setUnderline":    { "kind": "function", "params": [{ "name": "b", "type": "bool"   }], "returns": "Control" },
+                "setStrikeout":    { "kind": "function", "params": [{ "name": "b", "type": "bool"   }], "returns": "Control" },
+                "clearFont":       { "kind": "function", "returns": "Control" },
+                "getFont":         { "kind": "function", "returns": "object", "doc": "Returns `{face, size, bold, italic, underline, strikeout}` or NULL." },
+
+                "setForeColor":    { "kind": "function", "params": [{ "name": "spec", "type": "any", "rest": true }], "returns": "Control", "aliases": ["setColor"] },
+                "setBackColor":    { "kind": "function", "params": [{ "name": "spec", "type": "any", "rest": true }], "returns": "Control", "aliases": ["setBackground"] },
+                "getForeColor":    { "kind": "function", "returns": "number" },
+                "getBackColor":    { "kind": "function", "returns": "number" },
+                "clearForeColor":  { "kind": "function", "returns": "Control" },
+                "clearBackColor":  { "kind": "function", "returns": "Control" },
+
+                "setDock":         { "kind": "function", "params": [{ "name": "side", "type": "string" }], "returns": "Control", "aliases": ["Dock"] },
+                "getDock":         { "kind": "function", "returns": "number" },
+                "relayout":        { "kind": "function", "returns": "Control", "aliases": ["InvalidateLayout"] },
+
+                "setToolTip":      { "kind": "function", "params": [{ "name": "s", "type": "string" }], "returns": "Control" },
+                "setCursor":       { "kind": "function", "params": [{ "name": "name", "type": "string" }], "returns": "Control" },
+
+                "getParent":       { "kind": "function", "returns": "Control" },
+                "getChildren":     { "kind": "function", "returns": "array" },
+                "contains":        { "kind": "function", "params": [{ "name": "other", "type": "Control" }], "returns": "bool" },
+
+                "setTabIndex":     { "kind": "function", "params": [{ "name": "n", "type": "number" }], "returns": "Control" },
+                "getTabIndex":     { "kind": "function", "returns": "number" },
+                "setTabStop":      { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "Control" },
+
+                "onClick":         { "kind": "event", "signature": "function(self, button, x, y)" },
+                "onTextChanged":   { "kind": "event", "signature": "function(self)" },
+                "onValueChanged":  { "kind": "event", "signature": "function(self)" },
+                "onSelectionChanged": { "kind": "event", "signature": "function(self)" },
+                "onKeyDown":       { "kind": "event", "signature": "function(self, vk)" },
+                "onKeyUp":         { "kind": "event", "signature": "function(self, vk)" },
+                "onMouseDown":     { "kind": "event", "signature": "function(self, button, x, y)" },
+                "onMouseUp":       { "kind": "event", "signature": "function(self, button, x, y)" },
+                "onMouseMove":     { "kind": "event", "signature": "function(self, x, y)" },
+                "onFocus":         { "kind": "event", "signature": "function(self)" },
+                "onBlur":          { "kind": "event", "signature": "function(self)" }
+            }
+        },
+
+        "Form": {
+            "doc": "Top-level window. The script keeps running while forms are open; each form holds a VM lifeline until destroyed.",
+            "extends": "Control",
+            "members": {
+                "setTitle":         { "kind": "function", "params": [{ "name": "s", "type": "string" }], "returns": "Form", "doc": "Alias of setText." },
+                "center":           { "kind": "function", "returns": "Form", "aliases": ["centre", "Center"] },
+                "setOpacity":       { "kind": "function", "params": [{ "name": "alpha", "type": "number" }], "returns": "Form" },
+                "getOpacity":       { "kind": "function", "returns": "number" },
+                "setTopMost":       { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "Form" },
+                "setMinSize":       { "kind": "function", "params": [{ "name": "w", "type": "number" }, { "name": "h", "type": "number" }], "returns": "Form" },
+                "setMaxSize":       { "kind": "function", "params": [{ "name": "w", "type": "number" }, { "name": "h", "type": "number" }], "returns": "Form" },
+                "setBorderStyle":   { "kind": "function", "params": [{ "name": "style", "type": "string", "doc": "\"none\", \"single\", or \"3d\"" }], "returns": "Form" },
+
+                "setIcon":          { "kind": "function", "params": [{ "name": "path", "type": "string" }], "returns": "Form" },
+                "flash":            { "kind": "function", "params": [{ "name": "n", "type": "number", "optional": true }], "returns": "Form" },
+                "maximize":         { "kind": "function", "returns": "Form" },
+                "minimize":         { "kind": "function", "returns": "Form" },
+                "restore":          { "kind": "function", "returns": "Form" },
+                "setWindowState":   { "kind": "function", "params": [{ "name": "state", "type": "string" }], "returns": "Form" },
+                "getWindowState":   { "kind": "function", "returns": "string" },
+                "setResizable":     { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "Form" },
+                "setMinimizeBox":   { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "Form" },
+                "setMaximizeBox":   { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "Form" },
+                "setShowInTaskbar": { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "Form" },
+                "setAcceptButton":  { "kind": "function", "params": [{ "name": "btn", "type": "Button" }], "returns": "Form" },
+                "setCancelButton":  { "kind": "function", "params": [{ "name": "btn", "type": "Button" }], "returns": "Form" },
+
+                "onClose":  { "kind": "event", "signature": "function(self)" },
+                "onShown":  { "kind": "event", "signature": "function(self)" },
+                "onResize": { "kind": "event", "signature": "function(self, w, h)" }
+            }
+        },
+
+        "Button": {
+            "extends": "Control",
+            "indexes": "Control",
+            "members": {
+                "onClick": { "kind": "event", "signature": "function(self)" }
+            }
+        },
+
+        "Label": {
+            "extends": "Control",
+            "members": {
+                "setTextAlign": { "kind": "function", "params": [{ "name": "align", "type": "string", "doc": "\"left\", \"center\", or \"right\"" }], "returns": "Label" }
+            }
+        },
+
+        "LinkLabel": {
+            "extends": "Control",
+            "doc": "Clickable hyperlink. Activations fire `onClick`.",
+            "members": {}
+        },
+
+        "TextBox": {
+            "extends": "Control",
+            "members": {
+                "setMultiline":     { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "TextBox" },
+                "setReadOnly":      { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "TextBox" },
+                "setPlaceholder":   { "kind": "function", "params": [{ "name": "s", "type": "string" }], "returns": "TextBox", "aliases": ["setHint"] },
+                "setPasswordChar":  { "kind": "function", "params": [{ "name": "c", "type": "string" }], "returns": "TextBox" },
+                "setMaxLength":     { "kind": "function", "params": [{ "name": "n", "type": "number" }], "returns": "TextBox" },
+                "setTextAlign":     { "kind": "function", "params": [{ "name": "align", "type": "string" }], "returns": "TextBox" },
+                "selectAll":        { "kind": "function", "returns": "TextBox" },
+                "appendText":       { "kind": "function", "params": [{ "name": "s", "type": "string" }], "returns": "TextBox" },
+                "clear":            { "kind": "function", "returns": "TextBox" },
+                "setValue":         { "kind": "function", "params": [{ "name": "v", "type": "any" }], "returns": "TextBox" },
+                "getValue":         { "kind": "function", "returns": "any" }
+            }
+        },
+
+        "CheckBox": {
+            "extends": "Control",
+            "members": {
+                "setChecked": { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "CheckBox" },
+                "getChecked": { "kind": "function", "returns": "bool" }
+            }
+        },
+
+        "RadioButton": {
+            "extends": "Control",
+            "members": {
+                "setChecked": { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "RadioButton" },
+                "getChecked": { "kind": "function", "returns": "bool" }
+            }
+        },
+
+        "ListLike": {
+            "doc": "Common ListBox + ComboBox surface.",
+            "extends": "Control",
+            "members": {
+                "addItem":           { "kind": "function", "params": [{ "name": "text", "type": "string" }], "returns": "Control" },
+                "removeItem":        { "kind": "function", "params": [{ "name": "index", "type": "number" }], "returns": "Control" },
+                "clearItems":        { "kind": "function", "returns": "Control" },
+                "getItem":           { "kind": "function", "params": [{ "name": "index", "type": "number" }], "returns": "string" },
+                "getItems":          { "kind": "function", "returns": "array" },
+                "getItemCount":      { "kind": "function", "returns": "number" },
+                "getSelectedIndex":  { "kind": "function", "returns": "number" },
+                "setSelectedIndex":  { "kind": "function", "params": [{ "name": "i", "type": "number" }], "returns": "Control" },
+                "clear":             { "kind": "function", "returns": "Control" }
+            }
+        },
+        "ComboBox": { "extends": "ListLike", "members": {} },
+        "ListBox":  { "extends": "ListLike", "members": {} },
+
+        "Panel":    { "extends": "Control", "members": {} },
+        "GroupBox": { "extends": "Control", "members": {} },
+
+        "ProgressBar": {
+            "extends": "Control",
+            "members": {
+                "setValue":   { "kind": "function", "params": [{ "name": "n", "type": "number" }], "returns": "ProgressBar" },
+                "getValue":   { "kind": "function", "returns": "number" },
+                "setRange":   { "kind": "function", "params": [{ "name": "lo", "type": "number" }, { "name": "hi", "type": "number" }], "returns": "ProgressBar" },
+                "setMarquee": { "kind": "function", "params": [{ "name": "active", "type": "bool" }, { "name": "speed", "type": "number", "optional": true }], "returns": "ProgressBar" },
+                "setState":   { "kind": "function", "params": [{ "name": "state", "type": "string" }], "returns": "ProgressBar" },
+                "setStep":    { "kind": "function", "params": [{ "name": "n", "type": "number" }], "returns": "ProgressBar" },
+                "stepIt":     { "kind": "function", "returns": "ProgressBar" }
+            }
+        },
+
+        "TrackBar": {
+            "extends": "Control",
+            "members": {
+                "setValue":         { "kind": "function", "params": [{ "name": "n", "type": "number" }], "returns": "TrackBar" },
+                "getValue":         { "kind": "function", "returns": "number" },
+                "setRange":         { "kind": "function", "params": [{ "name": "lo", "type": "number" }, { "name": "hi", "type": "number" }], "returns": "TrackBar" },
+                "setTickFrequency": { "kind": "function", "params": [{ "name": "n", "type": "number" }], "returns": "TrackBar" },
+                "setSmallStep":     { "kind": "function", "params": [{ "name": "n", "type": "number" }], "returns": "TrackBar" },
+                "setLargeStep":     { "kind": "function", "params": [{ "name": "n", "type": "number" }], "returns": "TrackBar" }
+            }
+        },
+
+        "NumericUpDown": {
+            "extends": "Control",
+            "members": {
+                "setValue":     { "kind": "function", "params": [{ "name": "n", "type": "number" }], "returns": "NumericUpDown" },
+                "getValue":     { "kind": "function", "returns": "number" },
+                "setIncrement": { "kind": "function", "params": [{ "name": "n", "type": "number" }], "returns": "NumericUpDown" }
+            }
+        },
+
+        "PictureBox":     { "extends": "Control", "members": {} },
+        "DateTimePicker": { "extends": "Control", "members": {} },
+        "MonthCalendar":  { "extends": "Control", "members": {} },
+        "StatusBar":      { "extends": "Control", "members": {} },
+        "Spinner":        { "extends": "Control", "members": {} },
+
+        "ColorPalette": {
+            "doc": "0xRRGGBB packed colour constants. The same names are accepted as strings by setForeColor / setBackColor.",
+            "members": {
+                "red":             { "kind": "constant", "type": "number" },
+                "green":           { "kind": "constant", "type": "number" },
+                "blue":            { "kind": "constant", "type": "number" },
+                "white":           { "kind": "constant", "type": "number" },
+                "black":           { "kind": "constant", "type": "number" },
+                "yellow":          { "kind": "constant", "type": "number" },
+                "magenta":         { "kind": "constant", "type": "number" },
+                "cyan":            { "kind": "constant", "type": "number" },
+                "cornflowerblue":  { "kind": "constant", "type": "number" },
+                "steelblue":       { "kind": "constant", "type": "number" },
+                "darkgreen":       { "kind": "constant", "type": "number" },
+                "darkred":         { "kind": "constant", "type": "number" },
+                "darkblue":        { "kind": "constant", "type": "number" },
+                "lightgray":       { "kind": "constant", "type": "number" },
+                "darkgray":        { "kind": "constant", "type": "number" },
+                "orange":          { "kind": "constant", "type": "number" },
+                "purple":          { "kind": "constant", "type": "number" },
+                "pink":            { "kind": "constant", "type": "number" },
+                "brown":           { "kind": "constant", "type": "number" }
+            }
+        },
+        "DockEnum": {
+            "members": {
+                "none":   { "kind": "constant", "type": "number" },
+                "top":    { "kind": "constant", "type": "number" },
+                "bottom": { "kind": "constant", "type": "number" },
+                "left":   { "kind": "constant", "type": "number" },
+                "right":  { "kind": "constant", "type": "number" },
+                "fill":   { "kind": "constant", "type": "number" }
+            }
+        },
+        "AnchorEnum": {
+            "members": {
+                "none":   { "kind": "constant", "type": "number" },
+                "left":   { "kind": "constant", "type": "number" },
+                "top":    { "kind": "constant", "type": "number" },
+                "right":  { "kind": "constant", "type": "number" },
+                "bottom": { "kind": "constant", "type": "number" },
+                "all":    { "kind": "constant", "type": "number" }
+            }
+        },
+        "AutoSizeEnum": {
+            "members": {
+                "grow":       { "kind": "constant", "type": "string" },
+                "growShrink": { "kind": "constant", "type": "string" }
+            }
+        },
+        "BorderEnum": {
+            "members": {
+                "none":    { "kind": "constant", "type": "string" },
+                "single":  { "kind": "constant", "type": "string" },
+                "fixed3D": { "kind": "constant", "type": "string" }
+            }
+        },
+        "CursorEnum": {
+            "members": {
+                "arrow":       { "kind": "constant", "type": "string" },
+                "hand":        { "kind": "constant", "type": "string" },
+                "ibeam":       { "kind": "constant", "type": "string" },
+                "wait":        { "kind": "constant", "type": "string" },
+                "cross":       { "kind": "constant", "type": "string" },
+                "sizeNS":      { "kind": "constant", "type": "string" },
+                "sizeWE":      { "kind": "constant", "type": "string" },
+                "sizeNWSE":    { "kind": "constant", "type": "string" },
+                "sizeNESW":    { "kind": "constant", "type": "string" },
+                "sizeAll":     { "kind": "constant", "type": "string" },
+                "no":          { "kind": "constant", "type": "string" },
+                "help":        { "kind": "constant", "type": "string" },
+                "appStarting": { "kind": "constant", "type": "string" }
+            }
+        }
+    }
+}

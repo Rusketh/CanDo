@@ -1,0 +1,57 @@
+{
+    "$comment": "API manifest for the sql module (PostgreSQL + MySQL/MariaDB). Read by the vscode-cando language server.",
+    "name": "sql",
+    "version": "0.1.0",
+    "doc": "PostgreSQL and MySQL/MariaDB client. Both function-style (`sql.exec(db, ...)`) and method-style (`db:exec(...)`) calls are supported on every handle.",
+    "exports": {
+        "VERSION":          { "kind": "value", "type": "string" },
+        "DRIVER_POSTGRES":  { "kind": "constant", "type": "string", "doc": "Constant \"postgres\"." },
+        "DRIVER_MYSQL":     { "kind": "constant", "type": "string", "doc": "Constant \"mysql\"." },
+
+        "open":         { "kind": "function", "params": [{ "name": "driver", "type": "string", "doc": "\"postgres\" or \"mysql\"" }, { "name": "options", "type": "object" }], "returns": "Connection", "doc": "Generic open." },
+        "openPostgres": { "kind": "function", "params": [{ "name": "options", "type": "object" }], "returns": "Connection", "doc": "Open a PostgreSQL connection." },
+        "openMySQL":    { "kind": "function", "params": [{ "name": "options", "type": "object" }], "returns": "Connection", "doc": "Open a MySQL/MariaDB connection." },
+
+        "close":            { "kind": "function", "params": [{ "name": "db", "type": "Connection" }],                                                                       "returns": "bool" },
+        "exec":             { "kind": "function", "params": [{ "name": "db", "type": "Connection" }, { "name": "sql", "type": "string" }],                                  "returns": "object" },
+        "prepare":          { "kind": "function", "params": [{ "name": "db", "type": "Connection" }, { "name": "sql", "type": "string" }],                                  "returns": "Statement" },
+        "begin":            { "kind": "function", "params": [{ "name": "db", "type": "Connection" }],                                                                       "returns": "bool" },
+        "commit":           { "kind": "function", "params": [{ "name": "db", "type": "Connection" }],                                                                       "returns": "bool" },
+        "rollback":         { "kind": "function", "params": [{ "name": "db", "type": "Connection" }],                                                                       "returns": "bool" },
+        "inTransaction":    { "kind": "function", "params": [{ "name": "db", "type": "Connection" }],                                                                       "returns": "bool" },
+        "transaction":      { "kind": "function", "params": [{ "name": "db", "type": "Connection" }, { "name": "fn", "type": "function" }, { "name": "args", "type": "any", "rest": true, "optional": true }], "returns": "any" },
+        "ping":             { "kind": "function", "params": [{ "name": "db", "type": "Connection" }],                                                                       "returns": "bool" },
+        "escape":           { "kind": "function", "params": [{ "name": "db", "type": "Connection" }, { "name": "value", "type": "any" }],                                   "returns": "string" },
+        "escapeIdentifier": { "kind": "function", "params": [{ "name": "db", "type": "Connection" }, { "name": "name",  "type": "string" }],                                "returns": "string" }
+    },
+
+    "types": {
+        "Connection": {
+            "doc": "Open SQL connection. All methods accept either function-style (with `db` first) or method-style (`db:foo(...)`) calls.",
+            "members": {
+                "close":            { "kind": "function", "returns": "bool" },
+                "exec":             { "kind": "function", "params": [{ "name": "sql", "type": "string" }], "returns": "object", "doc": "Returns `{ affected, insertId, tag }`." },
+                "prepare":          { "kind": "function", "params": [{ "name": "sql", "type": "string" }], "returns": "Statement" },
+                "begin":            { "kind": "function", "returns": "bool" },
+                "commit":           { "kind": "function", "returns": "bool" },
+                "rollback":         { "kind": "function", "returns": "bool" },
+                "inTransaction":    { "kind": "function", "returns": "bool" },
+                "transaction":      { "kind": "function", "params": [{ "name": "fn", "type": "function" }, { "name": "args", "type": "any", "rest": true, "optional": true }], "returns": "any" },
+                "bigintMode":       { "kind": "function", "params": [{ "name": "mode", "type": "string", "optional": true, "doc": "\"number\" or \"string\"" }], "returns": "string" },
+                "ping":             { "kind": "function", "returns": "bool" },
+                "escape":           { "kind": "function", "params": [{ "name": "value", "type": "any" }], "returns": "string" },
+                "escapeIdentifier": { "kind": "function", "params": [{ "name": "name", "type": "string" }], "returns": "string" }
+            }
+        },
+        "Statement": {
+            "doc": "Compiled SQL statement. Always finalize with `:finalize()` once done.",
+            "members": {
+                "run":      { "kind": "function", "params": [{ "name": "params", "type": "any", "rest": true, "optional": true }], "returns": "object", "doc": "Returns `{ affected, insertId }`." },
+                "get":      { "kind": "function", "params": [{ "name": "params", "type": "any", "rest": true, "optional": true }], "returns": "object", "doc": "First row, or NULL." },
+                "all":      { "kind": "function", "params": [{ "name": "params", "type": "any", "rest": true, "optional": true }], "returns": "array",  "doc": "Every row as an object." },
+                "finalize": { "kind": "function", "returns": "bool" },
+                "sourceSQL":{ "kind": "value",    "type": "string" }
+            }
+        }
+    }
+}
