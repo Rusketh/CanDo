@@ -1211,6 +1211,10 @@ static CANDO_THREAD_RETURN conn_thread_fn(void *arg_p)
             ctx->status_code = 500;
             res_send_impl(ctx, "Internal Server Error", 21);
         }
+        /* Surface the original handler error on stderr -- without this,
+         * server-side bugs are invisible to the operator (the client just
+         * sees a generic 500). */
+        cando_vm_log_uncaught(&child, "http server callback");
     }
 
     res_wait_until_sent(ctx);

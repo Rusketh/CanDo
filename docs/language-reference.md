@@ -586,3 +586,36 @@ The following operations raise catchable errors:
 The error message is the value passed to the `CATCH` parameter.  If
 uncaught, the host embedder sees `CANDO_ERR_RUNTIME` and
 `cando_errmsg(vm)` returns the formatted message.
+
+### Uncaught errors are surfaced on stderr
+
+The runtime never silently drops an uncaught error.  Whenever an error
+escapes the script-side handlers it would normally have, CanDo prints a
+diagnostic line to **stderr** so the failure is visible to the operator.
+The cases this covers are:
+
+- **Top-level**: an uncaught error in the main script body bubbles out
+  to the embedder and the `cando` CLI prints it before exiting with
+  status 1.
+- **Threads**: a thread body that errors stores the error on the thread
+  object.  If the script never observes that error — never `await`s the
+  thread, never calls `thread.error(t)`, and never registered a
+  `thread.catch` callback — the runtime prints
+  `cando: uncaught error in thread: <message>` when the thread object is
+  reclaimed (typically at VM shutdown).
+- **Promise-style callbacks**: a `thread.then` or `thread.catch`
+  callback that itself throws is logged immediately as
+  `cando: uncaught error in thread.<then|catch> callback: <message>`.
+  These run after the thread completes and have no surrounding caller.
+- **HTTP server**: if a `http.createServer` callback errors before
+  calling `res:send()`, the server still returns a 500 to the client,
+  *and* prints the original error as
+  `cando: uncaught error in http server callback: <message>` on stderr.
+- **Socket / secure_socket / stream**: a connection-handler or stream
+  transform callback that errors logs
+  `cando: uncaught error in <subsystem>: <message>` so the failure is
+  attributable.
+
+Errors that **are** observed on the script side — caught by `TRY/CATCH`,
+delivered through `await`, picked up by an attached `thread.catch`, or
+inspected via `thread.error(t)` — are not duplicated to stderr.

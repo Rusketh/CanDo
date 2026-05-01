@@ -130,6 +130,15 @@ run_test "lib_yaml" "$SCRIPTS/lib_yaml.cdo" \
 run_test "threads" "$SCRIPTS/threads.cdo" \
     "$(printf '42\n10\n20\ntrue\nsleep_ok\nid_ok\n99\ntrue\nnull\n7\n1\n2\n3\ndone\nerror\nbad\ntrue\ntrue\n77\n88\ncaught_err\nalready\nfalse')"
 
+run_test "uncaught_thread_error" "$SCRIPTS/uncaught_thread_error.cdo" \
+    "$(printf 'script done\ncando: uncaught error in thread: boom from worker')"
+
+run_test "caught_thread_error" "$SCRIPTS/caught_thread_error.cdo" \
+    "$(printf 'caught: handled error\nthen-catch: handled via catch\nscript done')"
+
+run_test "thread_error_observed" "$SCRIPTS/thread_error_observed.cdo" \
+    "$(printf 'got: looked at via thread.error\nscript done')"
+
 run_test "lib_os" "$SCRIPTS/lib_os.cdo" \
     "$(printf 'os.name: %s\nos_time_ok\nos_clock_ok\nPATH_ok\nCANDO_TEST: Hello' "$PLATFORM_OS_NAME")"
 

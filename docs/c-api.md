@@ -226,6 +226,18 @@ Formats `fmt` into `vm->error_msg`, sets `vm->has_error`, and stages
 the message as a catchable thrown value.  Your native function should
 `return -1` immediately afterwards.
 
+```c
+void cando_vm_log_uncaught(CandoVM *vm, const char *context);
+```
+
+Prints `vm`'s current error to **stderr** in the form
+`cando: uncaught error in <context>: <msg>`, then clears the error so
+the calling thread can keep going.  Use this from callback dispatchers
+that have no caller to propagate to — the built-in HTTP server, socket
+listeners, stream transforms, and `thread.then` / `thread.catch`
+fire-and-forget paths all use it so script errors never disappear
+silently.  No-op when `vm` has no pending error.
+
 ## Globals
 
 ```c

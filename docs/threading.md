@@ -65,6 +65,28 @@ thread.catch(t, FUNCTION(err) {
 Callbacks are stored inside the thread handle; a `t` can have multiple
 `then` and `catch` callbacks and they fire in registration order.
 
+### Uncaught thread errors are logged
+
+If a thread body throws an error and the script never observes it — no
+`await`, no `thread.catch`, no `thread.error(t)` — the runtime prints
+the error to stderr when the thread handle is reclaimed:
+
+```
+cando: uncaught error in thread: <message>
+```
+
+This makes silent thread failures visible.  An error is considered
+"observed" as soon as any of the following happens:
+
+- `await t` (the await re-throws the error into the caller).
+- `thread.catch(t, fn)` is attached *before* the thread completes (or
+  fires immediately if attached afterwards).
+- `thread.error(t)` returns the value to script code.
+
+If a `thread.then` or `thread.catch` callback itself throws, the runtime
+prints `cando: uncaught error in thread.<then|catch> callback: <…>` —
+those callbacks have no further caller to propagate to.
+
 ## Introspection
 
 | Call | Returns |

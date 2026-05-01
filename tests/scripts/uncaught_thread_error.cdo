@@ -1,0 +1,16 @@
+/* uncaught_thread_error.cdo -- a thread that throws and is never observed.
+ *
+ * Expected: the runtime prints the error message to stderr at thread
+ * destruction.  The test runner combines stdout+stderr, so the message
+ * appears in the captured output. */
+
+VAR t = thread {
+    THROW "boom from worker";
+};
+
+/* Wait long enough for the thread to finish but never await it and never
+ * register a thread.catch.  At VM shutdown the thread is destroyed and
+ * the unobserved error is logged.                                       */
+thread.sleep(10);
+
+print("script done");

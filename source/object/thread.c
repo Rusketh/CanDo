@@ -7,6 +7,9 @@
 #include "thread.h"
 #include "../core/common.h"
 #include "../core/memory.h"
+#include "string.h"   /* CdoString for error formatting */
+#include <stdio.h>
+#include <string.h>   /* strlen for non-string error fallback */
 
 /* =========================================================================
  * Lifecycle
@@ -16,14 +19,15 @@ CdoThread *cdo_thread_new(CandoValue fn_val) {
     CdoThread *t = (CdoThread *)cando_alloc(sizeof(CdoThread));
 
     cando_lock_init(&t->lock);
-    t->kind         = OBJ_THREAD;
+    t->kind           = OBJ_THREAD;
     atomic_store(&t->state, CDO_THREAD_PENDING);
-    t->fn_val       = cando_value_copy(fn_val);
-    t->result_count = 0;
-    t->error        = cando_null();
-    t->then_fn      = cando_null();
-    t->catch_fn     = cando_null();
-    t->handle_idx   = CANDO_INVALID_HANDLE;
+    t->fn_val         = cando_value_copy(fn_val);
+    t->result_count   = 0;
+    t->error          = cando_null();
+    t->then_fn        = cando_null();
+    t->catch_fn       = cando_null();
+    t->error_observed = false;
+    t->handle_idx     = CANDO_INVALID_HANDLE;
 
     for (u32 i = 0; i < CDO_THREAD_MAX_RESULTS; i++)
         t->results[i] = cando_null();
@@ -39,6 +43,21 @@ CdoThread *cdo_thread_new(CandoValue fn_val) {
 
 void cdo_thread_destroy(CdoThread *t) {
     if (!t) return;
+
+    /* If the thread errored and nothing on the script side ever observed
+     * the error -- no `await`, no `thread.catch`, no `thread.error()` --
+     * surface it on stderr now so the failure isn't silently swallowed. */
+    if (atomic_load(&t->state) == CDO_THREAD_ERROR && !t->error_observed) {
+        if (t->error.tag == TYPE_STRING && t->error.as.string) {
+            fprintf(stderr, "cando: uncaught error in thread: %.*s\n",
+                    (int)t->error.as.string->length,
+                    t->error.as.string->data);
+        } else {
+            fprintf(stderr, "cando: uncaught error in thread: <%s>\n",
+                    cando_value_type_name((TypeTag)t->error.tag));
+        }
+        fflush(stderr);
+    }
 
     cando_value_release(t->fn_val);
     cando_value_release(t->error);

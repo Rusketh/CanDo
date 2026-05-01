@@ -1,0 +1,14 @@
+/* thread_error_observed.cdo -- thread.error(t) is itself an
+ * "observation" of the error and should suppress the destructor log.   */
+
+VAR t = thread {
+    THROW "looked at via thread.error";
+};
+
+thread.sleep(10);
+
+/* Read the error explicitly.  This counts as observing it. */
+VAR e = thread.error(t);
+print("got:", e);
+
+print("script done");
