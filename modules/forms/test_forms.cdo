@@ -92,6 +92,16 @@ VAR btn = forms.Button(f);
 btn:setText("Click me");
 btn:setLocation(220, 280);
 btn:setSize(180, 30);
+
+// Spot-check the new sizing helpers: setWidth/setHeight should change
+// only the requested axis, and sizeToContent should pick a sensible
+// natural size (BCM_GETIDEALSIZE-derived for buttons).
+VAR fitBtn = forms.Button(f);
+fitBtn:setText("Auto-fit");
+fitBtn:setLocation(220, 320);
+fitBtn:setHeight(28);
+fitBtn:sizeToContent();
+print("[fit] applied =", fitBtn:getWidth(), "x", fitBtn:getHeight());
 btn:setFont({face = "Segoe UI", size = 11, bold = TRUE});
 btn:setForeColor("white");
 btn:setBackColor("cornflowerblue");

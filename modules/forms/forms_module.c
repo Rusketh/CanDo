@@ -205,6 +205,36 @@ typedef enum {
 #define FORMS_DOCK_RIGHT  4
 #define FORMS_DOCK_FILL   5
 
+/* Anchor flags.  Combine via bitwise-or; defaults to LEFT|TOP. */
+#define FORMS_ANCHOR_NONE   0
+#define FORMS_ANCHOR_LEFT   (1 << 0)
+#define FORMS_ANCHOR_TOP    (1 << 1)
+#define FORMS_ANCHOR_RIGHT  (1 << 2)
+#define FORMS_ANCHOR_BOTTOM (1 << 3)
+#define FORMS_ANCHOR_ALL    (FORMS_ANCHOR_LEFT | FORMS_ANCHOR_TOP | \
+                             FORMS_ANCHOR_RIGHT | FORMS_ANCHOR_BOTTOM)
+#define FORMS_ANCHOR_DEFAULT (FORMS_ANCHOR_LEFT | FORMS_ANCHOR_TOP)
+
+/* Auto-size mode -- WinForms-flavoured: 1 = grow only, 2 = grow+shrink. */
+#define FORMS_AUTOSIZE_GROW         1
+#define FORMS_AUTOSIZE_GROW_SHRINK  2
+
+/* Cursor identifiers exposed to script via setCursor("..."). */
+#define FORMS_CURSOR_DEFAULT   0
+#define FORMS_CURSOR_ARROW     1
+#define FORMS_CURSOR_HAND      2
+#define FORMS_CURSOR_IBEAM     3
+#define FORMS_CURSOR_WAIT      4
+#define FORMS_CURSOR_CROSS     5
+#define FORMS_CURSOR_SIZE_NS   6
+#define FORMS_CURSOR_SIZE_WE   7
+#define FORMS_CURSOR_SIZE_NWSE 8
+#define FORMS_CURSOR_SIZE_NESW 9
+#define FORMS_CURSOR_SIZE_ALL  10
+#define FORMS_CURSOR_NO        11
+#define FORMS_CURSOR_HELP      12
+#define FORMS_CURSOR_APPSTART  13
+
 /* Pure-C dock-rect peel.  Lives outside any conditional so the test
  * build (which strips Win32) can still exercise it.  Given a parent's
  * remaining client rect (read/written via *left, *top, *right, *bottom)
@@ -451,12 +481,50 @@ typedef struct FormsSlot {
      * something the layout assumes.                                     */
     int          has_min_size, min_w, min_h;
     int          has_max_size, max_w, max_h;
+    /* Auto-size: when set, the control resizes itself to fit its content
+     * after every setText / addItem / setFont call.  Mode 1 = grow only,
+     * mode 2 = grow and shrink (the default).                            */
+    int          autosize;
+    int          autosize_mode;
+    /* Inner padding -- consumed by sizeToContent / autosize and by the
+     * layout pass when this slot acts as a container.                   */
+    int          pad_l, pad_t, pad_r, pad_b;
+    /* Outer margin -- reserved for layout managers that walk siblings.  */
+    int          margin_l, margin_t, margin_r, margin_b;
+    /* Anchor: bitmask of FORMS_ANCHOR_* flags.  When the parent resizes,
+     * an anchored control's edge stays a fixed distance from the parent
+     * edge.  When both opposite edges are anchored the control stretches.
+     * anchor_l/t/r/b cache the original gap so the math is stable.       */
+    int          anchor;
+    int          anchor_l, anchor_t, anchor_r, anchor_b;
+    int          anchor_w, anchor_h; /* parent client size at anchor capture */
+    /* Tab order. */
+    int          tab_index;
+    int          tab_stop;
+    /* Cursor override.  0 = inherit. */
+    int          cursor_kind;
+    /* Tooltip text (UTF-8).  Optional -- only allocated when set. */
+    char        *tooltip;
+    /* Form-only: default Accept / Cancel buttons (slots).               */
+    int          accept_btn_slot;
+    int          cancel_btn_slot;
+    /* Form-only: icon handle (HICON cast to void*) and cached icon path
+     * for diagnostics.                                                  */
+#if FORMS_HAVE_WIN32
+    HICON        hicon_small;
+    HICON        hicon_big;
+    HWND         tooltip_hwnd;       /* form-only, lazily created       */
+#endif
     /* Retained handle to the script-side instance so callbacks survive
      * the script returning.                                              */
     CandoValue   inst_val;
     int          inst_val_held;
     int          has_lifeline;
 } FormsSlot;
+
+/* Forward decl: autosize_apply lives near the layout code far below; the
+ * setText / setFont setters call it from anywhere in the file. */
+static void autosize_apply(FormsSlot *s);
 
 static FormsSlot g_slots[FORMS_MAX_SLOTS];
 static fm_mutex_t g_slot_mutex;
@@ -594,11 +662,27 @@ static int slot_alloc_locked(ControlKind kind, int parent_slot)
             s->has_max_size = 0;
             s->min_w = s->min_h = 0;
             s->max_w = s->max_h = 0;
+            s->autosize      = 0;
+            s->autosize_mode = FORMS_AUTOSIZE_GROW_SHRINK;
+            s->pad_l = s->pad_t = s->pad_r = s->pad_b = 0;
+            s->margin_l = s->margin_t = s->margin_r = s->margin_b = 0;
+            s->anchor   = FORMS_ANCHOR_DEFAULT;
+            s->anchor_l = s->anchor_t = s->anchor_r = s->anchor_b = 0;
+            s->anchor_w = s->anchor_h = 0;
+            s->tab_index = -1;
+            s->tab_stop  = 1;
+            s->cursor_kind = FORMS_CURSOR_DEFAULT;
+            s->tooltip = NULL;
+            s->accept_btn_slot = -1;
+            s->cancel_btn_slot = -1;
 #if FORMS_HAVE_WIN32
             s->hwnd        = NULL;
             s->orig_proc   = NULL;
             s->back_brush  = NULL;
             s->hfont       = NULL;
+            s->hicon_small = NULL;
+            s->hicon_big   = NULL;
+            s->tooltip_hwnd = NULL;
 #endif
             return i;
         }
@@ -708,6 +792,8 @@ static LRESULT CALLBACK mgr_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l);
 static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l);
 static void              dispatch_drain(void);
 static void              layout_dock_children(int parent_slot);
+static void              layout_anchor_children(int parent_slot);
+static LPCWSTR           cursor_kind_to_idc(int kind);
 
 /* Convert a UTF-8 string to a freshly-allocated wide string.  Caller
  * frees with free().  Returns NULL on alloc failure. */
@@ -1128,10 +1214,32 @@ static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
         event_queue_push(ev);
         if (slot > 0 && slot < FORMS_MAX_SLOTS) {
             g_slots[slot].w = cw; g_slots[slot].h = ch;
-            /* Re-run docking for any children that asked for it. */
+            /* Anchor pass first (children that should stretch / track an
+             * edge) then the dock pass for children that want a strip. */
+            layout_anchor_children(slot);
             layout_dock_children(slot);
         }
         return 0;
+    }
+    case WM_SETCURSOR: {
+        /* w = HWND of window receiving the cursor message.  When the mouse
+         * is over a child, look up its slot and apply any cursor override. */
+        HWND target = (HWND)w;
+        int  cid    = slot_from_hwnd(target);
+        if (cid > 0 && cid < FORMS_MAX_SLOTS && g_slots[cid].alive) {
+            int ck = g_slots[cid].cursor_kind;
+            if (ck != FORMS_CURSOR_DEFAULT) {
+                HCURSOR hc = LoadCursorW(NULL, cursor_kind_to_idc(ck));
+                if (hc) { SetCursor(hc); return TRUE; }
+            }
+        }
+        if (slot > 0 && slot < FORMS_MAX_SLOTS &&
+            g_slots[slot].cursor_kind != FORMS_CURSOR_DEFAULT) {
+            HCURSOR hc = LoadCursorW(NULL,
+                cursor_kind_to_idc(g_slots[slot].cursor_kind));
+            if (hc) { SetCursor(hc); return TRUE; }
+        }
+        return DefWindowProcW(h, msg, w, l);
     }
     case WM_COMMAND: {
         /* Child control notifications.  HIWORD(w)=notify code,
@@ -1605,7 +1713,11 @@ static void slot_teardown(FormsSlot *s)
     }
     if (s->back_brush) { DeleteObject(s->back_brush); s->back_brush = NULL; }
     if (s->hfont)      { DeleteObject(s->hfont);      s->hfont      = NULL; }
+    if (s->hicon_small) { DestroyIcon(s->hicon_small); s->hicon_small = NULL; }
+    if (s->hicon_big)   { DestroyIcon(s->hicon_big);   s->hicon_big   = NULL; }
+    if (s->tooltip_hwnd) { DestroyWindow(s->tooltip_hwnd); s->tooltip_hwnd = NULL; }
 #endif
+    if (s->tooltip) { free(s->tooltip); s->tooltip = NULL; }
     if (s->inst_val_held) {
         cando_value_release(s->inst_val);
         s->inst_val_held = 0;
@@ -1918,6 +2030,7 @@ static int native_set_text(CandoVM *vm, int argc, CandoValue *args)
         CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
         if (o) obj_set_string(o, "text", buf, (u32)strlen(buf));
     }
+    autosize_apply(s);
     cando_vm_push(vm, args[0]);          /* return self for chaining */
     return 1;
 }
@@ -2020,6 +2133,72 @@ static int native_get_location(CandoVM *vm, int argc, CandoValue *args)
     cando_vm_push(vm, cando_number((f64)s->x));
     cando_vm_push(vm, cando_number((f64)s->y));
     return 2;
+}
+
+static int native_set_width(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setWidth");
+    if (!s) return -1;
+    int w = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : s->w;
+    s->w = w;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) SetWindowPos(s->hwnd, NULL, 0, 0, w, s->h,
+                              SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+#endif
+    if (s->inst_val_held) {
+        CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
+        if (o) obj_set_number(o, "width", (f64)w);
+    }
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_height(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setHeight");
+    if (!s) return -1;
+    int h = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : s->h;
+    s->h = h;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) SetWindowPos(s->hwnd, NULL, 0, 0, s->w, h,
+                              SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+#endif
+    if (s->inst_val_held) {
+        CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
+        if (o) obj_set_number(o, "height", (f64)h);
+    }
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_get_width(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getWidth");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) {
+        RECT r; GetClientRect(s->hwnd, &r);
+        s->w = r.right - r.left;
+        s->h = r.bottom - r.top;
+    }
+#endif
+    cando_vm_push(vm, cando_number((f64)s->w));
+    return 1;
+}
+
+static int native_get_height(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getHeight");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) {
+        RECT r; GetClientRect(s->hwnd, &r);
+        s->w = r.right - r.left;
+        s->h = r.bottom - r.top;
+    }
+#endif
+    cando_vm_push(vm, cando_number((f64)s->h));
+    return 1;
 }
 
 static int native_show(CandoVM *vm, int argc, CandoValue *args)
@@ -3103,6 +3282,1386 @@ static void layout_dock_children(int parent_slot)
 }
 #endif
 
+/* =========================================================================
+ * Preferred-size measurement.  Picks a sensible width/height that "fits"
+ * the control's contents -- text + padding for buttons / labels / etc.,
+ * the bounding box of children for containers (forms, panels, group
+ * boxes), the widest item for ListBox / ComboBox.
+ * ===================================================================== */
+
+#if FORMS_HAVE_WIN32 && !defined(FORMS_MODULE_TEST_BUILD)
+static int measure_text_extent(FormsSlot *s, const wchar_t *text,
+                               int *out_w, int *out_h)
+{
+    *out_w = 0; *out_h = 0;
+    if (!s->hwnd) return 0;
+    HDC hdc = GetDC(s->hwnd);
+    if (!hdc) return 0;
+    HFONT hf = s->has_font ? s->hfont : NULL;
+    if (!hf) hf = (HFONT)SendMessageW(s->hwnd, WM_GETFONT, 0, 0);
+    HFONT old = hf ? (HFONT)SelectObject(hdc, hf) : NULL;
+    RECT r = { 0, 0, 0, 0 };
+    UINT flags = DT_CALCRECT | DT_NOPREFIX | DT_EXPANDTABS;
+    /* Multi-line edits / labels: respect line breaks. */
+    if (s->kind == KIND_TEXTBOX || s->kind == KIND_LABEL ||
+        s->kind == KIND_LINKLABEL) {
+        flags |= DT_WORDBREAK;
+    } else {
+        flags |= DT_SINGLELINE;
+    }
+    DrawTextW(hdc, text && text[0] ? text : L"M", -1, &r, flags);
+    *out_w = r.right - r.left;
+    *out_h = r.bottom - r.top;
+    if (hf && old) SelectObject(hdc, old);
+    ReleaseDC(s->hwnd, hdc);
+    return 1;
+}
+
+/* Compute the bounding box of every alive child of `parent_slot`. */
+static int children_bbox(int parent_slot, int *out_w, int *out_h)
+{
+    int max_right = 0, max_bottom = 0, any = 0;
+    for (int i = 1; i < FORMS_MAX_SLOTS; i++) {
+        FormsSlot *c = &g_slots[i];
+        if (!c->alive || c->parent_slot != parent_slot) continue;
+        any = 1;
+        int right  = c->x + c->w;
+        int bottom = c->y + c->h;
+        if (right  > max_right ) max_right  = right;
+        if (bottom > max_bottom) max_bottom = bottom;
+    }
+    *out_w = max_right;
+    *out_h = max_bottom;
+    return any;
+}
+
+static void compute_preferred_size(FormsSlot *s, int *out_w, int *out_h)
+{
+    int w = s->w, h = s->h;
+    if (!s->hwnd) { *out_w = w; *out_h = h; return; }
+    int slot = (int)(s - g_slots);
+
+    /* Containers: bounding box of children + a small margin. */
+    if (s->kind == KIND_FORM   || s->kind == KIND_PANEL ||
+        s->kind == KIND_GROUPBOX) {
+        int cw = 0, ch = 0;
+        int has_children = children_bbox(slot, &cw, &ch);
+        /* Per-kind defaults; the script-side padding fields add on top. */
+        int default_pad_x = 8, default_pad_y = 8;
+        int extra_top = 0;
+        if (s->kind == KIND_GROUPBOX) extra_top = 16;     /* title area      */
+        if (has_children) {
+            cw += default_pad_x + s->pad_l + s->pad_r;
+            ch += default_pad_y + s->pad_t + s->pad_b + extra_top;
+        } else if (s->kind == KIND_GROUPBOX) {
+            /* Empty groupbox: at least show the title. */
+            int len = (int)SendMessageW(s->hwnd, WM_GETTEXTLENGTH, 0, 0);
+            wchar_t *wbuf = (wchar_t *)calloc((size_t)len + 1, sizeof(wchar_t));
+            if (wbuf) {
+                if (len > 0) SendMessageW(s->hwnd, WM_GETTEXT, len + 1, (LPARAM)wbuf);
+                int tw, th;
+                measure_text_extent(s, wbuf, &tw, &th);
+                free(wbuf);
+                cw = tw + 24 + s->pad_l + s->pad_r;
+                ch = th + 16 + s->pad_t + s->pad_b;
+            }
+        } else {
+            *out_w = w; *out_h = h; return;
+        }
+        if (s->kind == KIND_FORM) {
+            /* Forms also need to account for the non-client frame: the
+             * children sit in the client rect, but setSize takes the
+             * outer window rect. */
+            RECT rc = { 0, 0, cw, ch };
+            DWORD style = (DWORD)GetWindowLongW(s->hwnd, GWL_STYLE);
+            DWORD ex    = (DWORD)GetWindowLongW(s->hwnd, GWL_EXSTYLE);
+            BOOL has_menu = (GetMenu(s->hwnd) != NULL);
+            AdjustWindowRectEx(&rc, style, has_menu, ex);
+            cw = rc.right - rc.left;
+            ch = rc.bottom - rc.top;
+            if (s->has_min_size) {
+                if (cw < s->min_w) cw = s->min_w;
+                if (ch < s->min_h) ch = s->min_h;
+            }
+            if (s->has_max_size) {
+                if (s->max_w > 0 && cw > s->max_w) cw = s->max_w;
+                if (s->max_h > 0 && ch > s->max_h) ch = s->max_h;
+            }
+        }
+        *out_w = cw; *out_h = ch;
+        return;
+    }
+
+    /* Buttons: ask Win32 for the ideal size first (XP+); if that fails,
+     * fall back to the text-based measurement below. */
+    if (s->kind == KIND_BUTTON) {
+        SIZE sz; sz.cx = 0; sz.cy = 0;
+        if (SendMessageW(s->hwnd, BCM_GETIDEALSIZE, 0, (LPARAM)&sz)
+            && sz.cx > 0 && sz.cy > 0) {
+            *out_w = sz.cx;
+            *out_h = sz.cy;
+            return;
+        }
+    }
+
+    /* Text-based controls: measure the caption with the current font. */
+    int len = (int)SendMessageW(s->hwnd, WM_GETTEXTLENGTH, 0, 0);
+    wchar_t *wbuf = (wchar_t *)calloc((size_t)len + 1, sizeof(wchar_t));
+    int tw = 0, th = 0;
+    if (wbuf) {
+        if (len > 0) SendMessageW(s->hwnd, WM_GETTEXT, len + 1, (LPARAM)wbuf);
+        measure_text_extent(s, len > 0 ? wbuf : L"M", &tw, &th);
+        if (len <= 0) tw = 0;
+    }
+    free(wbuf);
+
+    int pad_w = 0, pad_h = 0;
+    int min_w = 0, min_h = 0;
+    switch (s->kind) {
+    case KIND_BUTTON:
+        pad_w = 24; pad_h = 14; min_w = 75; min_h = 23;
+        break;
+    case KIND_LABEL:
+    case KIND_LINKLABEL:
+        pad_w = 0; pad_h = 0;
+        break;
+    case KIND_CHECKBOX:
+    case KIND_RADIO:
+        /* 13px box + 4px gap from text. */
+        pad_w = 17 + 4;
+        pad_h = 4;
+        if (th < 17) th = 17;
+        break;
+    case KIND_TEXTBOX:
+        pad_w = 8; pad_h = 6; min_w = 60; min_h = 20;
+        break;
+    case KIND_NUMERIC:
+        pad_w = 24; pad_h = 6; min_w = 60; min_h = 20;
+        break;
+    case KIND_COMBOBOX:
+    case KIND_LISTBOX: {
+        UINT msg_count   = (s->kind == KIND_COMBOBOX) ? CB_GETCOUNT     : LB_GETCOUNT;
+        UINT msg_textlen = (s->kind == KIND_COMBOBOX) ? CB_GETLBTEXTLEN : LB_GETTEXTLEN;
+        UINT msg_text    = (s->kind == KIND_COMBOBOX) ? CB_GETLBTEXT    : LB_GETTEXT;
+        int n = (int)SendMessageW(s->hwnd, msg_count, 0, 0);
+        int item_h = th > 0 ? th : 16;
+        for (int i = 0; i < n; i++) {
+            int ilen = (int)SendMessageW(s->hwnd, msg_textlen, (WPARAM)i, 0);
+            if (ilen <= 0) continue;
+            wchar_t *ib = (wchar_t *)calloc((size_t)ilen + 1, sizeof(wchar_t));
+            if (!ib) continue;
+            SendMessageW(s->hwnd, msg_text, (WPARAM)i, (LPARAM)ib);
+            int iw, ih;
+            measure_text_extent(s, ib, &iw, &ih);
+            if (iw > tw) tw = iw;
+            if (ih > item_h) item_h = ih;
+            free(ib);
+        }
+        if (s->kind == KIND_COMBOBOX) {
+            pad_w = 28;     /* dropdown arrow width */
+            pad_h = 8;
+            th = item_h;
+            min_w = 80;
+        } else {
+            /* ListBox: stack all items vertically. */
+            pad_w = 16;     /* room for scrollbar */
+            pad_h = 4;
+            th = (n > 0 ? n : 1) * item_h;
+            min_w = 80;
+        }
+        break;
+    }
+    case KIND_PROGRESS:
+        pad_w = 0; pad_h = 0;
+        if (tw < 100) tw = 100;
+        th = 16;
+        break;
+    case KIND_TRACKBAR:
+        pad_w = 0; pad_h = 0;
+        if (tw < 100) tw = 100;
+        th = 24;
+        break;
+    case KIND_DATETIMEPICKER:
+        pad_w = 28; pad_h = 6; min_w = 100; min_h = 20;
+        break;
+    case KIND_MONTHCALENDAR: {
+        /* The month-calendar control supplies its own ideal size. */
+        RECT mr;
+        if (SendMessageW(s->hwnd, MCM_GETMINREQRECT, 0, (LPARAM)&mr)) {
+            tw = mr.right - mr.left;
+            th = mr.bottom - mr.top;
+        }
+        pad_w = 0; pad_h = 0;
+        break;
+    }
+    case KIND_STATUSBAR:
+        /* Status bars own their geometry via WM_SIZE on the parent. */
+        *out_w = s->w; *out_h = s->h;
+        return;
+    case KIND_PICTUREBOX:
+    case KIND_SPINNER:
+    default:
+        pad_w = 4; pad_h = 4;
+        break;
+    }
+
+    int rw = tw + pad_w + s->pad_l + s->pad_r;
+    int rh = th + pad_h + s->pad_t + s->pad_b;
+    if (rw < min_w) rw = min_w;
+    if (rh < min_h) rh = min_h;
+    if (rw < 1) rw = 1;
+    if (rh < 1) rh = 1;
+    *out_w = rw;
+    *out_h = rh;
+}
+
+/* Re-fit the control to its preferred size when AutoSize is on.  Called
+ * from setText / setFont / addItem / setPadding etc. to keep the control
+ * sized to its current content.                                          */
+static void autosize_apply(FormsSlot *s)
+{
+    if (!s || !s->autosize) return;
+    int w = s->w, h = s->h;
+    compute_preferred_size(s, &w, &h);
+    if (s->autosize_mode == FORMS_AUTOSIZE_GROW) {
+        if (w < s->w) w = s->w;
+        if (h < s->h) h = s->h;
+    }
+    if (w == s->w && h == s->h) return;
+    s->w = w; s->h = h;
+    if (s->hwnd) SetWindowPos(s->hwnd, NULL, 0, 0, w, h,
+                              SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (s->parent_slot > 0) layout_dock_children(s->parent_slot);
+}
+#else
+static void compute_preferred_size(FormsSlot *s, int *out_w, int *out_h)
+{
+    *out_w = s->w; *out_h = s->h;
+}
+static void autosize_apply(FormsSlot *s) { (void)s; }
+#endif
+
+static int native_get_preferred_size(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getPreferredSize");
+    if (!s) return -1;
+    int w = s->w, h = s->h;
+    compute_preferred_size(s, &w, &h);
+    cando_vm_push(vm, cando_number((f64)w));
+    cando_vm_push(vm, cando_number((f64)h));
+    return 2;
+}
+
+static int native_size_to_content(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "sizeToContent");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    int w = s->w, h = s->h;
+    compute_preferred_size(s, &w, &h);
+    s->w = w; s->h = h;
+    if (s->hwnd) SetWindowPos(s->hwnd, NULL, 0, 0, w, h,
+                              SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (s->inst_val_held) {
+        CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
+        if (o) {
+            obj_set_number(o, "width",  (f64)w);
+            obj_set_number(o, "height", (f64)h);
+        }
+    }
+    if (s->parent_slot > 0) layout_dock_children(s->parent_slot);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_size_to_content_width(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "sizeToContentWidth");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    int w = s->w, h = s->h;
+    compute_preferred_size(s, &w, &h);
+    s->w = w;
+    if (s->hwnd) SetWindowPos(s->hwnd, NULL, 0, 0, w, s->h,
+                              SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (s->inst_val_held) {
+        CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
+        if (o) obj_set_number(o, "width", (f64)w);
+    }
+    if (s->parent_slot > 0) layout_dock_children(s->parent_slot);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_size_to_content_height(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "sizeToContentHeight");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    int w = s->w, h = s->h;
+    compute_preferred_size(s, &w, &h);
+    s->h = h;
+    if (s->hwnd) SetWindowPos(s->hwnd, NULL, 0, 0, s->w, h,
+                              SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (s->inst_val_held) {
+        CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
+        if (o) obj_set_number(o, "height", (f64)h);
+    }
+    if (s->parent_slot > 0) layout_dock_children(s->parent_slot);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* =========================================================================
+ * Padding / Margin / AutoSize / Anchor.
+ *
+ * Padding is the inner gap between a control and its contents (consumed
+ * by sizeToContent / autosize, and by the docking pass when the control
+ * is acting as a parent).  Margin is the outer gap reserved around the
+ * control for layout managers.  Anchor describes how a child's edges
+ * track the parent's edges on resize.
+ * ===================================================================== */
+
+/* Parse a 1, 2, or 4 number argument list into LTRB.  One value means
+ * "all four"; two means "horizontal, vertical"; four means LTRB.       */
+static void parse_quad_args(int argc, CandoValue *args,
+                             int *l, int *t, int *r, int *b)
+{
+    int v0 = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
+    if (argc < 3 || args[2].tag != CDO_NUMBER) {
+        *l = *t = *r = *b = v0; return;
+    }
+    int v1 = (int)args[2].as.number;
+    if (argc < 4 || args[3].tag != CDO_NUMBER) {
+        *l = *r = v0; *t = *b = v1; return;
+    }
+    int v2 = (int)args[3].as.number;
+    int v3 = (argc >= 5 && args[4].tag == CDO_NUMBER) ? (int)args[4].as.number : v2;
+    *l = v0; *t = v1; *r = v2; *b = v3;
+}
+
+static int native_set_padding(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setPadding");
+    if (!s) return -1;
+    parse_quad_args(argc, args, &s->pad_l, &s->pad_t, &s->pad_r, &s->pad_b);
+#if FORMS_HAVE_WIN32
+    autosize_apply(s);
+    layout_dock_children((int)(s - g_slots));
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_get_padding(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getPadding");
+    if (!s) return -1;
+    cando_vm_push(vm, cando_number((f64)s->pad_l));
+    cando_vm_push(vm, cando_number((f64)s->pad_t));
+    cando_vm_push(vm, cando_number((f64)s->pad_r));
+    cando_vm_push(vm, cando_number((f64)s->pad_b));
+    return 4;
+}
+
+static int native_set_margin(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setMargin");
+    if (!s) return -1;
+    parse_quad_args(argc, args, &s->margin_l, &s->margin_t,
+                    &s->margin_r, &s->margin_b);
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_get_margin(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getMargin");
+    if (!s) return -1;
+    cando_vm_push(vm, cando_number((f64)s->margin_l));
+    cando_vm_push(vm, cando_number((f64)s->margin_t));
+    cando_vm_push(vm, cando_number((f64)s->margin_r));
+    cando_vm_push(vm, cando_number((f64)s->margin_b));
+    return 4;
+}
+
+static int native_set_autosize(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setAutoSize");
+    if (!s) return -1;
+    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    s->autosize = on ? 1 : 0;
+#if FORMS_HAVE_WIN32
+    autosize_apply(s);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_get_autosize(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getAutoSize");
+    if (!s) return -1;
+    cando_vm_push(vm, cando_bool(s->autosize ? true : false));
+    return 1;
+}
+
+static int native_set_autosize_mode(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setAutoSizeMode");
+    if (!s) return -1;
+    int mode = FORMS_AUTOSIZE_GROW_SHRINK;
+    if (argc >= 2) {
+        if (args[1].tag == CDO_NUMBER) {
+            int n = (int)args[1].as.number;
+            if (n == FORMS_AUTOSIZE_GROW || n == FORMS_AUTOSIZE_GROW_SHRINK)
+                mode = n;
+        } else if (args[1].tag == CDO_STRING && args[1].as.string) {
+            const char *t = args[1].as.string->data;
+            u32 n = args[1].as.string->length;
+            if (n == 4 && memcmp(t, "grow", 4) == 0) mode = FORMS_AUTOSIZE_GROW;
+            else if (n == 10 && memcmp(t, "growshrink", 10) == 0)
+                mode = FORMS_AUTOSIZE_GROW_SHRINK;
+            else if (n == 11 && memcmp(t, "growandshrink", 11) == 0)
+                mode = FORMS_AUTOSIZE_GROW_SHRINK;
+        }
+    }
+    s->autosize_mode = mode;
+#if FORMS_HAVE_WIN32
+    autosize_apply(s);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* Parse an anchor argument: a single string ("left" / "right" / "top" /
+ * "bottom" / "all" / "none" / "fill"), a space/pipe-separated list
+ * ("left top right"), or a numeric bitmask. */
+static int parse_anchor_arg(CandoValue v)
+{
+    if (v.tag == CDO_NUMBER) return (int)v.as.number;
+    if (v.tag != CDO_STRING || !v.as.string) return FORMS_ANCHOR_DEFAULT;
+    const char *str = v.as.string->data;
+    u32 n = v.as.string->length;
+    int mask = 0;
+    u32 i = 0;
+    while (i < n) {
+        while (i < n && (str[i] == ' ' || str[i] == '|' ||
+                         str[i] == ',' || str[i] == '+')) i++;
+        u32 start = i;
+        while (i < n && str[i] != ' ' && str[i] != '|' &&
+               str[i] != ',' && str[i] != '+') i++;
+        u32 len = i - start;
+        const char *t = str + start;
+        if      (len == 4 && memcmp(t, "left",   4) == 0) mask |= FORMS_ANCHOR_LEFT;
+        else if (len == 3 && memcmp(t, "top",    3) == 0) mask |= FORMS_ANCHOR_TOP;
+        else if (len == 5 && memcmp(t, "right",  5) == 0) mask |= FORMS_ANCHOR_RIGHT;
+        else if (len == 6 && memcmp(t, "bottom", 6) == 0) mask |= FORMS_ANCHOR_BOTTOM;
+        else if (len == 3 && memcmp(t, "all",    3) == 0) mask |= FORMS_ANCHOR_ALL;
+        else if (len == 4 && memcmp(t, "fill",   4) == 0) mask |= FORMS_ANCHOR_ALL;
+        else if (len == 4 && memcmp(t, "none",   4) == 0) mask  = FORMS_ANCHOR_NONE;
+    }
+    return mask ? mask : FORMS_ANCHOR_DEFAULT;
+}
+
+/* Capture the current gaps so subsequent resizes can reproduce them. */
+#if FORMS_HAVE_WIN32 && !defined(FORMS_MODULE_TEST_BUILD)
+static void anchor_capture(FormsSlot *s)
+{
+    if (s->parent_slot <= 0 || !g_slots[s->parent_slot].hwnd) return;
+    RECT pr;
+    GetClientRect(g_slots[s->parent_slot].hwnd, &pr);
+    int pw = pr.right - pr.left, ph = pr.bottom - pr.top;
+    s->anchor_l = s->x;
+    s->anchor_t = s->y;
+    s->anchor_r = pw - (s->x + s->w);
+    s->anchor_b = ph - (s->y + s->h);
+    s->anchor_w = pw;
+    s->anchor_h = ph;
+}
+
+/* Apply anchors for every direct child of `parent_slot`.  Called from the
+ * parent's WM_SIZE handler before the dock pass. */
+static void layout_anchor_children(int parent_slot)
+{
+    if (parent_slot <= 0 || parent_slot >= FORMS_MAX_SLOTS) return;
+    FormsSlot *p = &g_slots[parent_slot];
+    if (!p->alive || !p->hwnd) return;
+    RECT pr;
+    if (!GetClientRect(p->hwnd, &pr)) return;
+    int pw = pr.right - pr.left, ph = pr.bottom - pr.top;
+    for (int i = 1; i < FORMS_MAX_SLOTS; i++) {
+        FormsSlot *c = &g_slots[i];
+        if (!c->alive || c->parent_slot != parent_slot || !c->hwnd) continue;
+        if (c->dock != FORMS_DOCK_NONE) continue;
+        int a = c->anchor;
+        if (a == FORMS_ANCHOR_DEFAULT) continue;  /* default = stay put */
+        if (c->anchor_w == 0 && c->anchor_h == 0) continue;  /* not captured */
+        int x = c->x, y = c->y, w = c->w, h = c->h;
+        int right_anchor  = (a & FORMS_ANCHOR_RIGHT)  != 0;
+        int left_anchor   = (a & FORMS_ANCHOR_LEFT)   != 0;
+        int top_anchor    = (a & FORMS_ANCHOR_TOP)    != 0;
+        int bottom_anchor = (a & FORMS_ANCHOR_BOTTOM) != 0;
+        if (left_anchor && right_anchor) {
+            x = c->anchor_l;
+            w = pw - c->anchor_l - c->anchor_r;
+        } else if (right_anchor) {
+            x = pw - c->anchor_r - c->w;
+        } else if (left_anchor) {
+            x = c->anchor_l;
+        } else {
+            /* No horizontal anchor -- track parent centre. */
+            x = c->anchor_l + (pw - c->anchor_w) / 2;
+        }
+        if (top_anchor && bottom_anchor) {
+            y = c->anchor_t;
+            h = ph - c->anchor_t - c->anchor_b;
+        } else if (bottom_anchor) {
+            y = ph - c->anchor_b - c->h;
+        } else if (top_anchor) {
+            y = c->anchor_t;
+        } else {
+            y = c->anchor_t + (ph - c->anchor_h) / 2;
+        }
+        if (w < 1) w = 1;
+        if (h < 1) h = 1;
+        SetWindowPos(c->hwnd, NULL, x, y, w, h,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        c->x = x; c->y = y; c->w = w; c->h = h;
+    }
+}
+#endif
+
+static int native_set_anchor(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setAnchor");
+    if (!s) return -1;
+    int mask = (argc >= 2) ? parse_anchor_arg(args[1]) : FORMS_ANCHOR_DEFAULT;
+    s->anchor = mask;
+#if FORMS_HAVE_WIN32
+    anchor_capture(s);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_get_anchor(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getAnchor");
+    if (!s) return -1;
+    cando_vm_push(vm, cando_number((f64)s->anchor));
+    return 1;
+}
+
+/* =========================================================================
+ * TextBox enrichments.  All silent no-ops on non-edit kinds so script
+ * code can stay loose.
+ * ===================================================================== */
+
+#if FORMS_HAVE_WIN32
+static void edit_toggle_style(FormsSlot *s, LONG add, LONG remove)
+{
+    if (!s->hwnd) return;
+    LONG st = GetWindowLongW(s->hwnd, GWL_STYLE);
+    st &= ~remove;
+    st |=  add;
+    SetWindowLongW(s->hwnd, GWL_STYLE, st);
+    SetWindowPos(s->hwnd, NULL, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                 SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+#endif
+
+static int native_set_multiline(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setMultiline");
+    if (!s) return -1;
+    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_TEXTBOX) {
+        if (on) edit_toggle_style(s,
+                    ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, 0);
+        else    edit_toggle_style(s, 0,
+                    ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN);
+    }
+#else
+    (void)on;
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_readonly(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setReadOnly");
+    if (!s) return -1;
+    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_TEXTBOX) {
+        SendMessageW(s->hwnd, EM_SETREADONLY, (WPARAM)(on ? TRUE : FALSE), 0);
+    }
+#else
+    (void)on;
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_placeholder(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setPlaceholder");
+    if (!s) return -1;
+    char buf[512] = {0};
+    if (argc >= 2) parse_text_arg(vm, args[1], buf, sizeof(buf));
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_TEXTBOX) {
+        wchar_t *w = utf8_to_wide(buf, -1);
+        if (w) {
+            /* EM_SETCUEBANNER -- 0x1501 -- 2nd arg TRUE keeps the cue
+             * visible while the edit has focus. */
+            SendMessageW(s->hwnd, 0x1501, (WPARAM)TRUE, (LPARAM)w);
+            free(w);
+        }
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_password_char(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setPasswordChar");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    wchar_t pc = L'\0';
+    if (argc >= 2) {
+        if (args[1].tag == CDO_NUMBER) pc = (wchar_t)(int)args[1].as.number;
+        else if (args[1].tag == CDO_STRING && args[1].as.string &&
+                 args[1].as.string->length > 0) {
+            wchar_t *w = utf8_to_wide(args[1].as.string->data,
+                                      (int)args[1].as.string->length);
+            if (w) { pc = w[0]; free(w); }
+        }
+        else if (args[1].tag == CDO_BOOL && args[1].as.boolean) pc = L'*';
+    }
+    if (s->hwnd && s->kind == KIND_TEXTBOX) {
+        SendMessageW(s->hwnd, EM_SETPASSWORDCHAR, (WPARAM)pc, 0);
+        InvalidateRect(s->hwnd, NULL, TRUE);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_max_length(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setMaxLength");
+    if (!s) return -1;
+    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_TEXTBOX) {
+        SendMessageW(s->hwnd, EM_SETLIMITTEXT, (WPARAM)(n > 0 ? n : 0), 0);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_text_alignment(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setTextAlign");
+    if (!s) return -1;
+    int align = 0;          /* 0 = left, 1 = center, 2 = right */
+    if (argc >= 2) {
+        if (args[1].tag == CDO_STRING && args[1].as.string) {
+            const char *t = args[1].as.string->data;
+            u32 n = args[1].as.string->length;
+            if (n == 4 && memcmp(t, "left", 4) == 0) align = 0;
+            else if (n == 6 && (memcmp(t, "center", 6) == 0 ||
+                                memcmp(t, "centre", 6) == 0)) align = 1;
+            else if (n == 5 && memcmp(t, "right", 5) == 0) align = 2;
+        } else if (args[1].tag == CDO_NUMBER) {
+            int v = (int)args[1].as.number;
+            if (v >= 0 && v <= 2) align = v;
+        }
+    }
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) {
+        if (s->kind == KIND_TEXTBOX) {
+            LONG add = (align == 1) ? ES_CENTER :
+                       (align == 2) ? ES_RIGHT  : ES_LEFT;
+            edit_toggle_style(s, add, ES_LEFT | ES_CENTER | ES_RIGHT);
+            InvalidateRect(s->hwnd, NULL, TRUE);
+        } else if (s->kind == KIND_LABEL || s->kind == KIND_LINKLABEL) {
+            LONG add = (align == 1) ? SS_CENTER :
+                       (align == 2) ? SS_RIGHT  : SS_LEFT;
+            edit_toggle_style(s, add, SS_LEFT | SS_CENTER | SS_RIGHT);
+            InvalidateRect(s->hwnd, NULL, TRUE);
+        }
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_select_all(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "selectAll");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_TEXTBOX) {
+        SendMessageW(s->hwnd, EM_SETSEL, 0, -1);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_append_text(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "appendText");
+    if (!s) return -1;
+    char buf[1024] = {0};
+    if (argc >= 2) parse_text_arg(vm, args[1], buf, sizeof(buf));
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_TEXTBOX) {
+        wchar_t *w = utf8_to_wide(buf, -1);
+        if (w) {
+            int len = (int)SendMessageW(s->hwnd, WM_GETTEXTLENGTH, 0, 0);
+            SendMessageW(s->hwnd, EM_SETSEL, (WPARAM)len, (LPARAM)len);
+            SendMessageW(s->hwnd, EM_REPLACESEL, (WPARAM)FALSE, (LPARAM)w);
+            free(w);
+        }
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_clear_text(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "clear");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) {
+        if (s->kind == KIND_TEXTBOX) {
+            SetWindowTextW(s->hwnd, L"");
+        } else if (s->kind == KIND_COMBOBOX) {
+            SendMessageW(s->hwnd, CB_RESETCONTENT, 0, 0);
+        } else if (s->kind == KIND_LISTBOX) {
+            SendMessageW(s->hwnd, LB_RESETCONTENT, 0, 0);
+        }
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* =========================================================================
+ * Tooltip + Cursor.
+ * ===================================================================== */
+
+#if FORMS_HAVE_WIN32 && !defined(FORMS_MODULE_TEST_BUILD)
+/* Walk up to the form that owns this slot.  Returns NULL if the slot is
+ * a top-level form with no parent. */
+static FormsSlot *slot_owning_form(FormsSlot *s)
+{
+    while (s && s->parent_slot > 0) s = &g_slots[s->parent_slot];
+    return (s && s->kind == KIND_FORM) ? s : NULL;
+}
+
+/* Lazily create a tooltip HWND owned by the form, then add or update the
+ * tool entry that targets `s->hwnd`. */
+static void tooltip_attach(FormsSlot *s, const char *text_utf8)
+{
+    if (!s || !s->hwnd) return;
+    FormsSlot *form = (s->kind == KIND_FORM) ? s : slot_owning_form(s);
+    if (!form) return;
+    if (!form->tooltip_hwnd) {
+        form->tooltip_hwnd = CreateWindowExW(
+            WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL,
+            WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+            form->hwnd, NULL, NULL, NULL);
+    }
+    if (!form->tooltip_hwnd) return;
+
+    wchar_t *w = (text_utf8 && text_utf8[0]) ? utf8_to_wide(text_utf8, -1)
+                                             : NULL;
+    TOOLINFOW ti; memset(&ti, 0, sizeof(ti));
+    ti.cbSize = sizeof(ti);
+    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    ti.hwnd   = form->hwnd;
+    ti.uId    = (UINT_PTR)s->hwnd;
+    /* Try update first; if no entry exists, add one. */
+    if (!SendMessageW(form->tooltip_hwnd, TTM_GETTOOLINFOW, 0, (LPARAM)&ti)) {
+        ti.lpszText = w ? w : (wchar_t *)L"";
+        SendMessageW(form->tooltip_hwnd, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+    } else {
+        ti.lpszText = w ? w : (wchar_t *)L"";
+        SendMessageW(form->tooltip_hwnd, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+    }
+    if (w) free(w);
+    /* Empty text -> remove the tool entirely. */
+    if (!text_utf8 || !text_utf8[0]) {
+        SendMessageW(form->tooltip_hwnd, TTM_DELTOOLW, 0, (LPARAM)&ti);
+    }
+}
+#endif
+
+static int native_set_tooltip(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setToolTip");
+    if (!s) return -1;
+    char buf[1024] = {0};
+    if (argc >= 2) parse_text_arg(vm, args[1], buf, sizeof(buf));
+    if (s->tooltip) { free(s->tooltip); s->tooltip = NULL; }
+    if (buf[0]) s->tooltip = strdup(buf);
+#if FORMS_HAVE_WIN32
+    tooltip_attach(s, buf);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+#if FORMS_HAVE_WIN32
+static LPCWSTR cursor_kind_to_idc(int kind)
+{
+    switch (kind) {
+    case FORMS_CURSOR_HAND:      return IDC_HAND;
+    case FORMS_CURSOR_IBEAM:     return IDC_IBEAM;
+    case FORMS_CURSOR_WAIT:      return IDC_WAIT;
+    case FORMS_CURSOR_CROSS:     return IDC_CROSS;
+    case FORMS_CURSOR_SIZE_NS:   return IDC_SIZENS;
+    case FORMS_CURSOR_SIZE_WE:   return IDC_SIZEWE;
+    case FORMS_CURSOR_SIZE_NWSE: return IDC_SIZENWSE;
+    case FORMS_CURSOR_SIZE_NESW: return IDC_SIZENESW;
+    case FORMS_CURSOR_SIZE_ALL:  return IDC_SIZEALL;
+    case FORMS_CURSOR_NO:        return IDC_NO;
+    case FORMS_CURSOR_HELP:      return IDC_HELP;
+    case FORMS_CURSOR_APPSTART:  return IDC_APPSTARTING;
+    case FORMS_CURSOR_ARROW:     return IDC_ARROW;
+    default:                     return IDC_ARROW;
+    }
+}
+#endif
+
+static int native_set_cursor(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setCursor");
+    if (!s) return -1;
+    int kind = FORMS_CURSOR_DEFAULT;
+    if (argc >= 2) {
+        if (args[1].tag == CDO_NUMBER) {
+            kind = (int)args[1].as.number;
+        } else if (args[1].tag == CDO_STRING && args[1].as.string) {
+            const char *t = args[1].as.string->data;
+            u32 n = args[1].as.string->length;
+            #define CCURSOR(name, val) \
+                if (n == sizeof(name)-1 && memcmp(t, name, sizeof(name)-1) == 0) kind = val
+            CCURSOR("default",     FORMS_CURSOR_DEFAULT);
+            CCURSOR("arrow",       FORMS_CURSOR_ARROW);
+            CCURSOR("hand",        FORMS_CURSOR_HAND);
+            CCURSOR("pointer",     FORMS_CURSOR_HAND);
+            CCURSOR("ibeam",       FORMS_CURSOR_IBEAM);
+            CCURSOR("text",        FORMS_CURSOR_IBEAM);
+            CCURSOR("wait",        FORMS_CURSOR_WAIT);
+            CCURSOR("cross",       FORMS_CURSOR_CROSS);
+            CCURSOR("crosshair",   FORMS_CURSOR_CROSS);
+            CCURSOR("size-ns",     FORMS_CURSOR_SIZE_NS);
+            CCURSOR("size-we",     FORMS_CURSOR_SIZE_WE);
+            CCURSOR("size-nwse",   FORMS_CURSOR_SIZE_NWSE);
+            CCURSOR("size-nesw",   FORMS_CURSOR_SIZE_NESW);
+            CCURSOR("size-all",    FORMS_CURSOR_SIZE_ALL);
+            CCURSOR("no",          FORMS_CURSOR_NO);
+            CCURSOR("forbidden",   FORMS_CURSOR_NO);
+            CCURSOR("help",        FORMS_CURSOR_HELP);
+            CCURSOR("appstarting", FORMS_CURSOR_APPSTART);
+            #undef CCURSOR
+        }
+    }
+    s->cursor_kind = kind;
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* =========================================================================
+ * Form-level state: icon, flash, window state, resizable, taskbar...
+ * ===================================================================== */
+
+static int native_set_icon(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setIcon");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_FORM && argc >= 2 &&
+        args[1].tag == CDO_STRING && args[1].as.string) {
+        wchar_t *w = utf8_to_wide(args[1].as.string->data,
+                                  (int)args[1].as.string->length);
+        if (w) {
+            HICON small = (HICON)LoadImageW(NULL, w, IMAGE_ICON, 16, 16,
+                                            LR_LOADFROMFILE | LR_DEFAULTSIZE);
+            HICON big   = (HICON)LoadImageW(NULL, w, IMAGE_ICON, 32, 32,
+                                            LR_LOADFROMFILE | LR_DEFAULTSIZE);
+            if (small) {
+                if (s->hicon_small) DestroyIcon(s->hicon_small);
+                s->hicon_small = small;
+                SendMessageW(s->hwnd, WM_SETICON, ICON_SMALL, (LPARAM)small);
+            }
+            if (big) {
+                if (s->hicon_big) DestroyIcon(s->hicon_big);
+                s->hicon_big = big;
+                SendMessageW(s->hwnd, WM_SETICON, ICON_BIG, (LPARAM)big);
+            }
+            free(w);
+        }
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_flash(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "flash");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_FORM) {
+        FLASHWINFO fi; memset(&fi, 0, sizeof(fi));
+        fi.cbSize = sizeof(fi);
+        fi.hwnd   = s->hwnd;
+        fi.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
+        fi.uCount  = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
+                     (UINT)(int)args[1].as.number : 3;
+        fi.dwTimeout = 0;
+        FlashWindowEx(&fi);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* Maximize / minimize / restore.  Forms only. */
+static int native_set_window_state(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setWindowState");
+    if (!s) return -1;
+    int cmd = -1;
+    if (argc >= 2) {
+        if (args[1].tag == CDO_STRING && args[1].as.string) {
+            const char *t = args[1].as.string->data;
+            u32 n = args[1].as.string->length;
+            if      (n == 6 && memcmp(t, "normal",   6) == 0) cmd = 0;
+            else if (n == 8 && memcmp(t, "maximize", 8) == 0) cmd = 1;
+            else if (n == 9 && memcmp(t, "maximized",9) == 0) cmd = 1;
+            else if (n == 8 && memcmp(t, "minimize", 8) == 0) cmd = 2;
+            else if (n == 9 && memcmp(t, "minimized",9) == 0) cmd = 2;
+            else if (n == 8 && memcmp(t, "restored", 8) == 0) cmd = 0;
+        } else if (args[1].tag == CDO_NUMBER) {
+            cmd = (int)args[1].as.number;
+        }
+    }
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_FORM) {
+        switch (cmd) {
+        case 0: ShowWindow(s->hwnd, SW_RESTORE);  break;
+        case 1: ShowWindow(s->hwnd, SW_MAXIMIZE); break;
+        case 2: ShowWindow(s->hwnd, SW_MINIMIZE); break;
+        default: break;
+        }
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_get_window_state(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getWindowState");
+    if (!s) return -1;
+    const char *st = "normal";
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) {
+        if (IsIconic(s->hwnd))   st = "minimized";
+        else if (IsZoomed(s->hwnd)) st = "maximized";
+    }
+#endif
+    cando_vm_push(vm, cando_string_value(cando_string_new(st, (u32)strlen(st))));
+    return 1;
+}
+
+static int native_maximize(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "maximize");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_FORM) ShowWindow(s->hwnd, SW_MAXIMIZE);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_minimize(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "minimize");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_FORM) ShowWindow(s->hwnd, SW_MINIMIZE);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_restore(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "restore");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_FORM) ShowWindow(s->hwnd, SW_RESTORE);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+#if FORMS_HAVE_WIN32
+static void form_toggle_style(FormsSlot *s, LONG add, LONG remove,
+                              LONG add_ex, LONG remove_ex)
+{
+    if (!s->hwnd) return;
+    LONG st = GetWindowLongW(s->hwnd, GWL_STYLE);
+    LONG ex = GetWindowLongW(s->hwnd, GWL_EXSTYLE);
+    st &= ~remove; st |= add;
+    ex &= ~remove_ex; ex |= add_ex;
+    SetWindowLongW(s->hwnd, GWL_STYLE,   st);
+    SetWindowLongW(s->hwnd, GWL_EXSTYLE, ex);
+    SetWindowPos(s->hwnd, NULL, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                 SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+#endif
+
+static int native_set_resizable(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setResizable");
+    if (!s) return -1;
+    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_FORM) {
+        if (on) form_toggle_style(s, WS_THICKFRAME | WS_MAXIMIZEBOX, 0, 0, 0);
+        else    form_toggle_style(s, 0, WS_THICKFRAME | WS_MAXIMIZEBOX, 0, 0);
+    }
+#else
+    (void)on;
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_minimize_box(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setMinimizeBox");
+    if (!s) return -1;
+    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_FORM) {
+        if (on) form_toggle_style(s, WS_MINIMIZEBOX, 0, 0, 0);
+        else    form_toggle_style(s, 0, WS_MINIMIZEBOX, 0, 0);
+    }
+#else
+    (void)on;
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_maximize_box(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setMaximizeBox");
+    if (!s) return -1;
+    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_FORM) {
+        if (on) form_toggle_style(s, WS_MAXIMIZEBOX, 0, 0, 0);
+        else    form_toggle_style(s, 0, WS_MAXIMIZEBOX, 0, 0);
+    }
+#else
+    (void)on;
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_show_in_taskbar(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setShowInTaskbar");
+    if (!s) return -1;
+    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_FORM) {
+        if (on) form_toggle_style(s, 0, 0, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW);
+        else    form_toggle_style(s, 0, 0, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW);
+    }
+#else
+    (void)on;
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_accept_button(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setAcceptButton");
+    if (!s) return -1;
+    int btn_slot = -1;
+    if (argc >= 2) {
+        FormsSlot *b = slot_from_inst(vm, args[1]);
+        if (b) btn_slot = (int)(b - g_slots);
+    }
+    s->accept_btn_slot = btn_slot;
+#if FORMS_HAVE_WIN32
+    /* Mark the button as the default-push button so Win32 paints the
+     * extra emphasis ring.  (Triggering Enter as a click requires a
+     * dialog-style message loop -- not yet wired up.) */
+    if (btn_slot > 0 && g_slots[btn_slot].alive && g_slots[btn_slot].hwnd &&
+        g_slots[btn_slot].kind == KIND_BUTTON) {
+        LONG st = GetWindowLongW(g_slots[btn_slot].hwnd, GWL_STYLE);
+        st = (st & ~BS_TYPEMASK) | BS_DEFPUSHBUTTON;
+        SetWindowLongW(g_slots[btn_slot].hwnd, GWL_STYLE, st);
+        InvalidateRect(g_slots[btn_slot].hwnd, NULL, TRUE);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_cancel_button(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setCancelButton");
+    if (!s) return -1;
+    int btn_slot = -1;
+    if (argc >= 2) {
+        FormsSlot *b = slot_from_inst(vm, args[1]);
+        if (b) btn_slot = (int)(b - g_slots);
+    }
+    s->cancel_btn_slot = btn_slot;
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* =========================================================================
+ * Numeric / Progress / TrackBar enrichments.
+ * ===================================================================== */
+
+static int native_set_step(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setStep");
+    if (!s) return -1;
+    int step = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
+               (int)args[1].as.number : 1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_PROGRESS) {
+        SendMessageW(s->hwnd, PBM_SETSTEP, (WPARAM)step, 0);
+    }
+#else
+    (void)step;
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_step_it(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "stepIt");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_PROGRESS) {
+        SendMessageW(s->hwnd, PBM_STEPIT, 0, 0);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_tick_frequency(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setTickFrequency");
+    if (!s) return -1;
+    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
+            (int)args[1].as.number : 1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_TRACKBAR) {
+        SendMessageW(s->hwnd, TBM_SETTICFREQ, (WPARAM)n, 0);
+    }
+#else
+    (void)n;
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_small_step(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setSmallStep");
+    if (!s) return -1;
+    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
+            (int)args[1].as.number : 1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_TRACKBAR) {
+        SendMessageW(s->hwnd, TBM_SETLINESIZE, 0, (LPARAM)n);
+    }
+#else
+    (void)n;
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_large_step(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setLargeStep");
+    if (!s) return -1;
+    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
+            (int)args[1].as.number : 5;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_TRACKBAR) {
+        SendMessageW(s->hwnd, TBM_SETPAGESIZE, 0, (LPARAM)n);
+    }
+#else
+    (void)n;
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_increment(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setIncrement");
+    if (!s) return -1;
+    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
+            (int)args[1].as.number : 1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_NUMERIC) {
+        /* For NumericUpDown the spinner is a sibling msctls_updown32; the
+         * UDM_SETACCEL message tunes how fast its repeat-arrow climbs.   */
+        UDACCEL acc; acc.nSec = 0; acc.nInc = (UINT)n;
+        SendMessageW(s->hwnd, UDM_SETACCEL, 1, (LPARAM)&acc);
+    }
+#else
+    (void)n;
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* =========================================================================
+ * Convenience helpers: remove / getParent / getChildren / hasFocus /
+ * setName / contains / tab order accessors.
+ * ===================================================================== */
+
+static int native_remove(CandoVM *vm, int argc, CandoValue *args)
+{
+    /* Alias for destroy -- Derma uses :Remove(). */
+    return native_destroy(vm, argc, args);
+}
+
+static int native_get_parent(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getParent");
+    if (!s) return -1;
+    if (s->parent_slot > 0 && s->parent_slot < FORMS_MAX_SLOTS &&
+        g_slots[s->parent_slot].alive &&
+        g_slots[s->parent_slot].inst_val_held) {
+        cando_vm_push(vm, g_slots[s->parent_slot].inst_val);
+    } else {
+        cando_vm_push(vm, cando_null());
+    }
+    return 1;
+}
+
+static int native_get_children(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getChildren");
+    if (!s) return -1;
+    int slot = (int)(s - g_slots);
+    CandoValue arr = cando_bridge_new_array(vm);
+    CdoObject *a   = cando_bridge_resolve(vm, arr.as.handle);
+    for (int i = 1; i < FORMS_MAX_SLOTS; i++) {
+        FormsSlot *c = &g_slots[i];
+        if (!c->alive || c->parent_slot != slot) continue;
+        if (!c->inst_val_held) continue;
+        CdoObject *co = cando_bridge_resolve(vm, c->inst_val.as.handle);
+        if (co) cdo_array_push(a, cdo_object_value(co));
+    }
+    cando_vm_push(vm, arr);
+    return 1;
+}
+
+static int native_has_focus(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "hasFocus");
+    if (!s) return -1;
+    bool focused = false;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) focused = (GetFocus() == s->hwnd);
+#endif
+    cando_vm_push(vm, cando_bool(focused));
+    return 1;
+}
+
+static int native_contains(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "contains");
+    if (!s) return -1;
+    bool yes = false;
+    if (argc >= 2) {
+        FormsSlot *c = slot_from_inst(vm, args[1]);
+        while (c && c->parent_slot > 0) {
+            if (c->parent_slot == (int)(s - g_slots)) { yes = true; break; }
+            c = &g_slots[c->parent_slot];
+        }
+    }
+    cando_vm_push(vm, cando_bool(yes));
+    return 1;
+}
+
+static int native_set_tab_index(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setTabIndex");
+    if (!s) return -1;
+    s->tab_index = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
+                   (int)args[1].as.number : -1;
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_get_tab_index(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getTabIndex");
+    if (!s) return -1;
+    cando_vm_push(vm, cando_number((f64)s->tab_index));
+    return 1;
+}
+
+static int native_set_tab_stop(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setTabStop");
+    if (!s) return -1;
+    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    s->tab_stop = on ? 1 : 0;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) {
+        LONG st = GetWindowLongW(s->hwnd, GWL_STYLE);
+        if (on) st |=  WS_TABSTOP; else st &= ~WS_TABSTOP;
+        SetWindowLongW(s->hwnd, GWL_STYLE, st);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
 /* Translate a dock argument (number or "top"/"bottom"/"left"/"right"/
  * "fill"/"none") into a FORMS_DOCK_* constant. */
 static int parse_dock_arg(CandoValue v)
@@ -3255,6 +4814,14 @@ CandoValue cando_module_init(CandoVM *vm)
     cando_lib_meta_define(vm, meta, "setTitle",     native_set_text);     /* alias */
     cando_lib_meta_define(vm, meta, "setSize",      native_set_size);
     cando_lib_meta_define(vm, meta, "getSize",      native_get_size);
+    cando_lib_meta_define(vm, meta, "setWidth",     native_set_width);
+    cando_lib_meta_define(vm, meta, "setHeight",    native_set_height);
+    cando_lib_meta_define(vm, meta, "getWidth",     native_get_width);
+    cando_lib_meta_define(vm, meta, "getHeight",    native_get_height);
+    cando_lib_meta_define(vm, meta, "sizeToContent",       native_size_to_content);
+    cando_lib_meta_define(vm, meta, "sizeToContentWidth",  native_size_to_content_width);
+    cando_lib_meta_define(vm, meta, "sizeToContentHeight", native_size_to_content_height);
+    cando_lib_meta_define(vm, meta, "getPreferredSize",    native_get_preferred_size);
     cando_lib_meta_define(vm, meta, "setLocation",  native_set_location);
     cando_lib_meta_define(vm, meta, "getLocation",  native_get_location);
     cando_lib_meta_define(vm, meta, "setPosition",  native_set_location); /* alias */
@@ -3331,6 +4898,88 @@ CandoValue cando_module_init(CandoVM *vm)
     /* ProgressBar extras. */
     cando_lib_meta_define(vm, meta, "setMarquee",   native_set_marquee);
     cando_lib_meta_define(vm, meta, "setState",     native_set_state);
+
+    /* Padding / Margin / AutoSize / Anchor. */
+    cando_lib_meta_define(vm, meta, "setPadding",      native_set_padding);
+    cando_lib_meta_define(vm, meta, "getPadding",      native_get_padding);
+    cando_lib_meta_define(vm, meta, "setMargin",       native_set_margin);
+    cando_lib_meta_define(vm, meta, "getMargin",       native_get_margin);
+    cando_lib_meta_define(vm, meta, "setAutoSize",     native_set_autosize);
+    cando_lib_meta_define(vm, meta, "getAutoSize",     native_get_autosize);
+    cando_lib_meta_define(vm, meta, "setAutoSizeMode", native_set_autosize_mode);
+    cando_lib_meta_define(vm, meta, "setAnchor",       native_set_anchor);
+    cando_lib_meta_define(vm, meta, "getAnchor",       native_get_anchor);
+
+    /* TextBox enrichment. */
+    cando_lib_meta_define(vm, meta, "setMultiline",     native_set_multiline);
+    cando_lib_meta_define(vm, meta, "setReadOnly",      native_set_readonly);
+    cando_lib_meta_define(vm, meta, "setPlaceholder",   native_set_placeholder);
+    cando_lib_meta_define(vm, meta, "setHint",          native_set_placeholder); /* alias */
+    cando_lib_meta_define(vm, meta, "setPasswordChar",  native_set_password_char);
+    cando_lib_meta_define(vm, meta, "setMaxLength",     native_set_max_length);
+    cando_lib_meta_define(vm, meta, "setTextAlign",     native_set_text_alignment);
+    cando_lib_meta_define(vm, meta, "setTextAlignment", native_set_text_alignment); /* alias */
+    cando_lib_meta_define(vm, meta, "selectAll",        native_select_all);
+    cando_lib_meta_define(vm, meta, "appendText",       native_append_text);
+    cando_lib_meta_define(vm, meta, "clear",            native_clear_text);
+
+    /* Tooltip + cursor. */
+    cando_lib_meta_define(vm, meta, "setToolTip", native_set_tooltip);
+    cando_lib_meta_define(vm, meta, "setTooltip", native_set_tooltip);  /* alias */
+    cando_lib_meta_define(vm, meta, "setCursor",  native_set_cursor);
+
+    /* Form-level state. */
+    cando_lib_meta_define(vm, meta, "setIcon",           native_set_icon);
+    cando_lib_meta_define(vm, meta, "flash",             native_flash);
+    cando_lib_meta_define(vm, meta, "setWindowState",    native_set_window_state);
+    cando_lib_meta_define(vm, meta, "getWindowState",    native_get_window_state);
+    cando_lib_meta_define(vm, meta, "maximize",          native_maximize);
+    cando_lib_meta_define(vm, meta, "minimize",          native_minimize);
+    cando_lib_meta_define(vm, meta, "restore",           native_restore);
+    cando_lib_meta_define(vm, meta, "setResizable",      native_set_resizable);
+    cando_lib_meta_define(vm, meta, "setMinimizeBox",    native_set_minimize_box);
+    cando_lib_meta_define(vm, meta, "setMaximizeBox",    native_set_maximize_box);
+    cando_lib_meta_define(vm, meta, "setShowInTaskbar",  native_set_show_in_taskbar);
+    cando_lib_meta_define(vm, meta, "setAcceptButton",   native_set_accept_button);
+    cando_lib_meta_define(vm, meta, "setCancelButton",   native_set_cancel_button);
+
+    /* Numeric / Progress / TrackBar enrichments. */
+    cando_lib_meta_define(vm, meta, "setStep",           native_set_step);
+    cando_lib_meta_define(vm, meta, "stepIt",            native_step_it);
+    cando_lib_meta_define(vm, meta, "setTickFrequency",  native_set_tick_frequency);
+    cando_lib_meta_define(vm, meta, "setSmallStep",      native_set_small_step);
+    cando_lib_meta_define(vm, meta, "setLargeStep",      native_set_large_step);
+    cando_lib_meta_define(vm, meta, "setIncrement",      native_set_increment);
+
+    /* Convenience: tree, focus, tab order. */
+    cando_lib_meta_define(vm, meta, "remove",       native_remove);
+    cando_lib_meta_define(vm, meta, "getParent",    native_get_parent);
+    cando_lib_meta_define(vm, meta, "getChildren",  native_get_children);
+    cando_lib_meta_define(vm, meta, "hasFocus",     native_has_focus);
+    cando_lib_meta_define(vm, meta, "contains",     native_contains);
+    cando_lib_meta_define(vm, meta, "setTabIndex",  native_set_tab_index);
+    cando_lib_meta_define(vm, meta, "getTabIndex",  native_get_tab_index);
+    cando_lib_meta_define(vm, meta, "setTabStop",   native_set_tab_stop);
+
+    /* Derma-style aliases that script users coming from gmod will reach
+     * for instinctively.  These are pure aliases; everything important
+     * lives behind the camelCase names above. */
+    cando_lib_meta_define(vm, meta, "SetText",      native_set_text);
+    cando_lib_meta_define(vm, meta, "GetText",      native_get_text);
+    cando_lib_meta_define(vm, meta, "SetSize",      native_set_size);
+    cando_lib_meta_define(vm, meta, "SetPos",       native_set_location);
+    cando_lib_meta_define(vm, meta, "GetPos",       native_get_location);
+    cando_lib_meta_define(vm, meta, "SetVisible",   native_set_visible);
+    cando_lib_meta_define(vm, meta, "SetEnabled",   native_set_enabled);
+    cando_lib_meta_define(vm, meta, "MoveToFront",  native_bring_to_front);
+    cando_lib_meta_define(vm, meta, "MoveToBack",   native_send_to_back);
+    cando_lib_meta_define(vm, meta, "Remove",       native_remove);
+    cando_lib_meta_define(vm, meta, "Center",       native_center);
+    cando_lib_meta_define(vm, meta, "Dock",         native_set_dock);
+    cando_lib_meta_define(vm, meta, "DockPadding",  native_set_padding);
+    cando_lib_meta_define(vm, meta, "DockMargin",   native_set_margin);
+    cando_lib_meta_define(vm, meta, "InvalidateLayout", native_relayout);
+    cando_lib_meta_define(vm, meta, "SizeToContents",   native_size_to_content);
 
     CandoValue tbl = cando_bridge_new_object(vm);
     CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
@@ -3414,6 +5063,58 @@ CandoValue cando_module_init(CandoVM *vm)
         cdo_object_rawset(obj, kd, cdo_object_value(
             cando_bridge_resolve(vm, dv.as.handle)), FIELD_NONE);
         cdo_string_release(kd);
+    }
+
+    /* forms.Anchor -- bitmask constants for setAnchor(). */
+    {
+        CandoValue av = cando_bridge_new_object(vm);
+        CdoObject *a  = cando_bridge_resolve(vm, av.as.handle);
+        obj_set_number(a, "none",   (f64)FORMS_ANCHOR_NONE);
+        obj_set_number(a, "left",   (f64)FORMS_ANCHOR_LEFT);
+        obj_set_number(a, "top",    (f64)FORMS_ANCHOR_TOP);
+        obj_set_number(a, "right",  (f64)FORMS_ANCHOR_RIGHT);
+        obj_set_number(a, "bottom", (f64)FORMS_ANCHOR_BOTTOM);
+        obj_set_number(a, "all",    (f64)FORMS_ANCHOR_ALL);
+        CdoString *ka = cdo_string_intern("Anchor", 6);
+        cdo_object_rawset(obj, ka, cdo_object_value(
+            cando_bridge_resolve(vm, av.as.handle)), FIELD_NONE);
+        cdo_string_release(ka);
+    }
+
+    /* forms.AutoSizeMode -- enum for setAutoSizeMode(). */
+    {
+        CandoValue mv = cando_bridge_new_object(vm);
+        CdoObject *m  = cando_bridge_resolve(vm, mv.as.handle);
+        obj_set_number(m, "grow",       (f64)FORMS_AUTOSIZE_GROW);
+        obj_set_number(m, "growShrink", (f64)FORMS_AUTOSIZE_GROW_SHRINK);
+        CdoString *km = cdo_string_intern("AutoSizeMode", 12);
+        cdo_object_rawset(obj, km, cdo_object_value(
+            cando_bridge_resolve(vm, mv.as.handle)), FIELD_NONE);
+        cdo_string_release(km);
+    }
+
+    /* forms.Cursor -- friendly names for setCursor(). */
+    {
+        CandoValue cv = cando_bridge_new_object(vm);
+        CdoObject *c  = cando_bridge_resolve(vm, cv.as.handle);
+        obj_set_string(c, "default",     "default",     7);
+        obj_set_string(c, "arrow",       "arrow",       5);
+        obj_set_string(c, "hand",        "hand",        4);
+        obj_set_string(c, "ibeam",       "ibeam",       5);
+        obj_set_string(c, "wait",        "wait",        4);
+        obj_set_string(c, "cross",       "cross",       5);
+        obj_set_string(c, "sizeNS",      "size-ns",     7);
+        obj_set_string(c, "sizeWE",      "size-we",     7);
+        obj_set_string(c, "sizeNWSE",    "size-nwse",   9);
+        obj_set_string(c, "sizeNESW",    "size-nesw",   9);
+        obj_set_string(c, "sizeAll",     "size-all",    8);
+        obj_set_string(c, "no",          "no",          2);
+        obj_set_string(c, "help",        "help",        4);
+        obj_set_string(c, "appStarting", "appstarting", 11);
+        CdoString *kc = cdo_string_intern("Cursor", 6);
+        cdo_object_rawset(obj, kc, cdo_object_value(
+            cando_bridge_resolve(vm, cv.as.handle)), FIELD_NONE);
+        cdo_string_release(kc);
     }
 
     return tbl;

@@ -43,6 +43,11 @@ IF forms.Color == NULL  { print("FAIL: forms.Color missing"); fail = fail + 1; }
 IF forms.BorderStyle == NULL {
     print("FAIL: forms.BorderStyle missing"); fail = fail + 1;
 }
+IF forms.Anchor == NULL { print("FAIL: forms.Anchor missing"); fail = fail + 1; }
+IF forms.Cursor == NULL { print("FAIL: forms.Cursor missing"); fail = fail + 1; }
+IF forms.AutoSizeMode == NULL {
+    print("FAIL: forms.AutoSizeMode missing"); fail = fail + 1;
+}
 
 // Spot-check a few colour entries.  Values are 0xRRGGBB packed integers.
 IF forms.Color.red != 16711680 {                  // 0xFF0000
@@ -58,6 +63,10 @@ IF forms.BorderStyle.none != 1 {
 }
 IF forms.Dock.fill != 5 {
     print("FAIL: forms.Dock.fill != 5"); fail = fail + 1;
+}
+IF forms.Anchor.left != 1 || forms.Anchor.top != 2 ||
+   forms.Anchor.right != 4 || forms.Anchor.bottom != 8 {
+    print("FAIL: forms.Anchor flags wrong"); fail = fail + 1;
 }
 
 IF fail > 0 {
