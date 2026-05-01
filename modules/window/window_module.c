@@ -290,15 +290,21 @@ static void dispatch_call(WindowSlot *s, const char *name,
     /* The dispatch VM is single-threaded (only the manager touches it),
      * so no locking is needed around this call. */
     cando_vm_call_value(&g_dispatch_vm, fn, argv, 1 + extra_argc);
-    /* Discard any return values left on the child VM's stack and
-     * clear any per-call error state so the next dispatch starts
+    /* Surface uncaught errors from the user-supplied callback so they
+     * don't silently vanish.  cando_vm_log_uncaught prints the canonical
+     * "cando: uncaught error in <ctx>: <msg>" line (the message already
+     * carries the stack trace) and clears has_error / error_vals. */
+    if (g_dispatch_vm.has_error) {
+        char ctx[128];
+        snprintf(ctx, sizeof(ctx), "window %s callback", name);
+        cando_vm_log_uncaught(&g_dispatch_vm, ctx);
+    }
+    /* Reset the per-call stack/frame state so the next dispatch starts
      * clean.  Don't release `fn` here: cando_bridge_to_cando produced
      * a borrowed handle that the parent VM owns through the instance
      * field, so releasing would over-decref. */
     g_dispatch_vm.stack_top   = g_dispatch_vm.stack;
     g_dispatch_vm.frame_count = 0;
-    g_dispatch_vm.has_error   = false;
-    g_dispatch_vm.error_val_count = 0;
 }
 
 typedef enum {
