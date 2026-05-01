@@ -1535,14 +1535,17 @@ static void dispatch_one(FormsEvent ev)
     }
 
     cando_vm_call_value(&g_dispatch_vm, fn, argv, argc);
+    /* Surface uncaught errors from the user handler in the canonical
+     * "cando: uncaught error in <ctx>: <msg>" form.  The message already
+     * carries the stack trace produced by the VM, and log_uncaught
+     * clears has_error / error_vals so the next dispatch starts clean. */
     if (g_dispatch_vm.has_error) {
-        fprintf(stderr, "[forms] %s handler error: %s\n",
-                name, g_dispatch_vm.error_msg);
+        char ctx[128];
+        snprintf(ctx, sizeof(ctx), "forms %s handler", name);
+        cando_vm_log_uncaught(&g_dispatch_vm, ctx);
     }
     g_dispatch_vm.stack_top   = g_dispatch_vm.stack;
     g_dispatch_vm.frame_count = 0;
-    g_dispatch_vm.has_error   = false;
-    g_dispatch_vm.error_val_count = 0;
 }
 
 static void dispatch_drain(void)
