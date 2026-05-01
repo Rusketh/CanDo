@@ -14,12 +14,17 @@ export interface BuiltinInfo {
     name: string;
     detail: string;
     doc: string;
+    /** Optional snippet body. When present, completion inserts this and
+     * positions the cursor between the parens / args. */
+    snippet?: string;
 }
 
 export interface NamespaceInfo {
     name: string;
     doc: string;
     members: string[];
+    /** Per-member detail (signature) shown in completion / hover. */
+    memberDetails?: Record<string, string>;
 }
 
 export const KEYWORDS_UPPER: KeywordInfo[] = [
@@ -60,20 +65,59 @@ export const PIPE_KEYWORD: KeywordInfo = {
 };
 
 export const GLOBAL_BUILTINS: BuiltinInfo[] = [
-    { name: 'print',    detail: 'print(...args)',     doc: 'Write space-separated args to stdout, followed by a newline. Arrays are expanded element-by-element.' },
-    { name: 'type',     detail: 'type(value)',        doc: 'Return the type name of `value` as a string. Honours an object\'s `__type` metafield.' },
-    { name: 'toString', detail: 'toString(value)',    doc: 'Return the string form of `value`.' },
-    { name: 'inspect',  detail: 'inspect(value)',     doc: 'Return a debug representation of `value`, including object internals.' }
+    { name: 'print',    detail: 'print(...args)',     doc: 'Write space-separated args to stdout, followed by a newline. Arrays are expanded element-by-element.', snippet: 'print($0)' },
+    { name: 'type',     detail: 'type(value)',        doc: 'Return the type name of `value` as a string. Honours an object\'s `__type` metafield.', snippet: 'type($0)' },
+    { name: 'toString', detail: 'toString(value)',    doc: 'Return the string form of `value`.', snippet: 'toString($0)' },
+    { name: 'inspect',  detail: 'inspect(value)',     doc: 'Return a debug representation of `value`, including object internals.', snippet: 'inspect($0)' },
+    {
+        name: 'include',
+        detail: 'include(path) -> value',
+        doc:
+            'Load and cache a module by path.\n\n' +
+            'Accepts `.cdo` source files, binary extensions (`.so` / `.dylib` / `.dll`), ' +
+            'or data files (`.json` / `.csv` / `.yaml` / `.yml`). With no extension, ' +
+            'the runtime probes `.so → .dylib → .dll → .cdo` in order.\n\n' +
+            'Relative paths resolve from the calling script\'s directory and walk up to the ' +
+            'process working directory. The first call executes/parses the module and caches ' +
+            'the result; subsequent calls return the cached value (Node.js `require` semantics).',
+        snippet: 'include("$0")'
+    }
 ];
 
 export const NAMESPACES: NamespaceInfo[] = [
     {
         name: 'array', doc: 'Array helpers (mostly chainable via the `:` method syntax).',
-        members: ['copy', 'filter', 'length', 'map', 'pop', 'push', 'reduce', 'remove', 'splice']
+        members: ['copy', 'filter', 'length', 'map', 'pop', 'push', 'reduce', 'remove', 'splice'],
+        memberDetails: {
+            copy:   'array.copy(arr) -> array',
+            filter: 'array.filter(arr, fn) -> array',
+            length: 'array.length(arr) -> number',
+            map:    'array.map(arr, fn) -> array',
+            pop:    'array.pop(arr) -> value',
+            push:   'array.push(arr, value)',
+            reduce: 'array.reduce(arr, fn, init) -> value',
+            remove: 'array.remove(arr, index) -> value',
+            splice: 'array.splice(arr, start, count, ...inserts) -> array'
+        }
     },
     {
         name: 'string', doc: 'String helpers.',
-        members: ['char', 'chars', 'find', 'format', 'left', 'length', 'match', 'repeat', 'replace', 'right', 'split', 'sub', 'trim']
+        members: ['char', 'chars', 'find', 'format', 'left', 'length', 'match', 'repeat', 'replace', 'right', 'split', 'sub', 'trim'],
+        memberDetails: {
+            char:    'string.char(str, index) -> string',
+            chars:   'string.chars(str) -> array',
+            find:    'string.find(str, needle [, from]) -> number',
+            format:  'string.format(fmt, ...args) -> string',
+            left:    'string.left(str, n) -> string',
+            length:  'string.length(str) -> number',
+            match:   'string.match(str, pattern) -> array',
+            repeat:  'string.repeat(str, n) -> string',
+            replace: 'string.replace(str, find, repl) -> string',
+            right:   'string.right(str, n) -> string',
+            split:   'string.split(str, sep) -> array',
+            sub:     'string.sub(str, start [, end]) -> string',
+            trim:    'string.trim(str) -> string'
+        }
     },
     {
         name: 'math', doc: 'Math functions and constants.',
@@ -82,7 +126,21 @@ export const NAMESPACES: NamespaceInfo[] = [
             'floor', 'log', 'max', 'min', 'pow', 'rad', 'random', 'round', 'sign', 'sin',
             'sinh', 'sqrt', 'tan',
             'pi', 'tau', 'e', 'huge'
-        ]
+        ],
+        memberDetails: {
+            abs:    'math.abs(x) -> number',
+            clamp:  'math.clamp(x, lo, hi) -> number',
+            max:    'math.max(...nums) -> number',
+            min:    'math.min(...nums) -> number',
+            pow:    'math.pow(x, y) -> number',
+            random: 'math.random([lo, hi]) -> number',
+            round:  'math.round(x) -> number',
+            sqrt:   'math.sqrt(x) -> number',
+            pi:     'math.pi (constant)',
+            tau:    'math.tau (constant)',
+            e:      'math.e (constant)',
+            huge:   'math.huge (constant)'
+        }
     },
     {
         name: 'json', doc: 'JSON encoder / decoder.',
@@ -148,6 +206,14 @@ export const NAMESPACES: NamespaceInfo[] = [
 
 export function namespaceByName(name: string): NamespaceInfo | undefined {
     return NAMESPACES.find(ns => ns.name === name);
+}
+
+export function namespaceMemberDetail(ns: NamespaceInfo, member: string): string | undefined {
+    return ns.memberDetails?.[member];
+}
+
+export function builtinByName(name: string): BuiltinInfo | undefined {
+    return GLOBAL_BUILTINS.find(b => b.name === name);
 }
 
 export function isKeywordUpper(name: string): boolean {
