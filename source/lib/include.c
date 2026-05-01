@@ -14,10 +14,14 @@
  *
  * Path resolution
  *   - Absolute paths  ("/…")        → used as-is then canonicalised.
- *   - Relative paths  ("./…", "…") → resolved relative to the calling
- *     script's directory by walking the call frame stack and finding the
- *     most recent frame whose chunk name is an absolute path.  Falls back
- *     to the process working directory if no such frame is found.
+ *   - Relative paths  ("./…", "…") → resolved by starting in the calling
+ *     script's directory and walking up parent directories until the file
+ *     is found, or until the process working directory (cwd) has been
+ *     searched.  cwd is the upper bound — directories above it are never
+ *     searched.  If no calling script is on the stack, the search starts
+ *     from cwd.  The caller's directory must lie within the cwd tree;
+ *     otherwise resolution fails.  At each directory level, all candidate
+ *     extensions are probed before moving to the parent.
  *
  * Extension handling
  *   - If the path ends in a recognised extension (.cdo, .so, .dylib,
@@ -93,61 +97,92 @@ static bool file_exists(const char *path);
  * Path helpers
  * ======================================================================= */
 
-/*
- * build_absolute -- combine `raw_path` with the calling script's directory
- * (if relative) into an absolute path stored in `out` (PATH_MAX bytes).
- * Does NOT call realpath(); the result may reference a non-existent file
- * so the caller can probe extension candidates.
- */
-static bool build_absolute(CandoVM *vm, const char *raw_path,
-                           char out[PATH_MAX])
+static bool path_is_absolute(const char *p)
 {
 #if defined(_WIN32) || defined(_WIN64)
-    bool is_abs = (raw_path[0] == '/' || raw_path[0] == '\\'
-                   || (raw_path[0] && raw_path[1] == ':'));
+    return (p[0] == '/' || p[0] == '\\'
+            || (p[0] && p[1] == ':'));
 #else
-    bool is_abs = (raw_path[0] == '/');
+    return (p[0] == '/');
 #endif
-    if (is_abs) {
-        size_t n = strlen(raw_path);
-        if (n >= PATH_MAX) return false;
-        memcpy(out, raw_path, n + 1);
-        return true;
-    }
+}
 
-    /* Relative path: find the calling script's directory. */
-    const char *caller_file = NULL;
-    for (int i = (int)vm->frame_count - 1; i >= 0; i--) {
-        const char *name = vm->frames[i].closure->chunk->name;
-        if (!name) continue;
+static bool is_sep(char c)
+{
 #if defined(_WIN32) || defined(_WIN64)
-        bool frame_abs = (name[0] == '/' || name[0] == '\\'
-                          || (name[0] && name[1] == ':'));
+    return c == '/' || c == '\\';
 #else
-        bool frame_abs = (name[0] == '/');
+    return c == '/';
 #endif
-        if (frame_abs) { caller_file = name; break; }
-    }
+}
 
-    char base_dir[PATH_MAX];
-    if (caller_file) {
-        size_t len = strlen(caller_file);
-        if (len >= PATH_MAX) return false;
-        memcpy(base_dir, caller_file, len + 1);
-        char *slash = strrchr(base_dir, '/');
+/* True if `path` is exactly `prefix` or sits underneath it.  Both arguments
+ * are expected to be canonical (no trailing separator except when prefix is
+ * the filesystem root). */
+static bool is_within_dir(const char *path, const char *prefix)
+{
+    size_t pn = strlen(prefix);
+    if (pn == 0) return false;
+    if (strncmp(path, prefix, pn) != 0) return false;
+    if (path[pn] == '\0') return true;
+    /* Root prefix ("/" on POSIX, "X:\\" or "/" on Windows): every absolute
+     * path beneath it qualifies. */
+    if (is_sep(prefix[pn - 1])) return true;
+    return is_sep(path[pn]);
+}
+
+/* Replace `dir` with its parent directory in place.  Returns false when
+ * `dir` already names the filesystem root (no parent exists). */
+static bool dir_to_parent(char *dir)
+{
+    size_t len = strlen(dir);
+    if (len == 0) return false;
+
+    /* Strip trailing separators except a leading root one. */
+    while (len > 1 && is_sep(dir[len - 1])) dir[--len] = '\0';
+
+    if (len == 1 && is_sep(dir[0])) return false; /* "/" */
+
+    char *slash = strrchr(dir, '/');
 #if defined(_WIN32) || defined(_WIN64)
-        char *bslash = strrchr(base_dir, '\\');
-        if (bslash && (!slash || bslash > slash)) slash = bslash;
+    char *bslash = strrchr(dir, '\\');
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
 #endif
-        if (slash && slash != base_dir) *slash = '\0';
-        else { base_dir[0] = '.'; base_dir[1] = '\0'; }
+    if (!slash) return false;
+    if (slash == dir) {
+        dir[1] = '\0'; /* parent is root */
     } else {
-        if (!getcwd(base_dir, PATH_MAX)) return false;
+        *slash = '\0';
+    }
+    return true;
+}
+
+/* Try to locate `raw_path` inside `dir`.  When `has_ext` is false, candidate
+ * extensions (.so, .dylib, .dll, .cdo) are probed in order.  On success
+ * writes the canonical path to `out` and returns true. */
+static bool try_resolve_in(const char *dir, const char *raw_path,
+                           bool has_ext, char out[PATH_MAX])
+{
+    char joined[PATH_MAX];
+    int n = snprintf(joined, PATH_MAX, "%s/%s", dir, raw_path);
+    if (n < 0 || n >= PATH_MAX) return false;
+
+    if (has_ext) {
+        if (!file_exists(joined)) return false;
+        return realpath(joined, out) != NULL;
     }
 
-    int n = snprintf(out, PATH_MAX, "%s/%s", base_dir, raw_path);
-    if (n < 0 || n >= PATH_MAX) return false;
-    return true;
+    static const char *const candidates[] = {
+        ".so", ".dylib", ".dll", ".cdo", NULL
+    };
+    char probe[PATH_MAX];
+    for (int i = 0; candidates[i]; i++) {
+        int m = snprintf(probe, PATH_MAX, "%s%s", joined, candidates[i]);
+        if (m < 0 || m >= PATH_MAX) continue;
+        if (!file_exists(probe)) continue;
+        return realpath(probe, out) != NULL;
+    }
+    return false;
 }
 
 /*
@@ -156,34 +191,82 @@ static bool build_absolute(CandoVM *vm, const char *raw_path,
  * all, candidate extensions are probed in order (.so, .dylib, .dll, .cdo)
  * and the first existing candidate is used.
  *
- * Returns true on success, false if no candidate exists or canonicalisation
- * fails.  Does NOT set a VM error -- the caller does that.
+ * Relative paths are resolved by walking up from the calling script's
+ * directory toward the process working directory (inclusive), trying each
+ * level in turn.  cwd is a hard ceiling -- directories above it are never
+ * searched, and the caller's directory must lie within it.
+ *
+ * Returns true on success, false if no candidate exists, the caller is
+ * outside cwd, or canonicalisation fails.  Does NOT set a VM error -- the
+ * caller does that.
  */
 static bool resolve_path(CandoVM *vm, const char *raw_path,
                          char out[PATH_MAX])
 {
-    char joined[PATH_MAX];
-    if (!build_absolute(vm, raw_path, joined)) return false;
+    bool has_ext = has_any_extension(raw_path);
 
-    if (has_any_extension(raw_path)) {
-        /* Extension supplied -- use the path as given. */
-        if (!realpath(joined, out)) return false;
-        return true;
+    /* --- Absolute path: use as-is, with extension probing if needed --- */
+    if (path_is_absolute(raw_path)) {
+        if (has_ext) {
+            return realpath(raw_path, out) != NULL;
+        }
+        static const char *const candidates[] = {
+            ".so", ".dylib", ".dll", ".cdo", NULL
+        };
+        char probe[PATH_MAX];
+        for (int i = 0; candidates[i]; i++) {
+            int n = snprintf(probe, PATH_MAX, "%s%s", raw_path, candidates[i]);
+            if (n < 0 || n >= PATH_MAX) continue;
+            if (!file_exists(probe)) continue;
+            return realpath(probe, out) != NULL;
+        }
+        return false;
     }
 
-    /* No extension: probe binary candidates first, then .cdo. */
-    static const char *const candidates[] = {
-        ".so", ".dylib", ".dll", ".cdo", NULL
-    };
-    char probe[PATH_MAX];
-    for (int i = 0; candidates[i]; i++) {
-        int n = snprintf(probe, PATH_MAX, "%s%s", joined, candidates[i]);
-        if (n < 0 || n >= PATH_MAX) continue;
-        if (!file_exists(probe)) continue;
-        if (!realpath(probe, out)) return false;
-        return true;
+    /* --- Establish cwd as the upper bound --- */
+    char cwd_buf[PATH_MAX];
+    if (!getcwd(cwd_buf, PATH_MAX)) return false;
+    char cwd_real[PATH_MAX];
+    if (!realpath(cwd_buf, cwd_real)) return false;
+
+    /* --- Determine starting directory (caller's dir, or cwd) --- */
+    const char *caller_file = NULL;
+    for (int i = (int)vm->frame_count - 1; i >= 0; i--) {
+        const char *name = vm->frames[i].closure->chunk->name;
+        if (!name) continue;
+        if (path_is_absolute(name)) { caller_file = name; break; }
     }
-    return false;
+
+    char start_dir[PATH_MAX];
+    if (caller_file) {
+        size_t len = strlen(caller_file);
+        if (len >= PATH_MAX) return false;
+        memcpy(start_dir, caller_file, len + 1);
+        char *slash = strrchr(start_dir, '/');
+#if defined(_WIN32) || defined(_WIN64)
+        char *bslash = strrchr(start_dir, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+#endif
+        if (slash && slash != start_dir) *slash = '\0';
+        else { start_dir[0] = '/'; start_dir[1] = '\0'; }
+    } else {
+        size_t len = strlen(cwd_real);
+        memcpy(start_dir, cwd_real, len + 1);
+    }
+
+    char current[PATH_MAX];
+    if (!realpath(start_dir, current)) return false;
+
+    /* Caller must live within the cwd tree -- include() never escapes it. */
+    if (!is_within_dir(current, cwd_real)) return false;
+
+    /* --- Walk upward: caller's dir, then each parent, stopping at cwd --- */
+    for (;;) {
+        if (try_resolve_in(current, raw_path, has_ext, out)) return true;
+        if (strcmp(current, cwd_real) == 0) return false;
+        if (!dir_to_parent(current)) return false;
+        if (!is_within_dir(current, cwd_real)) return false;
+    }
 }
 
 /* =========================================================================
