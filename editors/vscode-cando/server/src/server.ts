@@ -329,6 +329,7 @@ connection.onCompletion(params => {
 
     const cached = analysisCache.get(params.textDocument.uri);
     if (cached) {
+        const seen = new Set<string>();
         for (const s of cached.symbols) {
             const item: CompletionItem = {
                 label: s.name,
@@ -346,6 +347,21 @@ connection.onCompletion(params => {
                 item.insertTextFormat = InsertTextFormat.Snippet;
             }
             items.push(item);
+            seen.add(s.name);
+        }
+        /* Function-body locals -- the analyzer only records top-level
+         * symbols, but the type tracker walks every VAR / CONST / GLOBAL
+         * declaration in the file. Surface those here so identifier
+         * completion works inside `FUNCTION` bodies and class
+         * constructors. */
+        for (const [name, ref] of cached.typeEnv.bindings) {
+            if (seen.has(name)) continue;
+            items.push({
+                label: name,
+                kind: CompletionItemKind.Variable,
+                detail: describeTypeForHover(ref)
+            });
+            seen.add(name);
         }
     }
 

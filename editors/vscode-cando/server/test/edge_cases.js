@@ -693,6 +693,75 @@ test('chained call with multiple args', () => {
 });
 
 /* =========================================================================
+ *  Cross-file include resolution (regression for the user-reported bugs)
+ * ======================================================================= */
+
+test('include of .cdo: RETURN { ... } literal -> only those keys', () => {
+    const dir = path.join(require('os').tmpdir(), 'cando-cf1-' + process.pid);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'mod.cdo'),
+        'VAR helper = 1;\nCONST private_thing = 2;\n' +
+        'RETURN { foo: helper, bar: private_thing };\n');
+
+    const stripped = `VAR x = include("${dir}/mod.cdo");\nx.|`;
+    const cursor = stripped.indexOf('|');
+    const text = stripped.slice(0, cursor) + stripped.slice(cursor + 1);
+    const tokens = new Lexer(text).tokenize();
+    const filtered = tokens.filter(t => t.kind !== 'comment' && t.kind !== 'newline');
+    const result = analyze(tokens);
+    const env = buildTypeEnv(tokens, result.symbols, 'file://' + dir + '/main.cdo', [dir, REPO]);
+    const dotIdx = filtered.findIndex(t => t.kind === 'op' && t.value === '.' && filtered[filtered.indexOf(t) - 1]?.value === 'x');
+    const ref = require(path.join(OUT, 'types.js')).inferReceiverAt(filtered, dotIdx, env, [dir, REPO]);
+    const members = [...require(path.join(OUT, 'types.js')).listMembers(ref, env).keys()];
+    fs.rmSync(dir, { recursive: true, force: true });
+
+    /* Must have foo + bar; must NOT include helper / private_thing. */
+    return members.includes('foo') && members.includes('bar')
+        && !members.includes('helper') && !members.includes('private_thing')
+        || ('got members=' + members.join(','));
+});
+
+test('include of .cdo: RETURN ident -> follow ident to its object literal', () => {
+    const dir = path.join(require('os').tmpdir(), 'cando-cf2-' + process.pid);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'mod.cdo'),
+        'VAR helper = 1;\nVAR exports = { foo: helper, bar: 2 };\nRETURN exports;\n');
+
+    const r = membersAt(`VAR x = include("${dir}/mod.cdo");\nx.|`);
+    fs.rmSync(dir, { recursive: true, force: true });
+    /* Only the exported keys, never the internal `helper` / `exports`. */
+    return r.members.includes('foo') && r.members.includes('bar')
+        && !r.members.includes('helper') && !r.members.includes('exports');
+});
+
+test('include of .cdo: no RETURN at all -> no false-positive members', () => {
+    const dir = path.join(require('os').tmpdir(), 'cando-cf3-' + process.pid);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'mod.cdo'), 'VAR helper = 1;\nVAR thing = 2;\n');
+
+    const r = membersAt(`VAR x = include("${dir}/mod.cdo");\nx.|`);
+    fs.rmSync(dir, { recursive: true, force: true });
+    /* Top-level VARs are private to the module; they must not appear
+     * as if they were exports. */
+    return r.members.length === 0
+        || ('expected 0 members, got: ' + r.members.join(','));
+});
+
+test('FUNCTION-body local variables are surfaced for general completion', () => {
+    /* Build the env directly and check that bindings include the local. */
+    const { env } = envFor(`
+        VAR topLevel = 1;
+        FUNCTION work() {
+            VAR localOne = 10;
+            CONST localTwo = 20;
+        }
+    `);
+    return env.bindings.has('topLevel')
+        && env.bindings.has('localOne')
+        && env.bindings.has('localTwo');
+});
+
+/* =========================================================================
  *  Run + report
  * ======================================================================= */
 

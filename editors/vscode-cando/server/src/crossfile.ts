@@ -71,9 +71,12 @@ function readMembers(abs: string): string[] {
     if (ext === '.cdo') {
         const tokens = new Lexer(text).tokenize();
         const result = analyze(tokens);
-        if (result.moduleExports.length) return dedupe(result.moduleExports);
-        /* Fallback: surface the module's top-level declarations. */
-        return dedupe(result.symbols.map(s => s.name));
+        /* Only surface the module's actual export shape -- the keys of its
+         * top-level `RETURN { ... }` (or `RETURN ident` when ident is a
+         * known object literal). NEVER fall back to top-level VARs/CONSTs
+         * since those are private to the module; surfacing them would
+         * advertise members the caller can't actually access. */
+        return dedupe(result.moduleExports);
     }
 
     if (ext === '.json') {

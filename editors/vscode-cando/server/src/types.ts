@@ -573,6 +573,14 @@ function resolveIncludeType(rawPath: string, env: TypeEnv, workspaceRoots: strin
             env.manifests.set(abs, manifest);
             return { kind: 'manifest-exports', manifest };
         }
+        /* No manifest, but if the target is a `.cdo` source file we can
+         * actually parse it and infer the type of its `RETURN` expression
+         * directly -- much more accurate than the crossfile harvester's
+         * key-based heuristic. */
+        if (abs.toLowerCase().endsWith('.cdo')) {
+            const sub = resolveCdoReturnType(abs, workspaceRoots);
+            if (sub) return sub;
+        }
     }
 
     /* Fallback: a manifest can exist alongside a binary that hasn't been
@@ -590,6 +598,54 @@ function resolveIncludeType(rawPath: string, env: TypeEnv, workspaceRoots: strin
     /* No manifest -- defer to crossfile-derived members. The completion
      * layer falls back to `getIncludeExports` for this case. */
     return UNKNOWN;
+}
+
+/* Cache by absolute path + mtime so repeated includes don't re-parse. */
+const cdoReturnCache = new Map<string, { mtimeMs: number; ref: TypeRef | null }>();
+
+/**
+ * Parse a `.cdo` file, build a partial type env over it, and return the
+ * type of its top-level `RETURN <expr>` statement -- precisely the value
+ * `include(...)` will yield. Returns `null` when the file has no
+ * recognisable top-level RETURN (the runtime would also yield `null` in
+ * that case but we have no useful members to offer).
+ */
+function resolveCdoReturnType(abs: string, workspaceRoots: string[]): TypeRef | null {
+    let mtimeMs: number;
+    try { mtimeMs = require('fs').statSync(abs).mtimeMs; }
+    catch { return null; }
+
+    const cached = cdoReturnCache.get(abs);
+    if (cached && cached.mtimeMs === mtimeMs) return cached.ref;
+
+    let text: string;
+    try { text = require('fs').readFileSync(abs, 'utf8'); }
+    catch { return null; }
+
+    const tokens = new (require('./lexer').Lexer)(text).tokenize();
+    const analysis = require('./analyzer').analyze(tokens);
+    const subEnv = buildTypeEnv(tokens, analysis.symbols, 'file://' + abs, workspaceRoots);
+
+    /* Find the first top-level RETURN. */
+    const t = tokens.filter((x: Token) => x.kind !== 'comment' && x.kind !== 'newline');
+    let depth = 0;
+    let ref: TypeRef | null = null;
+    for (let i = 0; i < t.length; i++) {
+        const tok = t[i];
+        if (tok.kind === 'punct' && tok.value === '{') { depth++; continue; }
+        if (tok.kind === 'punct' && tok.value === '}') { depth--; continue; }
+        if (depth !== 0) continue;
+        if (tok.kind === 'keyword' && (tok.value === 'RETURN' || tok.value === 'return')) {
+            const inferred = inferExpression(t, i + 1, subEnv, workspaceRoots);
+            if (inferred.ref.kind !== 'unknown') {
+                ref = inferred.ref;
+                break;
+            }
+        }
+    }
+
+    cdoReturnCache.set(abs, { mtimeMs, ref });
+    return ref;
 }
 
 /**
