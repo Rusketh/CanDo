@@ -26,7 +26,19 @@ CandoChunk *cando_chunk_new(const char *name, u32 arity, bool has_vararg) {
     c->const_count = 0;
     c->const_cap   = 0;
     c->lines       = NULL;
-    c->name        = name ? name : "<anonymous>";
+    /* The chunk owns its name string.  The previous "store-by-pointer"
+     * convention silently broke down whenever a chunk outlived its caller's
+     * stack frame (e.g. include() caches its compiled chunk and returns to
+     * the script -- the canonical[PATH_MAX] buffer that was passed in goes
+     * out of scope, leaving chunk->name dangling and producing garbled
+     * "[`¶Àïú☻ line N]" tails in subsequent error messages). */
+    {
+        const char *src = name ? name : "<anonymous>";
+        size_t len = strlen(src);
+        char *dup = (char *)cando_alloc(len + 1);
+        memcpy(dup, src, len + 1);
+        c->name = dup;
+    }
     c->arity       = arity;
     c->local_count = arity;   /* parameters occupy the first local slots  */
     c->upval_count = 0;
@@ -45,6 +57,7 @@ void cando_chunk_free(CandoChunk *chunk) {
     cando_free(chunk->code);
     cando_free(chunk->constants);
     cando_free(chunk->lines);
+    cando_free(chunk->name);
     cando_free(chunk);
 }
 

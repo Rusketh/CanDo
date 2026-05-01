@@ -1098,28 +1098,58 @@ void cando_vm_log_uncaught(CandoVM *vm, const char *context) {
     vm->error_val_count = 0;
 }
 
-/* vm_runtime_error -- internal; like cando_vm_error but appends the
- * current source file + line number from the active call frame.          */
+/* vm_append_stack_trace -- append a multi-line "  at <file>:<line>" trace
+ * to vm->error_msg covering every active call frame, innermost first.
+ * Truncation is bounded by the fixed error_msg buffer; if a frame would
+ * not fit, append a "  ... N more frame(s)" summary and stop.            */
+static void vm_append_stack_trace(CandoVM *vm) {
+    if (vm->frame_count == 0) return;
+
+    size_t cap = sizeof(vm->error_msg);
+    size_t used = strlen(vm->error_msg);
+
+    for (int i = (int)vm->frame_count - 1; i >= 0; i--) {
+        CandoCallFrame *f     = &vm->frames[i];
+        CandoChunk     *chunk = f->closure->chunk;
+        u32 line = 0;
+        /* The innermost frame has just executed (or attempted) one byte
+         * past the failing instruction; deeper frames record the IP as
+         * "the byte after the call site that pushed this frame". In both
+         * cases stepping back one byte lands on the relevant opcode.    */
+        u32 offset = (u32)(f->ip - chunk->code);
+        if (offset > 0) offset--;
+        if (offset < chunk->code_len) line = chunk->lines[offset];
+
+        char entry[256];
+        int n = snprintf(entry, sizeof(entry),
+                         "\n  at %s:%u",
+                         chunk->name ? chunk->name : "<anonymous>",
+                         line);
+        if (n < 0) break;
+        if (used + (size_t)n + 1 >= cap) {
+            /* Not enough room for this frame; summarise remainder. */
+            char tail[64];
+            int tn = snprintf(tail, sizeof(tail),
+                              "\n  ... %d more frame(s)", i + 1);
+            if (tn > 0 && used + (size_t)tn + 1 < cap) {
+                memcpy(vm->error_msg + used, tail, (size_t)tn + 1);
+            }
+            break;
+        }
+        memcpy(vm->error_msg + used, entry, (size_t)n + 1);
+        used += (size_t)n;
+    }
+}
+
+/* vm_runtime_error -- internal; like cando_vm_error but appends a stack
+ * trace covering every active call frame.                                */
 static void vm_runtime_error(CandoVM *vm, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(vm->error_msg, sizeof(vm->error_msg), fmt, ap);
     va_end(ap);
 
-    /* Attach source location from current frame. */
-    if (vm->frame_count > 0) {
-        CandoCallFrame *frame = &vm->frames[vm->frame_count - 1];
-        CandoChunk     *chunk = frame->closure->chunk;
-        u32 offset = (u32)(frame->ip - chunk->code - 1); /* -1: already advanced */
-        if (offset < chunk->code_len) {
-            u32 line = chunk->lines[offset];
-            char loc[128];
-            snprintf(loc, sizeof(loc), " [%s line %u]", chunk->name, line);
-            strncat(vm->error_msg, loc,
-                    sizeof(vm->error_msg) - strlen(vm->error_msg) - 1);
-        }
-    }
-
+    vm_append_stack_trace(vm);
     vm_error_commit(vm);
 }
 
@@ -3661,10 +3691,13 @@ static CandoVMResult vm_run(CandoVM *vm) {
             for (u32 i = count; i-- > 0; )
                 vm->error_vals[i] = POP();
             vm->has_error = true;
-            /* Format error_msg from first thrown value. */
+            /* Format error_msg from first thrown value, then append a
+             * stack trace so an uncaught throw is debuggable.            */
             char *s = cando_value_tostring(vm->error_vals[0]);
             snprintf(vm->error_msg, sizeof(vm->error_msg), "%s", s);
             cando_free(s);
+            SYNC_IP();
+            vm_append_stack_trace(vm);
             goto handle_error;
         }
         OP_CASE(OP_RERAISE): {

@@ -40,7 +40,7 @@ typedef struct CandoChunk {
     u32 *lines;         /* lines[i] = source line for code[i]             */
 
     /* Metadata --------------------------------------------------------- */
-    const char *name;   /* function / chunk name (static or heap string)  */
+    char *name;         /* function / chunk name (heap-owned, strdup'd)   */
     u32  arity;         /* number of named parameters                     */
     u32  local_count;   /* total local variable slots (incl. parameters)  */
     u32  upval_count;   /* number of captured upvalues                    */
@@ -52,7 +52,8 @@ typedef struct CandoChunk {
  * ---------------------------------------------------------------------- */
 
 /* cando_chunk_new -- allocate and zero-initialise a fresh chunk.
- * `name` is stored by pointer (caller must ensure lifetime). */
+ * `name` is duplicated into heap-owned storage; the caller's string can
+ * be freed immediately after this call returns. */
 CANDO_API CandoChunk *cando_chunk_new(const char *name, u32 arity, bool has_vararg);
 
 /* cando_chunk_free -- release all internal storage and the chunk itself. */
