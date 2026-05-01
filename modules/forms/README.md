@@ -88,6 +88,11 @@ forms.Button(parent, {                        // options table
 | `getLocation()`     | aliased as `getPosition` -- returns `x, y`              |
 | `setSize(w, h)`     |                                                         |
 | `getSize()`         | returns `w, h`                                          |
+| `setWidth(w)` / `setHeight(h)` | set one axis without touching the other      |
+| `getWidth()` / `getHeight()` | each returns a single number                    |
+| `sizeToContent()`   | resize to the control's preferred (natural) size        |
+| `sizeToContentWidth()` / `sizeToContentHeight()` | one-axis variants          |
+| `getPreferredSize()` | returns `w, h` without applying it to the control      |
 | `show()` / `hide()` | aliases for `setVisible(true/false)`                    |
 | `setVisible(b)`     |                                                         |
 | `setEnabled(b)`     |                                                         |
@@ -136,6 +141,28 @@ permits) when called on a child control, so script code can stay loose.
 Methods that don't apply to a given control are silent no-ops, so you
 can call `setChecked` on anything that has a check without writing a
 type guard.
+
+### Auto-sizing
+
+`sizeToContent()` measures the control's natural size (caption text +
+per-kind padding for buttons / labels / check boxes / text boxes; the
+widest item plus a vertical stack for `ListBox`; the dropdown for
+`ComboBox`; `MCM_GETMINREQRECT` for `MonthCalendar`) and resizes the
+control to fit.  For `Form`, `Panel`, and `GroupBox` it instead takes
+the bounding box of every direct child plus a small margin (and the
+non-client frame, for forms).
+
+```cando
+b:setText("Save changes");
+b:sizeToContent();      // button now exactly fits its caption
+panel:sizeToContent();  // panel shrinks/grows to wrap its children
+form:sizeToContent();   // form auto-fits the layout it contains
+```
+
+`sizeToContentWidth()` / `sizeToContentHeight()` change a single axis;
+`getPreferredSize()` returns the computed `w, h` pair without applying
+it.  Combine with `setMinSize(...)` to clamp the auto-fit's lower bound
+on forms.
 
 ### Fonts
 
