@@ -1,0 +1,58 @@
+{
+    "$comment": "API manifest for the draw module (immediate-mode 2D drawing). Read by the vscode-cando language server.",
+    "name": "draw",
+    "doc": "Immediate-mode 2D drawing on top of a window's GL context. Image / font instances inherit methods from `_meta.draw_image` and `_meta.draw_font` via `__index`.",
+    "exports": {
+        "clear":         { "kind": "function", "params": [{ "name": "r", "type": "number" }, { "name": "g", "type": "number" }, { "name": "b", "type": "number" }, { "name": "a", "type": "number", "optional": true }] },
+        "setColor":      { "kind": "function", "params": [{ "name": "r", "type": "number" }, { "name": "g", "type": "number" }, { "name": "b", "type": "number" }, { "name": "a", "type": "number", "optional": true }] },
+        "getColor":      { "kind": "function", "returns": "number", "doc": "Multi-return current `r, g, b, a`." },
+        "setLineWidth":  { "kind": "function", "params": [{ "name": "px", "type": "number" }] },
+        "getLineWidth":  { "kind": "function", "returns": "number" },
+        "setScissor":    { "kind": "function", "params": [{ "name": "x", "type": "number", "optional": true }, { "name": "y", "type": "number", "optional": true }, { "name": "w", "type": "number", "optional": true }, { "name": "h", "type": "number", "optional": true }], "doc": "Pass no arguments to disable." },
+        "setFont":       { "kind": "function", "params": [{ "name": "font", "type": "Font" }] },
+
+        "push":          { "kind": "function" },
+        "pop":           { "kind": "function" },
+        "translate":     { "kind": "function", "params": [{ "name": "x", "type": "number" }, { "name": "y", "type": "number" }] },
+        "scale":         { "kind": "function", "params": [{ "name": "sx", "type": "number" }, { "name": "sy", "type": "number", "optional": true }] },
+        "rotate":        { "kind": "function", "params": [{ "name": "rad", "type": "number" }] },
+        "origin":        { "kind": "function" },
+
+        "rectangle":     { "kind": "function", "params": [{ "name": "mode", "type": "string", "doc": "\"fill\" or \"line\"" }, { "name": "x", "type": "number" }, { "name": "y", "type": "number" }, { "name": "w", "type": "number" }, { "name": "h", "type": "number" }] },
+        "circle":        { "kind": "function", "params": [{ "name": "mode", "type": "string" }, { "name": "cx", "type": "number" }, { "name": "cy", "type": "number" }, { "name": "r", "type": "number" }, { "name": "segments", "type": "number", "optional": true }] },
+        "line":          { "kind": "function", "params": [{ "name": "coords", "type": "number", "rest": true }], "doc": "Variadic `x, y` pairs." },
+
+        "newImage":      { "kind": "function", "params": [{ "name": "path", "type": "string" }], "returns": "Image" },
+        "draw":          { "kind": "function", "params": [{ "name": "image", "type": "Image" }, { "name": "x", "type": "number" }, { "name": "y", "type": "number" }, { "name": "r", "type": "number", "optional": true }, { "name": "sx", "type": "number", "optional": true }, { "name": "sy", "type": "number", "optional": true }, { "name": "ox", "type": "number", "optional": true }, { "name": "oy", "type": "number", "optional": true }] },
+
+        "newFont":       { "kind": "function", "params": [{ "name": "path", "type": "string" }, { "name": "pixelHeight", "type": "number" }], "returns": "Font" },
+        "print":         { "kind": "function", "params": [{ "name": "text", "type": "string" }, { "name": "x", "type": "number" }, { "name": "y", "type": "number" }, { "name": "r", "type": "number", "optional": true }, { "name": "sx", "type": "number", "optional": true }, { "name": "sy", "type": "number", "optional": true }] }
+    },
+
+    "types": {
+        "Image": {
+            "indexes": "_meta.draw_image",
+            "members": {}
+        },
+        "Font": {
+            "indexes": "_meta.draw_font",
+            "members": {}
+        },
+        "_meta.draw_image": {
+            "members": {
+                "getWidth":      { "kind": "function", "returns": "number" },
+                "getHeight":     { "kind": "function", "returns": "number" },
+                "getDimensions": { "kind": "function", "returns": "number", "doc": "Multi-return `w, h`." },
+                "setFilter":     { "kind": "function", "params": [{ "name": "filter", "type": "string", "doc": "\"nearest\" or \"linear\"" }] },
+                "release":       { "kind": "function" }
+            }
+        },
+        "_meta.draw_font": {
+            "members": {
+                "getWidth":  { "kind": "function", "params": [{ "name": "text", "type": "string" }], "returns": "number" },
+                "getHeight": { "kind": "function", "returns": "number" },
+                "release":   { "kind": "function" }
+            }
+        }
+    }
+}

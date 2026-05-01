@@ -1,0 +1,66 @@
+{
+    "$comment": "API manifest for the sqlite module (embedded SQLite). Read by the vscode-cando language server.",
+    "name": "sqlite",
+    "version": "0.5.0",
+    "doc": "Embedded SQLite database, API on par with Node.js's node:sqlite. Both function-style and method-style calls are supported on every handle.",
+    "exports": {
+        "VERSION":         { "kind": "value", "type": "string" },
+        "SQLITE_VERSION":  { "kind": "value", "type": "string", "doc": "Vendored SQLite library version." },
+        "OPEN_READONLY":   { "kind": "constant", "type": "number" },
+        "OPEN_READWRITE":  { "kind": "constant", "type": "number" },
+        "OPEN_CREATE":     { "kind": "constant", "type": "number" },
+        "OPEN_URI":        { "kind": "constant", "type": "number" },
+        "OPEN_MEMORY":     { "kind": "constant", "type": "number" },
+
+        "open":             { "kind": "function", "params": [{ "name": "path", "type": "string" }, { "name": "options", "type": "object", "optional": true }], "returns": "Database" },
+        "escape":           { "kind": "function", "params": [{ "name": "value", "type": "any" }], "returns": "string" },
+        "escapeIdentifier": { "kind": "function", "params": [{ "name": "name",  "type": "string" }], "returns": "string" },
+
+        "close":            { "kind": "function", "params": [{ "name": "db", "type": "Database" }],                                          "returns": "bool" },
+        "exec":             { "kind": "function", "params": [{ "name": "db", "type": "Database" }, { "name": "sql", "type": "string" }],     "returns": "bool" },
+        "prepare":          { "kind": "function", "params": [{ "name": "db", "type": "Database" }, { "name": "sql", "type": "string" }],     "returns": "Statement" }
+    },
+
+    "types": {
+        "Database": {
+            "doc": "Open SQLite database. Wrap multi-step work in `:transaction(fn)` for ACID + savepoint nesting.",
+            "members": {
+                "close":             { "kind": "function", "returns": "bool" },
+                "exec":              { "kind": "function", "params": [{ "name": "sql", "type": "string" }], "returns": "bool" },
+                "prepare":           { "kind": "function", "params": [{ "name": "sql", "type": "string" }], "returns": "Statement" },
+                "begin":             { "kind": "function", "returns": "bool" },
+                "commit":            { "kind": "function", "returns": "bool" },
+                "rollback":          { "kind": "function", "returns": "bool" },
+                "inTransaction":     { "kind": "function", "returns": "bool" },
+                "transaction":       { "kind": "function", "params": [{ "name": "fn", "type": "function" }, { "name": "args", "type": "any", "rest": true, "optional": true }], "returns": "any" },
+                "pragma":            { "kind": "function", "params": [{ "name": "name", "type": "string" }, { "name": "value", "type": "any", "optional": true }], "returns": "array" },
+                "bigintMode":        { "kind": "function", "params": [{ "name": "mode", "type": "string", "optional": true }], "returns": "string" },
+                "setReadBigInts":    { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "bool", "doc": "node:sqlite-compat alias for bigintMode." },
+                "defineFunction":    { "kind": "function", "params": [{ "name": "name", "type": "string" }, { "name": "fn", "type": "function" }], "returns": "bool" },
+                "defineAggregate":   { "kind": "function", "params": [{ "name": "name", "type": "string" }, { "name": "opts", "type": "object" }], "returns": "bool" },
+                "loadExtension":     { "kind": "function", "params": [{ "name": "path", "type": "string" }, { "name": "entryPoint", "type": "string", "optional": true }], "returns": "bool" },
+                "backup":            { "kind": "function", "params": [{ "name": "destPath", "type": "string" }, { "name": "options", "type": "object", "optional": true }], "returns": "object" }
+            }
+        },
+        "Statement": {
+            "members": {
+                "run":         { "kind": "function", "params": [{ "name": "params", "type": "any", "rest": true, "optional": true }], "returns": "object", "doc": "Returns `{ lastInsertRowid, changes }`." },
+                "get":         { "kind": "function", "params": [{ "name": "params", "type": "any", "rest": true, "optional": true }], "returns": "object" },
+                "all":         { "kind": "function", "params": [{ "name": "params", "type": "any", "rest": true, "optional": true }], "returns": "array" },
+                "iterate":     { "kind": "function", "params": [{ "name": "params", "type": "any", "rest": true, "optional": true }], "returns": "Iterator" },
+                "bind":        { "kind": "function", "params": [{ "name": "params", "type": "any" }], "returns": "bool" },
+                "reset":       { "kind": "function", "returns": "bool" },
+                "finalize":    { "kind": "function", "returns": "bool" },
+                "expandedSQL": { "kind": "function", "returns": "string" },
+                "columns":     { "kind": "function", "returns": "array", "doc": "Array of `{ name, type, table, column, database }`." },
+                "sourceSQL":   { "kind": "value", "type": "string" }
+            }
+        },
+        "Iterator": {
+            "members": {
+                "next": { "kind": "function", "returns": "object", "doc": "Next row, or NULL once drained." },
+                "done": { "kind": "value", "type": "bool" }
+            }
+        }
+    }
+}

@@ -1,0 +1,45 @@
+{
+    "$comment": "API manifest for the ldap module. Read by the vscode-cando language server.",
+    "name": "ldap",
+    "version": "1.0.0",
+    "doc": "OpenLDAP / Active Directory client. Calls are function-style; the connection handle is passed as the first argument.",
+    "exports": {
+        "VERSION":    { "kind": "value", "type": "string" },
+        "SCOPE_BASE": { "kind": "constant", "type": "number", "doc": "LDAP_SCOPE_BASE." },
+        "SCOPE_ONE":  { "kind": "constant", "type": "number", "doc": "LDAP_SCOPE_ONELEVEL." },
+        "SCOPE_SUB":  { "kind": "constant", "type": "number", "doc": "LDAP_SCOPE_SUBTREE." },
+
+        "connect":          { "kind": "function", "params": [{ "name": "uri", "type": "string", "doc": "ldap:// or ldaps:// URI" }], "returns": "Connection" },
+        "bind":             { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }, { "name": "dn", "type": "string" }, { "name": "password", "type": "string" }], "returns": "bool" },
+        "bind_anonymous":   { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }], "returns": "bool" },
+        "start_tls":        { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }], "returns": "bool" },
+        "set_option":       { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }, { "name": "name", "type": "string" }, { "name": "value", "type": "any" }], "returns": "bool" },
+        "search":           { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }, { "name": "options", "type": "object", "doc": "{ base, scope, filter, attrs }" }], "returns": "array" },
+        "add":              { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }, { "name": "dn", "type": "string" }, { "name": "attrs", "type": "object" }], "returns": "bool" },
+        "modify":           { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }, { "name": "dn", "type": "string" }, { "name": "mods", "type": "object" }], "returns": "bool" },
+        "compare":          { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }, { "name": "dn", "type": "string" }, { "name": "attr", "type": "string" }, { "name": "value", "type": "any" }], "returns": "bool" },
+        "delete":           { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }, { "name": "dn", "type": "string" }], "returns": "bool" },
+        "rename":           { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }, { "name": "dn", "type": "string" }, { "name": "new_rdn", "type": "string" }, { "name": "delete_old", "type": "bool", "optional": true }], "returns": "bool" },
+        "move":             { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }, { "name": "dn", "type": "string" }, { "name": "new_parent_dn", "type": "string" }, { "name": "new_rdn", "type": "string", "optional": true }, { "name": "delete_old", "type": "bool", "optional": true }], "returns": "bool" },
+        "unbind":           { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }], "returns": "bool" },
+        "rootdse":          { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }, { "name": "attrs", "type": "array", "optional": true }], "returns": "object" },
+        "test_credentials": { "kind": "function", "params": [{ "name": "uri", "type": "string" }, { "name": "dn", "type": "string" }, { "name": "password", "type": "string" }], "returns": "bool" },
+        "password_modify":  { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }, { "name": "dn", "type": "string" }, { "name": "old_password", "type": "string" }, { "name": "new_password", "type": "string" }, { "name": "format", "type": "string", "optional": true, "doc": "\"auto\" | \"ad\" | \"rfc3062\"" }], "returns": "bool" },
+        "members":          { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }, { "name": "group_dn", "type": "string" }, { "name": "options", "type": "object", "optional": true }], "returns": "array" },
+        "member_of":        { "kind": "function", "params": [{ "name": "conn", "type": "Connection" }, { "name": "user_dn",  "type": "string" }, { "name": "options", "type": "object", "optional": true }], "returns": "array" },
+
+        "escape_filter":    { "kind": "function", "params": [{ "name": "value", "type": "string" }], "returns": "string", "doc": "RFC 4515 search-filter escape." },
+        "escape_dn":        { "kind": "function", "params": [{ "name": "value", "type": "string" }], "returns": "string", "doc": "RFC 4514 DN escape." },
+
+        "rc4":                          { "kind": "function", "params": [{ "name": "key", "type": "string" }, { "name": "data", "type": "string" }], "returns": "string", "doc": "Generic RC4 stream cipher." },
+        "md5":                          { "kind": "function", "params": [{ "name": "data", "type": "string" }], "returns": "string", "doc": "MD5 digest as a 16-byte binary string." },
+        "decode_reversible_password":   { "kind": "function", "params": [{ "name": "blob", "type": "string" }, { "name": "key", "type": "string" }], "returns": "string" }
+    },
+
+    "types": {
+        "Connection": {
+            "doc": "Open LDAP connection. The runtime exposes only function-style calls (`ldap.bind(conn, ...)`); there is no method-style surface here.",
+            "members": {}
+        }
+    }
+}

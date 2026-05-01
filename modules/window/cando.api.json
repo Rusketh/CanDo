@@ -1,0 +1,87 @@
+{
+    "$comment": "API manifest for the window module (GLFW). Read by the vscode-cando language server.",
+    "name": "window",
+    "version": "1.0.0",
+    "doc": "GLFW-based window. Each window instance chains `__index` to `_meta.window`, so every accessor is a method on the instance.",
+    "exports": {
+        "VERSION":     { "kind": "value", "type": "string" },
+        "glfwVersion": { "kind": "value", "type": "string" },
+        "keys":        { "kind": "value", "type": "KeyMap",   "doc": "Key constants (escape, a..z, _0.._9, f1..f12, space, return, tab, arrows, modifiers, punctuation)." },
+        "mouse":       { "kind": "value", "type": "MouseMap", "doc": "Mouse button constants (left, middle, right)." },
+
+        "create": {
+            "kind": "function",
+            "params": [
+                { "name": "title", "type": "any", "doc": "string title or { title=, width=, height= } options table" },
+                { "name": "width",  "type": "number", "optional": true },
+                { "name": "height", "type": "number", "optional": true }
+            ],
+            "returns": "Window"
+        }
+    },
+
+    "types": {
+        "Window": {
+            "doc": "Open window. Methods inherit from `_meta.window` via `__index`.",
+            "indexes": "_meta.window",
+            "members": {
+                "update":         { "kind": "event", "signature": "function(self, dt)" },
+                "draw":           { "kind": "event", "signature": "function(self)" },
+                "keypressed":     { "kind": "event", "signature": "function(self, key, isrepeat)" },
+                "keyreleased":    { "kind": "event", "signature": "function(self, key)" },
+                "textinput":      { "kind": "event", "signature": "function(self, text)" },
+                "mousepressed":   { "kind": "event", "signature": "function(self, x, y, button)" },
+                "mousereleased":  { "kind": "event", "signature": "function(self, x, y, button)" },
+                "mousemoved":     { "kind": "event", "signature": "function(self, x, y)" },
+                "wheelmoved":     { "kind": "event", "signature": "function(self, dx, dy)" },
+                "resize":         { "kind": "event", "signature": "function(self, width, height)" },
+                "focus":          { "kind": "event", "signature": "function(self, focused)" },
+                "onClose":        { "kind": "event", "signature": "function(self)" },
+                "quit":           { "kind": "event", "signature": "function(self)", "doc": "Back-compat alias for onClose." }
+            }
+        },
+        "_meta.window": {
+            "doc": "Prototype shared by every window instance. User code can install default handlers here.",
+            "members": {
+                "close":              { "kind": "function", "returns": "bool" },
+                "isOpen":             { "kind": "function", "returns": "bool" },
+                "setTitle":           { "kind": "function", "params": [{ "name": "s", "type": "string" }], "returns": "Window" },
+                "getTitle":           { "kind": "function", "returns": "string" },
+                "setSize":            { "kind": "function", "params": [{ "name": "w", "type": "number" }, { "name": "h", "type": "number" }], "returns": "Window" },
+                "getSize":            { "kind": "function", "returns": "number", "doc": "Returns `w, h` (multi-return)." },
+                "setPosition":        { "kind": "function", "params": [{ "name": "x", "type": "number" }, { "name": "y", "type": "number" }], "returns": "Window" },
+                "getPosition":        { "kind": "function", "returns": "number", "doc": "Returns `x, y` (multi-return)." },
+                "setVisible":         { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "Window" },
+                "isVisible":          { "kind": "function", "returns": "bool" },
+                "focus":              { "kind": "function", "returns": "Window" },
+                "hasFocus":           { "kind": "function", "returns": "bool" },
+                "setVSync":           { "kind": "function", "params": [{ "name": "b", "type": "bool" }], "returns": "Window" },
+                "getMouse":           { "kind": "function", "returns": "number", "doc": "Returns `x, y` relative to the client area." },
+                "getDPIScale":        { "kind": "function", "returns": "number", "doc": "Returns `sx, sy`." },
+                "getFramebufferSize": { "kind": "function", "returns": "number", "doc": "DPI-aware pixel size, multi-return `w, h`." }
+            }
+        },
+        "KeyMap": {
+            "doc": "Open-ended namespace of key constants. Common members shown; arrow / modifier / punctuation members exist too.",
+            "members": {
+                "escape": { "kind": "constant", "type": "number" },
+                "space":  { "kind": "constant", "type": "number" },
+                "return": { "kind": "constant", "type": "number" },
+                "tab":    { "kind": "constant", "type": "number" },
+                "left":   { "kind": "constant", "type": "number" },
+                "right":  { "kind": "constant", "type": "number" },
+                "up":     { "kind": "constant", "type": "number" },
+                "down":   { "kind": "constant", "type": "number" },
+                "f1":     { "kind": "constant", "type": "number" },
+                "f12":    { "kind": "constant", "type": "number" }
+            }
+        },
+        "MouseMap": {
+            "members": {
+                "left":   { "kind": "constant", "type": "number" },
+                "middle": { "kind": "constant", "type": "number" },
+                "right":  { "kind": "constant", "type": "number" }
+            }
+        }
+    }
+}

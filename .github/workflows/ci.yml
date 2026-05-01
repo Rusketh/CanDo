@@ -287,20 +287,14 @@ jobs:
           path: cando-windows-x86_64
 
       - name: Download VS Code extension artifact
+        # The extension has its own dedicated release channel
+        # (`vscode-latest` below) so we no longer bundle the .vsix into the
+        # platform zips. We still need to download it here so the standalone
+        # publish step can pick it up.
         uses: actions/download-artifact@v4
         with:
           name: vscode-cando-extension
           path: vscode-cando-extension
-
-      - name: Bundle VS Code extension into platform artifacts
-        # Ship the .vsix alongside each platform binary so a single
-        # download gives users both the interpreter and the editor
-        # integration.  Also publish it standalone on its own channel.
-        run: |
-          set -e
-          mkdir -p cando-linux-x86_64/editors cando-windows-x86_64/editors
-          cp vscode-cando-extension/vscode-cando.vsix cando-linux-x86_64/editors/
-          cp vscode-cando-extension/vscode-cando.vsix cando-windows-x86_64/editors/
 
       - name: Zip platform artifacts
         run: |

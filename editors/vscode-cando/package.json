@@ -2,7 +2,7 @@
   "name": "vscode-cando",
   "displayName": "CanDo Language",
   "description": "Syntax highlighting, snippets and IntelliSense for the CanDo scripting language (.cdo).",
-  "version": "0.1.0",
+  "version": "0.3.2",
   "publisher": "CandoProject",
   "license": "SEE LICENSE IN LICENSE",
   "icon": "icons/cando.png",
@@ -66,6 +66,16 @@
           "type": "boolean",
           "default": true,
           "description": "Include built-in standard library functions in completion suggestions."
+        },
+        "cando.completion.includePaths": {
+          "type": "boolean",
+          "default": true,
+          "description": "Suggest workspace files when typing a path inside an include(\"...\") call."
+        },
+        "cando.completion.crossFile": {
+          "type": "boolean",
+          "default": true,
+          "description": "Resolve include(\"./mod.cdo\") / .json bindings and offer their exports as member completions."
         },
         "cando.keywordCase": {
           "type": "string",

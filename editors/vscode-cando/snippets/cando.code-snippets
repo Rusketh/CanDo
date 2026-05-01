@@ -162,6 +162,36 @@
     "body": ["print(${0:value});"],
     "description": "Print to stdout."
   },
+  "Include module": {
+    "prefix": ["include", "import", "require"],
+    "body": ["VAR ${1:name} = include(\"${2:./module.cdo}\");"],
+    "description": "Load a module via include() and bind it to a variable."
+  },
+  "Include binary module (cross-platform)": {
+    "prefix": ["includeso", "includebin"],
+    "body": [
+      "VAR ${1:mod};",
+      "TRY {",
+      "\t${1:mod} = include(\"./${2:module}.so\");",
+      "} CATCH e {",
+      "\tTRY {",
+      "\t\t${1:mod} = include(\"./${2:module}.dylib\");",
+      "\t} CATCH e2 {",
+      "\t\t${1:mod} = include(\"./${2:module}.dll\");",
+      "\t}",
+      "}"
+    ],
+    "description": "Load a binary module, falling back across platform extensions."
+  },
+  "Module export object": {
+    "prefix": ["return", "export"],
+    "body": [
+      "RETURN {",
+      "\t${1:name}: ${0:value}",
+      "};"
+    ],
+    "description": "Return an object literal as the module's exports."
+  },
   "Thread spawn": {
     "prefix": ["thread", "THREAD"],
     "body": ["THREAD ${0:expr};"],
