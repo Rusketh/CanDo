@@ -3,6 +3,25 @@
 All notable changes to the **CanDo Language** VS Code extension are
 documented in this file.
 
+## 0.3.2 -- 2026-05-01
+
+### Fixed
+
+- **`::` is the fluent-chain operator.** CanDo distinguishes `:` (method
+  call -- result is whatever the method returns) from `::` (chain --
+  result is always the receiver). The lexer already tokenises `::` as a
+  single op, but the type tracker was treating it like `:`. Both the
+  receiver walk-back (`inferReceiverAt`) and the postfix step
+  (`inferPostfix`) now recognise `::` and preserve the receiver type
+  regardless of the method's declared return. So
+  `t::set_v(200)::set_v(300)` keeps its type on `t`, matching
+  `tests/scripts/method_call.cdo`.
+- **Runtime member attachments to records.** `VAR t = { v: 100 };
+  t.meth = FUNCTION(self) { ... };` -- the `meth` assignment was
+  invisible to completion. The type tracker now runs a second pass and
+  augments record-typed bindings with `name.member = ...` and
+  `name:member = ...` patterns so `t.|` includes both `v` and `meth`.
+
 ## 0.3.1 -- 2026-05-01
 
 Edge-case sweep for the type tracker. 63-case harness in

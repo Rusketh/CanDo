@@ -67,22 +67,15 @@ function membersAt(source) {
     const result = analyze(tokens);
     const env = buildTypeEnv(tokens, result.symbols, DOC_URI, ROOTS);
 
-    /* Find the dot/colon immediately before the cursor. We scan filtered
-     * tokens for `.` or `:` whose end-of-token is at-or-before the cursor
-     * and there is no token in between. To do that, we map filtered token
-     * positions back to character offsets via the lexer's range. */
-    const offsets = filtered.map(t => offsetOf(stripped, t.range.end));
+    /* Find the dot/colon/double-colon immediately before the cursor. */
     let dotIdx = -1;
     for (let i = filtered.length - 1; i >= 0; i--) {
         const tok = filtered[i];
-        if (tok.kind === 'op' && (tok.value === '.' || tok.value === ':')) {
+        if (tok.kind === 'op' && (tok.value === '.' || tok.value === ':' || tok.value === '::')) {
             const o = offsetOf(stripped, tok.range.start);
-            if (o < idx) { dotIdx = i; break; }
+            const e = offsetOf(stripped, tok.range.end);
+            if (e <= idx) { dotIdx = i; break; }
         }
-        const o = offsets[i];
-        if (o > idx) continue;
-        /* If the token after our cursor is a non-ident token it shouldn't
-         * gate the dot search. */
     }
     if (dotIdx < 0) return { type: 'no-dot', members: [] };
     const ref = inferReceiverAt(filtered, dotIdx, env, ROOTS);
@@ -136,6 +129,60 @@ test('newline between dot and member', () => {
 test('colon (method) syntax', () => {
     const r = membersAt('VAR forms = include("./forms.so"); VAR f = forms.Form();\nf:|');
     return r.members.includes('center') || 'expected center, members=' + r.members.slice(0, 5);
+});
+
+test('double-colon (chain) syntax: t::method', () => {
+    /* `::` is the fluent-chain operator. `f::method(args)` is equivalent
+     * to a `:` call but the runtime always returns the receiver, so the
+     * type tracker should treat completion the same as `f:`. */
+    const r = membersAt('VAR forms = include("./forms.so"); VAR f = forms.Form();\nf::|');
+    return r.members.includes('center') || 'expected center, members=' + r.members.slice(0, 5);
+});
+
+test('::-chain preserves receiver type even when method returns something else', () => {
+    /* User-defined object whose method has a non-self return; chaining via
+     * `::` should keep the result on the original receiver. */
+    const src = `
+        VAR t = { v: 100 };
+        t.meth = FUNCTION(self) { RETURN self.v; };
+        t::meth().|
+    `;
+    const r = membersAt(src);
+    /* The chain ends back on `t`; available members are t's own keys. */
+    return r.members.includes('v') && r.members.includes('meth');
+});
+
+test('::-chain on manifest type preserves the receiver', () => {
+    const src = `
+        VAR forms = include("./forms.so");
+        VAR f = forms.Form();
+        f::setText("hi")::|
+    `;
+    /* setText nominally returns Form (or self). After ::, we're guaranteed
+     * to still be on Form regardless of declaration. */
+    const r = membersAt(src);
+    return r.members.includes('center');
+});
+
+test('mixed :- and ::-chain', () => {
+    const src = `
+        VAR forms = include("./forms.so");
+        VAR f = forms.Form();
+        f:setSize(100, 100)::|
+    `;
+    const r = membersAt(src);
+    return r.members.includes('center');
+});
+
+test('::-chain with two consecutive chains', () => {
+    /* From metamethods.cdo: t::set_v(200)::set_v(300) */
+    const src = `
+        VAR t = { };
+        t.set_v = FUNCTION(self, v) { self.v = v; };
+        t::set_v(200)::|
+    `;
+    const r = membersAt(src);
+    return r.members.includes('set_v');
 });
 
 test('do not complete inside string literal', () => {

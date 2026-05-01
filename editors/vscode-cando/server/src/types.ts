@@ -96,6 +96,25 @@ export function buildTypeEnv(
      * everything except whitespace-shaped tokens. */
     const t = tokens.filter(x => x.kind !== 'comment' && x.kind !== 'newline');
 
+    /* First pass: capture every binding shape we recognise. */
+    walkBindings(t, env, workspaceRoots);
+
+    /* Second pass: pick up runtime member additions of the form
+     *   name.member  = rhs;
+     *   name:member  = rhs;
+     * When `name` resolves to a record, augment its member set so the
+     * captured field is offered on `name.` completion. This is the
+     * canonical CanDo pattern for attaching methods after a literal:
+     *
+     *     VAR t = { };
+     *     t.meth = FUNCTION(self) { ... };
+     */
+    augmentRecordsWithRuntimeMembers(t, env);
+
+    return env;
+}
+
+function walkBindings(t: Token[], env: TypeEnv, workspaceRoots: string[]): void {
     for (let i = 0; i < t.length; i++) {
         const tok = t[i];
 
@@ -157,8 +176,27 @@ export function buildTypeEnv(
             }
         }
     }
+}
 
-    return env;
+function augmentRecordsWithRuntimeMembers(t: Token[], env: TypeEnv): void {
+    for (let i = 0; i < t.length; i++) {
+        const head = t[i];
+        if (head.kind !== 'ident') continue;
+        const dot = t[i + 1];
+        if (dot?.kind !== 'op' || (dot.value !== '.' && dot.value !== ':')) continue;
+        const memberTok = t[i + 2];
+        if (memberTok?.kind !== 'ident') continue;
+        const eq = t[i + 3];
+        if (eq?.kind !== 'op' || eq.value !== '=') continue;
+
+        const ref = env.bindings.get(head.value);
+        if (!ref || ref.kind !== 'record') continue;
+        if (ref.members.has(memberTok.value)) continue;
+
+        const isFn = t[i + 4]?.kind === 'keyword'
+            && (t[i + 4].value === 'FUNCTION' || t[i + 4].value === 'function');
+        ref.members.set(memberTok.value, isFn ? { kind: 'function' } : { kind: 'value' });
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -285,13 +323,32 @@ function inferPostfix(
     while (j < endExclusive) {
         const tok = tokens[j];
 
-        /* Member access `name.x` or `name:x`. */
-        if (tok.kind === 'op' && (tok.value === '.' || tok.value === ':')) {
+        /* Member access:
+         *   `.`  -- field / method lookup; if called, the result has the
+         *           method's declared return type.
+         *   `:`  -- method call; same lookup as `.`, but the runtime passes
+         *           the receiver as the implicit first argument. From the
+         *           type tracker's perspective `:` and `.` resolve the
+         *           same way -- the difference is how the call is dispatched.
+         *   `::` -- fluent chain. `t::method(...)` ALWAYS returns `t` (the
+         *           receiver), regardless of what `method` actually returns.
+         *           This is how scripts daisy-chain calls on objects whose
+         *           methods don't explicitly `return self`.
+         */
+        if (
+            tok.kind === 'op' &&
+            (tok.value === '.' || tok.value === ':' || tok.value === '::')
+        ) {
+            const isChain = tok.value === '::';
             const nameTok = tokens[j + 1];
             if (nameTok?.kind !== 'ident') break;
             const member = lookupMemberSpec(ref, nameTok.value, env);
             if (!member) {
-                ref = UNKNOWN;
+                /* `::` still preserves the receiver even if we can't look
+                 * the member up -- you might be chaining through a runtime-
+                 * defined helper. For `.` and `:`, an unknown member kills
+                 * inference. */
+                if (!isChain) ref = UNKNOWN;
                 j += 2;
                 continue;
             }
@@ -299,15 +356,21 @@ function inferPostfix(
             const isCall = next?.kind === 'punct' && next.value === '(';
             if (isCall) {
                 const callEnd = skipBalanced(tokens, j + 2, '(', ')');
-                /* `"self"` / `"this"` return types preserve the receiver's
-                 * type, which is how fluent chaining stays on a Form when
-                 * Control declares `setText`. */
-                if (isSelfReturn(member.returns)) {
-                    /* ref is unchanged. */
+                if (isChain || isSelfReturn(member.returns)) {
+                    /* ref is unchanged: `::` is a fluent chain, and a
+                     * `"returns": "self"` declaration explicitly says the
+                     * method preserves its receiver's type. */
                 } else {
                     ref = resolveTypeReference(member.returns ?? 'any', env);
                 }
                 j = callEnd;
+                continue;
+            }
+            /* Bare member reference (no call). */
+            if (isChain) {
+                /* `t::method` without `()` is a syntax error in CanDo, but
+                 * be defensive -- preserve the receiver. */
+                j += 2;
                 continue;
             }
             if (member.kind === 'function') {
@@ -588,8 +651,8 @@ export function inferReceiverAt(
     workspaceRoots: string[]
 ): TypeRef {
     /* Walk back, skipping balanced `()` / `[]` groups, to find the start of
-     * the chain. Anything other than ident / `.` / `:` / `(` / `[` ends the
-     * receiver. */
+     * the chain. Anything other than ident / `.` / `:` / `::` / `(` / `[`
+     * ends the receiver. */
     let start = dotIndex - 1;
     while (start >= 0) {
         const tok = tokens[start];
@@ -600,7 +663,9 @@ export function inferReceiverAt(
             continue;
         }
         if (tok.kind === 'ident') { start--; continue; }
-        if (tok.kind === 'op' && (tok.value === '.' || tok.value === ':')) { start--; continue; }
+        if (tok.kind === 'op' && (tok.value === '.' || tok.value === ':' || tok.value === '::')) {
+            start--; continue;
+        }
         break;
     }
     start++;
