@@ -260,6 +260,9 @@ static int thread_error(CandoVM *vm, int argc, CandoValue *args)
 
     cando_os_mutex_lock(&t->done_mutex);
     CandoValue err = cando_value_copy(t->error);
+    /* Caller is reading the error explicitly -- count this as observing
+     * the error so destroy doesn't also print it on stderr. */
+    t->error_observed = true;
     cando_os_mutex_unlock(&t->done_mutex);
 
     cando_vm_push(vm, err);
@@ -319,6 +322,9 @@ static int thread_then(CandoVM *vm, int argc, CandoValue *args)
         cando_vm_call_value(vm, fn, results_copy, count);
         for (u32 i = 0; i < count; i++)
             cando_value_release(results_copy[i]);
+        if (vm->has_error) {
+            cando_vm_log_uncaught(vm, "thread.then callback");
+        }
     } else if (s == CDO_THREAD_PENDING || s == CDO_THREAD_RUNNING) {
         /* Store callback; trampoline will fire it. */
         cando_value_release(t->then_fn);
@@ -356,14 +362,20 @@ static int thread_catch(CandoVM *vm, int argc, CandoValue *args)
     CdoThreadState s = atomic_load(&t->state);
 
     if (s == CDO_THREAD_ERROR) {
-        /* Already errored — collect error then call fn outside the lock. */
+        /* Already errored — collect error then call fn outside the lock.
+         * The catch callback consumes the error, so mark it observed.   */
         CandoValue err = cando_value_copy(t->error);
+        t->error_observed = true;
         cando_os_mutex_unlock(&t->done_mutex);
 
         cando_vm_call_value(vm, fn, &err, 1);
         cando_value_release(err);
+        /* If the user's catch callback itself threw, surface it. */
+        if (vm->has_error) {
+            cando_vm_log_uncaught(vm, "thread.catch callback");
+        }
     } else if (s == CDO_THREAD_PENDING || s == CDO_THREAD_RUNNING) {
-        /* Store callback; trampoline will fire it. */
+        /* Store callback; trampoline will fire it (and mark observed). */
         cando_value_release(t->catch_fn);
         t->catch_fn = cando_value_copy(fn);
         cando_os_mutex_unlock(&t->done_mutex);

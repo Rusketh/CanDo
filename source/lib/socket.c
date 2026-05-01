@@ -820,6 +820,9 @@ void socket_default_conn_handler(int listener_idx, sockutil_socket_t cfd)
 
     CandoValue cb_args[1] = { conn_val };
     cando_vm_call_value(&child, listener->callback_fn, cb_args, 1);
+    if (child.has_error) {
+        cando_vm_log_uncaught(&child, "socket listener callback");
+    }
 
     socket_pool_release(conn_idx);
     cando_vm_destroy(&child);

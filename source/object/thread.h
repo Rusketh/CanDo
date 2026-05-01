@@ -68,6 +68,13 @@ typedef struct CdoThread {
     CandoValue           then_fn;   /* called with results on DONE          */
     CandoValue           catch_fn;  /* called with error on ERROR           */
 
+    /* Set true when the error from state=ERROR has been delivered to user
+     * code: by `await` re-throwing, by a thread.catch callback firing, or
+     * by thread.error() returning the value.  When destroy is called and
+     * this is still false, the error is logged to stderr to surface
+     * silently dropped exceptions.  Protected by done_mutex.              */
+    bool                 error_observed;
+
     /* Handle index of this thread in the VM handle table.  Set by
      * OP_THREAD immediately after allocation; used by thread.current().   */
     HandleIndex          handle_idx;

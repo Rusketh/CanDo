@@ -870,6 +870,12 @@ static StreamStatus transform_write(void *vctx, const u8 *buf, usize len,
     int n_ret = cando_vm_call_value(&t->child_vm, t->fn, &arg, 1);
     cando_string_release(in_s);
 
+    /* Surface uncaught errors from the user transform so they don't
+     * vanish into the streaming pipeline.                             */
+    if (t->child_vm.has_error) {
+        cando_vm_log_uncaught(&t->child_vm, "stream transform callback");
+    }
+
     /* Drain returned values; only the first string is appended to the
      * output buffer.  Anything else is silently dropped — matches the
      * "filter chunk" semantics where returning null/non-string skips. */

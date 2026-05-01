@@ -446,6 +446,20 @@ CANDO_API CandoVMResult cando_vm_exec_eval_module(CandoVM *vm, CandoChunk *chunk
  */
 CANDO_API void cando_vm_error(CandoVM *vm, const char *fmt, ...);
 
+/*
+ * cando_vm_log_uncaught -- print vm's current error to stderr in the
+ * canonical "cando: uncaught error in <context>: <msg>" form, then clear
+ * the error so the calling thread can continue.
+ *
+ * Used by callback dispatchers (HTTP server, socket listeners, stream
+ * callbacks, thread then/catch) to surface errors that would otherwise
+ * be silently dropped on the C side.  No-op when vm has no error.
+ *
+ * `context` is a short label identifying which subsystem the callback
+ * belongs to, e.g. "http server callback" or "socket listener".
+ */
+CANDO_API void cando_vm_log_uncaught(CandoVM *vm, const char *context);
+
 /* cando_vm_push -- push a value; aborts on stack overflow. */
 CANDO_API void cando_vm_push(CandoVM *vm, CandoValue val);
 

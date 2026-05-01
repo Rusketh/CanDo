@@ -1,0 +1,25 @@
+/* caught_thread_error.cdo -- a thread that throws but is caught via
+ * await + TRY/CATCH.  No "uncaught error" message should appear. */
+
+VAR t = thread {
+    THROW "handled error";
+};
+
+TRY {
+    await t;
+    print("unreachable");
+} CATCH (msg) {
+    print("caught:", msg);
+}
+
+/* Same idea via thread.catch -- registered before completion. */
+VAR t2 = thread {
+    THROW "handled via catch";
+};
+
+thread.catch(t2, FUNCTION(err) {
+    print("then-catch:", err);
+});
+
+thread.sleep(10);
+print("script done");

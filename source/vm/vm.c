@@ -1078,6 +1078,26 @@ void cando_vm_error(CandoVM *vm, const char *fmt, ...) {
     vm_error_commit(vm);
 }
 
+/* cando_vm_log_uncaught -- print vm's current error to stderr and clear it.
+ * Used by callback dispatchers where there is no surrounding TRY/CATCH and
+ * no caller to propagate the error to.  No-op when vm has no error.        */
+void cando_vm_log_uncaught(CandoVM *vm, const char *context) {
+    if (!vm || !vm->has_error) return;
+    fprintf(stderr, "cando: uncaught error in %s: %s\n",
+            context && *context ? context : "callback",
+            vm->error_msg[0] ? vm->error_msg : "<no message>");
+    fflush(stderr);
+
+    /* Clear the error so the calling thread can continue dispatching. */
+    vm->has_error       = false;
+    vm->error_msg[0]    = '\0';
+    for (u32 i = 0; i < CANDO_MAX_THROW_ARGS; i++) {
+        cando_value_release(vm->error_vals[i]);
+        vm->error_vals[i] = cando_null();
+    }
+    vm->error_val_count = 0;
+}
+
 /* vm_runtime_error -- internal; like cando_vm_error but appends the
  * current source file + line number from the active call frame.          */
 static void vm_runtime_error(CandoVM *vm, const char *fmt, ...) {
@@ -1496,6 +1516,7 @@ static CANDO_THREAD_RETURN vm_thread_trampoline(void *raw_arg) {
     {
         CdoThreadState final_state = atomic_load(&ta->thread->state);
         CandoValue cb = cando_null();
+        bool       cb_is_catch = false;
 
         cando_os_mutex_lock(&ta->thread->done_mutex);
         if (final_state == CDO_THREAD_DONE && cando_is_object(ta->thread->then_fn)) {
@@ -1503,6 +1524,10 @@ static CANDO_THREAD_RETURN vm_thread_trampoline(void *raw_arg) {
         } else if (final_state == CDO_THREAD_ERROR &&
                    cando_is_object(ta->thread->catch_fn)) {
             cb = cando_value_copy(ta->thread->catch_fn);
+            /* The error is being delivered to user code -- mark it
+             * observed so the destroy hook doesn't also print it. */
+            ta->thread->error_observed = true;
+            cb_is_catch                = true;
         }
         cando_os_mutex_unlock(&ta->thread->done_mutex);
 
@@ -1522,6 +1547,15 @@ static CANDO_THREAD_RETURN vm_thread_trampoline(void *raw_arg) {
                 } else {
                     vm_call_closure_with_args(&child, cb_obj,
                                               &ta->thread->error, 1);
+                }
+
+                /* If the then/catch callback itself threw, surface that
+                 * on stderr -- there is no further caller to receive
+                 * it.  Helpful for diagnosing bugs in completion logic. */
+                if (child.has_error) {
+                    cando_vm_log_uncaught(&child,
+                        cb_is_catch ? "thread.catch callback"
+                                    : "thread.then callback");
                 }
             }
             cando_value_release(cb);
@@ -3667,13 +3701,28 @@ static CandoVMResult vm_run(CandoVM *vm) {
             cdo_thread_wait(t);
 
             if (atomic_load(&t->state) == CDO_THREAD_ERROR) {
+                /* The error is being delivered to user code via the
+                 * propagating throw -- mark it as observed so the
+                 * destructor doesn't also log it on stderr.            */
+                cando_os_mutex_lock(&t->done_mutex);
+                t->error_observed = true;
+                cando_os_mutex_unlock(&t->done_mutex);
+
                 /* Propagate error: push to error_vals and go to error handler. */
                 cando_value_release(vm->error_vals[0]);
                 vm->error_vals[0]   = cando_value_copy(t->error);
                 vm->error_val_count = 1;
                 vm->has_error       = true;
-                snprintf(vm->error_msg, sizeof(vm->error_msg),
-                         "thread raised an error");
+                /* Use the thread's actual error message when it is a string,
+                 * so the surfaced error reads like the original throw. */
+                if (cando_is_string(t->error) && t->error.as.string) {
+                    snprintf(vm->error_msg, sizeof(vm->error_msg), "%.*s",
+                             (int)t->error.as.string->length,
+                             t->error.as.string->data);
+                } else {
+                    snprintf(vm->error_msg, sizeof(vm->error_msg),
+                             "thread raised an error");
+                }
                 cando_value_release(thread_val);
                 goto handle_error;
             }
