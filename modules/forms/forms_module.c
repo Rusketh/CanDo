@@ -975,9 +975,9 @@ static int do_create_control(FormsCommand *c)
         break;
     case KIND_STATUSBAR:
         cls = STATUSCLASSNAMEW;
-        /* Status bars are designed to dock to the bottom of their
-         * parent.  Win32 sizes them automatically, ignore x/y/w/h. */
-        x = 0; y = 0; w = 0; h = 0;
+        /* Status bars dock to the parent's bottom by default (CCS_BOTTOM)
+         * and resize themselves on the parent's WM_SIZE -- the geometry
+         * we pass to CreateWindowExW is effectively ignored. */
         style |= SBARS_SIZEGRIP;
         break;
     case KIND_SPINNER:
@@ -1177,17 +1177,23 @@ static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
             if (g_slots[cid].alive) {
                 int cgen = g_slots[cid].generation;
                 ControlKind k = g_slots[cid].kind;
-                /* SysLink: NM_CLICK (-2) and NM_RETURN (-4) */
+                /* The notification codes are defined as `(NM_FIRST - n)`,
+                 * which the Win32 headers expand to a wrap-around UINT
+                 * (e.g. NM_CLICK == 0xFFFFFFFE).  Compare on the raw UINT
+                 * value to avoid sign-compare warnings under -Wextra. */
+                UINT code = nh->code;
                 if (k == KIND_LINKLABEL &&
-                    ((LONG)nh->code == NM_CLICK || (LONG)nh->code == NM_RETURN)) {
+                    (code == (UINT)NM_CLICK || code == (UINT)NM_RETURN)) {
                     push_event(EV_CLICK, cid, cgen);
                 }
-                /* DateTimePicker: DTN_DATETIMECHANGE = -759 */
-                else if (k == KIND_DATETIMEPICKER && (LONG)nh->code == -759) {
+                /* DateTimePicker: DTN_DATETIMECHANGE = (DTN_FIRST - 19) */
+                else if (k == KIND_DATETIMEPICKER &&
+                         code == (UINT)(DTN_FIRST - 19)) {
                     push_event(EV_VALUE_CHANGED, cid, cgen);
                 }
-                /* MonthCalendar: MCN_SELCHANGE = -749 */
-                else if (k == KIND_MONTHCALENDAR && (LONG)nh->code == -749) {
+                /* MonthCalendar: MCN_SELCHANGE = (MCN_FIRST - 3) */
+                else if (k == KIND_MONTHCALENDAR &&
+                         code == (UINT)(MCN_FIRST - 3)) {
                     push_event(EV_SELECTION_CHANGED, cid, cgen);
                 }
             }
