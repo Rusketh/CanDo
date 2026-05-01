@@ -3,7 +3,31 @@
 A hands-on introduction to CanDo.  Work through the sections in order —
 each one builds on the previous.  For lookup tables covering every
 function and operator see [language-reference.md](language-reference.md)
-and [standard-library.md](standard-library.md).
+and [standard-library.md](standard-library.md); for everyday idioms see
+[patterns.md](patterns.md).
+
+## Contents
+
+1. [Running a script](#running-a-script)
+2. [Values and types](#values-and-types)
+3. [Variables](#variables)
+4. [Strings](#strings)
+5. [Numbers and math](#numbers-and-math)
+6. [Arrays](#arrays)
+7. [Objects](#objects)
+8. [Control flow](#control-flow)
+9. [Functions](#functions)
+10. [Method calls](#method-calls)
+11. [Error handling](#error-handling)
+12. [Pipe and filter](#pipe-and-filter)
+13. [Classes](#classes)
+14. [Threads](#threads)
+15. [Modules](#modules)
+16. [**Working with the standard library**](#working-with-the-standard-library)
+    - File I/O · JSON · HTTP client · HTTP server · Crypto · Date and time · OS · eval
+17. [Mask syntax](#mask-syntax)
+18. [`FOR ... OVER` (generic iterators)](#for--over-generic-iterators)
+19. [Putting it together](#putting-it-together)
 
 ## Running a script
 
@@ -18,8 +42,10 @@ cando hello.cdo
 print("hello, world!");
 ```
 
-Keywords are case-insensitive (`VAR`, `var`, and `Var` all work), but the
-convention is uppercase.  This guide uses uppercase throughout.
+Keywords accept all-uppercase or all-lowercase spelling — `VAR` and `var`
+both work — but **mixed case is not a keyword**: `Var` is just an ordinary
+identifier.  The convention is uppercase, and this guide uses uppercase
+throughout.
 
 ## Values and types
 
@@ -553,6 +579,15 @@ print(mu.clamp(15, 0, 10));  // 10
 Calling `include()` with the same path again returns the cached value
 without re-executing the file.
 
+---
+
+# Working with the standard library
+
+The rest of this guide is a tour of the most-used standard-library
+modules.  Read [standard-library.md](standard-library.md) for the full
+function-by-function reference; the snippets below show the shape of
+each module and the patterns that come up daily.
+
 ## File I/O
 
 ```cando
@@ -792,5 +827,8 @@ print("wrote report.json with", #results, "entries");
 |---|---|
 | Every operator, keyword, and syntax rule | [language-reference.md](language-reference.md) |
 | All library functions | [standard-library.md](standard-library.md) |
+| Common idioms and best practice | [patterns.md](patterns.md) |
+| The `cando` CLI: flags, `args[]`, exit codes | [cli.md](cli.md) |
 | Threading in depth | [threading.md](threading.md) |
+| Networking sockets in depth | [socket.md](socket.md) |
 | Building the interpreter | [getting-started.md](getting-started.md) |
