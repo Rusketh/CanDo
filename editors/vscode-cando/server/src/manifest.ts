@@ -58,7 +58,10 @@ export interface MemberSpec {
     /* Type of the value (for non-function members) or member-of relationship. */
     type?: string;
     params?: Param[];
-    /* Function/method return type; defaults to `void` if absent on a function. */
+    /* Function/method return type; defaults to `void` if absent on a
+     * function. Special value `"self"` (or `"this"`) means the method
+     * returns its receiver's type, which is how fluent chaining like
+     * `f:setText("hi"):center()` keeps its type. */
     returns?: string;
     doc?: string;
     /* Aliases that resolve to the same spec (`SetText` -> `setText` etc.). */
@@ -126,8 +129,10 @@ export function loadManifestFile(filePath: string): Manifest | null {
         }
     } catch (e) {
         /* Don't let a malformed manifest break completion for the rest of
-         * the workspace. */
-        console.warn(`[cando] failed to load manifest ${filePath}: ${(e as Error).message}`);
+         * the workspace. We swallow the error silently rather than
+         * console.warn to avoid noise in the language-server output --
+         * the editor's diagnostics layer is the right place to surface
+         * authoring problems if we ever want to. */
         manifest = null;
     }
 

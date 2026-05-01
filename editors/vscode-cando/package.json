@@ -2,7 +2,7 @@
   "name": "vscode-cando",
   "displayName": "CanDo Language",
   "description": "Syntax highlighting, snippets and IntelliSense for the CanDo scripting language (.cdo).",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "CandoProject",
   "license": "SEE LICENSE IN LICENSE",
   "icon": "icons/cando.png",

@@ -99,6 +99,28 @@ export function buildTypeEnv(
     for (let i = 0; i < t.length; i++) {
         const tok = t[i];
 
+        /* CLASS declarations are recognised by the analyzer and registered in
+         * env.classes. Skip past their `(params) { body }` here so the
+         * type-tracker doesn't mistake `CLASS Foo = { }` for a bare
+         * assignment binding `Foo` to an empty record. */
+        if (tok.kind === 'keyword' && isOneOf(tok.value, 'CLASS')) {
+            let j = i + 1;
+            if (t[j]?.kind === 'ident') j++;
+            if (t[j]?.kind === 'keyword' && isOneOf(t[j].value, 'EXTENDS')) {
+                j++;
+                if (t[j]?.kind === 'ident') j++;
+            }
+            if (t[j]?.kind === 'op' && t[j].value === '=') j++;
+            if (t[j]?.kind === 'punct' && t[j].value === '(') {
+                j = skipBalanced(t, j, '(', ')');
+            }
+            if (t[j]?.kind === 'punct' && t[j].value === '{') {
+                j = skipBalanced(t, j, '{', '}');
+            }
+            i = j - 1;
+            continue;
+        }
+
         /* `VAR|CONST|GLOBAL name = rhs` */
         if (tok.kind === 'keyword' && isOneOf(tok.value, 'VAR', 'CONST', 'GLOBAL')) {
             const nameTok = t[i + 1];
@@ -118,10 +140,16 @@ export function buildTypeEnv(
         }
 
         /* Bare assignment: `name = rhs`. Only honoured when `name` isn't
-         * already bound (so we don't clobber a stronger inference). */
+         * already bound (so we don't clobber a stronger inference) AND isn't
+         * the name of a class (class identifiers are a stronger hint than a
+         * stray `Cls = ...` line). */
         if (tok.kind === 'ident') {
             const eq = t[i + 1];
-            if (eq?.kind === 'op' && eq.value === '=' && !env.bindings.has(tok.value)) {
+            if (
+                eq?.kind === 'op' && eq.value === '='
+                && !env.bindings.has(tok.value)
+                && !env.classes.has(tok.value)
+            ) {
                 const { ref, next } = inferExpression(t, i + 2, env, workspaceRoots);
                 env.bindings.set(tok.value, ref);
                 i = next - 1;
@@ -175,18 +203,6 @@ function inferPrimary(
     if (tok.kind === 'keyword') {
         if (matches(tok.value, 'TRUE', 'FALSE')) return { ref: { kind: 'primitive', name: 'bool' }, next: i + 1 };
         if (matches(tok.value, 'NULL'))           return { ref: { kind: 'primitive', name: 'null' }, next: i + 1 };
-        if (matches(tok.value, 'NEW')) {
-            const cls = tokens[i + 1];
-            if (cls?.kind === 'ident') {
-                const ref: TypeRef = { kind: 'in-file-class', className: cls.value };
-                /* Skip past the optional argument list. */
-                let j = i + 2;
-                if (tokens[j]?.kind === 'punct' && tokens[j].value === '(') {
-                    j = skipBalanced(tokens, j, '(', ')');
-                }
-                return { ref, next: j };
-            }
-        }
         if (matches(tok.value, 'FUNCTION')) {
             /* Anonymous function literal -- skip its body and treat the value
              * as a generic function. */
@@ -283,7 +299,14 @@ function inferPostfix(
             const isCall = next?.kind === 'punct' && next.value === '(';
             if (isCall) {
                 const callEnd = skipBalanced(tokens, j + 2, '(', ')');
-                ref = resolveTypeReference(member.returns ?? 'any', env);
+                /* `"self"` / `"this"` return types preserve the receiver's
+                 * type, which is how fluent chaining stays on a Form when
+                 * Control declares `setText`. */
+                if (isSelfReturn(member.returns)) {
+                    /* ref is unchanged. */
+                } else {
+                    ref = resolveTypeReference(member.returns ?? 'any', env);
+                }
                 j = callEnd;
                 continue;
             }
@@ -298,10 +321,12 @@ function inferPostfix(
 
         /* Direct call `name(args)`. */
         if (tok.kind === 'punct' && tok.value === '(') {
-            /* If the current ref is a function value we don't know its return
-             * type. Best we can do is mark it unknown and skip past the call. */
             const end = skipBalanced(tokens, j, '(', ')');
-            ref = UNKNOWN;
+            /* Calling a class returns an instance of it. CanDo classes are
+             * callable directly (`Animal("Rex")`), no `NEW` keyword. */
+            if (ref.kind !== 'in-file-class') {
+                ref = UNKNOWN;
+            }
             j = end;
             continue;
         }
@@ -431,6 +456,10 @@ function lookupMemberSpec(ref: TypeRef, name: string, env: TypeEnv): MemberSpec 
 /* -------------------------------------------------------------------------
  * Type-string resolution (manifest "type" / "returns" -> TypeRef)
  * ----------------------------------------------------------------------- */
+
+function isSelfReturn(s: string | undefined): boolean {
+    return s === 'self' || s === 'this' || s === 'Self';
+}
 
 function resolveTypeReference(typeStr: string, env: TypeEnv): TypeRef {
     if (!typeStr) return ANY;
@@ -692,8 +721,3 @@ export function formatMemberDetail(spec: MemberSpec, name: string): string {
     return name;
 }
 
-/* Exports a synthetic path lookup module so server.ts can stay tidy. */
-export const _internal_for_tests = {
-    skipBalanced,
-    inferPrimary
-};

@@ -3,7 +3,10 @@
  *   - top-level VAR / CONST / GLOBAL bindings (and bindings inside FUNCTION
  *     bodies for parameter / locals capture)
  *   - FUNCTION declarations (with parameter names)
- *   - CLASS declarations with their methods and fields
+ *   - CLASS declarations with their methods and fields. CanDo's class
+ *     statement is `CLASS Name [EXTENDS Parent] = [(params)] { body }`;
+ *     methods are typically attached afterwards via
+ *     `Name.method = FUNCTION(self) { ... }`. Both shapes are captured.
  *   - Object literals bound to top-level VAR/CONST/GLOBAL (for `name.member`
  *     completion)
  *   - `include("path")` bindings (for cross-file member completion)
@@ -182,27 +185,59 @@ export function analyze(tokens: Token[]): AnalysisResult {
         if (depth === 0 && isKw(tok, 'CLASS')) {
             const nameTok = t[i + 1];
             if (nameTok && nameTok.kind === 'ident') {
-                let detail = `CLASS ${nameTok.value}`;
                 let scan = i + 2;
-                if (isKw(t[i + 2], 'EXTENDS') && t[i + 3]?.kind === 'ident') {
-                    detail += ` EXTENDS ${t[i + 3].value}`;
-                    scan = i + 4;
+                let parent: string | undefined;
+                let detail = `CLASS ${nameTok.value}`;
+
+                if (isKw(t[scan], 'EXTENDS') && t[scan + 1]?.kind === 'ident') {
+                    parent = t[scan + 1].value;
+                    detail += ` EXTENDS ${parent}`;
+                    scan += 2;
                 }
-                const members = collectClassMembers(scan);
+
+                /* `=` is mandatory in the statement form. */
+                if (!isOp(t[scan], '=')) {
+                    /* Not a class declaration we recognise -- skip and keep
+                     * walking. */
+                    continue;
+                }
+                scan++;
+
+                /* Optional `(params)` for the constructor. */
+                let params: Symbol[] = [];
+                if (isPunct(t[scan], '(')) {
+                    const collected = collectParams(scan);
+                    params = collected.params;
+                    scan = collected.end + 1;
+                }
+
+                /* Mandatory `{ body }`. */
+                let bodyEnd = scan;
+                const fields: Symbol[] = [];
+                if (isPunct(t[scan], '{')) {
+                    fields.push(...collectSelfAssignments(scan));
+                    bodyEnd = skipBalanced(scan, '{', '}');
+                }
+
+                if (params.length) {
+                    detail += `(${params.map(p => p.name).join(', ')})`;
+                }
+
                 const sym: Symbol = {
                     name: nameTok.value,
                     kind: 'class',
                     range: nameTok.range,
                     selectionRange: nameTok.range,
                     detail,
-                    children: members
+                    children: [...params, ...fields],
+                    parameters: params.map(p => p.name)
                 };
                 symbols.push(sym);
                 if (!byName.has(sym.name)) byName.set(sym.name, sym);
-                /* Skip past the class body so its inner `{` doesn't confuse depth. */
-                if (isPunct(t[scan], '{')) {
-                    i = skipBalanced(scan, '{', '}') - 1;
-                }
+
+                /* Skip past the class body so its inner braces don't perturb
+                 * the depth tracker. */
+                i = bodyEnd - 1;
                 continue;
             }
         }
@@ -280,10 +315,12 @@ export function analyze(tokens: Token[]): AnalysisResult {
         }
     }
 
-    /* CLASS body member collection: starts at the `{` after the class header. */
-    function collectClassMembers(headerEnd: number): Symbol[] {
+    /* Collect `self.X = ...` patterns inside the constructor body to surface
+     * fields (and inline method assignments) on the class. */
+    function collectSelfAssignments(headerEnd: number): Symbol[] {
         const members: Symbol[] = [];
         if (!isPunct(t[headerEnd], '{')) return members;
+        const seen = new Set<string>();
 
         let j = headerEnd + 1;
         let d = 1;
@@ -292,54 +329,73 @@ export function analyze(tokens: Token[]): AnalysisResult {
             if (isPunct(tok, '{')) { d++; j++; continue; }
             if (isPunct(tok, '}')) { d--; j++; continue; }
 
-            if (d === 1) {
-                /* Optional STATIC / PRIVATE / ASYNC modifier prefix. */
-                let k = j;
-                while (isKw(t[k], 'STATIC', 'PRIVATE', 'ASYNC')) k++;
-
-                if (isKw(t[k], 'FUNCTION')) {
-                    const nameTok = t[k + 1];
-                    if (nameTok && nameTok.kind === 'ident') {
-                        const { params, end } = collectParams(k + 2);
-                        members.push({
-                            name: nameTok.value,
-                            kind: 'method',
-                            range: nameTok.range,
-                            selectionRange: nameTok.range,
-                            detail: `FUNCTION ${nameTok.value}(${params.map(p => p.name).join(', ')})`,
-                            children: params,
-                            parameters: params.map(p => p.name)
-                        });
-                        /* Skip the method body. */
-                        const bodyOpen = end + 1;
-                        if (isPunct(t[bodyOpen], '{')) {
-                            j = skipBalanced(bodyOpen, '{', '}');
-                            continue;
-                        }
-                        j = end + 1;
-                        continue;
-                    }
+            /* Look for `self.name = ...` or `self:name = ...` at any nesting
+             * level inside the constructor. Don't restrict by depth -- this
+             * is safe because we only key off the literal token sequence. */
+            if (
+                tok.kind === 'ident' && tok.value === 'self' &&
+                isOp(t[j + 1], '.') &&
+                t[j + 2]?.kind === 'ident' &&
+                isOp(t[j + 3], '=')
+            ) {
+                const fieldTok = t[j + 2];
+                if (!seen.has(fieldTok.value)) {
+                    seen.add(fieldTok.value);
+                    const isFn = isKw(t[j + 4], 'FUNCTION');
+                    members.push({
+                        name: fieldTok.value,
+                        kind: isFn ? 'method' : 'field',
+                        range: fieldTok.range,
+                        selectionRange: fieldTok.range,
+                        detail: isFn ? `self.${fieldTok.value}(...)` : `self.${fieldTok.value}`
+                    });
                 }
-                if (isKw(t[k], 'VAR', 'CONST', 'GLOBAL')) {
-                    const nameTok = t[k + 1];
-                    if (nameTok && nameTok.kind === 'ident') {
-                        members.push({
-                            name: nameTok.value,
-                            kind: 'field',
-                            range: nameTok.range,
-                            selectionRange: nameTok.range,
-                            detail: `${t[k].value.toUpperCase()} ${nameTok.value}`
-                        });
-                        /* Advance past the declaration so we don't re-enter
-                         * on the same VAR after a STATIC/PRIVATE prefix. */
-                        j = k + 2;
-                        continue;
-                    }
-                }
+                j += 4;
+                continue;
             }
             j++;
         }
         return members;
+    }
+
+    /* Second pass: methods are usually attached to a class *after* its body
+     * via `Name.method = FUNCTION(...) { ... }`. Walk the whole token stream
+     * once more and add those to the class symbol's children. */
+    const classByName = new Map<string, Symbol>();
+    for (const s of symbols) if (s.kind === 'class') classByName.set(s.name, s);
+
+    if (classByName.size > 0) {
+        for (let i = 0; i < t.length; i++) {
+            const head = t[i];
+            if (head.kind !== 'ident') continue;
+            const cls = classByName.get(head.value);
+            if (!cls) continue;
+            if (!isOp(t[i + 1], '.')) continue;
+            const memberTok = t[i + 2];
+            if (memberTok?.kind !== 'ident') continue;
+            if (!isOp(t[i + 3], '=')) continue;
+
+            if (cls.children?.some(c => c.name === memberTok.value)) continue;
+
+            const isFn = isKw(t[i + 4], 'FUNCTION');
+            let params: Symbol[] = [];
+            let detail = isFn ? `${cls.name}.${memberTok.value}(...)` : `${cls.name}.${memberTok.value}`;
+            if (isFn && isPunct(t[i + 5], '(')) {
+                const collected = collectParams(i + 5);
+                params = collected.params;
+                detail = `${cls.name}.${memberTok.value}(${params.map(p => p.name).join(', ')})`;
+            }
+            const child: Symbol = {
+                name: memberTok.value,
+                kind: isFn ? 'method' : 'field',
+                range: memberTok.range,
+                selectionRange: memberTok.range,
+                detail,
+                children: params,
+                parameters: isFn ? params.map(p => p.name) : undefined
+            };
+            (cls.children ??= []).push(child);
+        }
     }
 
     return { symbols, byName, includes, objectLiterals, moduleExports };

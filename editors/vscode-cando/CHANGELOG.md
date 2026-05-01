@@ -3,6 +3,42 @@
 All notable changes to the **CanDo Language** VS Code extension are
 documented in this file.
 
+## 0.3.1 -- 2026-05-01
+
+Edge-case sweep for the type tracker. 63-case harness in
+`server/test/edge_cases.js`; all green.
+
+### Fixed
+
+- **CLASS syntax.** The analyzer was assuming `CLASS Name { body }`,
+  but CanDo's actual syntax is
+  `CLASS Name [EXTENDS Parent] = [(params)] { body }`. The fix parses
+  the constructor params, captures `self.x = …` assignments inside
+  the constructor as fields/methods, and runs a second pass that
+  picks up methods attached after the body via
+  `Name.method = FUNCTION(self) { … }` (the canonical CanDo idiom).
+- **No `NEW` keyword.** Removed a fictional `NEW` branch from the type
+  tracker. Calling a class directly (`Animal("Rex")`) now produces
+  an instance of the class, matching the runtime.
+- **Class-name shadowing.** `CLASS Foo = { }` was being misread by
+  the type tracker as a bare `Foo = { }` assignment, shadowing the
+  class with an empty record. The tracker now skips past CLASS
+  declarations and refuses to bind class names via bare assignment.
+- **Self-typed returns.** Fluent chaining (`f:setText("…"):center()`)
+  was collapsing to `Control` -- the class declaring `setText`. The
+  manifest schema now supports `"returns": "self"` (alias `"this"`)
+  meaning "preserve the receiver's type". 90 chainable methods in the
+  forms manifest were migrated.
+
+### Added
+
+- `server/test/edge_cases.js`: a node-based harness covering receiver
+  detection, type inference, include/path detection, manifest
+  pathologies (cycles, missing types, malformed JSON), real-world
+  class idioms from `tests/scripts/metamethods.cdo`, performance
+  (1k-line files), CRLF/tabs, empty documents, and 50+ smaller
+  shapes. Run with `node server/test/edge_cases.js` after `tsc -b`.
+
 ## 0.3.0 -- 2026-05-01
 
 ### Added
