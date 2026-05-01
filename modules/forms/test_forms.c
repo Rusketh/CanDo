@@ -266,6 +266,79 @@ static void test_dock_layout_full_flow(void)
     EXPECT("flow: remainder bottom", bottom == 280);
 }
 
+/* New control kinds were added at the end of the ControlKind enum.  This
+ * test pins their numeric values so a future reordering of the enum can't
+ * silently break callers that have hard-coded the expected slot kind. */
+static void test_control_kind_enum(void)
+{
+    EXPECT("KIND_FORM is 1",         (int)KIND_FORM == 1);
+    EXPECT("KIND_BUTTON is 2",       (int)KIND_BUTTON == 2);
+    EXPECT("KIND_LINKLABEL exists",  (int)KIND_LINKLABEL > (int)KIND_PICTUREBOX);
+    EXPECT("KIND_DATETIMEPICKER",    (int)KIND_DATETIMEPICKER == (int)KIND_LINKLABEL + 1);
+    EXPECT("KIND_MONTHCALENDAR",     (int)KIND_MONTHCALENDAR == (int)KIND_DATETIMEPICKER + 1);
+    EXPECT("KIND_STATUSBAR",         (int)KIND_STATUSBAR == (int)KIND_MONTHCALENDAR + 1);
+    EXPECT("KIND_SPINNER",           (int)KIND_SPINNER == (int)KIND_STATUSBAR + 1);
+}
+
+/* ci_strneq is the case-insensitive matcher used by the named-colour
+ * lookup; we exercise it in isolation so a regression in the lowercase
+ * fold doesn't quietly send "RED" to the default branch. */
+static void test_ci_strneq(void)
+{
+    EXPECT("ci_strneq lower==lower", ci_strneq("red", "red", 3));
+    EXPECT("ci_strneq UPPER==lower", ci_strneq("RED", "red", 3));
+    EXPECT("ci_strneq Mixed==lower", ci_strneq("ReD", "red", 3));
+    EXPECT("ci_strneq mismatch",    !ci_strneq("red", "blu", 3));
+}
+
+/* The hex-string parser accepts 3-, 6-, and 8-digit hex (with or
+ * without a leading '#'); 8-digit drops the alpha channel.  These
+ * rules are easy to break so we lock them in with a table. */
+static void test_parse_hex_color(void)
+{
+    unsigned int rgb = 0;
+
+    EXPECT("hex #ff0000",  parse_hex_color("#ff0000", 7, &rgb) && rgb == 0xFF0000);
+    EXPECT("hex FF0000",   parse_hex_color("FF0000",  6, &rgb) && rgb == 0xFF0000);
+    EXPECT("hex #f00 -> #ff0000",
+                          parse_hex_color("#f00", 4, &rgb) && rgb == 0xFF0000);
+    EXPECT("hex #abc -> aabbcc",
+                          parse_hex_color("#abc", 4, &rgb) && rgb == 0xAABBCC);
+    EXPECT("hex 8-digit drops alpha",
+                          parse_hex_color("#ff336699", 9, &rgb) && rgb == 0x336699);
+    EXPECT("hex rejects 5 chars", !parse_hex_color("#abcd",  5, &rgb));
+    EXPECT("hex rejects garbage", !parse_hex_color("#zzzzzz", 7, &rgb));
+}
+
+/* The named-colour lookup uses ci_strneq under the hood.  Spot-check
+ * that the table contains the marquee entries and that case folding
+ * works through the public lookup. */
+static void test_lookup_named_color(void)
+{
+    unsigned int rgb = 0;
+    EXPECT("named: red",            lookup_named_color("red",            3, &rgb) && rgb == 0xFF0000);
+    EXPECT("named: RED  (CI)",      lookup_named_color("RED",            3, &rgb) && rgb == 0xFF0000);
+    EXPECT("named: cornflowerblue", lookup_named_color("cornflowerblue", 14, &rgb) && rgb == 0x6495ED);
+    EXPECT("named: missing returns 0", !lookup_named_color("notacolour", 10, &rgb));
+}
+
+/* rgb_to_colorref / colorref_to_rgb are inverses; round-trip on a few
+ * sentinel values to catch byte-swap bugs. */
+static void test_color_byte_order_roundtrip(void)
+{
+    unsigned int xs[] = { 0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF,
+                          0x123456, 0x6495ED, 0xFEDCBA };
+    for (size_t i = 0; i < sizeof(xs)/sizeof(xs[0]); i++) {
+        unsigned int cref = rgb_to_colorref(xs[i]);
+        unsigned int back = colorref_to_rgb(cref);
+        char name[64];
+        snprintf(name, sizeof(name),
+                 "color round-trip 0x%06X -> 0x%06X -> 0x%06X",
+                 xs[i], cref, back);
+        EXPECT(name, back == xs[i]);
+    }
+}
+
 int main(void)
 {
     printf("== modules/forms: C tests ==\n");
@@ -280,6 +353,11 @@ int main(void)
     test_long_running_stability();
     test_dock_layout_basic();
     test_dock_layout_full_flow();
+    test_control_kind_enum();
+    test_ci_strneq();
+    test_parse_hex_color();
+    test_lookup_named_color();
+    test_color_byte_order_roundtrip();
 
     if (failures == 0) {
         printf("All forms C tests passed.\n");

@@ -23,6 +23,43 @@ VAR fail = 0;
 IF (forms.VERSION == NULL)   { print("FAIL: VERSION missing"); fail = fail + 1; }
 IF (forms.platform == NULL)  { print("FAIL: platform missing"); fail = fail + 1; }
 
+// Constructor surface (Form, Button, Label, ...).  The stub backend
+// errors on call but the field must still be present.
+VAR ctors = ["Form", "Button", "Label", "TextBox", "CheckBox",
+             "RadioButton", "ComboBox", "ListBox", "Panel", "GroupBox",
+             "ProgressBar", "TrackBar", "NumericUpDown", "PictureBox",
+             "LinkLabel", "DateTimePicker", "MonthCalendar",
+             "StatusBar", "Spinner"];
+FOR name OF ctors {
+    IF forms[name] == NULL {
+        print("FAIL: constructor missing:", name);
+        fail = fail + 1;
+    }
+}
+
+// Constants tables.
+IF forms.Dock == NULL   { print("FAIL: forms.Dock missing"); fail = fail + 1; }
+IF forms.Color == NULL  { print("FAIL: forms.Color missing"); fail = fail + 1; }
+IF forms.BorderStyle == NULL {
+    print("FAIL: forms.BorderStyle missing"); fail = fail + 1;
+}
+
+// Spot-check a few colour entries.  Values are 0xRRGGBB packed integers.
+IF forms.Color.red != 16711680 {                  // 0xFF0000
+    print("FAIL: forms.Color.red mismatch (got", forms.Color.red, ")");
+    fail = fail + 1;
+}
+IF forms.Color.cornflowerblue != 6591981 {        // 0x6495ED
+    print("FAIL: forms.Color.cornflowerblue mismatch");
+    fail = fail + 1;
+}
+IF forms.BorderStyle.none != 1 {
+    print("FAIL: forms.BorderStyle.none != 1"); fail = fail + 1;
+}
+IF forms.Dock.fill != 5 {
+    print("FAIL: forms.Dock.fill != 5"); fail = fail + 1;
+}
+
 IF fail > 0 {
     print(fail, "smoke check(s) failed.");
 } ELSE {

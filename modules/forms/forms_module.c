@@ -184,6 +184,11 @@ typedef enum {
     KIND_TRACKBAR,
     KIND_NUMERIC,
     KIND_PICTUREBOX,
+    KIND_LINKLABEL,
+    KIND_DATETIMEPICKER,
+    KIND_MONTHCALENDAR,
+    KIND_STATUSBAR,
+    KIND_SPINNER,
     KIND_KIND_COUNT
 } ControlKind;
 
@@ -235,6 +240,157 @@ static void compute_dock_rect(int dock, int child_w, int child_h,
     out->x = x; out->y = y; out->w = w; out->h = h;
 }
 
+/* =========================================================================
+ * Pure-C colour helpers.  Live above the test-build / Win32 boundary so
+ * the C unit tests can link against them directly (test_forms.c includes
+ * the .c with FORMS_MODULE_TEST_BUILD set, which strips the Win32 +
+ * libcando-bound paths but keeps these).
+ *
+ * Internal representation is the Win32 COLORREF byte order (0x00BBGGRR);
+ * scripts see/use 0xRRGGBB.  rgb_to_colorref / colorref_to_rgb mediate.
+ * ===================================================================== */
+
+typedef struct NamedColor {
+    const char  *name;
+    unsigned int rgb;       /* 0xRRGGBB                                   */
+} NamedColor;
+
+/* CSS-style named colour table.  Keys are lowercase so the case-insensitive
+ * matcher only has to fold the input. */
+static const NamedColor g_named_colors[] = {
+    { "black",            0x000000 },
+    { "white",            0xFFFFFF },
+    { "red",              0xFF0000 },
+    { "green",            0x008000 },   /* CSS-green, not lime */
+    { "blue",             0x0000FF },
+    { "yellow",           0xFFFF00 },
+    { "cyan",             0x00FFFF },
+    { "magenta",          0xFF00FF },
+    { "orange",           0xFFA500 },
+    { "purple",           0x800080 },
+    { "gray",             0x808080 },
+    { "grey",             0x808080 },   /* spelling alias */
+    { "lightgray",        0xD3D3D3 },
+    { "lightgrey",        0xD3D3D3 },
+    { "darkgray",         0xA9A9A9 },
+    { "darkgrey",         0xA9A9A9 },
+    { "silver",           0xC0C0C0 },
+    { "navy",             0x000080 },
+    { "teal",             0x008080 },
+    { "olive",            0x808000 },
+    { "maroon",           0x800000 },
+    { "lime",             0x00FF00 },
+    { "aqua",             0x00FFFF },
+    { "fuchsia",          0xFF00FF },
+    { "pink",             0xFFC0CB },
+    { "brown",            0xA52A2A },
+    { "gold",             0xFFD700 },
+    { "salmon",           0xFA8072 },
+    { "coral",            0xFF7F50 },
+    { "tomato",           0xFF6347 },
+    { "indigo",           0x4B0082 },
+    { "violet",           0xEE82EE },
+    { "khaki",            0xF0E68C },
+    { "beige",            0xF5F5DC },
+    { "ivory",            0xFFFFF0 },
+    { "snow",             0xFFFAFA },
+    { "azure",            0xF0FFFF },
+    { "mint",             0xF5FFFA },
+    /* Useful Win32 system-ish defaults: */
+    { "buttonface",       0xF0F0F0 },
+    { "windowbg",         0xFFFFFF },
+    { "controltext",      0x000000 },
+    /* WinForms common picks. */
+    { "cornflowerblue",   0x6495ED },
+    { "dodgerblue",       0x1E90FF },
+    { "steelblue",        0x4682B4 },
+    { "skyblue",          0x87CEEB },
+    { "darkred",          0x8B0000 },
+    { "darkgreen",        0x006400 },
+    { "darkblue",         0x00008B },
+    { "lightyellow",      0xFFFFE0 },
+    { "lightblue",        0xADD8E6 },
+    { "lightgreen",       0x90EE90 },
+    { "transparent",      0x000000 },   /* synthetic; needs has_back=0   */
+    { NULL, 0 }
+};
+
+/* Case-insensitive comparison on a byte range.  Table keys are all
+ * lowercase ASCII so this plain tolower fold suffices regardless of
+ * locale -- we deliberately don't reach into ctype. */
+static int ci_strneq(const char *a, const char *b, u32 n)
+{
+    for (u32 i = 0; i < n; i++) {
+        unsigned char ac = (unsigned char)a[i];
+        unsigned char bc = (unsigned char)b[i];
+        if (ac >= 'A' && ac <= 'Z') ac = (unsigned char)(ac + 32);
+        if (bc >= 'A' && bc <= 'Z') bc = (unsigned char)(bc + 32);
+        if (ac != bc) return 0;
+    }
+    return 1;
+}
+
+/* Look up `name` in g_named_colors.  Returns 1 on hit (writes *rgb_out
+ * as 0xRRGGBB), 0 otherwise. */
+static int lookup_named_color(const char *name, u32 n, unsigned int *rgb_out)
+{
+    if (!name || n == 0) return 0;
+    for (const NamedColor *p = g_named_colors; p->name; p++) {
+        u32 keylen = (u32)strlen(p->name);
+        if (keylen != n) continue;
+        if (ci_strneq(name, p->name, n)) { *rgb_out = p->rgb; return 1; }
+    }
+    return 0;
+}
+
+/* Parse "#RRGGBB", "#RGB" (CSS-style 3-digit shorthand), "#AARRGGBB"
+ * (alpha dropped) or the same without the leading '#'.  Returns 1 on
+ * success and writes the canonical 0xRRGGBB into *rgb_out. */
+static int parse_hex_color(const char *s, u32 n, unsigned int *rgb_out)
+{
+    if (!s || n == 0) return 0;
+    if (s[0] == '#') { s++; n--; }
+    if (n != 3 && n != 6 && n != 8) return 0;
+    unsigned int v = 0;
+    for (u32 i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        unsigned int d;
+        if      (c >= '0' && c <= '9') d = (unsigned)c - '0';
+        else if (c >= 'a' && c <= 'f') d = (unsigned)c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') d = (unsigned)c - 'A' + 10;
+        else return 0;
+        v = (v << 4) | d;
+    }
+    if (n == 3) {
+        unsigned r = (v >> 8) & 0xF;
+        unsigned g = (v >> 4) & 0xF;
+        unsigned b = (v     ) & 0xF;
+        v = ((r * 0x11) << 16) | ((g * 0x11) << 8) | (b * 0x11);
+    } else if (n == 8) {
+        v &= 0x00FFFFFFu;          /* drop alpha */
+    }
+    *rgb_out = v & 0xFFFFFFu;
+    return 1;
+}
+
+/* Convert 0xRRGGBB into a Win32 COLORREF (0x00BBGGRR). */
+static unsigned int rgb_to_colorref(unsigned int rgb)
+{
+    unsigned char r = (rgb >> 16) & 0xFF;
+    unsigned char g = (rgb >>  8) & 0xFF;
+    unsigned char b = (rgb >>  0) & 0xFF;
+    return (unsigned int)(((unsigned)b << 16) | ((unsigned)g << 8) | (unsigned)r);
+}
+
+/* Inverse of rgb_to_colorref: COLORREF -> 0xRRGGBB. */
+static unsigned int colorref_to_rgb(unsigned int colorref)
+{
+    unsigned char b = (colorref >> 16) & 0xFF;
+    unsigned char g = (colorref >>  8) & 0xFF;
+    unsigned char r = (colorref >>  0) & 0xFF;
+    return (unsigned int)(((unsigned)r << 16) | ((unsigned)g << 8) | (unsigned)b);
+}
+
 typedef struct FormsSlot {
     int          alive;
     int          generation;
@@ -265,6 +421,36 @@ typedef struct FormsSlot {
      * WM_SIZE handler walks the children and re-positions each one
      * according to its dock value.                                     */
     int          dock;              /* one of FORMS_DOCK_*               */
+    /* Font state.  has_font == 0 means the control inherits the parent
+     * form's font (set up at creation by sending WM_SETFONT).  When a
+     * script-side setFont* call sets has_font, the slot owns its own
+     * HFONT created from these fields.                                  */
+    int          has_font;
+    char         font_face[64];     /* face name -- empty = "Segoe UI"  */
+    int          font_size;         /* point size (positive)            */
+    int          font_bold;
+    int          font_italic;
+    int          font_underline;
+    int          font_strikeout;
+#if FORMS_HAVE_WIN32
+    HFONT        hfont;             /* lazily created from above fields */
+#endif
+    /* Border style override.  border_style_set means the script overrode
+     * the per-kind default; values mirror System.Windows.Forms.BorderStyle
+     * (1=none, 2=single line, 3=fixed-3D).                              */
+    int          border_style_set;
+    int          border_style;
+    /* Form opacity.  has_opacity gates whether the form's WS_EX_LAYERED
+     * style has been enabled and SetLayeredWindowAttributes called with
+     * the alpha value below (0..255, 255 = fully opaque).               */
+    int          has_opacity;
+    int          opacity;           /* 0..255                            */
+    int          topmost;           /* form-only: above all other windows */
+    /* Optional minimum and maximum size for forms.  When set, WM_GETMINMAXINFO
+     * clamps to these values so user-driven resizes can't shrink past
+     * something the layout assumes.                                     */
+    int          has_min_size, min_w, min_h;
+    int          has_max_size, max_w, max_h;
     /* Retained handle to the script-side instance so callbacks survive
      * the script returning.                                              */
     CandoValue   inst_val;
@@ -392,10 +578,27 @@ static int slot_alloc_locked(ControlKind kind, int parent_slot)
             s->fore_color = 0;
             s->back_color = 0;
             s->dock = FORMS_DOCK_NONE;
+            s->has_font = 0;
+            s->font_face[0] = 0;
+            s->font_size = 0;
+            s->font_bold = 0;
+            s->font_italic = 0;
+            s->font_underline = 0;
+            s->font_strikeout = 0;
+            s->border_style_set = 0;
+            s->border_style = 0;
+            s->has_opacity = 0;
+            s->opacity = 255;
+            s->topmost = 0;
+            s->has_min_size = 0;
+            s->has_max_size = 0;
+            s->min_w = s->min_h = 0;
+            s->max_w = s->max_h = 0;
 #if FORMS_HAVE_WIN32
             s->hwnd        = NULL;
             s->orig_proc   = NULL;
             s->back_brush  = NULL;
+            s->hfont       = NULL;
 #endif
             return i;
         }
@@ -753,6 +956,35 @@ static int do_create_control(FormsCommand *c)
         cls = L"STATIC";
         style |= SS_BITMAP;
         break;
+    case KIND_LINKLABEL:
+        /* SysLink ships with comctl32 v6 (Windows XP+).  Falls back to a
+         * regular STATIC if the control isn't registered, so the script
+         * still gets a label even on bare-bones systems.               */
+        cls = L"SysLink";
+        style |= 0x00000001;        /* LWS_TRANSPARENT */
+        break;
+    case KIND_DATETIMEPICKER:
+        cls = DATETIMEPICK_CLASSW;
+        style |= WS_TABSTOP;
+        if (c->style_extra & 1) style |= 0x0008;   /* DTS_SHOWNONE */
+        if (c->style_extra & 2) style |= 0x0009;   /* DTS_TIMEFORMAT (clock) */
+        break;
+    case KIND_MONTHCALENDAR:
+        cls = MONTHCAL_CLASSW;
+        style |= WS_TABSTOP;
+        break;
+    case KIND_STATUSBAR:
+        cls = STATUSCLASSNAMEW;
+        /* Status bars are designed to dock to the bottom of their
+         * parent.  Win32 sizes them automatically, ignore x/y/w/h. */
+        x = 0; y = 0; w = 0; h = 0;
+        style |= SBARS_SIZEGRIP;
+        break;
+    case KIND_SPINNER:
+        cls = UPDOWN_CLASSW;
+        style |= UDS_SETBUDDYINT | UDS_ARROWKEYS | UDS_HOTTRACK |
+                 UDS_ALIGNRIGHT | UDS_NOTHOUSANDS;
+        break;
     default:
         snprintf(c->err, sizeof(c->err), "unsupported control kind %d",
                  (int)c->kind);
@@ -935,6 +1167,33 @@ static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
         }
         return 0;
     }
+    case WM_NOTIFY: {
+        /* Common-control notifications: SysLink clicks, DateTimePicker
+         * changes, MonthCalendar selection changes, ListView/TreeView
+         * (future). Notification code lives in NMHDR.code. */
+        NMHDR *nh = (NMHDR *)l;
+        if (nh && nh->idFrom > 0 && nh->idFrom < FORMS_MAX_SLOTS) {
+            int cid = (int)nh->idFrom;
+            if (g_slots[cid].alive) {
+                int cgen = g_slots[cid].generation;
+                ControlKind k = g_slots[cid].kind;
+                /* SysLink: NM_CLICK (-2) and NM_RETURN (-4) */
+                if (k == KIND_LINKLABEL &&
+                    ((LONG)nh->code == NM_CLICK || (LONG)nh->code == NM_RETURN)) {
+                    push_event(EV_CLICK, cid, cgen);
+                }
+                /* DateTimePicker: DTN_DATETIMECHANGE = -759 */
+                else if (k == KIND_DATETIMEPICKER && (LONG)nh->code == -759) {
+                    push_event(EV_VALUE_CHANGED, cid, cgen);
+                }
+                /* MonthCalendar: MCN_SELCHANGE = -749 */
+                else if (k == KIND_MONTHCALENDAR && (LONG)nh->code == -749) {
+                    push_event(EV_SELECTION_CHANGED, cid, cgen);
+                }
+            }
+        }
+        return 0;
+    }
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORBTN:
@@ -976,6 +1235,22 @@ static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
                 FillRect((HDC)w, &r, fs->back_brush);
                 return 1;
             }
+        }
+        break;
+    }
+    case WM_GETMINMAXINFO: {
+        if (slot > 0 && slot < FORMS_MAX_SLOTS) {
+            FormsSlot *fs = &g_slots[slot];
+            MINMAXINFO *mmi = (MINMAXINFO *)l;
+            if (fs->has_min_size) {
+                if (fs->min_w > 0) mmi->ptMinTrackSize.x = fs->min_w;
+                if (fs->min_h > 0) mmi->ptMinTrackSize.y = fs->min_h;
+            }
+            if (fs->has_max_size) {
+                if (fs->max_w > 0) mmi->ptMaxTrackSize.x = fs->max_w;
+                if (fs->max_h > 0) mmi->ptMaxTrackSize.y = fs->max_h;
+            }
+            return 0;
         }
         break;
     }
@@ -1320,6 +1595,7 @@ static void slot_teardown(FormsSlot *s)
         }
     }
     if (s->back_brush) { DeleteObject(s->back_brush); s->back_brush = NULL; }
+    if (s->hfont)      { DeleteObject(s->hfont);      s->hfont      = NULL; }
 #endif
     if (s->inst_val_held) {
         cando_value_release(s->inst_val);
@@ -1605,6 +1881,11 @@ FORMS_DEFINE_CTOR("ProgressBar", KIND_PROGRESS,    native_progress_create)
 FORMS_DEFINE_CTOR("TrackBar",    KIND_TRACKBAR,    native_trackbar_create)
 FORMS_DEFINE_CTOR("NumericUpDown", KIND_NUMERIC,   native_numeric_create)
 FORMS_DEFINE_CTOR("PictureBox",  KIND_PICTUREBOX,  native_picturebox_create)
+FORMS_DEFINE_CTOR("LinkLabel",   KIND_LINKLABEL,   native_linklabel_create)
+FORMS_DEFINE_CTOR("DateTimePicker", KIND_DATETIMEPICKER, native_datetime_create)
+FORMS_DEFINE_CTOR("MonthCalendar",  KIND_MONTHCALENDAR,  native_calendar_create)
+FORMS_DEFINE_CTOR("StatusBar",   KIND_STATUSBAR,   native_statusbar_create)
+FORMS_DEFINE_CTOR("Spinner",     KIND_SPINNER,     native_spinner_create)
 
 /* =========================================================================
  * Methods on every control instance.  Most setters cross threads via
@@ -2088,21 +2369,34 @@ static int native_get_value(CandoVM *vm, int argc, CandoValue *args)
 }
 
 /* =========================================================================
- * Colours.  Accepts (r, g, b) or a single packed 0xRRGGBB integer.
+ * Colours (script-facing).  setForeColor / setBackColor accept any of:
+ *   - three numbers (r, g, b)            -- 0..255 each
+ *   - one packed integer 0xRRGGBB
+ *   - a hex string ("#RRGGBB", "#RGB", or "#AARRGGBB" -- alpha ignored)
+ *   - a CSS-style named colour ("red", "cornflowerblue", ...)
+ *
+ * The pure-C parsing helpers (parse_hex_color, lookup_named_color, ...)
+ * live above, near compute_dock_rect; they're shared with the C unit
+ * test build that strips libcando + Win32.
  * ===================================================================== */
 
 static unsigned int parse_color_args(CandoValue *args, int argc, int start,
-                                     unsigned int default_rgb)
+                                     unsigned int default_colorref)
 {
-    if (argc <= start) return default_rgb;
+    if (argc <= start) return default_colorref;
+    /* Single string-arg: "#RRGGBB", "#RGB" or named colour. */
+    if (argc == start + 1 && args[start].tag == CDO_STRING && args[start].as.string) {
+        const char *s = args[start].as.string->data;
+        u32 n = args[start].as.string->length;
+        unsigned int rgb;
+        if (parse_hex_color(s, n, &rgb))   return rgb_to_colorref(rgb);
+        if (lookup_named_color(s, n, &rgb)) return rgb_to_colorref(rgb);
+        return default_colorref;
+    }
     /* Single-arg packed 0xRRGGBB */
     if (argc == start + 1 && args[start].tag == CDO_NUMBER) {
         unsigned int rgb = (unsigned int)args[start].as.number & 0xFFFFFFu;
-        unsigned char r = (rgb >> 16) & 0xFF;
-        unsigned char g = (rgb >>  8) & 0xFF;
-        unsigned char b = (rgb >>  0) & 0xFF;
-        /* Win32 COLORREF byte order is 0x00BBGGRR. */
-        return (unsigned int)(((unsigned)b << 16) | ((unsigned)g << 8) | (unsigned)r);
+        return rgb_to_colorref(rgb);
     }
     /* Three-arg (r, g, b) -- match WinForms Color.FromArgb. */
     int r = (argc > start     && args[start].tag     == CDO_NUMBER) ? (int)args[start].as.number     : 0;
@@ -2166,6 +2460,600 @@ static int native_clear_back_color(CandoVM *vm, int argc, CandoValue *args)
     if (s->hwnd) InvalidateRect(s->hwnd, NULL, TRUE);
 #endif
     cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* Return the current fore/back colour as 0xRRGGBB, or NULL when no
+ * override is in effect.  Useful for round-tripping ("save & restore"
+ * theming) and for adoption-by-children patterns. */
+static int native_get_fore_color(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getForeColor");
+    if (!s) return -1;
+    if (!s->has_fore) { cando_vm_push(vm, cando_null()); return 1; }
+    cando_vm_push(vm, cando_number((f64)colorref_to_rgb(s->fore_color)));
+    return 1;
+}
+
+static int native_get_back_color(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getBackColor");
+    if (!s) return -1;
+    if (!s->has_back) { cando_vm_push(vm, cando_null()); return 1; }
+    cando_vm_push(vm, cando_number((f64)colorref_to_rgb(s->back_color)));
+    return 1;
+}
+
+/* =========================================================================
+ * Fonts.
+ *
+ * Font state is stored on the slot: face name (UTF-8, max 63 chars),
+ * point size, and four boolean style flags (bold / italic / underline /
+ * strikeout).  When any field changes we destroy the cached HFONT and
+ * rebuild it on the next setter call before sending WM_SETFONT.
+ *
+ * Setters are forgiving: setFont("Segoe UI"), setFont("Segoe UI", 14),
+ * setFont({face="Segoe UI", size=14, bold=true, italic=true}) all work.
+ * Calling setBold(true) without a prior setFont takes the platform
+ * default face/size and just toggles weight on top.
+ * ===================================================================== */
+
+#if FORMS_HAVE_WIN32
+/* Pull the current default-GUI-font face/size into out_face/out_size so
+ * setBold/setItalic can build on top of them when the script never
+ * specified a face.  Falls back to "Segoe UI" 9pt if anything fails. */
+static void default_gui_font_metrics(char *out_face, int out_face_cap,
+                                     int *out_size)
+{
+    HFONT def = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    LOGFONTW lf; memset(&lf, 0, sizeof(lf));
+    int ok = (def && GetObjectW(def, sizeof(lf), &lf) > 0);
+    if (ok) {
+        char *u8 = wide_to_utf8(lf.lfFaceName);
+        if (u8) {
+            int n = (int)strlen(u8);
+            if (n >= out_face_cap) n = out_face_cap - 1;
+            memcpy(out_face, u8, (size_t)n);
+            out_face[n] = 0;
+            free(u8);
+        } else {
+            snprintf(out_face, (size_t)out_face_cap, "Segoe UI");
+        }
+        /* lfHeight is in logical units; convert to a positive point size.
+         * Negative => character cell height in pixels. */
+        HDC hdc = GetDC(NULL);
+        int dpi = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;
+        if (hdc) ReleaseDC(NULL, hdc);
+        int height_px = (int)(lf.lfHeight < 0 ? -lf.lfHeight : lf.lfHeight);
+        if (height_px <= 0) height_px = 12;
+        *out_size = (int)((height_px * 72 + dpi / 2) / dpi);
+        if (*out_size <= 0) *out_size = 9;
+    } else {
+        snprintf(out_face, (size_t)out_face_cap, "Segoe UI");
+        *out_size = 9;
+    }
+}
+
+/* Recreate s->hfont from the slot's current font fields and apply it via
+ * WM_SETFONT so the control redraws with the new typeface. */
+static void apply_font(FormsSlot *s)
+{
+    if (!s) return;
+    if (s->hfont) { DeleteObject(s->hfont); s->hfont = NULL; }
+    if (!s->has_font) return;
+
+    LOGFONTW lf; memset(&lf, 0, sizeof(lf));
+    HDC hdc = GetDC(NULL);
+    int dpi = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;
+    if (hdc) ReleaseDC(NULL, hdc);
+    int size = s->font_size > 0 ? s->font_size : 9;
+    /* Win32 wants a negative lfHeight to specify character height in
+     * pixels (rather than cell height -- the practical font-size you
+     * see in office apps).  -MulDiv(points, dpi, 72). */
+    lf.lfHeight  = -((size * dpi + 36) / 72);
+    lf.lfWeight  = s->font_bold      ? FW_BOLD : FW_NORMAL;
+    lf.lfItalic  = s->font_italic    ? TRUE : FALSE;
+    lf.lfUnderline = s->font_underline ? TRUE : FALSE;
+    lf.lfStrikeOut = s->font_strikeout ? TRUE : FALSE;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
+
+    const char *face = s->font_face[0] ? s->font_face : "Segoe UI";
+    wchar_t *wface = utf8_to_wide(face, -1);
+    if (wface) {
+        size_t copy = wcslen(wface);
+        if (copy > LF_FACESIZE - 1) copy = LF_FACESIZE - 1;
+        memcpy(lf.lfFaceName, wface, copy * sizeof(wchar_t));
+        lf.lfFaceName[copy] = 0;
+        free(wface);
+    }
+    s->hfont = CreateFontIndirectW(&lf);
+    if (s->hwnd && s->hfont) {
+        SendMessageW(s->hwnd, WM_SETFONT, (WPARAM)s->hfont, TRUE);
+        InvalidateRect(s->hwnd, NULL, TRUE);
+    }
+}
+#else
+static void apply_font(FormsSlot *s) { (void)s; }
+#endif
+
+/* Common helper: parse a setFont options object and write into slot. */
+static void font_options_into_slot(CandoVM *vm, CdoObject *opts, FormsSlot *s)
+{
+    (void)vm;
+    if (!opts) return;
+    /* face / family: string face name */
+    {
+        CdoString *k = cdo_string_intern("face", 4);
+        CdoValue v;
+        if (cdo_object_rawget(opts, k, &v) && v.tag == CDO_STRING && v.as.string) {
+            u32 n = v.as.string->length;
+            if (n >= sizeof(s->font_face)) n = sizeof(s->font_face) - 1;
+            memcpy(s->font_face, v.as.string->data, n);
+            s->font_face[n] = 0;
+        }
+        cdo_string_release(k);
+    }
+    {
+        CdoString *k = cdo_string_intern("family", 6);
+        CdoValue v;
+        if (cdo_object_rawget(opts, k, &v) && v.tag == CDO_STRING && v.as.string) {
+            u32 n = v.as.string->length;
+            if (n >= sizeof(s->font_face)) n = sizeof(s->font_face) - 1;
+            memcpy(s->font_face, v.as.string->data, n);
+            s->font_face[n] = 0;
+        }
+        cdo_string_release(k);
+    }
+    /* size: numeric point size */
+    {
+        CdoString *k = cdo_string_intern("size", 4);
+        CdoValue v;
+        if (cdo_object_rawget(opts, k, &v) && v.tag == CDO_NUMBER) {
+            int sz = (int)v.as.number;
+            if (sz > 0) s->font_size = sz;
+        }
+        cdo_string_release(k);
+    }
+    struct { const char *k; int *v; } flags[] = {
+        { "bold",      &s->font_bold      },
+        { "italic",    &s->font_italic    },
+        { "underline", &s->font_underline },
+        { "strikeout", &s->font_strikeout },
+    };
+    for (size_t i = 0; i < sizeof(flags)/sizeof(flags[0]); i++) {
+        CdoString *k = cdo_string_intern(flags[i].k, (u32)strlen(flags[i].k));
+        CdoValue v;
+        if (cdo_object_rawget(opts, k, &v) && v.tag == CDO_BOOL) {
+            *flags[i].v = v.as.boolean ? 1 : 0;
+        }
+        cdo_string_release(k);
+    }
+}
+
+/* Make sure font_face / font_size are populated.  When the script has
+ * never set a face we fall back to the platform default GUI font so the
+ * resulting HFONT looks native. */
+static void font_ensure_defaults(FormsSlot *s)
+{
+    if (!s) return;
+    if (s->font_face[0] && s->font_size > 0) return;
+#if FORMS_HAVE_WIN32
+    char  face[64] = {0};
+    int   size = 0;
+    default_gui_font_metrics(face, (int)sizeof(face), &size);
+    if (!s->font_face[0]) {
+        size_t n = strlen(face);
+        if (n >= sizeof(s->font_face)) n = sizeof(s->font_face) - 1;
+        memcpy(s->font_face, face, n); s->font_face[n] = 0;
+    }
+    if (s->font_size <= 0) s->font_size = size > 0 ? size : 9;
+#else
+    if (!s->font_face[0]) {
+        const char *fallback = "Segoe UI";
+        size_t n = strlen(fallback);
+        memcpy(s->font_face, fallback, n); s->font_face[n] = 0;
+    }
+    if (s->font_size <= 0) s->font_size = 9;
+#endif
+}
+
+static int native_set_font(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setFont");
+    if (!s) return -1;
+    /* Argument forms:
+     *   setFont("Segoe UI")
+     *   setFont("Segoe UI", 12)
+     *   setFont("Segoe UI", 12, "bold")
+     *   setFont(12)                    -- size only, keep current face
+     *   setFont({face="...", size=12, bold=true, italic=true})
+     */
+    if (argc >= 2) {
+        if (cando_is_object(args[1])) {
+            CdoObject *opts = cando_bridge_resolve(vm, args[1].as.handle);
+            font_options_into_slot(vm, opts, s);
+        } else {
+            int idx = 1;
+            if (args[idx].tag == CDO_STRING && args[idx].as.string) {
+                u32 n = args[idx].as.string->length;
+                if (n >= sizeof(s->font_face)) n = sizeof(s->font_face) - 1;
+                memcpy(s->font_face, args[idx].as.string->data, n);
+                s->font_face[n] = 0;
+                idx++;
+            }
+            if (argc > idx && args[idx].tag == CDO_NUMBER) {
+                int sz = (int)args[idx].as.number;
+                if (sz > 0) s->font_size = sz;
+                idx++;
+            }
+            /* Optional trailing style string: "bold", "italic", "bold italic", ... */
+            if (argc > idx && args[idx].tag == CDO_STRING && args[idx].as.string) {
+                const char *t = args[idx].as.string->data;
+                u32 n = args[idx].as.string->length;
+                s->font_bold = s->font_italic = s->font_underline = 0;
+                if (n >= 4 && strstr((const char *)t, "bold"))      s->font_bold      = 1;
+                if (n >= 6 && strstr((const char *)t, "italic"))    s->font_italic    = 1;
+                if (n >= 9 && strstr((const char *)t, "underline")) s->font_underline = 1;
+                (void)n;
+            }
+        }
+    }
+    s->has_font = 1;
+    font_ensure_defaults(s);
+    apply_font(s);
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_font_size(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setFontSize");
+    if (!s) return -1;
+    int sz = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
+    if (sz > 0) s->font_size = sz;
+    s->has_font = 1;
+    font_ensure_defaults(s);
+    apply_font(s);
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_bold(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setBold");
+    if (!s) return -1;
+    bool b = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    s->font_bold = b ? 1 : 0;
+    s->has_font  = 1;
+    font_ensure_defaults(s);
+    apply_font(s);
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_italic(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setItalic");
+    if (!s) return -1;
+    bool b = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    s->font_italic = b ? 1 : 0;
+    s->has_font    = 1;
+    font_ensure_defaults(s);
+    apply_font(s);
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_underline(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setUnderline");
+    if (!s) return -1;
+    bool b = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    s->font_underline = b ? 1 : 0;
+    s->has_font       = 1;
+    font_ensure_defaults(s);
+    apply_font(s);
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_strikeout(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setStrikeout");
+    if (!s) return -1;
+    bool b = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    s->font_strikeout = b ? 1 : 0;
+    s->has_font       = 1;
+    font_ensure_defaults(s);
+    apply_font(s);
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* Drop the slot's font override -- the control reverts to the parent
+ * form's font (set up via WM_SETFONT at creation time). */
+static int native_clear_font(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "clearFont");
+    if (!s) return -1;
+    s->has_font       = 0;
+    s->font_face[0]   = 0;
+    s->font_size      = 0;
+    s->font_bold      = 0;
+    s->font_italic    = 0;
+    s->font_underline = 0;
+    s->font_strikeout = 0;
+#if FORMS_HAVE_WIN32
+    if (s->hfont) { DeleteObject(s->hfont); s->hfont = NULL; }
+    if (s->hwnd) {
+        /* Reapply the parent's font so the control looks native again. */
+        HFONT pf = NULL;
+        if (s->parent_slot > 0 && s->parent_slot < FORMS_MAX_SLOTS &&
+            g_slots[s->parent_slot].hwnd) {
+            pf = (HFONT)SendMessageW(g_slots[s->parent_slot].hwnd,
+                                     WM_GETFONT, 0, 0);
+        }
+        if (!pf) pf = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        SendMessageW(s->hwnd, WM_SETFONT, (WPARAM)pf, TRUE);
+        InvalidateRect(s->hwnd, NULL, TRUE);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* Return the current font as an object {face, size, bold, italic,
+ * underline, strikeout}, or NULL if no override is set. */
+static int native_get_font(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getFont");
+    if (!s) return -1;
+    if (!s->has_font) { cando_vm_push(vm, cando_null()); return 1; }
+    CandoValue v = cando_bridge_new_object(vm);
+    CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
+    obj_set_string(o, "face", s->font_face,
+                   (u32)strlen(s->font_face[0] ? s->font_face : ""));
+    obj_set_number(o, "size", (f64)s->font_size);
+    obj_set_bool  (o, "bold",      s->font_bold      ? true : false);
+    obj_set_bool  (o, "italic",    s->font_italic    ? true : false);
+    obj_set_bool  (o, "underline", s->font_underline ? true : false);
+    obj_set_bool  (o, "strikeout", s->font_strikeout ? true : false);
+    cando_vm_push(vm, v);
+    return 1;
+}
+
+/* =========================================================================
+ * Form-only extras: opacity, top-most, centering, min/max sizes,
+ * border style.  Most of these are no-ops on non-forms (silent).
+ * ===================================================================== */
+
+static int native_set_opacity(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setOpacity");
+    if (!s) return -1;
+    /* Accept 0..1 (float) or 0..255 (integer).  WinForms uses 0.0-1.0;
+     * we honour both for ergonomic reasons.  >=1 is opaque. */
+    int alpha = 255;
+    if (argc >= 2 && args[1].tag == CDO_NUMBER) {
+        double v = args[1].as.number;
+        if (v <= 1.0) alpha = (int)(v * 255.0 + 0.5);
+        else          alpha = (int)v;
+        if (alpha < 0)   alpha = 0;
+        if (alpha > 255) alpha = 255;
+    }
+    s->opacity     = alpha;
+    s->has_opacity = 1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_FORM) {
+        LONG ex = GetWindowLongW(s->hwnd, GWL_EXSTYLE);
+        if (!(ex & WS_EX_LAYERED))
+            SetWindowLongW(s->hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+        SetLayeredWindowAttributes(s->hwnd, 0, (BYTE)alpha, LWA_ALPHA);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_get_opacity(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getOpacity");
+    if (!s) return -1;
+    int alpha = s->has_opacity ? s->opacity : 255;
+    cando_vm_push(vm, cando_number((f64)alpha / 255.0));
+    return 1;
+}
+
+static int native_set_topmost(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setTopMost");
+    if (!s) return -1;
+    bool top = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    s->topmost = top ? 1 : 0;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_FORM) {
+        SetWindowPos(s->hwnd, top ? HWND_TOPMOST : HWND_NOTOPMOST,
+                     0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* Centre the form on the work area of the monitor it currently lives
+ * on.  No-op for child controls. */
+static int native_center(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "center");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && s->kind == KIND_FORM) {
+        RECT wr; GetWindowRect(s->hwnd, &wr);
+        int w = wr.right - wr.left, h = wr.bottom - wr.top;
+        HMONITOR mon = MonitorFromWindow(s->hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi; mi.cbSize = sizeof(mi);
+        if (mon && GetMonitorInfoW(mon, &mi)) {
+            int mw = mi.rcWork.right - mi.rcWork.left;
+            int mh = mi.rcWork.bottom - mi.rcWork.top;
+            int x = mi.rcWork.left + (mw - w) / 2;
+            int y = mi.rcWork.top  + (mh - h) / 2;
+            SetWindowPos(s->hwnd, NULL, x, y, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            s->x = x; s->y = y;
+        }
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_min_size(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setMinSize");
+    if (!s) return -1;
+    int w = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
+    int h = (argc >= 3 && args[2].tag == CDO_NUMBER) ? (int)args[2].as.number : 0;
+    s->min_w = w; s->min_h = h;
+    s->has_min_size = (w > 0 || h > 0) ? 1 : 0;
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_max_size(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setMaxSize");
+    if (!s) return -1;
+    int w = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
+    int h = (argc >= 3 && args[2].tag == CDO_NUMBER) ? (int)args[2].as.number : 0;
+    s->max_w = w; s->max_h = h;
+    s->has_max_size = (w > 0 || h > 0) ? 1 : 0;
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* Translate a border-style string into the FormsBorderStyle enum.
+ *   "none"   -> 1
+ *   "single" -> 2
+ *   "3d"     -> 3
+ * Numeric arguments are accepted as-is. */
+static int parse_border_style(CandoValue v)
+{
+    if (v.tag == CDO_NUMBER) {
+        int n = (int)v.as.number;
+        if (n < 1 || n > 3) return 0;
+        return n;
+    }
+    if (v.tag == CDO_STRING && v.as.string) {
+        const char *s = v.as.string->data;
+        u32 n = v.as.string->length;
+        if (n == 4 && memcmp(s, "none",   4) == 0) return 1;
+        if (n == 6 && memcmp(s, "single", 6) == 0) return 2;
+        if (n == 2 && memcmp(s, "3d",     2) == 0) return 3;
+        if (n == 5 && memcmp(s, "fixed3d", 5) == 0) return 3;
+    }
+    return 0;
+}
+
+static int native_set_border_style(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setBorderStyle");
+    if (!s) return -1;
+    int style = (argc >= 2) ? parse_border_style(args[1]) : 0;
+    if (style == 0) {
+        cando_vm_push(vm, args[0]);
+        return 1;
+    }
+    s->border_style_set = 1;
+    s->border_style     = style;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) {
+        LONG st = GetWindowLongW(s->hwnd, GWL_STYLE);
+        LONG ex = GetWindowLongW(s->hwnd, GWL_EXSTYLE);
+        st &= ~WS_BORDER;
+        ex &= ~WS_EX_CLIENTEDGE;
+        ex &= ~WS_EX_STATICEDGE;
+        if (style == 2) st |= WS_BORDER;
+        if (style == 3) ex |= WS_EX_CLIENTEDGE;
+        SetWindowLongW(s->hwnd, GWL_STYLE,   st);
+        SetWindowLongW(s->hwnd, GWL_EXSTYLE, ex);
+        SetWindowPos(s->hwnd, NULL, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* =========================================================================
+ * General extras shared by every control: z-order helpers, refresh,
+ * getEnabled / getVisible accessors.
+ * ===================================================================== */
+
+static int native_bring_to_front(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "bringToFront");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) BringWindowToTop(s->hwnd);
+    if (s->hwnd) SetWindowPos(s->hwnd, HWND_TOP, 0, 0, 0, 0,
+                              SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_send_to_back(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "sendToBack");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) SetWindowPos(s->hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                              SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* Force the control to redraw, mirroring System.Windows.Forms.Control.Refresh. */
+static int native_refresh(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "refresh");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) {
+        InvalidateRect(s->hwnd, NULL, TRUE);
+        UpdateWindow(s->hwnd);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_get_enabled(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getEnabled");
+    if (!s) return -1;
+    bool enabled = s->enabled ? true : false;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) enabled = IsWindowEnabled(s->hwnd) ? true : false;
+#endif
+    cando_vm_push(vm, cando_bool(enabled));
+    return 1;
+}
+
+static int native_get_visible(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getVisible");
+    if (!s) return -1;
+    bool visible = s->visible ? true : false;
+#if FORMS_HAVE_WIN32
+    if (s->hwnd) visible = IsWindowVisible(s->hwnd) ? true : false;
+#endif
+    cando_vm_push(vm, cando_bool(visible));
     return 1;
 }
 
@@ -2389,8 +3277,42 @@ CandoValue cando_module_init(CandoVM *vm)
     /* Colours. */
     cando_lib_meta_define(vm, meta, "setForeColor",   native_set_fore_color);
     cando_lib_meta_define(vm, meta, "setBackColor",   native_set_back_color);
+    cando_lib_meta_define(vm, meta, "getForeColor",   native_get_fore_color);
+    cando_lib_meta_define(vm, meta, "getBackColor",   native_get_back_color);
     cando_lib_meta_define(vm, meta, "clearForeColor", native_clear_fore_color);
     cando_lib_meta_define(vm, meta, "clearBackColor", native_clear_back_color);
+    cando_lib_meta_define(vm, meta, "setColor",       native_set_fore_color);  /* alias */
+    cando_lib_meta_define(vm, meta, "setBackground",  native_set_back_color);  /* alias */
+
+    /* Fonts. */
+    cando_lib_meta_define(vm, meta, "setFont",      native_set_font);
+    cando_lib_meta_define(vm, meta, "setFontSize",  native_set_font_size);
+    cando_lib_meta_define(vm, meta, "setBold",      native_set_bold);
+    cando_lib_meta_define(vm, meta, "setItalic",    native_set_italic);
+    cando_lib_meta_define(vm, meta, "setUnderline", native_set_underline);
+    cando_lib_meta_define(vm, meta, "setStrikeout", native_set_strikeout);
+    cando_lib_meta_define(vm, meta, "clearFont",    native_clear_font);
+    cando_lib_meta_define(vm, meta, "getFont",      native_get_font);
+
+    /* Form-only extras (silent no-ops on child controls). */
+    cando_lib_meta_define(vm, meta, "setOpacity",     native_set_opacity);
+    cando_lib_meta_define(vm, meta, "getOpacity",     native_get_opacity);
+    cando_lib_meta_define(vm, meta, "setTopMost",     native_set_topmost);
+    cando_lib_meta_define(vm, meta, "center",         native_center);
+    cando_lib_meta_define(vm, meta, "centre",         native_center);  /* alias */
+    cando_lib_meta_define(vm, meta, "setMinSize",     native_set_min_size);
+    cando_lib_meta_define(vm, meta, "setMaxSize",     native_set_max_size);
+    cando_lib_meta_define(vm, meta, "setBorderStyle", native_set_border_style);
+
+    /* General extras shared by every control. */
+    cando_lib_meta_define(vm, meta, "bringToFront", native_bring_to_front);
+    cando_lib_meta_define(vm, meta, "sendToBack",   native_send_to_back);
+    cando_lib_meta_define(vm, meta, "refresh",      native_refresh);
+    cando_lib_meta_define(vm, meta, "invalidate",   native_refresh);  /* alias */
+    cando_lib_meta_define(vm, meta, "getEnabled",   native_get_enabled);
+    cando_lib_meta_define(vm, meta, "getVisible",   native_get_visible);
+    cando_lib_meta_define(vm, meta, "isEnabled",    native_get_enabled);  /* alias */
+    cando_lib_meta_define(vm, meta, "isVisible",    native_get_visible);  /* alias */
 
     /* Docking. */
     cando_lib_meta_define(vm, meta, "setDock",      native_set_dock);
@@ -2429,6 +3351,45 @@ CandoValue cando_module_init(CandoVM *vm)
     libutil_set_method(vm, obj, "TrackBar",      native_trackbar_create);
     libutil_set_method(vm, obj, "NumericUpDown", native_numeric_create);
     libutil_set_method(vm, obj, "PictureBox",    native_picturebox_create);
+    libutil_set_method(vm, obj, "LinkLabel",     native_linklabel_create);
+    libutil_set_method(vm, obj, "DateTimePicker", native_datetime_create);
+    libutil_set_method(vm, obj, "MonthCalendar", native_calendar_create);
+    libutil_set_method(vm, obj, "StatusBar",     native_statusbar_create);
+    libutil_set_method(vm, obj, "Spinner",       native_spinner_create);
+
+    /* forms.Color -- a small palette of CSS-style named colours that
+     * scripts can drop straight into setForeColor / setBackColor without
+     * looking the hex value up.  The same names also work as strings:
+     *
+     *     b:setBackColor("cornflowerblue")
+     *     b:setBackColor(forms.Color.cornflowerblue)
+     *
+     * are equivalent; the table form is a touch faster (no string lookup
+     * per call) and gives editors a discoverable namespace. */
+    {
+        CandoValue cv = cando_bridge_new_object(vm);
+        CdoObject *cobj = cando_bridge_resolve(vm, cv.as.handle);
+        for (const NamedColor *p = g_named_colors; p->name; p++) {
+            obj_set_number(cobj, p->name, (f64)p->rgb);
+        }
+        CdoString *kc = cdo_string_intern("Color", 5);
+        cdo_object_rawset(obj, kc, cdo_object_value(
+            cando_bridge_resolve(vm, cv.as.handle)), FIELD_NONE);
+        cdo_string_release(kc);
+    }
+
+    /* forms.BorderStyle -- enum for setBorderStyle(). */
+    {
+        CandoValue bv = cando_bridge_new_object(vm);
+        CdoObject *bobj = cando_bridge_resolve(vm, bv.as.handle);
+        obj_set_number(bobj, "none",    1.0);
+        obj_set_number(bobj, "single",  2.0);
+        obj_set_number(bobj, "fixed3D", 3.0);
+        CdoString *kb = cdo_string_intern("BorderStyle", 11);
+        cdo_object_rawset(obj, kb, cdo_object_value(
+            cando_bridge_resolve(vm, bv.as.handle)), FIELD_NONE);
+        cdo_string_release(kb);
+    }
 
     /* forms.Dock -- DockStyle constants for setDock(). */
     {

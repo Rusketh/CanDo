@@ -32,8 +32,9 @@ IF forms.supported == FALSE {
 // -- Build a form ----------------------------------------------------------
 VAR f = forms.Form();
 f:setText("CanDo Forms demo");
-f:setSize(420, 320);
-f:setLocation(200, 200);
+f:setSize(480, 420);
+f:center();
+f:setMinSize(300, 200);
 
 // Top-level click counter -- captured by the button's onClick.
 VAR clicks = 0;
@@ -42,7 +43,10 @@ VAR clicks = 0;
 VAR title = forms.Label(f);
 title:setText("Hello from CanDo!");
 title:setLocation(20, 20);
-title:setSize(380, 24);
+title:setSize(380, 28);
+title:setFont("Segoe UI", 14);
+title:setBold(TRUE);
+title:setForeColor("cornflowerblue");
 
 VAR input = forms.TextBox(f);
 input:setLocation(20, 60);
@@ -73,15 +77,33 @@ list.onSelectionChanged = function(self) {
     print("[list] sel =", self:getSelectedIndex());
 };
 
+// LinkLabel -- SysLink notification fires onClick when the user activates
+// the embedded <a href> element.  CanDo handlers don't see the href; the
+// script can stash one in a closure.
+VAR link = forms.LinkLabel(f);
+link:setText("<a>Visit cando.dev</a>");
+link:setLocation(220, 170);
+link:setSize(180, 20);
+link.onClick = function(self) {
+    print("[link] activated");
+};
+
 VAR btn = forms.Button(f);
 btn:setText("Click me");
-btn:setLocation(220, 240);
+btn:setLocation(220, 280);
 btn:setSize(180, 30);
+btn:setFont({face = "Segoe UI", size = 11, bold = TRUE});
+btn:setForeColor("white");
+btn:setBackColor("cornflowerblue");
 btn.onClick = function(self) {
     clicks = clicks + 1;
     bar:setValue((clicks * 10) % 101);
     print("[button] click #" + clicks);
 };
+
+// Status bar at the bottom -- Win32 sizes it automatically.
+VAR status = forms.StatusBar(f);
+status:setText("Ready.");
 
 // -- Form-level callbacks --------------------------------------------------
 f.onClose = function(self) {
