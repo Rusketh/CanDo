@@ -93,6 +93,12 @@ forms.Button(parent, {                        // options table
 | `sizeToContent()`   | resize to the control's preferred (natural) size        |
 | `sizeToContentWidth()` / `sizeToContentHeight()` | one-axis variants          |
 | `getPreferredSize()` | returns `w, h` without applying it to the control      |
+| `setAutoSize(b)` / `getAutoSize()` | continuously fit content (re-runs after `setText` / `setFont` / `setPadding` / `addItem`) |
+| `setAutoSizeMode(m)` | `"grow"` (only enlarge) or `"growShrink"` (default)   |
+| `setPadding(...)` / `getPadding()` | inner padding -- 1 / 2 / 4 numbers (`all`, `h v`, or `l t r b`).  Consumed by `sizeToContent` and the auto-fit pass. |
+| `setMargin(...)` / `getMargin()`   | outer margin -- same shapes; reserved for layout managers. |
+| `setAnchor(...)`     | edge tracking on parent resize -- `"left"`, `"top"`, `"right"`, `"bottom"`, `"all"`, `"none"`, or a space-separated list (`"top right"`); also accepts a numeric mask. |
+| `getAnchor()`        | returns the numeric mask                                |
 | `show()` / `hide()` | aliases for `setVisible(true/false)`                    |
 | `setVisible(b)`     |                                                         |
 | `setEnabled(b)`     |                                                         |
@@ -142,7 +148,7 @@ Methods that don't apply to a given control are silent no-ops, so you
 can call `setChecked` on anything that has a check without writing a
 type guard.
 
-### Auto-sizing
+### Auto-sizing, padding, margin, anchor
 
 `sizeToContent()` measures the control's natural size (caption text +
 per-kind padding for buttons / labels / check boxes / text boxes; the
@@ -161,8 +167,30 @@ form:sizeToContent();   // form auto-fits the layout it contains
 
 `sizeToContentWidth()` / `sizeToContentHeight()` change a single axis;
 `getPreferredSize()` returns the computed `w, h` pair without applying
-it.  Combine with `setMinSize(...)` to clamp the auto-fit's lower bound
-on forms.
+it.
+
+`setAutoSize(true)` makes the fit continuous: every `setText`,
+`setFont`, `setPadding`, or `addItem` call re-runs the calculation.
+`setAutoSizeMode("grow")` allows the control to enlarge only -- never
+shrink below its current size; the default `"growShrink"` lets it
+contract too.  Combine with `setMinSize(...)` to clamp the auto-fit's
+lower bound on forms.
+
+`setPadding(l, t, r, b)` is the gap inside the control between its
+border and its contents -- it adds to the auto-fit calculation.
+`setMargin(l, t, r, b)` is the outer gap reserved around the control
+for layout managers.  Both accept 1 / 2 / 4 numeric arguments
+(all-sides, horizontal+vertical, LTRB).
+
+`setAnchor("top right")` fixes a child's distance to its parent's top
+and right edges; resizing the parent moves the child to keep those
+gaps constant.  Anchoring opposite edges stretches the child:
+
+```cando
+btn:setAnchor("bottom right")     // floats with the form's BR corner
+panel:setAnchor("left top right") // stretches horizontally on resize
+panel:setAnchor("all")            // == "left top right bottom"
+```
 
 ### Fonts
 
@@ -271,13 +299,91 @@ has been destroyed (or closed via the X button — the default `onClose`
 hides; call `self:destroy()` to actually free it) the lifelines drop
 and the process exits.
 
+### TextBox extras
+
+| Method                       | Notes                                          |
+| ---------------------------- | ---------------------------------------------- |
+| `setMultiline(b)`            | toggle multi-line edit + word-wrap             |
+| `setReadOnly(b)`             | EM_SETREADONLY                                 |
+| `setPlaceholder(s)` / `setHint(s)` | EM_SETCUEBANNER                          |
+| `setPasswordChar(c)`         | character (or a single-char string) used for masking |
+| `setMaxLength(n)`            | EM_SETLIMITTEXT                                |
+| `setTextAlign("left"/"center"/"right")` | also works on `Label`               |
+| `selectAll()`                | EM_SETSEL 0..-1                                |
+| `appendText(s)`              | append to the end without disturbing selection |
+| `clear()`                    | empty the contents (works on `ComboBox` and `ListBox` too) |
+
+### Tooltip + cursor
+
+| Method            | Notes                                                |
+| ----------------- | ---------------------------------------------------- |
+| `setToolTip(s)`   | shows `s` in a Win32 tooltip when the user hovers.  Pass `""` to remove. |
+| `setCursor(name)` | `"arrow"`, `"hand"`, `"ibeam"`, `"wait"`, `"cross"`, `"size-ns"`, `"size-we"`, `"size-nwse"`, `"size-nesw"`, `"size-all"`, `"no"`, `"help"`, `"appstarting"`, or `"default"`. |
+
+### Form-only state
+
+| Method                       | Notes                                       |
+| ---------------------------- | ------------------------------------------- |
+| `setIcon(path)`              | load an `.ico` and apply via `WM_SETICON`   |
+| `flash([n])`                 | `FlashWindowEx` for `n` (default 3) cycles  |
+| `maximize()` / `minimize()` / `restore()` | one-shot window-state helpers  |
+| `setWindowState("normal" / "maximized" / "minimized")` | set + read |
+| `getWindowState()`           | returns `"normal"`, `"maximized"`, or `"minimized"` |
+| `setResizable(b)`            | toggles `WS_THICKFRAME` + `WS_MAXIMIZEBOX`  |
+| `setMinimizeBox(b)` / `setMaximizeBox(b)` | individual title-bar buttons   |
+| `setShowInTaskbar(b)`        | `WS_EX_APPWINDOW` vs `WS_EX_TOOLWINDOW`     |
+| `setAcceptButton(btn)`       | mark `btn` as `BS_DEFPUSHBUTTON`            |
+| `setCancelButton(btn)`       | stored on the form for later use            |
+
+### Numeric / Progress / TrackBar extras
+
+| Method                       | Notes                                       |
+| ---------------------------- | ------------------------------------------- |
+| `setStep(n)` / `stepIt()`    | `ProgressBar` -- `PBM_SETSTEP` / `PBM_STEPIT` |
+| `setTickFrequency(n)`        | `TrackBar` -- `TBM_SETTICFREQ`              |
+| `setSmallStep(n)` / `setLargeStep(n)` | `TrackBar` -- arrow-key + page-key step |
+| `setIncrement(n)`            | `NumericUpDown` accelerator -- `UDM_SETACCEL` |
+
+### Tree, focus, tab order
+
+| Method                       | Notes                                       |
+| ---------------------------- | ------------------------------------------- |
+| `getParent()` / `getChildren()` | walk the form tree (returns instances or array) |
+| `contains(other)`            | `true` if `other` is a descendant           |
+| `hasFocus()`                 | `GetFocus() == hwnd`                        |
+| `setTabIndex(n)` / `getTabIndex()` | tab-order index                       |
+| `setTabStop(b)`              | toggle `WS_TABSTOP`                         |
+| `remove()`                   | alias for `destroy()` (Derma-flavoured)     |
+
+### Derma-style PascalCase aliases
+
+Scripts coming from gmod can use familiar names instead -- every entry
+below is a pure alias.
+
+| Derma name        | Equivalent                       |
+| ----------------- | -------------------------------- |
+| `:SetText`, `:GetText`, `:SetSize`, `:SetPos`, `:GetPos`, `:SetVisible`, `:SetEnabled` | the obvious counterparts |
+| `:MoveToFront` / `:MoveToBack` | `bringToFront` / `sendToBack` |
+| `:Remove`         | `destroy`                        |
+| `:Center`         | `center`                         |
+| `:Dock(side)`     | `setDock(side)`                  |
+| `:DockPadding(...)` / `:DockMargin(...)` | `setPadding` / `setMargin` |
+| `:InvalidateLayout` | `relayout`                     |
+| `:SizeToContents` | `sizeToContent`                  |
+
 ### Constants
 
-The module table exports three small enum-like objects so editor
+The module table exports a handful of enum-like objects so editor
 autocomplete can surface valid arguments:
 
 * `forms.Dock` -- `none`, `top`, `bottom`, `left`, `right`, `fill`
+* `forms.Anchor` -- `none`, `left`, `top`, `right`, `bottom`, `all`
+  (bitmask values; combine with `+` or pass the string form to `setAnchor`)
+* `forms.AutoSizeMode` -- `grow`, `growShrink`
 * `forms.BorderStyle` -- `none`, `single`, `fixed3D`
+* `forms.Cursor` -- string aliases for `setCursor` (`arrow`, `hand`,
+  `ibeam`, `wait`, `cross`, `sizeNS`, `sizeWE`, `sizeNWSE`, `sizeNESW`,
+  `sizeAll`, `no`, `help`, `appStarting`)
 * `forms.Color` -- a CSS-style palette (`red`, `cornflowerblue`,
   `darkgreen`, `steelblue`, …) holding `0xRRGGBB` packed integers.
   Also reachable as plain strings -- `setBackColor("cornflowerblue")`
