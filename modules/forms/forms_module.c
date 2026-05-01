@@ -955,6 +955,22 @@ static LRESULT CALLBACK panel_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
         if (parent) return SendMessageW(parent, msg, w, l);
         break;
     }
+    case WM_SIZE: {
+        /* When a panel changes size -- because its own parent's dock
+         * pass moved it, or the script called setSize/setDock on it --
+         * its docked / anchored children need the same re-layout pass
+         * the form's WndProc runs on its top-level resize.  Without
+         * this, children that were docked while the panel was 0x0
+         * would never grow into the panel's eventual real size.       */
+        if (slot > 0 && slot < FORMS_MAX_SLOTS) {
+            int cw = LOWORD(l), ch = HIWORD(l);
+            g_slots[slot].w = cw;
+            g_slots[slot].h = ch;
+            layout_anchor_children(slot);
+            layout_dock_children(slot);
+        }
+        break;
+    }
     }
     if (orig) return CallWindowProcW(orig, h, msg, w, l);
     return DefWindowProcW(h, msg, w, l);
