@@ -28,11 +28,14 @@ and cannot be used as identifiers.
 
 ### Keywords
 
-Keywords are case-sensitive and — with one exception — upper-case.
+Keywords are case-insensitive but **reject mixed-case** spellings.  `VAR`,
+`var`, `IF`, `if` all work; `Var` and `iF` are ordinary identifiers.  The
+canonical CanDo style is **all-uppercase** for keywords; the all-lowercase
+form is supported for users coming from other languages.
 
 ```
 IF   ELSE   WHILE   FOR   IN   OF   OVER
-FUNCTION   RETURN   CLASS
+FUNCTION   RETURN   CLASS   EXTENDS
 TRY   CATCH   FINALY   THROW
 VAR   CONST   GLOBAL   STATIC   PRIVATE
 THREAD   ASYNC   AWAIT
@@ -42,7 +45,9 @@ pipe
 ```
 
 The lower-case `pipe` is the implicit iteration variable in `~>` and
-`~!>` expressions (see *Pipe and filter* below).
+`~!>` expressions (see *Pipe and filter* below); like other keywords its
+spelling can be either all-lower or all-upper, but the convention is
+lowercase to make it visually distinct from statement keywords.
 
 > `FINALY` is spelled with one `L`.  `FINALLY` is **not** accepted.
 
@@ -534,13 +539,6 @@ VAR rex = Dog("Rex", "labrador");
 print(rex:bark());     // Rex says hello (woof, labrador)
 ```
 
-### Keyword case
-
-CanDo keywords are case-insensitive but reject mixed-case spellings.
-`class`, `CLASS`, `var`, `VAR`, `extends`, `EXTENDS` etc. all work; a
-mixed-case form like `Class` or `eXtEnDs` is treated as an ordinary
-identifier.
-
 See [metamethods.md](metamethods.md) for the full prototype system,
 the desugaring of `class`, and all available meta-keys.
 
@@ -574,15 +572,111 @@ same way; see [writing-extensions.md](writing-extensions.md).
 
 ## Errors raised by the runtime
 
-The following operations raise catchable errors:
+Runtime errors are catchable with `TRY` / `CATCH`.  The first `CATCH`
+parameter receives the message string.  If uncaught, the host embedder
+sees `CANDO_ERR_RUNTIME` and `cando_errmsg(vm)` returns the formatted
+message; the `cando` CLI prints it to stderr and exits with code 1.
 
-- Division or modulo by zero on numbers
-- Calling a non-callable value (`v()`)
-- Indexing `NULL` with a field or `[idx]`
-- Assigning to a `CONST` variable
-- `RETURN` or `BREAK` outside a valid target (parse error)
-- Stack overflow (call depth > 256, value stack > 2048)
+### Arithmetic and operator errors
 
-The error message is the value passed to the `CATCH` parameter.  If
-uncaught, the host embedder sees `CANDO_ERR_RUNTIME` and
-`cando_errmsg(vm)` returns the formatted message.
+| Message                                                    | Cause                                                |
+|---                                                         |---                                                   |
+| `division by zero`                                         | `a / 0` or `a % 0`.                                  |
+| `operands must be numbers (got <T> and <T>)`               | `a + b` where neither side has a `__add` metamethod and at least one side isn't a number / string. |
+| `operands must be numbers`                                 | A binary operator (`-`, `*`, `/`, etc.) received a non-numeric operand. |
+| `comparison requires numbers`                              | `<`, `<=`, `>`, `>=` between non-numeric values without a `__lt` / `__le` metamethod. |
+| `range requires numbers`                                   | `a -> b` or `a <- b` outside a `FOR` (the range-list form). |
+| `range check requires numbers`                             | A `FOR i IN a -> b { … }` where `a` or `b` isn't a number. |
+| `unary '+' requires a number`                              | `+x` on a non-string non-number.                     |
+| `unary '-' requires a number`                              | `-x` on a non-numeric value without `__unm`.         |
+| `'++' requires a number`, `'--' requires a number`         | Increment/decrement on a non-number.                 |
+| `# operator requires a string or object`                   | `#x` on `null`, `bool`, or `number` without `__len`. |
+
+### Type errors on access
+
+| Message                                          | Cause                                              |
+|---                                               |---                                                 |
+| `field access on non-object (got <T>)`           | `v.name` when `v` is not an object or string.      |
+| `field assignment on non-object`                 | `v.name = …` when `v` is not an object.            |
+| `index access on non-object`                     | `v[k]` on a non-object (and non-string).           |
+| `index assignment on non-object`                 | `v[k] = …` on a non-object.                        |
+| `index must be a number or string`               | `arr[obj]` and similar.                            |
+| `IN operator requires an object`                 | `FOR k IN v` where `v` isn't an iterable object.   |
+| `OF operator requires an object`                 | `FOR x OF v` where `v` isn't an array.             |
+| `pipe/filter (~>/~!>) requires an array source`  | `arr ~> body` where `arr` isn't an array.          |
+
+### Calls and methods
+
+| Message                                          | Cause                                              |
+|---                                               |---                                                 |
+| `can only call functions (got <T>)`              | Called a non-callable value.  An object with `__call` would have been dispatched instead. |
+| `method call on non-object (got <T>)`            | `v:m()` on a non-object value.                     |
+| `method is not callable`                         | `v:m()` where `m` resolved but isn't a function.   |
+| `meta-method is not callable`                    | A meta-method field (`__add`, `__lt`, …) resolved to a non-callable value. |
+| `call stack overflow`                            | Recursion depth exceeds `CANDO_FRAMES_MAX` (256).  |
+| `stack overflow in method call`                  | Value stack exhausted while building the call frame (default 2048). |
+| `undefined variable '<name>'`                    | Read of a global that was never assigned.          |
+
+### Control flow and bindings
+
+| Message                                  | Cause                                               |
+|---                                       |---                                                  |
+| `cannot assign to constant '<name>'`     | Reassigning a `CONST` binding.                      |
+| `BREAK outside loop`                     | `BREAK` (or `BREAK n`) used where no loop is active. |
+| `CONTINUE outside loop`                  | `CONTINUE` used where no loop is active.            |
+| `RERAISE outside of catch block`         | `RERAISE` used outside a `CATCH` body.              |
+
+### Threads and concurrency
+
+| Message                                  | Cause                                               |
+|---                                       |---                                                  |
+| `thread: expected a function`            | `thread.spawn(v)` with a non-function `v`.          |
+| `thread: failed to create OS thread`     | `pthread_create` / Windows equivalent failed.       |
+| `await: expected a thread handle`        | `await v` with no operand, or wrong type.           |
+| `await: value is not a thread`           | `await v` where `v` is not a thread object.         |
+
+### Class machinery
+
+These come from class compilation primitives and only appear if the
+bytecode was hand-crafted or corrupted; ordinary scripts never see them.
+
+| Message                                       | Notes                                |
+|---                                            |---                                   |
+| `INHERIT: expected class objects`             | `OP_INHERIT` saw bad operands.       |
+| `BIND_METHOD: expected class object`          | Method-binding failed.               |
+| `BIND_DEFAULT_CALL: expected class object`    | Default `__call` setup failed.       |
+| `class __call: missing class receiver`        | Default class `__call` invoked with no class. |
+| `class __call: invalid class handle`          | Default class `__call` saw an invalid handle. |
+
+### Not-yet-implemented
+
+| Message                                  | Notes                                                |
+|---                                       |---                                                   |
+| `tail call not yet implemented`          | The `OP_TAIL_CALL` opcode is reserved.               |
+| `ASYNC not implemented (use 'thread' instead)` | Reserved keyword; use `thread` for concurrency. |
+| `YIELD not implemented (use 'thread' instead)` | Same.                                          |
+
+### Catching a runtime error
+
+```cando
+TRY {
+    VAR v = 1 / 0;
+} CATCH (msg) {
+    print("caught:", msg);    // caught: division by zero
+}
+```
+
+`THROW` produces an error whose value is whatever you threw — typically
+a string but any value is accepted.  `THROW` with multiple values
+unpacks into the `CATCH` parameter list:
+
+```cando
+TRY {
+    THROW "validation", 422, "missing 'name'";
+} CATCH (kind, code, detail) {
+    print(kind, code, detail);
+}
+```
+
+If the `CATCH` parameter list is shorter than the throw's value list,
+the extras are dropped.  If longer, the extras are `NULL`.

@@ -7,16 +7,44 @@ compiled to bytecode for a stack-based VM.
 
 ## For script authors
 
+**Start here:**
+
 | Document | What's in it |
 |---|---|
 | [getting-started.md](getting-started.md) | Build the interpreter and run your first script |
 | [user-guide.md](user-guide.md) | Hands-on tutorial: learn CanDo by example |
 | [language-reference.md](language-reference.md) | Complete syntax: types, expressions, statements, functions, classes |
 | [standard-library.md](standard-library.md) | Every built-in library module, function-by-function |
-| [socket.md](socket.md) | Long-form guide to the `socket` and `secure_socket` libraries |
-| [streaming.md](streaming.md) | Unified `stream` API: pipe between files, sockets, HTTP, processes, threads |
+| [patterns.md](patterns.md) | Common idioms — error handling, FP style, classes, modules, threads |
+| [cli.md](cli.md) | The `cando` executable: flags, `args[]`, exit codes, environment |
+
+**Concurrency:**
+
+| Document | What's in it |
+|---|---|
 | [threading.md](threading.md) | `thread` / `await`, the `thread` library, shared state |
+| [streaming.md](streaming.md) | Unified `stream` API: pipe between files, sockets, HTTP, processes, threads |
+
+**Networking:**
+
+| Document | What's in it |
+|---|---|
+| [socket.md](socket.md) | Long-form guide to the `socket` and `secure_socket` libraries |
+
+**Data formats:**
+
+| Document | What's in it |
+|---|---|
 | [yaml.md](yaml.md) | YAML parse / stringify and `include()`-time loading |
+| [sql.md](sql.md) | SQLite-backed `sql` module: queries, parameter binding, transactions |
+
+**Graphics & UI** (require platform binary modules):
+
+| Document | What's in it |
+|---|---|
+| [window.md](window.md) | Window creation and event loop |
+| [draw.md](draw.md) | 2D drawing primitives, sprites, text |
+| [forms.md](forms.md) | Declarative widget tree for in-window UI |
 
 ## For C embedders
 

@@ -29,7 +29,7 @@ All meta-key strings are pre-interned at startup.  The corresponding global
 | `__mod`       | `g_meta_mod`       | `a % b`                                  |
 | `__pow`       | `g_meta_pow`       | `a ^ b`                                  |
 | `__unm`       | `g_meta_unm`       | Unary `-obj`                             |
-| `__idiv`      | `g_meta_idiv`      | Integer division (reserved)              |
+| `__idiv`      | `g_meta_idiv`      | *Reserved name; no `//` operator yet*    |
 | `__call`      | `g_meta_call`      | `obj(...)` when `obj` is not a function  |
 | `__constructor` | `g_meta_constructor` | Run by the default class `__call`       |
 
