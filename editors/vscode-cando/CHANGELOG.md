@@ -3,6 +3,30 @@
 All notable changes to the **CanDo Language** VS Code extension are
 documented in this file.
 
+## 0.3.3 -- 2026-05-01
+
+### Fixed
+
+- **Cross-file include now uses the actual return shape, not the file's
+  top-level VARs.** When a `.cdo` module did
+  `VAR exports = { foo, bar }; RETURN exports;` the language server
+  was leaking `helper`, `thing`, `exports` -- every top-level
+  declaration in the file -- as if they were public members. The type
+  tracker now parses the included file and infers the type of its
+  top-level `RETURN <expr>` statement directly. Three shapes are
+  recognised:
+  1. `RETURN { ... }`     -- literal object
+  2. `RETURN ident;`      -- a variable bound to an object literal
+  3. `RETURN <chain>`     -- chained call whose type the tracker can
+                              follow (e.g. another module's exports)
+  The crossfile fallback no longer surfaces top-level VARs at all.
+- **Function-body locals show up in identifier completion.** The
+  analyzer only collects symbols at depth 0 (for the Outline view),
+  so `VAR localFoo = ...` declared inside a `FUNCTION` was invisible
+  to plain identifier completion. The general completion path now
+  also walks the type env's bindings, which includes every
+  `VAR/CONST/GLOBAL` regardless of nesting.
+
 ## 0.3.2 -- 2026-05-01
 
 ### Fixed

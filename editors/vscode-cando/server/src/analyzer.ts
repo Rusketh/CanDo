@@ -304,13 +304,26 @@ export function analyze(tokens: Token[]): AnalysisResult {
             }
         }
 
-        /* Top-level `RETURN { ... }` -- capture as module exports. */
+        /* Top-level `RETURN <expr>` -- capture as module exports. We
+         * recognise three shapes:
+         *   - `RETURN { a: ..., b: ... };`        -- literal object
+         *   - `RETURN ident;`                     -- a variable that was
+         *                                            bound earlier to an
+         *                                            object literal
+         *   - other expressions                   -- left for the type
+         *                                            tracker to handle
+         */
         if (depth === 0 && isKw(tok, 'RETURN')) {
             if (isPunct(t[i + 1], '{')) {
                 const { keys, end } = collectObjectKeys(i + 1);
                 if (keys.length) moduleExports = keys;
                 i = end - 1;
                 continue;
+            }
+            const next = t[i + 1];
+            if (next?.kind === 'ident') {
+                const lit = objectLiterals.get(next.value);
+                if (lit && lit.length) moduleExports = [...lit];
             }
         }
     }
