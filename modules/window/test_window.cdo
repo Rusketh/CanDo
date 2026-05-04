@@ -93,6 +93,39 @@ thread {
     EXPECT("app.holds() after close",
         app.holds() == 1);   // just this thread now
 
+    // ------------------------------------------------------------------
+    // self:close() from inside a user callback used to deadlock the
+    // manager thread (it posts CMD_DESTROY and then waits for the
+    // manager -- which is itself -- to fulfill it).  The fix detects
+    // re-entry and tears the slot down inline.
+    // ------------------------------------------------------------------
+    print("== window: self:close() inside a callback ==");
+    VAR w2 = window.create("self-close-in-cb", 200, 100);
+    VAR ticks = 0;
+    w2.update = FUNCTION(self, dt) {
+        ticks = ticks + 1;
+        IF ticks == 3 { self:close(); }
+    };
+    thread.sleep(200);
+    EXPECT("self:close() inside update closed the window",
+        w2:isOpen() == false);
+
+    // Same scenario but starting from another window's callback so we
+    // also exercise cross-slot teardown on the manager thread.
+    VAR a = window.create("a", 200, 100);
+    VAR b = window.create("b", 200, 100);
+    VAR aticks = 0;
+    a.update = FUNCTION(self, dt) {
+        aticks = aticks + 1;
+        IF aticks == 3 { b:close(); }
+    };
+    thread.sleep(200);
+    EXPECT("cross-window close from callback worked",
+        b:isOpen() == false && a:isOpen() == true);
+    a:close();
+    thread.sleep(20);
+    EXPECT("a closed cleanly afterwards", a:isOpen() == false);
+
     print(`Results: ${passes} passed, ${fails} failed`);
     IF fails > 0 { os.exit(1); }
 };
