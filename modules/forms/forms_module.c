@@ -40,6 +40,13 @@
  * Must compile with gcc / clang / MinGW-w64 -std=c11.
  */
 
+/* Pull in nanosleep / clock_gettime from <time.h> on POSIX. */
+#if !defined(_WIN32) && !defined(_WIN64)
+#  ifndef _POSIX_C_SOURCE
+#    define _POSIX_C_SOURCE 200809L
+#  endif
+#endif
+
 #ifndef FORMS_MODULE_TEST_BUILD
 #  include <cando.h>
 #  include "vm/bridge.h"
