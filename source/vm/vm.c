@@ -1907,8 +1907,13 @@ static CandoVMResult vm_run(CandoVM *vm) {
             /* String concatenation or numeric addition. */
             CandoValue b = PEEK(0), a = PEEK(1);
             if (cando_is_string(a) && cando_is_string(b)) {
-                DROP(); DROP();
                 u32 la = a.as.string->length, lb = b.as.string->length;
+                if (la > UINT32_MAX - lb - 1) {
+                    vm_runtime_error(vm,
+                        "string concatenation length overflow");
+                    goto handle_error;
+                }
+                DROP(); DROP();
                 u32 total = la + lb;
                 char *buf = cando_alloc(total + 1);
                 memcpy(buf,      a.as.string->data, la);
@@ -2793,7 +2798,6 @@ static CandoVMResult vm_run(CandoVM *vm) {
             vm->spread_extra = 0;
             /* The function value sits just below the arguments. */
             CandoValue callee = *(vm->stack_top - arg_count - 1);
-            int meta_call_depth = 0;
 
         op_call_dispatch:
             /* Native function: negative-number sentinel convention. */

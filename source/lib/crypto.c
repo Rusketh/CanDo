@@ -43,16 +43,18 @@ static int crypto_base64Encode(CandoVM *vm, int argc, CandoValue *args)
     char *out = (char *)cando_alloc(out_len + 1);
 
     for (u32 i = 0, j = 0; i < len;) {
+        u32 group_start = i;
         u32 octet_a = (u32)(u8)s->data[i++];
         u32 octet_b = (i < len) ? (u32)(u8)s->data[i++] : 0;
         u32 octet_c = (i < len) ? (u32)(u8)s->data[i++] : 0;
+        u32 bytes_in_group = i - group_start;
 
         u32 triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;
 
         out[j++] = base64_table[(triple >> 3 * 6) & 0x3F];
         out[j++] = base64_table[(triple >> 2 * 6) & 0x3F];
-        out[j++] = (i > len + 1) ? '=' : base64_table[(triple >> 1 * 6) & 0x3F];
-        out[j++] = (i > len) ? '=' : base64_table[(triple >> 0 * 6) & 0x3F];
+        out[j++] = (bytes_in_group < 2) ? '=' : base64_table[(triple >> 1 * 6) & 0x3F];
+        out[j++] = (bytes_in_group < 3) ? '=' : base64_table[(triple >> 0 * 6) & 0x3F];
     }
     out[out_len] = '\0';
 

@@ -15,7 +15,8 @@ CdoObject *cdo_function_new(u32 param_count, void *bytecode,
     obj->fn.script.bytecode      = bytecode;
     obj->fn.script.upvalue_count = upvalue_count;
     if (upvalue_count > 0 && upvalues) {
-        obj->fn.script.upvalues = cando_alloc(upvalue_count * sizeof(CdoValue));
+        obj->fn.script.upvalues = cando_alloc(
+            (size_t)upvalue_count * sizeof(CdoValue));
         for (u32 i = 0; i < upvalue_count; i++)
             obj->fn.script.upvalues[i] = cdo_value_copy(upvalues[i]);
     }

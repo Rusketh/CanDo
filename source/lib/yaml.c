@@ -997,10 +997,9 @@ static CandoValue yp_parse_block_seq(YParser *p, u32 indent)
                 L->indent  = item_col;
                 item = yp_parse_block_map(p, item_col);
                 /* Restore (the next iteration won't look at L anyway, but
-                 * keep the state consistent for diagnostics). */
-                p->lines[p->pos > 0 ? p->pos - 1 : 0] = p->lines[
-                    p->pos > 0 ? p->pos - 1 : 0];
-                (void)saved;
+                 * keep the state consistent for diagnostics).  L still
+                 * points at the same slot in p->lines. */
+                *L = saved;
             } else if (line_slice[0] == '-' &&
                        (slice_len == 1 ||
                         line_slice[1] == ' ' || line_slice[1] == '\t')) {
