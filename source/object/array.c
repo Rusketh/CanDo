@@ -10,13 +10,19 @@
 
 /* Ensure items[] can hold at least `min_cap` entries.  Grows by doubling
  * (initial capacity 8 when the array is empty).  Caller must hold the
- * write lock.                                                          */
-static void array_ensure_cap(CdoObject *arr, u32 min_cap) {
-    if (arr->items_cap >= min_cap) return;
+ * write lock.  Returns false if the requested capacity cannot be
+ * satisfied without overflow.                                          */
+static bool array_ensure_cap(CdoObject *arr, u32 min_cap) {
+    if (arr->items_cap >= min_cap) return true;
     u32 new_cap = arr->items_cap ? arr->items_cap : 8;
-    while (new_cap < min_cap) new_cap *= 2;
-    arr->items     = cando_realloc(arr->items, new_cap * sizeof(CdoValue));
+    while (new_cap < min_cap) {
+        if (new_cap > UINT32_MAX / 2) { new_cap = min_cap; break; }
+        new_cap *= 2;
+    }
+    arr->items     = cando_realloc(arr->items,
+                                   (size_t)new_cap * sizeof(CdoValue));
     arr->items_cap = new_cap;
+    return true;
 }
 
 CdoObject *cdo_array_new(void) {
@@ -28,7 +34,7 @@ bool cdo_array_push(CdoObject *arr, CdoValue val) {
 
     cando_lock_write_acquire(&arr->lock);
 
-    if (arr->readonly) {
+    if (arr->readonly || arr->items_len == UINT32_MAX) {
         cando_lock_write_release(&arr->lock);
         return false;
     }
@@ -56,7 +62,7 @@ bool cdo_array_rawset_idx(CdoObject *arr, u32 idx, CdoValue val) {
 
     cando_lock_write_acquire(&arr->lock);
 
-    if (arr->readonly) {
+    if (arr->readonly || idx == UINT32_MAX) {
         cando_lock_write_release(&arr->lock);
         return false;
     }
@@ -91,7 +97,7 @@ bool cdo_array_insert(CdoObject *arr, u32 idx, CdoValue val) {
 
     cando_lock_write_acquire(&arr->lock);
 
-    if (arr->readonly) {
+    if (arr->readonly || arr->items_len == UINT32_MAX) {
         cando_lock_write_release(&arr->lock);
         return false;
     }

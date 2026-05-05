@@ -434,28 +434,34 @@ static int str_format(CandoVM *vm, int argc, CandoValue *args) {
     /* Simple implementation supporting only %s and %d for now. */
     char buf[4096];
     char *dst = buf;
+    char * const end = buf + sizeof(buf) - 1; /* keep one byte for NUL */
     int arg_idx = 1;
     const char *p = fmt;
 
-    while (*p && dst - buf < 4000) {
+    while (*p && dst < end) {
+        usize remain = (usize)(end - dst);
         if (*p == '%' && *(p+1)) {
             p++;
             if (*p == 's') {
                 const char *val = libutil_arg_cstr_at(args, argc, arg_idx++);
                 if (val) {
-                    u32 vlen = (u32)strlen(val);
+                    usize vlen = strlen(val);
+                    if (vlen > remain) vlen = remain;
                     memcpy(dst, val, vlen);
                     dst += vlen;
                 }
             } else if (*p == 'd' || *p == 'f') {
                 f64 val = libutil_arg_num_at(args, argc, arg_idx++, 0.0);
-                int n = sprintf(dst, (*p == 'd') ? "%.0f" : "%f", val);
+                int n = snprintf(dst, remain + 1,
+                                 (*p == 'd') ? "%.0f" : "%f", val);
+                if (n < 0) n = 0;
+                if ((usize)n > remain) n = (int)remain;
                 dst += n;
             } else if (*p == '%') {
                 *dst++ = '%';
             } else {
                 *dst++ = '%';
-                *dst++ = *p;
+                if (dst < end) *dst++ = *p;
             }
             p++;
         } else {
