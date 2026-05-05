@@ -139,7 +139,28 @@ static wm_thread_t g_mgr_thread;
 static atomic_int  g_mgr_state    = MGR_UNSTARTED;
 static atomic_int  g_mgr_should_stop = 0;
 static int         g_sync_inited  = 0;
-static int         g_atexit_registered = 0;
+
+/* Identifier of the manager thread, captured once it enters its main
+ * loop.  Used by mgr_on_manager_thread() so script-side natives invoked
+ * from inside a user callback (which dispatches on the manager thread)
+ * can detect re-entry and avoid posting a synchronous command back to
+ * themselves -- that would deadlock mgr_post_command. */
+#if defined(_WIN32) || defined(_WIN64)
+static atomic_uint g_mgr_thread_id = 0;
+static int mgr_on_manager_thread(void)
+{
+    unsigned tid = (unsigned)atomic_load(&g_mgr_thread_id);
+    return tid != 0 && GetCurrentThreadId() == (DWORD)tid;
+}
+#else
+static pthread_t g_mgr_thread_self;
+static atomic_int g_mgr_thread_self_set = 0;
+static int mgr_on_manager_thread(void)
+{
+    if (!atomic_load(&g_mgr_thread_self_set)) return 0;
+    return pthread_equal(pthread_self(), g_mgr_thread_self) != 0;
+}
+#endif
 
 static void mgr_init_sync_once(void)
 {
@@ -847,7 +868,11 @@ static void mgr_render_frame(void)
             if (g_dispatch_vm_inited && s->inst_val_held) {
                 /* `onClose` is the canonical name (matches modules/forms);
                  * `quit` is kept as a back-compat alias.  Both fire so
-                 * existing scripts continue to work. */
+                 * existing scripts continue to work.  The user's callback
+                 * may itself call self:close(), which now tears the slot
+                 * down inline -- dispatch_call's `inst_val_held` guard
+                 * makes the second dispatch a no-op, and slot_teardown()
+                 * is idempotent. */
                 dispatch_call(s, "onClose", NULL, 0);
                 dispatch_call(s, "quit",    NULL, 0);
             }
@@ -871,6 +896,9 @@ static void mgr_render_frame(void)
             CandoValue dt_arg = cando_number(dt);
             dispatch_call(s, "update", &dt_arg, 1);
         }
+        /* User update() may have called self:close().  Skip the rest of
+         * this frame for the now-dead slot. */
+        if (!s->alive || !s->handle) continue;
 
         glfwMakeContextCurrent(s->handle);
 
@@ -901,6 +929,13 @@ static void mgr_render_frame(void)
          * any direct GL the user wants. */
         if (g_dispatch_vm_inited && s->inst_val_held) {
             dispatch_call(s, "draw", NULL, 0);
+        }
+        /* User draw() may have called self:close().  Drop the GL
+         * context (slot_teardown already destroyed the window) and skip
+         * the swap. */
+        if (!s->alive || !s->handle) {
+            glfwMakeContextCurrent(NULL);
+            continue;
         }
 
         glfwSwapBuffers(s->handle);
@@ -953,6 +988,15 @@ static void *manager_thread_main(void *arg)
 #endif
 {
     (void)arg;
+
+    /* Record this thread's identity so script-side natives invoked from
+     * a user callback (which runs on this thread) can detect re-entry. */
+#if defined(_WIN32) || defined(_WIN64)
+    atomic_store(&g_mgr_thread_id, (unsigned)GetCurrentThreadId());
+#else
+    g_mgr_thread_self = pthread_self();
+    atomic_store(&g_mgr_thread_self_set, 1);
+#endif
 
     /* glfwInit happens on the manager thread itself, never on the caller. */
     int ok = glfwInit();
@@ -1084,10 +1128,10 @@ static int ensure_manager(void)
             return 0;
         }
 #endif
-        if (!g_atexit_registered) {
-            atexit(mgr_shutdown);
-            g_atexit_registered = 1;
-        }
+        /* Don't register an atexit hook -- cando_vm_destroy reliably
+         * invokes our exported `cando_module_shutdown` before dlclose,
+         * and a stale function pointer left over after the .so has
+         * unloaded would crash (or hang on Windows) on process exit. */
     }
     while ((state = atomic_load(&g_mgr_state)) == MGR_STARTING) {
         WM_COND_WAIT(&g_mgr_cond, &g_mgr_mutex);
@@ -1321,6 +1365,18 @@ static int native_window_close(CandoVM *vm, int argc, CandoValue *args)
     }
     WindowSlot *s = resolve_window(vm, args[0], "window.close");
     if (!s) return -1;
+
+    /* If the script called w:close() from inside a user callback (draw,
+     * update, onClose, keypressed, ...), we're already running on the
+     * manager thread.  Posting CMD_DESTROY would deadlock -- the manager
+     * services the queue from the same loop that's currently blocked in
+     * the dispatch.  Tear down inline instead; mgr_render_frame's
+     * post-dispatch guards skip the rest of the frame for this slot. */
+    if (mgr_on_manager_thread()) {
+        slot_teardown(s);
+        cando_vm_push(vm, cando_bool(true));
+        return 1;
+    }
 
     int slot = (int)(s - g_slots);
     Command cmd; memset(&cmd, 0, sizeof(cmd));
