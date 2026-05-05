@@ -579,7 +579,10 @@ u32 cando_vm_gc_collect(CandoVM *vm) {
      * Floor at 256 so very small programs don't ping-pong.            */
     u32 next = after * 2;
     if (next < 256) next = 256;
-    vm->mem->next_collect_threshold = next;
+    /* Relaxed atomic store -- pairs with the unsynchronised relaxed
+     * load in vm_gc_maybe_collect's hot path. */
+    __atomic_store_n(&vm->mem->next_collect_threshold, next,
+                     __ATOMIC_RELAXED);
     return before - after;
 }
 
@@ -589,11 +592,19 @@ u32 cando_vm_gc_collect(CandoVM *vm) {
  * object has already been pushed onto the value stack so it counts as
  * a root.                                                              */
 static inline void vm_gc_maybe_collect(CandoVM *vm) {
-    if (CANDO_UNLIKELY(vm->mem &&
-                       vm->mem->next_collect_threshold > 0 &&
-                       vm->mem->live_count >=
-                           vm->mem->next_collect_threshold)) {
-        cando_vm_gc_collect(vm);
+    if (CANDO_UNLIKELY(vm->mem)) {
+        /* Use relaxed atomic loads here; the matching writes in
+         * memory.c are made under gc_lock, but this hot path
+         * intentionally reads without taking the lock and the values
+         * are only used as a heuristic to decide whether to run a
+         * full collect.  Stale reads are acceptable -- a true torn
+         * read is not, hence the explicit atomic load. */
+        u32 threshold = __atomic_load_n(&vm->mem->next_collect_threshold,
+                                        __ATOMIC_RELAXED);
+        u32 live      = __atomic_load_n(&vm->mem->live_count,
+                                        __ATOMIC_RELAXED);
+        if (CANDO_UNLIKELY(threshold > 0 && live >= threshold))
+            cando_vm_gc_collect(vm);
     }
 }
 
