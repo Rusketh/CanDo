@@ -64,12 +64,19 @@ static void jbuf_free(JBuf *b)
  * JSON parser
  * ======================================================================= */
 
+/* Cap nesting to keep deeply nested adversarial input from blowing the
+ * native stack via the recursive descent.  256 is comfortably below the
+ * default 8 MiB pthread stack for the typical ~100 bytes per frame and
+ * well above any practical document. */
+#define JSON_MAX_DEPTH 256
+
 typedef struct {
     const char *src;
     usize       len;
     usize       pos;
     CandoVM    *vm;
     bool        has_error;
+    int         depth;
     char        error[256];
 } JParser;
 
@@ -220,6 +227,8 @@ str_done:;
     if (!p->has_error) {
         if (buf.oom) {
             jp_error(p, "out of memory building string");
+        } else if (buf.len > UINT32_MAX) {
+            jp_error(p, "string too long");
         } else {
             const char *raw = buf.data ? buf.data : "";
             CandoString *s = cando_string_new(raw, (u32)buf.len);
@@ -406,8 +415,16 @@ static CandoValue jp_parse_value(JParser *p)
 
     char c = p->src[p->pos];
     if (c == '"')                           return jp_parse_string(p);
-    if (c == '[')                           return jp_parse_array(p);
-    if (c == '{')                           return jp_parse_object(p);
+    if (c == '[' || c == '{') {
+        if (p->depth >= JSON_MAX_DEPTH) {
+            jp_error(p, "nesting too deep");
+            return cando_null();
+        }
+        p->depth++;
+        CandoValue v = (c == '[') ? jp_parse_array(p) : jp_parse_object(p);
+        p->depth--;
+        return v;
+    }
     if (c == 't') {
         if (jp_match(p, "true",  4))        return cando_bool(true);
         jp_error(p, "invalid token"); return cando_null();
@@ -441,6 +458,7 @@ bool cando_lib_json_parse_buffer(CandoVM *vm,
     p.pos       = 0;
     p.vm        = vm;
     p.has_error = false;
+    p.depth     = 0;
     p.error[0]  = '\0';
 
     CandoValue result = jp_parse_value(&p);

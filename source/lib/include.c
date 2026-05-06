@@ -297,7 +297,12 @@ static CandoModuleEntry *cache_insert(CandoVM *vm, const char *canonical_path,
     }
 
     CandoModuleEntry *e = &vm->module_cache[vm->module_cache_count++];
-    e->path      = strdup(canonical_path); /* owned by the cache */
+    /* Use cando_alloc so OOM aborts uniformly; strdup returns NULL on
+     * failure and the cached entry is later strcmp'd, which would then
+     * crash on the NULL path. */
+    usize path_len = strlen(canonical_path) + 1;
+    e->path = (char *)cando_alloc(path_len);
+    memcpy(e->path, canonical_path, path_len);
     e->value_count = value_count;
     if (value_count > 0) {
         e->values = (CandoValue *)cando_alloc(value_count * sizeof(CandoValue));

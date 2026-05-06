@@ -1368,18 +1368,31 @@ static int server_close_fn(CandoVM *vm, int argc, CandoValue *args)
     if (!server) { cando_vm_push(vm, cando_null()); return 1; }
 
     atomic_store(&server->running, false);
+    /* Shutdown unblocks any in-flight accept() so the worker exits its
+     * loop, but we must not close the fd yet -- the accept thread may
+     * still be reading server->listen_fd.  Join first, then close. */
     if (server->listen_fd >= 0) {
 #if defined(CANDO_PLATFORM_WINDOWS)
         shutdown(server->listen_fd, SD_BOTH);
 #else
         shutdown(server->listen_fd, SHUT_RDWR);
 #endif
-        HTTP_CLOSE(server->listen_fd);
-        server->listen_fd = -1;
     }
     if (server->has_thread) {
         cando_os_thread_join(server->accept_thread);
         server->has_thread = false;
+    }
+    if (server->listen_fd >= 0) {
+        HTTP_CLOSE(server->listen_fd);
+        server->listen_fd = -1;
+    }
+    /* Connection workers are detached from the accept loop, so we must
+     * drain them by hand before letting the slot be reused.  Otherwise a
+     * worker can still be running through the script's bytecode while
+     * the host scope tears down (see TSan races against cando_chunk_free
+     * and against memset() of a freshly-allocated server slot). */
+    while (atomic_load(&server->active_conns) > 0) {
+        cando_os_thread_sleep_ms(1);
     }
     if (server->ssl_ctx) {
         SSL_CTX_free(server->ssl_ctx);

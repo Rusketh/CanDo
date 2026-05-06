@@ -1,8 +1,8 @@
 /*
  * lib/crypto.c -- Cryptography and hashing standard library for Cando.
  *
- * For now, this is a placeholder/mock implementation to demonstrate the API
- * since real MD5/SHA256 implementations are large.
+ * Backed by OpenSSL (-lcrypto), which the rest of the runtime already
+ * links for the secure socket and HTTPS modules.
  *
  * Must compile with gcc -std=c11.
  */
@@ -14,6 +14,8 @@
 
 #include <stdio.h>
 #include <string.h>
+
+#include <openssl/evp.h>
 
 /* =========================================================================
  * Base64 Encoding
@@ -64,21 +66,59 @@ static int crypto_base64Encode(CandoVM *vm, int argc, CandoValue *args)
 }
 
 /* =========================================================================
- * Placeholder MD5 and SHA256 (returns mocked values)
+ * MD5 and SHA256, backed by OpenSSL EVP
  * ======================================================================= */
+
+static int crypto_hash_evp(CandoVM *vm, int argc, CandoValue *args,
+                            const EVP_MD *md, const char *name)
+{
+    /* Default to the empty-string digest if the caller passes anything
+     * non-stringy -- matches the previous placeholder's "always succeed"
+     * shape so existing scripts keep working. */
+    const char *data = "";
+    u32         len  = 0;
+    CandoString *s = libutil_arg_str_at(args, argc, 0);
+    if (s) { data = s->data; len = s->length; }
+
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int  digest_len = 0;
+
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    if (!ctx) {
+        cando_vm_error(vm, "crypto.%s: out of memory", name);
+        return -1;
+    }
+    if (EVP_DigestInit_ex(ctx, md, NULL) != 1 ||
+        EVP_DigestUpdate(ctx, data, len) != 1 ||
+        EVP_DigestFinal_ex(ctx, digest, &digest_len) != 1) {
+        EVP_MD_CTX_free(ctx);
+        cando_vm_error(vm, "crypto.%s: digest computation failed", name);
+        return -1;
+    }
+    EVP_MD_CTX_free(ctx);
+
+    /* Hex-encode into a stack buffer.  EVP_MAX_MD_SIZE is 64, so the
+     * encoded form is at most 128 bytes plus the trailing NUL. */
+    char hex[EVP_MAX_MD_SIZE * 2 + 1];
+    static const char digits[] = "0123456789abcdef";
+    for (unsigned int i = 0; i < digest_len; i++) {
+        hex[i * 2]     = digits[(digest[i] >> 4) & 0xF];
+        hex[i * 2 + 1] = digits[ digest[i]       & 0xF];
+    }
+    hex[digest_len * 2] = '\0';
+
+    libutil_push_str(vm, hex, digest_len * 2);
+    return 1;
+}
 
 static int crypto_md5(CandoVM *vm, int argc, CandoValue *args)
 {
-    (void)argc; (void)args;
-    libutil_push_cstr(vm, "d41d8cd98f00b204e9800998ecf8427e"); /* MD5 of empty string */
-    return 1;
+    return crypto_hash_evp(vm, argc, args, EVP_md5(), "md5");
 }
 
 static int crypto_sha256(CandoVM *vm, int argc, CandoValue *args)
 {
-    (void)argc; (void)args;
-    libutil_push_cstr(vm, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"); /* SHA256 of empty */
-    return 1;
+    return crypto_hash_evp(vm, argc, args, EVP_sha256(), "sha256");
 }
 
 static int crypto_base64Decode(CandoVM *vm, int argc, CandoValue *args)

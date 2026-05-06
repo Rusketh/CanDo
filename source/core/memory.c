@@ -27,7 +27,9 @@ static void live_grow(CandoMemCtrl *mc) {
 static bool live_remove_by_obj(CandoMemCtrl *mc, void *obj) {
     for (u32 i = 0; i < mc->live_count; i++) {
         if (mc->live[i].obj == obj) {
-            mc->live[i] = mc->live[--mc->live_count];
+            u32 new_count = mc->live_count - 1;
+            mc->live[i] = mc->live[new_count];
+            __atomic_store_n(&mc->live_count, new_count, __ATOMIC_RELAXED);
             return true;
         }
     }
@@ -80,7 +82,9 @@ void cando_memctrl_track(CandoMemCtrl *mc, void *obj,
     mc->live[mc->live_count].obj     = obj;
     mc->live[mc->live_count].destroy = destroy;
     mc->live[mc->live_count].marked  = false;
-    mc->live_count++;
+    /* Relaxed atomic store: the unsynchronised reader in
+     * vm_gc_maybe_collect uses __atomic_load_n on the same field. */
+    __atomic_store_n(&mc->live_count, mc->live_count + 1, __ATOMIC_RELAXED);
     cando_lock_write_release(&mc->gc_lock);
 }
 
@@ -142,7 +146,9 @@ void cando_memctrl_sweep(CandoMemCtrl *mc,
         void (*destroy)(void *) = e->destroy;
         /* Remove from the registry first so the destroy hook can safely
          * re-enter (e.g. a finalizer that allocates new objects).      */
-        mc->live[i] = mc->live[--mc->live_count];
+        u32 new_count = mc->live_count - 1;
+        mc->live[i] = mc->live[new_count];
+        __atomic_store_n(&mc->live_count, new_count, __ATOMIC_RELAXED);
         if (free_handle) free_handle(handle_user, obj);
         if (destroy)     destroy(obj);
         /* Don't increment i -- a different entry now sits at this slot. */

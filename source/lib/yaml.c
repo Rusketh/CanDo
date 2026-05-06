@@ -88,6 +88,11 @@ typedef struct {
     bool has_tab_indent; /* tab found in indent — error for block ctx    */
 } YLine;
 
+/* Caps recursion in both block and flow parsing -- adversarial input
+ * like "[[[[[...]]]]]" or deeply nested mappings would otherwise blow
+ * the native stack. */
+#define YAML_MAX_DEPTH 256
+
 typedef struct {
     const char *src;
     u32         len;
@@ -96,6 +101,7 @@ typedef struct {
     u32         pos;        /* current line index                        */
     CandoVM    *vm;
     bool        has_error;
+    int         depth;
     char        error[256];
 } YParser;
 
@@ -704,8 +710,17 @@ static CandoValue yp_parse_flow_value(YParser *p, const char *s, u32 *i, u32 n)
     yp_skip_flow_ws(s, i, n);
     if (*i >= n) { yp_error(p, "expected flow value"); return cando_null(); }
     char c = s[*i];
-    if (c == '[') return yp_parse_flow_seq(p, s, i, n);
-    if (c == '{') return yp_parse_flow_map(p, s, i, n);
+    if (c == '[' || c == '{') {
+        if (p->depth >= YAML_MAX_DEPTH) {
+            yp_error(p, "nesting too deep");
+            return cando_null();
+        }
+        p->depth++;
+        CandoValue v = (c == '[') ? yp_parse_flow_seq(p, s, i, n)
+                                  : yp_parse_flow_map(p, s, i, n);
+        p->depth--;
+        return v;
+    }
     if (c == '"') return yp_decode_dquoted(p, s, i, n);
     if (c == '\'') return yp_decode_squoted(p, s, i, n);
 
@@ -1129,7 +1144,7 @@ static CandoValue yp_parse_block_map(YParser *p, u32 indent)
  * first non-blank line's content.
  * ======================================================================= */
 
-static CandoValue yp_parse_node(YParser *p, u32 min_indent)
+static CandoValue yp_parse_node_inner(YParser *p, u32 min_indent)
 {
     yp_skip_blanks(p);
     if (p->pos >= p->n_lines) return cando_null();
@@ -1176,6 +1191,18 @@ static CandoValue yp_parse_node(YParser *p, u32 min_indent)
     return v;
 }
 
+static CandoValue yp_parse_node(YParser *p, u32 min_indent)
+{
+    if (p->depth >= YAML_MAX_DEPTH) {
+        yp_error(p, "nesting too deep");
+        return cando_null();
+    }
+    p->depth++;
+    CandoValue v = yp_parse_node_inner(p, min_indent);
+    p->depth--;
+    return v;
+}
+
 /* =========================================================================
  * Public parse entry point
  * ======================================================================= */
@@ -1193,6 +1220,7 @@ bool cando_lib_yaml_parse_buffer(CandoVM *vm,
     p.pos       = 0;
     p.vm        = vm;
     p.has_error = false;
+    p.depth     = 0;
     p.error[0]  = '\0';
 
     yl_tokenise(&p);

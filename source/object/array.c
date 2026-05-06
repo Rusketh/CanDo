@@ -89,7 +89,10 @@ bool cdo_array_rawset_idx(CdoObject *arr, u32 idx, CdoValue val) {
 
 u32 cdo_array_len(const CdoObject *arr) {
     CANDO_ASSERT(arr != NULL && arr->kind == OBJ_ARRAY);
-    return arr->items_len;
+    cando_lock_read_acquire((CandoLockHeader *)&arr->lock);
+    u32 len = arr->items_len;
+    cando_lock_read_release((CandoLockHeader *)&arr->lock);
+    return len;
 }
 
 bool cdo_array_insert(CdoObject *arr, u32 idx, CdoValue val) {
