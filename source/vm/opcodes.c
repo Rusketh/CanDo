@@ -255,9 +255,10 @@ static const CandoOpFmt s_opcode_fmts[OP_COUNT] = {
     [OP_PIPE_INIT]        = OPFMT_A,
     [OP_PIPE_NEXT]        = OPFMT_A,
     [OP_FILTER_NEXT]      = OPFMT_A,
-    [OP_PIPE_END]         = OPFMT_NONE,
-    [OP_PIPE_COLLECT]     = OPFMT_NONE,
-    [OP_FILTER_COLLECT]   = OPFMT_NONE,
+    [OP_PIPE_END]            = OPFMT_NONE,
+    [OP_PIPE_COLLECT]        = OPFMT_NONE,
+    [OP_FILTER_COLLECT]      = OPFMT_NONE,
+    [OP_COND_FILTER_COLLECT] = OPFMT_NONE,
     /* Band 14: error handling */
     [OP_TRY_BEGIN]        = OPFMT_A,
     [OP_TRY_END]          = OPFMT_NONE,
@@ -340,33 +341,36 @@ static const CandoOpInfo s_opcode_info[OP_COUNT] = {
     [OP_STORE_UPVAL]         = _OP(1, 1, EFFECT_STORE,   0, 0),
     [OP_CLOSE_UPVAL]         = _OP(0, 0, EFFECT_STORE,   0, 0),
 
-    /* Band 5: arithmetic -- may throw on type mismatch */
-    [OP_ADD]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
-    [OP_SUB]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
-    [OP_MUL]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
-    [OP_DIV]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
-    [OP_MOD]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
-    [OP_POW]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
-    [OP_NEG]                 = _OP(1, 1, EFFECT_PURE,    1, 0),
+    /* Band 5: arithmetic -- may throw on type mismatch, and dispatches
+     * __add / __sub / __mul / __div / __mod / __pow / __unm metamethods
+     * via cando_vm_call_meta which re-enters the VM (may_recurse=1). */
+    [OP_ADD]                 = _OP(2, 1, EFFECT_PURE,    1, 1),
+    [OP_SUB]                 = _OP(2, 1, EFFECT_PURE,    1, 1),
+    [OP_MUL]                 = _OP(2, 1, EFFECT_PURE,    1, 1),
+    [OP_DIV]                 = _OP(2, 1, EFFECT_PURE,    1, 1),
+    [OP_MOD]                 = _OP(2, 1, EFFECT_PURE,    1, 1),
+    [OP_POW]                 = _OP(2, 1, EFFECT_PURE,    1, 1),
+    [OP_NEG]                 = _OP(1, 1, EFFECT_PURE,    1, 1),
     [OP_POS]                 = _OP(1, 1, EFFECT_PURE,    1, 0),
-    [OP_INCR]                = _OP(1, 1, EFFECT_PURE,    1, 0), /* in-place */
-    [OP_DECR]                = _OP(1, 1, EFFECT_PURE,    1, 0),
+    [OP_INCR]                = _OP(1, 1, EFFECT_PURE,    1, 1), /* in-place */
+    [OP_DECR]                = _OP(1, 1, EFFECT_PURE,    1, 1),
 
-    /* Band 6: comparison -- may throw if metamethod misbehaves */
-    [OP_EQ]                  = _OP(2, 1, EFFECT_PURE,    1, 0),
-    [OP_NEQ]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
-    [OP_LT]                  = _OP(2, 1, EFFECT_PURE,    1, 0),
-    [OP_GT]                  = _OP(2, 1, EFFECT_PURE,    1, 0),
-    [OP_LEQ]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
-    [OP_GEQ]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
+    /* Band 6: comparison -- dispatches __equal / __greater metamethods
+     * via the same call_meta path, hence may_recurse=1. */
+    [OP_EQ]                  = _OP(2, 1, EFFECT_PURE,    1, 1),
+    [OP_NEQ]                 = _OP(2, 1, EFFECT_PURE,    1, 1),
+    [OP_LT]                  = _OP(2, 1, EFFECT_PURE,    1, 1),
+    [OP_GT]                  = _OP(2, 1, EFFECT_PURE,    1, 1),
+    [OP_LEQ]                 = _OP(2, 1, EFFECT_PURE,    1, 1),
+    [OP_GEQ]                 = _OP(2, 1, EFFECT_PURE,    1, 1),
     /* _STACK variants: variable left-side + A right-sides; arity=0 */
-    [OP_EQ_STACK]            = _OP(0, 1, EFFECT_PURE,    1, 0),
-    [OP_NEQ_STACK]           = _OP(0, 1, EFFECT_PURE,    1, 0),
-    [OP_LT_STACK]            = _OP(0, 1, EFFECT_PURE,    1, 0),
-    [OP_GT_STACK]            = _OP(0, 1, EFFECT_PURE,    1, 0),
-    [OP_LEQ_STACK]           = _OP(0, 1, EFFECT_PURE,    1, 0),
-    [OP_GEQ_STACK]           = _OP(0, 1, EFFECT_PURE,    1, 0),
-    [OP_RANGE_CHECK]         = _OP(3, 1, EFFECT_PURE,    1, 0),
+    [OP_EQ_STACK]            = _OP(0, 1, EFFECT_PURE,    1, 1),
+    [OP_NEQ_STACK]           = _OP(0, 1, EFFECT_PURE,    1, 1),
+    [OP_LT_STACK]            = _OP(0, 1, EFFECT_PURE,    1, 1),
+    [OP_GT_STACK]            = _OP(0, 1, EFFECT_PURE,    1, 1),
+    [OP_LEQ_STACK]           = _OP(0, 1, EFFECT_PURE,    1, 1),
+    [OP_GEQ_STACK]           = _OP(0, 1, EFFECT_PURE,    1, 1),
+    [OP_RANGE_CHECK]         = _OP(3, 1, EFFECT_PURE,    1, 1),
 
     /* Band 7: bitwise -- may throw on non-numeric */
     [OP_BIT_AND]             = _OP(2, 1, EFFECT_PURE,    1, 0),
@@ -462,14 +466,15 @@ static const CandoOpInfo s_opcode_info[OP_COUNT] = {
     [OP_SPREAD_RET]          = _OP(0, 0, EFFECT_PURE,    0, 0),
     [OP_ARRAY_SPREAD]        = _OP(0, 0, EFFECT_PURE,    0, 0),
 
-    /* Band 19: call-result comparison -- consume last_ret_count + 1 */
+    /* Band 19: call-result comparison -- consume last_ret_count + 1.
+     * Same metamethod-dispatch caveat as band 6 -- may_recurse=1.   */
     [OP_TRUNCATE_RET]        = _OP(0, 0, EFFECT_PURE,    0, 0),
-    [OP_EQ_SPREAD]           = _OP(0, 1, EFFECT_PURE,    1, 0),
-    [OP_NEQ_SPREAD]          = _OP(0, 1, EFFECT_PURE,    1, 0),
-    [OP_LT_SPREAD]           = _OP(0, 1, EFFECT_PURE,    1, 0),
-    [OP_GT_SPREAD]           = _OP(0, 1, EFFECT_PURE,    1, 0),
-    [OP_LEQ_SPREAD]          = _OP(0, 1, EFFECT_PURE,    1, 0),
-    [OP_GEQ_SPREAD]          = _OP(0, 1, EFFECT_PURE,    1, 0),
+    [OP_EQ_SPREAD]           = _OP(0, 1, EFFECT_PURE,    1, 1),
+    [OP_NEQ_SPREAD]          = _OP(0, 1, EFFECT_PURE,    1, 1),
+    [OP_LT_SPREAD]           = _OP(0, 1, EFFECT_PURE,    1, 1),
+    [OP_GT_SPREAD]           = _OP(0, 1, EFFECT_PURE,    1, 1),
+    [OP_LEQ_SPREAD]          = _OP(0, 1, EFFECT_PURE,    1, 1),
+    [OP_GEQ_SPREAD]          = _OP(0, 1, EFFECT_PURE,    1, 1),
 
     /* Sentinels */
     [OP_NOP]                 = _OP(0, 0, EFFECT_PURE,    0, 0),

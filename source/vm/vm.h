@@ -146,6 +146,11 @@ typedef struct CandoCallFrame {
     u8           *ip;        /* instruction pointer into closure->chunk   */
     CandoValue   *slots;     /* base of this frame's window in vm->stack  */
     u32           ret_count; /* expected return-value count (0 = any)     */
+    u32           loop_save; /* loop-stack depth at frame entry; OP_RETURN
+                                restores vm->loop_depth to this so any
+                                loops the function left open (e.g. via
+                                an early RETURN inside a FOR-IN body)
+                                do not leak frames into the caller       */
     bool           is_fluent; /* return receiver instead of result         */
 } CandoCallFrame;
 

@@ -144,6 +144,12 @@ CANDO_INLINE HandleIndex cando_as_handle(CandoValue v) {
  * isolate this convention so the NaN-box migration can replace it with
  * a dedicated tag without breaking call sites.  See
  * docs/value-types.md and docs/jit-plan.md §9.7.
+ *
+ * Limit: index must satisfy index < UINT32_MAX.  The encoding wraps
+ * silently at index == UINT32_MAX (the "+1u" overflows to 0 and the
+ * sentinel becomes 0.0 -- which cando_is_native_fn reads as non-native).
+ * The native-function table in CandoVM caps at CANDO_NATIVE_MAX (128),
+ * so this limit is comfortably out of reach in practice.
  * --------------------------------------------------------------------- */
 CANDO_INLINE bool cando_is_native_fn(CandoValue v) {
     return cando_is_number(v) && cando_as_number(v) < 0.0;
@@ -152,6 +158,8 @@ CANDO_INLINE u32 cando_native_index(CandoValue v) {
     return (u32)(-cando_as_number(v) - 1.0);
 }
 CANDO_INLINE CandoValue cando_native_value(u32 index) {
+    CANDO_ASSERT_MSG(index < UINT32_MAX,
+                     "cando_native_value: index would wrap encoding");
     return cando_number(-(f64)(index + 1u));
 }
 

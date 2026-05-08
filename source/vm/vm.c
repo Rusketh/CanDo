@@ -1188,6 +1188,7 @@ static bool vm_push_frame(CandoVM *vm, CandoClosure *closure, u8 *ip,
     frame->ip        = ip;
     frame->slots     = vm->stack_top - arg_count - 1;
     frame->ret_count = 0;
+    frame->loop_save = vm->loop_depth;
     frame->is_fluent = is_fluent;
     /* Pre-allocate null slots for the function's remaining locals so
      * expression evaluation never overwrites them; n_present = slot-0
@@ -3129,7 +3130,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cando_value_release(*slot++);
             }
 
-            /* Pop the frame. */
+            /* Pop the frame.  Also unwind the loop stack back to whatever
+             * depth was active when the frame was entered, so any FOR-IN /
+             * WHILE / FOR-OVER loops the function left open (e.g. via an
+             * early RETURN inside the body) cannot leak frames into the
+             * caller's BREAK/CONTINUE depth math. */
+            vm->loop_depth = frame->loop_save;
             vm->frame_count--;
 
             /* Thread result capture: if we've returned to the thread boundary,

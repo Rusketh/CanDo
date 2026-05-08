@@ -152,7 +152,9 @@ typedef enum {
     /* ===== Band 13: Iteration =========================================== */
     OP_RANGE_ASC,       /* b=pop, a=pop, push ascending range a->b        */
     OP_RANGE_DESC,      /* b=pop, a=pop, push descending range b<-a       */
-    OP_FOR_INIT,        /* init for-each; A = number of loop variables    */
+    OP_FOR_INIT,        /* init for-each; A = keys_mode (1=FOR IN keys,
+                           0=FOR OF values).  See vm.c OP_FOR_INIT for the
+                           [source, len_signed, index] state convention. */
     OP_FOR_NEXT,        /* advance for-each; A = signed jump offset if done */
     OP_FOR_OVER_INIT,   /* init over loop (function-based iterator)       */
     OP_FOR_OVER_NEXT,   /* advance over loop; A = signed jump if done     */
