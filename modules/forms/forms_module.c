@@ -1717,34 +1717,9 @@ static int native_set_parent(CandoVM *vm, int argc, CandoValue *args)
  * on anything that has a check") without writing kind guards.
  * ===================================================================== */
 
-static int native_set_checked(CandoVM *vm, int argc, CandoValue *args)
-{
-    FormsSlot *s = arg_self(vm, argc, args, "setChecked");
-    if (!s) return -1;
-    bool checked = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
-#if FORMS_HAVE_WIN32
-    if (s->hwnd && (s->kind == KIND_CHECKBOX || s->kind == KIND_RADIO)) {
-        SendMessageW(s->hwnd, BM_SETCHECK,
-                     (WPARAM)(checked ? BST_CHECKED : BST_UNCHECKED), 0);
-    }
-#endif
-    cando_vm_push(vm, args[0]);
-    return 1;
-}
-
-static int native_get_checked(CandoVM *vm, int argc, CandoValue *args)
-{
-    FormsSlot *s = arg_self(vm, argc, args, "getChecked");
-    if (!s) return -1;
-    bool checked = false;
-#if FORMS_HAVE_WIN32
-    if (s->hwnd && (s->kind == KIND_CHECKBOX || s->kind == KIND_RADIO)) {
-        checked = (SendMessageW(s->hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    }
-#endif
-    cando_vm_push(vm, cando_bool(checked));
-    return 1;
-}
+/* native_set_checked + native_get_checked moved to
+ * src/controls/ctl_checkbox.{c,h}. */
+#include "src/controls/ctl_checkbox.h"
 
 static int native_add_item(CandoVM *vm, int argc, CandoValue *args)
 {
