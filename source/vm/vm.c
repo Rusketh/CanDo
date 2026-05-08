@@ -425,8 +425,8 @@ void cando_closure_trace(CandoClosure *closure, CandoVM *vm,
         CandoUpvalue *uv = closure->upvalues[i];
         if (!uv || !uv->location) continue;
         CandoValue v = *uv->location;
-        if (v.tag != TYPE_OBJECT) continue;
-        void *obj = cando_handle_get(vm->handles, v.as.handle);
+        if (!cando_is_object(v)) continue;
+        void *obj = cando_handle_get(vm->handles, cando_as_handle(v));
         if (obj) mark(obj, ud);
     }
 }
@@ -454,8 +454,8 @@ static bool gc_mark_obj(void *obj, void *ud);
 /* Resolve a CandoValue's heap target to a tracked-object pointer, or
  * NULL if the value is not a heap reference.                           */
 static void *gc_resolve_cv(CandoVM *vm, CandoValue v) {
-    if (v.tag != TYPE_OBJECT) return NULL;
-    return cando_handle_get(vm->handles, v.as.handle);
+    if (!cando_is_object(v)) return NULL;
+    return cando_handle_get(vm->handles, cando_as_handle(v));
 }
 
 static void gc_mark_cv(CandoValue v, TraceCtx *ctx) {
@@ -797,7 +797,7 @@ static int vm_native_class_default_call(CandoVM *vm, int argc, CandoValue *args)
     }
 
     CandoValue cls_val  = args[0];
-    CdoObject *cls_obj  = cando_bridge_resolve(vm, cls_val.as.handle);
+    CdoObject *cls_obj  = cando_bridge_resolve(vm, cando_as_handle(cls_val));
     if (!cls_obj) {
         vm_runtime_error(vm, "class __call: invalid class handle");
         return -1;
@@ -805,7 +805,7 @@ static int vm_native_class_default_call(CandoVM *vm, int argc, CandoValue *args)
 
     /* 1. Allocate the instance. */
     CandoValue inst_val = cando_bridge_new_object(vm);
-    CdoObject *inst_obj = cando_bridge_resolve(vm, inst_val.as.handle);
+    CdoObject *inst_obj = cando_bridge_resolve(vm, cando_as_handle(inst_val));
 
     /* 2. instance.__index = class. */
     if (g_meta_index) {
@@ -951,7 +951,7 @@ bool cando_vm_dispatch_callable(CandoVM *vm, const struct CdoValue *raw_p,
 
     /* Number: PC-offset inline function in the current chunk. */
     if (cando_is_number(callee)) {
-        u32 pc = (u32)callee.as.number;
+        u32 pc = (u32)cando_as_number(callee);
         CandoCallFrame *cur_frame = &vm->frames[vm->frame_count - 1];
 
         u32 saved_stop = vm->thread_stop_frame;
@@ -991,7 +991,7 @@ bool cando_vm_dispatch_callable(CandoVM *vm, const struct CdoValue *raw_p,
 
     /* OBJ_NATIVE or OBJ_FUNCTION: dispatch via cando_vm_call_value. */
     if (cando_is_object(callee)) {
-        CdoObject *fn_obj = cando_bridge_resolve(vm, callee.as.handle);
+        CdoObject *fn_obj = cando_bridge_resolve(vm, cando_as_handle(callee));
 
         /* OBJ_NATIVE: call via fn.native.fn with CdoValue args. */
         if (fn_obj && fn_obj->kind == OBJ_NATIVE && fn_obj->fn.native.fn) {
@@ -1054,7 +1054,7 @@ bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
 
 static bool vm_is_truthy(CandoValue v) {
     if (cando_is_null(v))  return false;
-    if (cando_is_bool(v))  return v.as.boolean;
+    if (cando_is_bool(v))  return cando_as_bool(v);
     return true;
 }
 
@@ -1471,7 +1471,7 @@ int cando_vm_call_value(CandoVM *vm, CandoValue fn_val,
     }
 
     if (!cando_is_object(fn_val)) return 0;
-    CdoObject *fn_obj = cando_bridge_resolve(vm, fn_val.as.handle);
+    CdoObject *fn_obj = cando_bridge_resolve(vm, cando_as_handle(fn_val));
     if (!fn_obj || fn_obj->kind != OBJ_FUNCTION) return 0;
 
     vm_call_closure_with_args(vm, fn_obj, args, argc);
@@ -1517,7 +1517,7 @@ static CANDO_THREAD_RETURN vm_thread_trampoline(void *raw_arg) {
     }
 
     {
-        CdoObject *fn_obj = cando_bridge_resolve(&child, ta->fn_val.as.handle);
+        CdoObject *fn_obj = cando_bridge_resolve(&child, cando_as_handle(ta->fn_val));
         if (!fn_obj || fn_obj->kind != OBJ_FUNCTION ||
             !fn_obj->fn.script.bytecode) {
             CandoValue err = cando_string_value(
@@ -1574,7 +1574,7 @@ static CANDO_THREAD_RETURN vm_thread_trampoline(void *raw_arg) {
         cando_os_mutex_unlock(&ta->thread->done_mutex);
 
         if (cando_is_object(cb)) {
-            CdoObject *cb_obj = cando_bridge_resolve(&child, cb.as.handle);
+            CdoObject *cb_obj = cando_bridge_resolve(&child, cando_as_handle(cb));
             if (cb_obj && cb_obj->kind == OBJ_FUNCTION) {
                 /* Reset child VM stack/frame state for the callback call. */
                 child.stack_top     = child.stack;
@@ -1822,12 +1822,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
             CANDO_ASSERT(cando_is_string(name_val));
             CandoValue out;
             cando_lock_read_acquire(&vm->globals->lock);
-            bool found = vm_get_global_str(vm, name_val.as.string, &out);
+            bool found = vm_get_global_str(vm, cando_as_string(name_val), &out);
             CandoValue out_copy = found ? cando_value_copy(out) : cando_null();
             cando_lock_read_release(&vm->globals->lock);
             if (!found) {
                 vm_runtime_error(vm, "undefined variable '%s'",
-                                 name_val.as.string->data);
+                                 cando_as_string(name_val)->data);
                 goto handle_error;
             }
             PUSH(out_copy);
@@ -1839,12 +1839,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
             CANDO_ASSERT(cando_is_string(name_val));
             CandoValue val = PEEK(0);
             cando_lock_write_acquire(&vm->globals->lock);
-            bool ok = vm_set_global_str(vm, name_val.as.string,
+            bool ok = vm_set_global_str(vm, cando_as_string(name_val),
                                         cando_value_copy(val), false);
             cando_lock_write_release(&vm->globals->lock);
             if (!ok) {
                 vm_runtime_error(vm, "cannot assign to constant '%s'",
-                                 name_val.as.string->data);
+                                 cando_as_string(name_val)->data);
                 goto handle_error;
             }
             DISPATCH();
@@ -1854,7 +1854,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             CandoValue name_val = frame->closure->chunk->constants[ci];
             CANDO_ASSERT(cando_is_string(name_val));
             cando_lock_write_acquire(&vm->globals->lock);
-            vm_set_global_str(vm, name_val.as.string, POP(), false);
+            vm_set_global_str(vm, cando_as_string(name_val), POP(), false);
             cando_lock_write_release(&vm->globals->lock);
             vm->spread_extra = 0;
             DISPATCH();
@@ -1864,7 +1864,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             CandoValue name_val = frame->closure->chunk->constants[ci];
             CANDO_ASSERT(cando_is_string(name_val));
             cando_lock_write_acquire(&vm->globals->lock);
-            vm_set_global_str(vm, name_val.as.string, POP(), true);
+            vm_set_global_str(vm, cando_as_string(name_val), POP(), true);
             cando_lock_write_release(&vm->globals->lock);
             vm->spread_extra = 0;
             DISPATCH();
@@ -1901,8 +1901,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
         /* Try a binary metamethod; dispatches and continues if found. */
 #define TRY_BINARY_META(meta_key, _a, _b)                                   \
     if ((meta_key) && (cando_is_object(_a) || cando_is_object(_b))) {       \
-        HandleIndex _h = cando_is_object(_a) ? (_a).as.handle               \
-                                              : (_b).as.handle;             \
+        HandleIndex _h = cando_is_object(_a) ? cando_as_handle(_a)          \
+                                              : cando_as_handle(_b);        \
         CandoValue _buf[2] = {_a, _b};                                     \
         if (cando_vm_call_meta(vm, _h,                                      \
                                (struct CdoString *)(meta_key), _buf, 2)) {  \
@@ -1919,7 +1919,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             /* String concatenation or numeric addition. */
             CandoValue b = PEEK(0), a = PEEK(1);
             if (cando_is_string(a) && cando_is_string(b)) {
-                u32 la = a.as.string->length, lb = b.as.string->length;
+                u32 la = cando_as_string(a)->length, lb = cando_as_string(b)->length;
                 if (la > UINT32_MAX - lb - 1) {
                     vm_runtime_error(vm,
                         "string concatenation length overflow");
@@ -1928,8 +1928,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 DROP(); DROP();
                 u32 total = la + lb;
                 char *buf = cando_alloc(total + 1);
-                memcpy(buf,      a.as.string->data, la);
-                memcpy(buf + la, b.as.string->data, lb);
+                memcpy(buf,      cando_as_string(a)->data, la);
+                memcpy(buf + la, cando_as_string(b)->data, lb);
                 buf[total] = '\0';
                 CandoString *s = cando_string_new(buf, total);
                 cando_free(buf);
@@ -1942,11 +1942,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 if (CANDO_UNLIKELY(!cando_is_number(_a2) || !cando_is_number(_b2))) {
                     cando_value_release(_a2); cando_value_release(_b2);
                     vm_runtime_error(vm, "operands must be numbers (got %s and %s)",
-                        cando_value_type_name((TypeTag)_a2.tag),
-                        cando_value_type_name((TypeTag)_b2.tag));
+                        cando_value_type_name(cando_value_tag(_a2)),
+                        cando_value_type_name(cando_value_tag(_b2)));
                     goto handle_error;
                 }
-                PUSH(cando_number(_a2.as.number + _b2.as.number));
+                PUSH(cando_number(cando_as_number(_a2) + cando_as_number(_b2)));
             }
             DISPATCH();
         }
@@ -1955,11 +1955,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
             TRY_BINARY_META(g_meta_sub, a, b);
             if (CANDO_UNLIKELY(!cando_is_number(a) || !cando_is_number(b))) {
                 vm_runtime_error(vm, "operands must be numbers (got %s and %s)",
-                    cando_value_type_name((TypeTag)a.tag),
-                    cando_value_type_name((TypeTag)b.tag));
+                    cando_value_type_name(cando_value_tag(a)),
+                    cando_value_type_name(cando_value_tag(b)));
                 goto handle_error;
             }
-            PUSH(cando_number(a.as.number - b.as.number));
+            PUSH(cando_number(cando_as_number(a) - cando_as_number(b)));
             DISPATCH();
         }
         OP_CASE(OP_MUL): {
@@ -1967,11 +1967,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
             TRY_BINARY_META(g_meta_mul, a, b);
             if (CANDO_UNLIKELY(!cando_is_number(a) || !cando_is_number(b))) {
                 vm_runtime_error(vm, "operands must be numbers (got %s and %s)",
-                    cando_value_type_name((TypeTag)a.tag),
-                    cando_value_type_name((TypeTag)b.tag));
+                    cando_value_type_name(cando_value_tag(a)),
+                    cando_value_type_name(cando_value_tag(b)));
                 goto handle_error;
             }
-            PUSH(cando_number(a.as.number * b.as.number));
+            PUSH(cando_number(cando_as_number(a) * cando_as_number(b)));
             DISPATCH();
         }
         OP_CASE(OP_DIV): {
@@ -1981,11 +1981,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "operands must be numbers");
                 goto handle_error;
             }
-            if (b.as.number == 0.0) {
+            if (cando_as_number(b) == 0.0) {
                 vm_runtime_error(vm, "division by zero");
                 goto handle_error;
             }
-            PUSH(cando_number(a.as.number / b.as.number));
+            PUSH(cando_number(cando_as_number(a) / cando_as_number(b)));
             DISPATCH();
         }
         OP_CASE(OP_MOD): {
@@ -1995,7 +1995,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "operands must be numbers");
                 goto handle_error;
             }
-            PUSH(cando_number(fmod(a.as.number, b.as.number)));
+            PUSH(cando_number(fmod(cando_as_number(a), cando_as_number(b))));
             DISPATCH();
         }
         OP_CASE(OP_POW): {
@@ -2005,14 +2005,14 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "operands must be numbers");
                 goto handle_error;
             }
-            PUSH(cando_number(pow(a.as.number, b.as.number)));
+            PUSH(cando_number(pow(cando_as_number(a), cando_as_number(b))));
             DISPATCH();
         }
 #undef TRY_BINARY_META
         OP_CASE(OP_NEG): {
             CandoValue a = POP();
             if (cando_is_object(a) && g_meta_unm) {
-                if (cando_vm_call_meta(vm, a.as.handle,
+                if (cando_vm_call_meta(vm, cando_as_handle(a),
                                        (struct CdoString *)g_meta_unm,
                                        &a, 1)) {
                     cando_value_release(a);
@@ -2025,7 +2025,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "unary '-' requires a number");
                 goto handle_error;
             }
-            PUSH(cando_number(-a.as.number));
+            PUSH(cando_number(-cando_as_number(a)));
             DISPATCH();
         }
         OP_CASE(OP_POS): {
@@ -2063,8 +2063,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
          * where no meta is involved -- CMP_NUM_FALLBACK below.            */
 #define TRY_CMP_META(meta_key, swap, negate, _a, _b)                          \
     if ((meta_key) && (cando_is_object(_a) || cando_is_object(_b))) {         \
-        HandleIndex _h = cando_is_object(_a) ? (_a).as.handle                 \
-                                              : (_b).as.handle;               \
+        HandleIndex _h = cando_is_object(_a) ? cando_as_handle(_a)            \
+                                              : cando_as_handle(_b);          \
         CandoValue _buf[2] = { (swap) ? (_b) : (_a),                          \
                                 (swap) ? (_a) : (_b) };                       \
         if (cando_vm_call_meta(vm, _h,                                        \
@@ -2089,7 +2089,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         vm_runtime_error(vm, "comparison requires numbers");                  \
         goto handle_error;                                                    \
     }                                                                         \
-    PUSH(cando_bool((_a).as.number op_sym (_b).as.number));                   \
+    PUSH(cando_bool(cando_as_number(_a) op_sym cando_as_number(_b)));         \
     cando_value_release(_a); cando_value_release(_b);                         \
 } while (0)
 
@@ -2173,7 +2173,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CandoValue r = *(vm->stack_top - n + i);
                 if (!cando_is_number(left) || !cando_is_number(r))
                     result = false;
-                else if (!(left.as.number < r.as.number)) result = false;
+                else if (!(cando_as_number(left) < cando_as_number(r))) result = false;
             }
             for (u16 i = 0; i < n; i++) cando_value_release(POP());
             cando_value_release(POP());
@@ -2188,7 +2188,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CandoValue r = *(vm->stack_top - n + i);
                 if (!cando_is_number(left) || !cando_is_number(r))
                     result = false;
-                else if (!(left.as.number > r.as.number)) result = false;
+                else if (!(cando_as_number(left) > cando_as_number(r))) result = false;
             }
             for (u16 i = 0; i < n; i++) cando_value_release(POP());
             cando_value_release(POP());
@@ -2203,7 +2203,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CandoValue r = *(vm->stack_top - n + i);
                 if (!cando_is_number(left) || !cando_is_number(r))
                     result = false;
-                else if (!(left.as.number <= r.as.number)) result = false;
+                else if (!(cando_as_number(left) <= cando_as_number(r))) result = false;
             }
             for (u16 i = 0; i < n; i++) cando_value_release(POP());
             cando_value_release(POP());
@@ -2218,7 +2218,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CandoValue r = *(vm->stack_top - n + i);
                 if (!cando_is_number(left) || !cando_is_number(r))
                     result = false;
-                else if (!(left.as.number >= r.as.number)) result = false;
+                else if (!(cando_as_number(left) >= cando_as_number(r))) result = false;
             }
             for (u16 i = 0; i < n; i++) cando_value_release(POP());
             cando_value_release(POP());
@@ -2237,7 +2237,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "range check requires numbers");
                 goto handle_error;
             }
-            f64 mn = vmin.as.number, v = vval.as.number, mx = vmax.as.number;
+            f64 mn = cando_as_number(vmin), v = cando_as_number(vval), mx = cando_as_number(vmax);
             bool ok = (left_inc  ? (mn <= v) : (mn < v)) &&
                       (right_inc ? (v <= mx) : (v < mx));
             PUSH(cando_bool(ok));
@@ -2247,32 +2247,32 @@ static CandoVMResult vm_run(CandoVM *vm) {
         /* ── Band 7: Bitwise ────────────────────────────────────────── */
         OP_CASE(OP_BIT_AND): {
             CandoValue b = POP(), a = POP();
-            PUSH(cando_number((f64)((i64)a.as.number & (i64)b.as.number)));
+            PUSH(cando_number((f64)((i64)cando_as_number(a) & (i64)cando_as_number(b))));
             DISPATCH();
         }
         OP_CASE(OP_BIT_OR): {
             CandoValue b = POP(), a = POP();
-            PUSH(cando_number((f64)((i64)a.as.number | (i64)b.as.number)));
+            PUSH(cando_number((f64)((i64)cando_as_number(a) | (i64)cando_as_number(b))));
             DISPATCH();
         }
         OP_CASE(OP_BIT_XOR): {
             CandoValue b = POP(), a = POP();
-            PUSH(cando_number((f64)((i64)a.as.number ^ (i64)b.as.number)));
+            PUSH(cando_number((f64)((i64)cando_as_number(a) ^ (i64)cando_as_number(b))));
             DISPATCH();
         }
         OP_CASE(OP_BIT_NOT): {
             CandoValue a = POP();
-            PUSH(cando_number((f64)(~(i64)a.as.number)));
+            PUSH(cando_number((f64)(~(i64)cando_as_number(a))));
             DISPATCH();
         }
         OP_CASE(OP_LSHIFT): {
             CandoValue b = POP(), a = POP();
-            PUSH(cando_number((f64)((i64)a.as.number << (i64)b.as.number)));
+            PUSH(cando_number((f64)((i64)cando_as_number(a) << (i64)cando_as_number(b))));
             DISPATCH();
         }
         OP_CASE(OP_RSHIFT): {
             CandoValue b = POP(), a = POP();
-            PUSH(cando_number((f64)((i64)a.as.number >> (i64)b.as.number)));
+            PUSH(cando_number((f64)((i64)cando_as_number(a) >> (i64)cando_as_number(b))));
             DISPATCH();
         }
 
@@ -2332,7 +2332,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             vm->array_extra = 0;
             CandoValue arr_val = cando_bridge_new_array(vm);
             if (n > 0) {
-                CdoObject *arr = cando_bridge_resolve(vm, arr_val.as.handle);
+                CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(arr_val));
                 /* Items are on the stack: stack_top-n .. stack_top-1 */
                 CandoValue *base = vm->stack_top - n;
                 for (u32 i = 0; i < n; i++) {
@@ -2355,8 +2355,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
             if (cando_is_string(obj_val)) {
                 if (cando_is_object(vm->string_proto)) {
                     CdoObject   *proto = cando_bridge_resolve(
-                                            vm, vm->string_proto.as.handle);
-                    CandoString *ks    = frame->closure->chunk->constants[ci].as.string;
+                                            vm, cando_as_handle(vm->string_proto));
+                    CandoString *ks    = cando_as_string(frame->closure->chunk->constants[ci]);
                     CdoString   *key   = cando_bridge_intern_key(ks);
                     CdoValue     raw;
                     if (cdo_object_get(proto, key, &raw)) {
@@ -2375,11 +2375,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
             if (!cando_is_object(obj_val)) {
                 cando_value_release(obj_val);
                 vm_runtime_error(vm, "field access on non-object (got %s)",
-                                 cando_value_type_name((TypeTag)obj_val.tag));
+                                 cando_value_type_name(cando_value_tag(obj_val)));
                 goto handle_error;
             }
-            CdoObject  *obj = cando_bridge_resolve(vm, obj_val.as.handle);
-            CandoString *ks = frame->closure->chunk->constants[ci].as.string;
+            CdoObject  *obj = cando_bridge_resolve(vm, cando_as_handle(obj_val));
+            CandoString *ks = cando_as_string(frame->closure->chunk->constants[ci]);
             CdoString   *key = cando_bridge_intern_key(ks);
             CdoValue     result;
             bool         got = false;
@@ -2391,7 +2391,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 /* Thread instances have no slot table; fall back to the
                  * cached `_meta.thread` prototype for method lookups. */
                 CdoObject *tproto = cando_bridge_resolve(
-                    vm, vm->thread_proto.as.handle);
+                    vm, cando_as_handle(vm->thread_proto));
                 if (cdo_object_get(tproto, key, &result)) got = true;
             }
             if (!got) {
@@ -2432,15 +2432,15 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "field assignment on non-object");
                 goto handle_error;
             }
-            CdoObject  *obj = cando_bridge_resolve(vm, obj_val.as.handle);
-            CandoString *ks = frame->closure->chunk->constants[ci].as.string;
+            CdoObject  *obj = cando_bridge_resolve(vm, cando_as_handle(obj_val));
+            CandoString *ks = cando_as_string(frame->closure->chunk->constants[ci]);
             CdoString   *key = cando_bridge_intern_key(ks);
             CdoValue     existing;
             if (!cdo_object_rawget(obj, key, &existing) && g_meta_newindex) {
                 CandoValue key_cv = cando_string_value(
                     cando_string_new(key->data, key->length));
                 CandoValue args[3] = { obj_val, key_cv, val };
-                if (cando_vm_call_meta(vm, obj_val.as.handle,
+                if (cando_vm_call_meta(vm, cando_as_handle(obj_val),
                                        (struct CdoString *)g_meta_newindex,
                                        args, 3)) {
                     cdo_string_release(key);
@@ -2471,9 +2471,9 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "index access on non-object");
                 goto handle_error;
             }
-            CdoObject *obj = cando_bridge_resolve(vm, obj_val.as.handle);
+            CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(obj_val));
             if (cando_is_number(idx_val)) {
-                u32      idx = (u32)idx_val.as.number;
+                u32      idx = (u32)cando_as_number(idx_val);
                 CdoValue result;
                 if (cdo_array_rawget_idx(obj, idx, &result)) {
                     PUSH(cando_bridge_to_cando(vm, result));
@@ -2481,7 +2481,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     PUSH(cando_null());
                 }
             } else if (cando_is_string(idx_val)) {
-                CdoString *key = cando_bridge_intern_key(idx_val.as.string);
+                CdoString *key = cando_bridge_intern_key(cando_as_string(idx_val));
                 CdoValue   result;
                 if (cdo_object_rawget(obj, key, &result)) {
                     PUSH(cando_bridge_to_cando(vm, result));
@@ -2509,17 +2509,17 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "index assignment on non-object");
                 goto handle_error;
             }
-            CdoObject *obj     = cando_bridge_resolve(vm, obj_val.as.handle);
+            CdoObject *obj     = cando_bridge_resolve(vm, cando_as_handle(obj_val));
             CdoValue   cdo_val = cando_bridge_to_cdo(vm, val);
             if (cando_is_number(idx_val)) {
-                u32 idx = (u32)idx_val.as.number;
+                u32 idx = (u32)cando_as_number(idx_val);
                 cdo_array_rawset_idx(obj, idx, cdo_val);   /* retains */
             } else if (cando_is_string(idx_val)) {
-                CdoString *key = cando_bridge_intern_key(idx_val.as.string);
+                CdoString *key = cando_bridge_intern_key(cando_as_string(idx_val));
                 CdoValue   existing;
                 if (!cdo_object_rawget(obj, key, &existing) && g_meta_newindex) {
                     CandoValue args[3] = { obj_val, idx_val, val };
-                    if (cando_vm_call_meta(vm, obj_val.as.handle,
+                    if (cando_vm_call_meta(vm, cando_as_handle(obj_val),
                                            (struct CdoString *)g_meta_newindex,
                                            args, 3)) {
                         cdo_value_release(cdo_val);
@@ -2554,14 +2554,14 @@ static CandoVMResult vm_run(CandoVM *vm) {
         OP_CASE(OP_LEN): {
             CandoValue a = POP();
             if (cando_is_string(a)) {
-                u32 len = a.as.string->length;
+                u32 len = cando_as_string(a)->length;
                 cando_value_release(a);
                 PUSH(cando_number((f64)len));
             } else if (cando_is_object(a)) {
                 /* Check __len meta-method first. */
                 if (g_meta_len) {
                     CandoValue a_copy = cando_value_copy(a);
-                    if (cando_vm_call_meta(vm, a.as.handle,
+                    if (cando_vm_call_meta(vm, cando_as_handle(a),
                                            (struct CdoString *)g_meta_len,
                                            &a_copy, 1)) {
                         cando_value_release(a);
@@ -2575,7 +2575,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     }
                     cando_value_release(a_copy);
                 }
-                CdoObject *obj = cando_bridge_resolve(vm, a.as.handle);
+                CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(a));
                 u32 len = cdo_object_length(obj);
                 cando_value_release(a);
                 PUSH(cando_number((f64)len));
@@ -2593,9 +2593,9 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "IN operator requires an object");
                 goto handle_error;
             }
-            CdoObject  *obj     = cando_bridge_resolve(vm, obj_val.as.handle);
+            CdoObject  *obj     = cando_bridge_resolve(vm, cando_as_handle(obj_val));
             CandoValue  arr_val = cando_bridge_new_array(vm);
-            CdoObject  *arr     = cando_bridge_resolve(vm, arr_val.as.handle);
+            CdoObject  *arr     = cando_bridge_resolve(vm, cando_as_handle(arr_val));
             u32 si = obj->fifo_head;
             while (si != UINT32_MAX) {
                 ObjSlot *slot = &obj->slots[si];
@@ -2615,9 +2615,9 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "OF operator requires an object");
                 goto handle_error;
             }
-            CdoObject  *obj     = cando_bridge_resolve(vm, obj_val.as.handle);
+            CdoObject  *obj     = cando_bridge_resolve(vm, cando_as_handle(obj_val));
             CandoValue  arr_val = cando_bridge_new_array(vm);
-            CdoObject  *arr     = cando_bridge_resolve(vm, arr_val.as.handle);
+            CdoObject  *arr     = cando_bridge_resolve(vm, cando_as_handle(arr_val));
             u32 si = obj->fifo_head;
             while (si != UINT32_MAX) {
                 ObjSlot *slot = &obj->slots[si];
@@ -2752,7 +2752,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * function whose OP_LOAD_UPVAL/OP_STORE_UPVAL access *its*
              * captures, not whatever the parent frame happened to share. */
             u16 ci    = READ_U16();
-            u32 fn_pc = (u32)frame->closure->chunk->constants[ci].as.number;
+            u32 fn_pc = (u32)cando_as_number(frame->closure->chunk->constants[ci]);
 
             u16 cap_count = READ_U16();
 
@@ -2854,7 +2854,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             /* Positive number: user-defined function stored as PC offset
              * in the current chunk (parser emits cando_number((f64)fn_start)). */
             if (cando_is_number(callee)) {
-                u32 pc = (u32)callee.as.number;
+                u32 pc = (u32)cando_as_number(callee);
                 SYNC_IP();
                 if (!vm_push_frame(vm, frame->closure,
                                    frame->closure->chunk->code + pc,
@@ -2866,7 +2866,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
 
             if (!cando_is_object(callee)) {
                 vm_runtime_error(vm, "can only call functions (got %s)",
-                                 cando_value_type_name((TypeTag)callee.tag));
+                                 cando_value_type_name(cando_value_tag(callee)));
                 goto handle_error;
             }
 
@@ -2874,7 +2874,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * fn.script.bytecode  = (void *)CandoClosure *
              * fn.script.param_count = fn_pc (byte offset of function body) */
             {
-                CdoObject *fn_obj = cando_bridge_resolve(vm, callee.as.handle);
+                CdoObject *fn_obj = cando_bridge_resolve(vm, cando_as_handle(callee));
                 if (fn_obj && fn_obj->kind == OBJ_FUNCTION &&
                     fn_obj->fn.script.bytecode) {
                     CandoClosure *fn_closure =
@@ -2943,26 +2943,26 @@ static CandoVMResult vm_run(CandoVM *vm) {
             if (cando_is_string(receiver)) {
                 if (cando_is_object(vm->string_proto)) {
                     CandoValue name_val = frame->closure->chunk->constants[name_ci];
-                    CdoString *skey = cando_bridge_intern_key(name_val.as.string);
-                    CdoObject *sproto = cando_bridge_resolve(vm, vm->string_proto.as.handle);
+                    CdoString *skey = cando_bridge_intern_key(cando_as_string(name_val));
+                    CdoObject *sproto = cando_bridge_resolve(vm, cando_as_handle(vm->string_proto));
                     cdo_object_get(sproto, skey, &method_cdo);
                     cdo_string_release(skey);
                 }
             } else if (cando_is_object(receiver)) {
-                CdoObject *robj = cando_bridge_resolve(vm, receiver.as.handle);
+                CdoObject *robj = cando_bridge_resolve(vm, cando_as_handle(receiver));
                 CandoValue name_val = frame->closure->chunk->constants[name_ci];
-                CdoString *key = cando_bridge_intern_key(name_val.as.string);
+                CdoString *key = cando_bridge_intern_key(cando_as_string(name_val));
 
                 /* Array method special case: look in array_proto if not found in array object. */
                 if (robj->kind == OBJ_ARRAY && cando_is_object(vm->array_proto)) {
                     if (!cdo_object_get(robj, key, &method_cdo)) {
-                        CdoObject *aproto = cando_bridge_resolve(vm, vm->array_proto.as.handle);
+                        CdoObject *aproto = cando_bridge_resolve(vm, cando_as_handle(vm->array_proto));
                         cdo_object_get(aproto, key, &method_cdo);
                     }
                 } else if (robj->kind == OBJ_THREAD && cando_is_object(vm->thread_proto)) {
                     /* Thread instances have no slot table; methods live on
                      * the cached `_meta.thread` prototype. */
-                    CdoObject *tproto = cando_bridge_resolve(vm, vm->thread_proto.as.handle);
+                    CdoObject *tproto = cando_bridge_resolve(vm, cando_as_handle(vm->thread_proto));
                     cdo_object_get(tproto, key, &method_cdo);
                 } else {
                     cdo_object_get(robj, key, &method_cdo);
@@ -2970,7 +2970,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cdo_string_release(key);
             } else {
                 vm_runtime_error(vm, "method call on non-object (got %s)",
-                                 cando_value_type_name((TypeTag)receiver.tag));
+                                 cando_value_type_name(cando_value_tag(receiver)));
                 goto handle_error;
             }
 
@@ -2981,7 +2981,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             if (IS_NATIVE_FN(method)) callable = true;
             else if (cando_is_number(method)) callable = true;
             else if (cando_is_object(method)) {
-                CdoObject *mo = cando_bridge_resolve(vm, method.as.handle);
+                CdoObject *mo = cando_bridge_resolve(vm, cando_as_handle(method));
                 if (mo->kind == OBJ_FUNCTION || mo->kind == OBJ_NATIVE) callable = true;
             }
 
@@ -3044,7 +3044,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
 
             /* OBJ_NATIVE object */
             if (cando_is_object(method)) {
-                CdoObject *mo = cando_bridge_resolve(vm, method.as.handle);
+                CdoObject *mo = cando_bridge_resolve(vm, cando_as_handle(method));
                 if (mo->kind == OBJ_NATIVE) {
                     CdoValue *cdo_args = (CdoValue *)cando_alloc(total_argc * sizeof(CdoValue));
                     for (u32 i = 0; i < total_argc; i++) cdo_args[i] = cando_bridge_to_cdo(vm, base[i + 1]);
@@ -3076,7 +3076,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
 
             /* OBJ_FUNCTION (script closure) */
             if (cando_is_object(method)) {
-                CdoObject *fn_obj = cando_bridge_resolve(vm, method.as.handle);
+                CdoObject *fn_obj = cando_bridge_resolve(vm, cando_as_handle(method));
                 if (fn_obj->kind == OBJ_FUNCTION && fn_obj->fn.script.bytecode) {
                     CandoClosure *fn_closure = (CandoClosure *)fn_obj->fn.script.bytecode;
                     u32 fn_pc = fn_obj->fn.script.param_count;
@@ -3095,7 +3095,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * not pre-allocate local nulls; vm_push_frame will fill them
              * if the chunk declares any (no-op when local_count == 0).  */
             if (cando_is_number(method)) {
-                u32 pc = (u32)method.as.number;
+                u32 pc = (u32)cando_as_number(method);
                 SYNC_IP();
                 if (!vm_push_frame(vm, frame->closure,
                                    frame->closure->chunk->code + pc,
@@ -3244,7 +3244,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * a following OP_ARRAY_SPREAD can accumulate the extra count. */
             CandoValue v = POP();
             if (cando_is_object(v)) {
-                CdoObject *obj = cando_bridge_resolve(vm, (HandleIndex)v.as.handle);
+                CdoObject *obj = cando_bridge_resolve(vm, (HandleIndex)cando_as_handle(v));
                 if (obj->kind == OBJ_ARRAY) {
                     u32 len = cdo_array_len(obj);
                     for (u32 ui = 0; ui < len; ui++) {
@@ -3273,15 +3273,15 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "range requires numbers");
                 goto handle_error;
             }
-            i64 from  = (i64)a.as.number;
-            i64 to    = (i64)b.as.number;
+            i64 from  = (i64)cando_as_number(a);
+            i64 to    = (i64)cando_as_number(b);
             /* Build an array so the range is a single value on the stack.
              * This lets it be used as a for-loop iterable, a function
              * argument, an assignment target, etc. without corrupting the
              * call frame. */
             SYNC_IP();
             CandoValue arr_val = cando_bridge_new_array(vm);
-            CdoObject *arr     = cando_bridge_resolve(vm, arr_val.as.handle);
+            CdoObject *arr     = cando_bridge_resolve(vm, cando_as_handle(arr_val));
             for (i64 v = from; v <= to; v++) {
                 CdoValue cv = cdo_number((f64)v);
                 cdo_array_push(arr, cv);
@@ -3295,11 +3295,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "range requires numbers");
                 goto handle_error;
             }
-            i64 from  = (i64)a.as.number;
-            i64 to    = (i64)b.as.number;
+            i64 from  = (i64)cando_as_number(a);
+            i64 to    = (i64)cando_as_number(b);
             SYNC_IP();
             CandoValue arr_val = cando_bridge_new_array(vm);
-            CdoObject *arr     = cando_bridge_resolve(vm, arr_val.as.handle);
+            CdoObject *arr     = cando_bridge_resolve(vm, cando_as_handle(arr_val));
             for (i64 v = from; v >= to; v--) {
                 CdoValue cv = cdo_number((f64)v);
                 cdo_array_push(arr, cv);
@@ -3551,7 +3551,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 goto handle_error;
             }
             CdoObject *src_obj = cando_bridge_resolve(vm,
-                                     (HandleIndex)src.as.handle);
+                                     (HandleIndex)cando_as_handle(src));
             if (src_obj->kind != OBJ_ARRAY) {
                 cando_value_release(src);
                 vm_runtime_error(vm, "pipe/filter (~>/~!>) requires an array source");
@@ -3612,7 +3612,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * Stack after:  [..., result_arr]                               */
             cando_value_release(POP());          /* pop src_idx (number) */
             CandoValue count_v = POP();          /* pop count */
-            i64 n = (i64)count_v.as.number;
+            i64 n = (i64)cando_as_number(count_v);
             for (i64 vi = 0; vi < n; vi++)
                 cando_value_release(POP());      /* pop source values */
             /* result_arr is now on top — leave it as the pipe result. */
@@ -3766,7 +3766,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "await: expected a thread handle");
                 goto handle_error;
             }
-            CdoObject *obj = cando_bridge_resolve(vm, thread_val.as.handle);
+            CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(thread_val));
             if (!obj || obj->kind != OBJ_THREAD) {
                 cando_value_release(thread_val);
                 vm_runtime_error(vm, "await: value is not a thread");
@@ -3793,10 +3793,10 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm->has_error       = true;
                 /* Use the thread's actual error message when it is a string,
                  * so the surfaced error reads like the original throw. */
-                if (cando_is_string(t->error) && t->error.as.string) {
+                if (cando_is_string(t->error) && cando_as_string(t->error)) {
                     snprintf(vm->error_msg, sizeof(vm->error_msg), "%.*s",
-                             (int)t->error.as.string->length,
-                             t->error.as.string->data);
+                             (int)cando_as_string(t->error)->length,
+                             cando_as_string(t->error)->data);
                 } else {
                     snprintf(vm->error_msg, sizeof(vm->error_msg),
                              "thread raised an error");
@@ -3829,7 +3829,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "thread: expected a function");
                 goto handle_error;
             }
-            CdoObject *fn_obj = cando_bridge_resolve(vm, fn_val.as.handle);
+            CdoObject *fn_obj = cando_bridge_resolve(vm, cando_as_handle(fn_val));
             if (!fn_obj || fn_obj->kind != OBJ_FUNCTION) {
                 cando_value_release(fn_val);
                 vm_runtime_error(vm, "thread: value is not a function");
@@ -3901,8 +3901,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
 
             CandoValue cls_val = cando_bridge_new_object(vm);
             if (g_meta_type) {
-                CdoObject  *cls     = cando_bridge_resolve(vm, cls_val.as.handle);
-                CdoString  *cdo_key = cando_bridge_intern_key(name_val.as.string);
+                CdoObject  *cls     = cando_bridge_resolve(vm, cando_as_handle(cls_val));
+                CdoString  *cdo_key = cando_bridge_intern_key(cando_as_string(name_val));
                 CdoValue    tv      = cdo_string_value(cdo_string_retain(cdo_key));
                 cdo_object_rawset(cls, g_meta_type, tv, FIELD_STATIC);
                 cdo_value_release(tv);
@@ -3925,8 +3925,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
             }
             CandoValue name_val = frame->closure->chunk->constants[ci];
             CANDO_ASSERT(cando_is_string(name_val));
-            CdoObject *cls     = cando_bridge_resolve(vm, cls_val.as.handle);
-            CdoString *cdo_key = cando_bridge_intern_key(name_val.as.string);
+            CdoObject *cls     = cando_bridge_resolve(vm, cando_as_handle(cls_val));
+            CdoString *cdo_key = cando_bridge_intern_key(cando_as_string(name_val));
             CdoValue   mv      = cando_bridge_to_cdo(vm, method_val);
             cdo_object_rawset(cls, cdo_key, mv, FIELD_NONE);
             cdo_value_release(mv);
@@ -3946,7 +3946,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 goto handle_error;
             }
             if (g_meta_index) {
-                CdoObject *child  = cando_bridge_resolve(vm, child_val.as.handle);
+                CdoObject *child  = cando_bridge_resolve(vm, cando_as_handle(child_val));
                 CdoValue   pv     = cando_bridge_to_cdo(vm, parent_val);
                 cdo_object_rawset(child, g_meta_index, pv, FIELD_NONE);
                 cdo_value_release(pv);
@@ -3965,7 +3965,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 goto handle_error;
             }
             if (g_meta_call) {
-                CdoObject *cls = cando_bridge_resolve(vm, cls_val.as.handle);
+                CdoObject *cls = cando_bridge_resolve(vm, cando_as_handle(cls_val));
                 CdoValue   cv  = cando_bridge_to_cdo(vm, vm->default_class_call);
                 cdo_object_rawset(cls, g_meta_call, cv, FIELD_NONE);
                 cdo_value_release(cv);
@@ -4070,7 +4070,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CandoValue r = *(vm->stack_top - n + i);
                 if (!cando_is_number(left) || !cando_is_number(r))
                     result = false;
-                else if (!(left.as.number < r.as.number)) result = false;
+                else if (!(cando_as_number(left) < cando_as_number(r))) result = false;
             }
             for (int i = 0; i < n; i++) cando_value_release(POP());
             cando_value_release(POP());
@@ -4085,7 +4085,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CandoValue r = *(vm->stack_top - n + i);
                 if (!cando_is_number(left) || !cando_is_number(r))
                     result = false;
-                else if (!(left.as.number > r.as.number)) result = false;
+                else if (!(cando_as_number(left) > cando_as_number(r))) result = false;
             }
             for (int i = 0; i < n; i++) cando_value_release(POP());
             cando_value_release(POP());
@@ -4100,7 +4100,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CandoValue r = *(vm->stack_top - n + i);
                 if (!cando_is_number(left) || !cando_is_number(r))
                     result = false;
-                else if (!(left.as.number <= r.as.number)) result = false;
+                else if (!(cando_as_number(left) <= cando_as_number(r))) result = false;
             }
             for (int i = 0; i < n; i++) cando_value_release(POP());
             cando_value_release(POP());
@@ -4115,7 +4115,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CandoValue r = *(vm->stack_top - n + i);
                 if (!cando_is_number(left) || !cando_is_number(r))
                     result = false;
-                else if (!(left.as.number >= r.as.number)) result = false;
+                else if (!(cando_as_number(left) >= cando_as_number(r))) result = false;
             }
             for (int i = 0; i < n; i++) cando_value_release(POP());
             cando_value_release(POP());
