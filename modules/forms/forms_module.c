@@ -154,16 +154,15 @@ static void autosize_apply(FormsSlot *s);
 
 /* =========================================================================
  * Manager-thread state machine (lazy-start on first form creation).
+ *
+ * The ManagerState enum lives in src/core/manager.h.  The Win32-bound
+ * manager body (window class, message-only HWND, command queue,
+ * thread bootstrap) stays inlined here until Phase 1 of the rewrite
+ * splits the backend.
  * ===================================================================== */
 
-typedef enum {
-    MGR_UNSTARTED = 0,
-    MGR_STARTING,
-    MGR_RUNNING,
-    MGR_INIT_FAILED,
-    MGR_STOPPING,
-    MGR_STOPPED,
-} ManagerState;
+#include "src/core/manager.h"
+#include "src/core/dispatch.h"
 
 static fm_mutex_t  g_mgr_mutex;
 static fm_cond_t   g_mgr_cond;
@@ -1015,27 +1014,7 @@ static CandoVM   *g_root_vm = NULL;
 static CandoVM    g_dispatch_vm;
 static int        g_dispatch_vm_inited = 0;
 
-/* Map an EventKind to its script-side property name. */
-static const char *event_callback_name(EventKind k)
-{
-    switch (k) {
-    case EV_CLICK:              return "onClick";
-    case EV_CLOSE:              return "onClose";
-    case EV_TEXT_CHANGED:       return "onTextChanged";
-    case EV_VALUE_CHANGED:      return "onValueChanged";
-    case EV_SELECTION_CHANGED:  return "onSelectionChanged";
-    case EV_KEY_DOWN:           return "onKeyDown";
-    case EV_KEY_UP:             return "onKeyUp";
-    case EV_MOUSE_DOWN:         return "onMouseDown";
-    case EV_MOUSE_UP:           return "onMouseUp";
-    case EV_MOUSE_MOVE:         return "onMouseMove";
-    case EV_FOCUS:              return "onFocus";
-    case EV_BLUR:               return "onBlur";
-    case EV_RESIZE:             return "onResize";
-    case EV_SHOWN:              return "onShown";
-    default:                    return NULL;
-    }
-}
+/* event_callback_name moved to src/core/dispatch.{c,h}. */
 
 static void dispatch_one(FormsEvent ev)
 {

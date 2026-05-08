@@ -33,11 +33,12 @@ CFLAGS     = -std=c11 -Wall -Wextra -Wpedantic -fPIC $(INCLUDES)
 # Pure-C support TUs split out under src/core/.  See REWRITE_PLAN.md.
 # Each is free-standing (no Win32, no libcando) so it compiles
 # identically for the .so / .dll / test builds.
-CORE_C     = src/core/color.c src/core/geom.c src/core/events.c \
-             src/core/slots.c
-CORE_H     = src/core/color.h src/core/geom.h src/core/events.h \
-             src/core/sync.h   src/core/cando_compat.h \
-             src/core/slots.h
+CORE_C     = src/core/color.c    src/core/geom.c   src/core/events.c \
+             src/core/slots.c    src/core/dispatch.c
+CORE_H     = src/core/color.h    src/core/geom.h   src/core/events.h \
+             src/core/sync.h     src/core/cando_compat.h \
+             src/core/slots.h    src/core/manager.h \
+             src/core/dispatch.h
 
 ifeq ($(OS),Windows_NT)
     SHARED      = forms.dll
