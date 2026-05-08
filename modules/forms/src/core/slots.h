@@ -62,7 +62,20 @@ typedef enum {
     KIND_KIND_COUNT
 } ControlKind;
 
-#define FORMS_MAX_SLOTS 256
+/* Practical cap on simultaneously-live forms + controls in a process.
+ *
+ * Phase 0.6 raises this from the original 256 to a value that's no
+ * longer a real-world ceiling for any UI a CanDo script is likely to
+ * build (a thousand controls is already far more than any reasonable
+ * form tree).  The slot array is still statically allocated -- a
+ * truly dynamic vector requires either chunked storage with a
+ * per-access indirection or realloc that invalidates cached
+ * FormsSlot* pointers, both of which are bigger surgical changes
+ * than fit in Phase 0's "scaffolding without behaviour change"
+ * mandate.  The dynamic vector lands in Phase 1 alongside the
+ * backend split (REWRITE_PLAN.md). */
+#define FORMS_MAX_SLOTS 4096
+
 #define FORMS_SLOT_KEY  "__forms_slot"
 #define FORMS_GEN_KEY   "__forms_gen"
 #define FORMS_KIND_KEY  "__forms_kind"
