@@ -73,6 +73,8 @@
 #  endif
 #  include <windows.h>
 #  include <commctrl.h>
+#  include <commdlg.h>
+#  include <shlobj.h>
 #  include <process.h>
 #else
 #  include <pthread.h>
@@ -2074,6 +2076,329 @@ static int native_notify_hide(CandoVM *vm, int argc, CandoValue *args)
     }
     cando_vm_push(vm, args[0]);
     return 1;
+}
+
+/* =========================================================================
+ * Phase 4.2 -- common dialogs.
+ *
+ * MessageBox + OpenFileDialog + SaveFileDialog + FolderBrowserDialog +
+ * ColorDialog + FontDialog.  These are module-level helper functions
+ * rather than control instances -- each call blocks until the user
+ * dismisses the dialog and returns a string / object / NULL.
+ *
+ * They run on the calling thread; Win32 is OK with that for the
+ * common-controls dialogs as long as OLE is initialised (file dialogs
+ * use IFileDialog, which needs CoInitialize).
+ * ===================================================================== */
+
+#if FORMS_HAVE_WIN32
+
+/* String helpers used by the dialog filter parser ("Text|*.txt|All|*.*"
+ * -> a pair of NUL-separated wide strings the legacy GetOpenFileName
+ * and friends consume). */
+static int filter_to_wide_pairs(const char *u8, wchar_t *out, int outcap)
+{
+    if (!u8 || outcap <= 0) { if (outcap > 1) { out[0] = 0; out[1] = 0; } return 0; }
+    int wpos = 0;
+    int n = (int)strlen(u8);
+    int i = 0, start = 0;
+    while (i <= n) {
+        if (i == n || u8[i] == '|') {
+            int len = i - start;
+            wchar_t *t = utf8_to_wide(u8 + start, len);
+            if (t) {
+                int tn = (int)wcslen(t);
+                if (wpos + tn + 1 >= outcap) { free(t); break; }
+                memcpy(out + wpos, t, sizeof(wchar_t) * tn);
+                wpos += tn;
+                out[wpos++] = 0;
+                free(t);
+            }
+            start = i + 1;
+        }
+        i++;
+    }
+    /* Double-NUL terminate the filter pair list. */
+    if (wpos < outcap) out[wpos++] = 0;
+    if (wpos < outcap) out[wpos]   = 0;
+    return wpos;
+}
+
+#endif
+
+/* forms.MessageBox(text, [title], [opts])
+ *   opts.buttons: "ok" | "okCancel" | "yesNo" | "yesNoCancel" | "abortRetryIgnore"
+ *   opts.icon:    "info" | "warning" | "error" | "question" | "none"
+ * Returns "ok" | "cancel" | "yes" | "no" | "abort" | "retry" | "ignore". */
+static int native_messagebox(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (!require_supported(vm, "forms.MessageBox")) return -1;
+    char text[1024]  = {0};
+    char title[256]  = "Notice";
+    /* Internal abstract codes mapped to MB_* inside the Win32 block. */
+    int  buttons     = 0;     /* 0=ok 1=okCancel 2=yesNo 3=yesNoCancel 4=abortRetryIgnore */
+    int  icon        = 0;     /* 0=none 1=info 2=warning 3=error 4=question */
+    if (argc >= 1) parse_text_arg(vm, args[0], text,  sizeof(text));
+    if (argc >= 2 && args[1].tag == CDO_STRING)
+        parse_text_arg(vm, args[1], title, sizeof(title));
+    if (argc >= 3 && args[2].tag == CDO_OBJECT && args[2].as.handle) {
+        CdoObject *opts = cando_bridge_resolve(vm, args[2].as.handle);
+        if (opts) {
+            CdoValue v;
+            CdoString *kb = cdo_string_intern("buttons", 7);
+            CdoString *ki = cdo_string_intern("icon",    4);
+            if (cdo_object_get(opts, kb, &v) && v.tag == CDO_STRING && v.as.string) {
+                const char *t = v.as.string->data;
+                u32 n = v.as.string->length;
+                if      (n == 8  && memcmp(t, "okCancel",        8)  == 0) buttons = 1;
+                else if (n == 5  && memcmp(t, "yesNo",           5)  == 0) buttons = 2;
+                else if (n == 11 && memcmp(t, "yesNoCancel",    11)  == 0) buttons = 3;
+                else if (n == 16 && memcmp(t, "abortRetryIgnore", 16) == 0) buttons = 4;
+            }
+            if (cdo_object_get(opts, ki, &v) && v.tag == CDO_STRING && v.as.string) {
+                const char *t = v.as.string->data;
+                u32 n = v.as.string->length;
+                if      (n == 4 && memcmp(t, "info",     4) == 0) icon = 1;
+                else if (n == 7 && memcmp(t, "warning",  7) == 0) icon = 2;
+                else if (n == 5 && memcmp(t, "error",    5) == 0) icon = 3;
+                else if (n == 8 && memcmp(t, "question", 8) == 0) icon = 4;
+            }
+            cdo_string_release(kb);
+            cdo_string_release(ki);
+        }
+    }
+    const char *result = "ok";
+#if FORMS_HAVE_WIN32
+    UINT mb_buttons = MB_OK;
+    switch (buttons) {
+    case 1: mb_buttons = MB_OKCANCEL; break;
+    case 2: mb_buttons = MB_YESNO;    break;
+    case 3: mb_buttons = MB_YESNOCANCEL; break;
+    case 4: mb_buttons = MB_ABORTRETRYIGNORE; break;
+    }
+    UINT mb_icon = 0;
+    switch (icon) {
+    case 1: mb_icon = MB_ICONINFORMATION; break;
+    case 2: mb_icon = MB_ICONWARNING;     break;
+    case 3: mb_icon = MB_ICONERROR;       break;
+    case 4: mb_icon = MB_ICONQUESTION;    break;
+    }
+    wchar_t *wt = utf8_to_wide(text,  -1);
+    wchar_t *wh = utf8_to_wide(title, -1);
+    int r = MessageBoxW(NULL, wt ? wt : L"", wh ? wh : L"",
+                        mb_buttons | mb_icon | MB_TASKMODAL);
+    free(wt); free(wh);
+    switch (r) {
+    case IDOK:     result = "ok";     break;
+    case IDCANCEL: result = "cancel"; break;
+    case IDYES:    result = "yes";    break;
+    case IDNO:     result = "no";     break;
+    case IDABORT:  result = "abort";  break;
+    case IDRETRY:  result = "retry";  break;
+    case IDIGNORE: result = "ignore"; break;
+    default:       result = "cancel"; break;
+    }
+#endif
+    cando_vm_push(vm,
+        cando_string_value(cando_string_new(result, (u32)strlen(result))));
+    return 1;
+}
+
+/* Shared core for OpenFileDialog / SaveFileDialog using the legacy
+ * GetOpenFileNameW / GetSaveFileNameW (no OLE init required, single
+ * dependency on comdlg32 which forms.dll already links).  Returns
+ * the chosen path as a string, or NULL on cancel. */
+static int native_filedialog(CandoVM *vm, int argc, CandoValue *args, int save)
+{
+    if (!require_supported(vm, save ? "forms.SaveFileDialog" : "forms.OpenFileDialog"))
+        return -1;
+    char title[256]   = {0};
+    char filter[1024] = "All files (*.*)|*.*|";
+    char initial[512] = {0};
+    char fname[1024]  = {0};
+    if (argc >= 1 && args[0].tag == CDO_OBJECT && args[0].as.handle) {
+        CdoObject *opts = cando_bridge_resolve(vm, args[0].as.handle);
+        if (opts) {
+            CdoValue v;
+#define GETSTR(name, dst) do { \
+    CdoString *k = cdo_string_intern((name), (u32)strlen(name)); \
+    if (cdo_object_get(opts, k, &v) && v.tag == CDO_STRING && v.as.string) { \
+        u32 n = v.as.string->length; if (n > sizeof(dst)-1) n = sizeof(dst)-1; \
+        memcpy(dst, v.as.string->data, n); dst[n] = 0; \
+    } \
+    cdo_string_release(k); \
+} while (0)
+            GETSTR("title",      title);
+            GETSTR("filter",     filter);
+            GETSTR("initialDir", initial);
+            GETSTR("fileName",   fname);
+#undef GETSTR
+        }
+    }
+#if FORMS_HAVE_WIN32
+    wchar_t wfilter[1024] = {0};
+    filter_to_wide_pairs(filter, wfilter,
+                         (int)(sizeof(wfilter) / sizeof(wfilter[0])));
+    wchar_t wfile[1024] = {0};
+    if (fname[0]) utf8_into_wide_buf(fname, -1, wfile,
+                                     sizeof(wfile) / sizeof(wfile[0]));
+    wchar_t wdir[512] = {0};
+    if (initial[0]) utf8_into_wide_buf(initial, -1, wdir,
+                                       sizeof(wdir) / sizeof(wdir[0]));
+    wchar_t wtitle[256] = {0};
+    if (title[0]) utf8_into_wide_buf(title, -1, wtitle,
+                                     sizeof(wtitle) / sizeof(wtitle[0]));
+    OPENFILENAMEW ofn; memset(&ofn, 0, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = wfilter;
+    ofn.lpstrFile   = wfile;
+    ofn.nMaxFile    = (DWORD)(sizeof(wfile) / sizeof(wfile[0]));
+    ofn.lpstrInitialDir = wdir[0] ? wdir : NULL;
+    ofn.lpstrTitle  = wtitle[0] ? wtitle : NULL;
+    ofn.Flags       = OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR |
+                      (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
+    BOOL ok = save ? GetSaveFileNameW(&ofn) : GetOpenFileNameW(&ofn);
+    if (!ok) {
+        cando_vm_push(vm, cando_null());
+        return 1;
+    }
+    char *u8 = wide_to_utf8(wfile);
+    if (u8) {
+        cando_vm_push(vm,
+            cando_string_value(cando_string_new(u8, (u32)strlen(u8))));
+        free(u8);
+        return 1;
+    }
+#endif
+    cando_vm_push(vm, cando_null());
+    return 1;
+}
+
+static int native_open_file_dialog(CandoVM *vm, int argc, CandoValue *args)
+{ return native_filedialog(vm, argc, args, 0); }
+static int native_save_file_dialog(CandoVM *vm, int argc, CandoValue *args)
+{ return native_filedialog(vm, argc, args, 1); }
+
+static int native_folder_dialog(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (!require_supported(vm, "forms.FolderBrowserDialog")) return -1;
+    char title[256] = "Select folder";
+    if (argc >= 1 && args[0].tag == CDO_OBJECT && args[0].as.handle) {
+        CdoObject *opts = cando_bridge_resolve(vm, args[0].as.handle);
+        if (opts) {
+            CdoValue v;
+            CdoString *k = cdo_string_intern("title", 5);
+            if (cdo_object_get(opts, k, &v) && v.tag == CDO_STRING && v.as.string) {
+                u32 n = v.as.string->length;
+                if (n > sizeof(title) - 1) n = sizeof(title) - 1;
+                memcpy(title, v.as.string->data, n); title[n] = 0;
+            }
+            cdo_string_release(k);
+        }
+    }
+#if FORMS_HAVE_WIN32
+    wchar_t wtitle[256] = {0};
+    utf8_into_wide_buf(title, -1, wtitle, sizeof(wtitle) / sizeof(wtitle[0]));
+    BROWSEINFOW bi; memset(&bi, 0, sizeof(bi));
+    bi.lpszTitle = wtitle;
+    bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+    if (!pidl) { cando_vm_push(vm, cando_null()); return 1; }
+    wchar_t buf[MAX_PATH] = {0};
+    BOOL ok = SHGetPathFromIDListW(pidl, buf);
+    CoTaskMemFree(pidl);
+    if (!ok) { cando_vm_push(vm, cando_null()); return 1; }
+    char *u8 = wide_to_utf8(buf);
+    if (u8) {
+        cando_vm_push(vm,
+            cando_string_value(cando_string_new(u8, (u32)strlen(u8))));
+        free(u8);
+        return 1;
+    }
+#endif
+    cando_vm_push(vm, cando_null());
+    return 1;
+}
+
+static int native_color_dialog(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (!require_supported(vm, "forms.ColorDialog")) return -1;
+    unsigned int initial = 0;
+    if (argc >= 1) {
+        unsigned int rgb = 0;
+        if (args[0].tag == CDO_NUMBER) {
+            initial = ((unsigned)args[0].as.number) & 0xFFFFFFu;
+        } else if (args[0].tag == CDO_STRING && args[0].as.string) {
+            if (parse_hex_color(args[0].as.string->data,
+                                args[0].as.string->length, &rgb) ||
+                lookup_named_color(args[0].as.string->data,
+                                   args[0].as.string->length, &rgb)) {
+                initial = rgb;
+            }
+        }
+    }
+#if FORMS_HAVE_WIN32
+    static COLORREF custom[16] = {0};
+    CHOOSECOLORW cc; memset(&cc, 0, sizeof(cc));
+    cc.lStructSize = sizeof(cc);
+    cc.rgbResult   = rgb_to_colorref(initial);
+    cc.lpCustColors = custom;
+    cc.Flags       = CC_RGBINIT | CC_FULLOPEN | CC_ANYCOLOR;
+    if (!ChooseColorW(&cc)) {
+        cando_vm_push(vm, cando_null());
+        return 1;
+    }
+    cando_vm_push(vm,
+        cando_number((f64)colorref_to_rgb((unsigned int)cc.rgbResult)));
+    return 1;
+#else
+    (void)initial;
+    cando_vm_push(vm, cando_null());
+    return 1;
+#endif
+}
+
+static int native_font_dialog(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (!require_supported(vm, "forms.FontDialog")) return -1;
+    (void)argc; (void)args;
+#if FORMS_HAVE_WIN32
+    LOGFONTW lf; memset(&lf, 0, sizeof(lf));
+    HDC dc = GetDC(NULL);
+    lf.lfHeight = -MulDiv(11, GetDeviceCaps(dc, LOGPIXELSY), 72);
+    ReleaseDC(NULL, dc);
+    wcsncpy(lf.lfFaceName, L"Segoe UI", LF_FACESIZE - 1);
+    CHOOSEFONTW cf; memset(&cf, 0, sizeof(cf));
+    cf.lStructSize = sizeof(cf);
+    cf.lpLogFont   = &lf;
+    cf.Flags       = CF_INITTOLOGFONTSTRUCT | CF_SCREENFONTS | CF_EFFECTS;
+    if (!ChooseFontW(&cf)) {
+        cando_vm_push(vm, cando_null());
+        return 1;
+    }
+    /* Build a {face, size, bold, italic, underline, strikeout} object. */
+    CandoValue v = cando_bridge_new_object(vm);
+    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    char *face = wide_to_utf8(lf.lfFaceName);
+    if (face) {
+        obj_set_string(obj, "face", face, (u32)strlen(face));
+        free(face);
+    }
+    HDC dc2 = GetDC(NULL);
+    int pt = MulDiv(-lf.lfHeight, 72, GetDeviceCaps(dc2, LOGPIXELSY));
+    ReleaseDC(NULL, dc2);
+    if (pt <= 0) pt = 11;
+    obj_set_number(obj, "size",       (f64)pt);
+    obj_set_bool  (obj, "bold",       lf.lfWeight >= FW_BOLD);
+    obj_set_bool  (obj, "italic",     lf.lfItalic    ? true : false);
+    obj_set_bool  (obj, "underline",  lf.lfUnderline ? true : false);
+    obj_set_bool  (obj, "strikeout",  lf.lfStrikeOut ? true : false);
+    cando_vm_push(vm, v);
+    return 1;
+#else
+    cando_vm_push(vm, cando_null());
+    return 1;
+#endif
 }
 
 static int native_notify_balloon(CandoVM *vm, int argc, CandoValue *args)
@@ -4428,6 +4753,13 @@ CandoValue cando_module_init(CandoVM *vm)
     /* Phase 4 non-visual + tray. */
     libutil_set_method(vm, obj, "Timer",            native_timer_create);
     libutil_set_method(vm, obj, "NotifyIcon",       native_notifyicon_create);
+    /* Phase 4.2 -- common dialogs. */
+    libutil_set_method(vm, obj, "MessageBox",          native_messagebox);
+    libutil_set_method(vm, obj, "OpenFileDialog",      native_open_file_dialog);
+    libutil_set_method(vm, obj, "SaveFileDialog",      native_save_file_dialog);
+    libutil_set_method(vm, obj, "FolderBrowserDialog", native_folder_dialog);
+    libutil_set_method(vm, obj, "ColorDialog",         native_color_dialog);
+    libutil_set_method(vm, obj, "FontDialog",          native_font_dialog);
 
     /* forms.Color -- a small palette of CSS-style named colours that
      * scripts can drop straight into setForeColor / setBackColor without
