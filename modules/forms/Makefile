@@ -30,6 +30,12 @@ INCLUDES   = -iquote $(ROOT)/source -iquote $(ROOT)/source/core \
 
 CFLAGS     = -std=c11 -Wall -Wextra -Wpedantic -fPIC $(INCLUDES)
 
+# Pure-C support TUs split out under src/core/.  See REWRITE_PLAN.md.
+# Each is free-standing (no Win32, no libcando) so it compiles
+# identically for the .so / .dll / test builds.
+CORE_C     = src/core/color.c src/core/geom.c
+CORE_H     = src/core/color.h src/core/geom.h
+
 ifeq ($(OS),Windows_NT)
     SHARED      = forms.dll
     LDLIBS      = -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lole32 -luuid
@@ -55,17 +61,17 @@ all: $(SHARED) test_forms
 # present but every native errors with "forms is Windows-only" so scripts
 # can do a feature check without crashing.)
 # ---------------------------------------------------------------------------
-forms.so: forms_module.c
-	$(CC) $(CFLAGS) -shared forms_module.c -o $@ $(LDLIBS)
+forms.so: forms_module.c $(CORE_C) $(CORE_H)
+	$(CC) $(CFLAGS) -shared forms_module.c $(CORE_C) -o $@ $(LDLIBS)
 
-forms.dylib: forms_module.c
+forms.dylib: forms_module.c $(CORE_C) $(CORE_H)
 	$(CC) $(CFLAGS) -dynamiclib -undefined dynamic_lookup \
-	    forms_module.c -o $@ $(LDLIBS)
+	    forms_module.c $(CORE_C) -o $@ $(LDLIBS)
 
 # ---------------------------------------------------------------------------
 # Windows DLL (cross-compile from Linux).  Real Win32 backend.
 # ---------------------------------------------------------------------------
-forms.dll: forms_module.c
+forms.dll: forms_module.c $(CORE_C) $(CORE_H)
 	$(MINGW_CC) -std=c11 -Wall -Wextra -Wpedantic -DCANDO_PLATFORM_WINDOWS \
 	    -D_WIN32_WINNT=0x0600 -DUNICODE -D_UNICODE \
 	    -iquote $(ROOT)/source -iquote $(ROOT)/source/core \
@@ -73,7 +79,7 @@ forms.dll: forms_module.c
 	    -iquote $(ROOT)/source/object -iquote $(ROOT)/source/compat \
 	    -I$(ROOT)/include \
 	    -static-libgcc \
-	    -shared forms_module.c -o $@ \
+	    -shared forms_module.c $(CORE_C) -o $@ \
 	    -L$(ROOT) -lcando \
 	    -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive \
 	    -Wl,-Bdynamic -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lole32 -luuid \
@@ -84,9 +90,9 @@ forms.dll: forms_module.c
 # property name dispatcher).  Compile the C tests with no Win32 deps so
 # they run on Linux CI even though the runtime backend is Windows-only.
 # ---------------------------------------------------------------------------
-test_forms: test_forms.c forms_module.c
+test_forms: test_forms.c forms_module.c $(CORE_C) $(CORE_H)
 	$(CC) $(CFLAGS) -DFORMS_MODULE_TEST_BUILD \
-	    test_forms.c -o $@ $(LDLIBS)
+	    test_forms.c $(CORE_C) -o $@ $(LDLIBS)
 
 test: test_forms
 	./test_forms

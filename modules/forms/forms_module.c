@@ -204,13 +204,10 @@ typedef enum {
 #define FORMS_GEN_KEY   "__forms_gen"
 #define FORMS_KIND_KEY  "__forms_kind"
 
-/* Docking constants.  Mirror System.Windows.Forms.DockStyle. */
-#define FORMS_DOCK_NONE   0
-#define FORMS_DOCK_TOP    1
-#define FORMS_DOCK_BOTTOM 2
-#define FORMS_DOCK_LEFT   3
-#define FORMS_DOCK_RIGHT  4
-#define FORMS_DOCK_FILL   5
+/* Docking constants + DockRect + compute_dock_rect now live in
+ * src/core/geom.h.  Pulled in below so the rest of this file (and the
+ * test build via forms_module.c #include) keeps seeing them. */
+#include "src/core/geom.h"
 
 /* Anchor flags.  Combine via bitwise-or; defaults to LEFT|TOP. */
 #define FORMS_ANCHOR_NONE   0
@@ -242,191 +239,12 @@ typedef enum {
 #define FORMS_CURSOR_HELP      12
 #define FORMS_CURSOR_APPSTART  13
 
-/* Pure-C dock-rect peel.  Lives outside any conditional so the test
- * build (which strips Win32) can still exercise it.  Given a parent's
- * remaining client rect (read/written via *left, *top, *right, *bottom)
- * and a child's preferred width/height, returns the rect the child
- * should occupy and updates the remainder.  FILL is a no-op here --
- * callers handle FILL by reading whatever's left after every other
- * child has peeled its rect. */
-typedef struct DockRect { int x, y, w, h; } DockRect;
-
-static void compute_dock_rect(int dock, int child_w, int child_h,
-                              int *left, int *top, int *right, int *bottom,
-                              DockRect *out)
-{
-    int x = *left, y = *top, w = *right - *left, h = *bottom - *top;
-    switch (dock) {
-    case FORMS_DOCK_TOP:
-        h = child_h; *top    += child_h;
-        break;
-    case FORMS_DOCK_BOTTOM:
-        y = *bottom - child_h; h = child_h; *bottom -= child_h;
-        break;
-    case FORMS_DOCK_LEFT:
-        w = child_w; *left   += child_w;
-        break;
-    case FORMS_DOCK_RIGHT:
-        x = *right  - child_w; w = child_w; *right  -= child_w;
-        break;
-    case FORMS_DOCK_FILL:
-    case FORMS_DOCK_NONE:
-    default:
-        break;
-    }
-    out->x = x; out->y = y; out->w = w; out->h = h;
-}
-
-/* =========================================================================
- * Pure-C colour helpers.  Live above the test-build / Win32 boundary so
- * the C unit tests can link against them directly (test_forms.c includes
- * the .c with FORMS_MODULE_TEST_BUILD set, which strips the Win32 +
- * libcando-bound paths but keeps these).
- *
- * Internal representation is the Win32 COLORREF byte order (0x00BBGGRR);
- * scripts see/use 0xRRGGBB.  rgb_to_colorref / colorref_to_rgb mediate.
- * ===================================================================== */
-
-typedef struct NamedColor {
-    const char  *name;
-    unsigned int rgb;       /* 0xRRGGBB                                   */
-} NamedColor;
-
-/* CSS-style named colour table.  Keys are lowercase so the case-insensitive
- * matcher only has to fold the input. */
-static const NamedColor g_named_colors[] = {
-    { "black",            0x000000 },
-    { "white",            0xFFFFFF },
-    { "red",              0xFF0000 },
-    { "green",            0x008000 },   /* CSS-green, not lime */
-    { "blue",             0x0000FF },
-    { "yellow",           0xFFFF00 },
-    { "cyan",             0x00FFFF },
-    { "magenta",          0xFF00FF },
-    { "orange",           0xFFA500 },
-    { "purple",           0x800080 },
-    { "gray",             0x808080 },
-    { "grey",             0x808080 },   /* spelling alias */
-    { "lightgray",        0xD3D3D3 },
-    { "lightgrey",        0xD3D3D3 },
-    { "darkgray",         0xA9A9A9 },
-    { "darkgrey",         0xA9A9A9 },
-    { "silver",           0xC0C0C0 },
-    { "navy",             0x000080 },
-    { "teal",             0x008080 },
-    { "olive",            0x808000 },
-    { "maroon",           0x800000 },
-    { "lime",             0x00FF00 },
-    { "aqua",             0x00FFFF },
-    { "fuchsia",          0xFF00FF },
-    { "pink",             0xFFC0CB },
-    { "brown",            0xA52A2A },
-    { "gold",             0xFFD700 },
-    { "salmon",           0xFA8072 },
-    { "coral",            0xFF7F50 },
-    { "tomato",           0xFF6347 },
-    { "indigo",           0x4B0082 },
-    { "violet",           0xEE82EE },
-    { "khaki",            0xF0E68C },
-    { "beige",            0xF5F5DC },
-    { "ivory",            0xFFFFF0 },
-    { "snow",             0xFFFAFA },
-    { "azure",            0xF0FFFF },
-    { "mint",             0xF5FFFA },
-    /* Useful Win32 system-ish defaults: */
-    { "buttonface",       0xF0F0F0 },
-    { "windowbg",         0xFFFFFF },
-    { "controltext",      0x000000 },
-    /* WinForms common picks. */
-    { "cornflowerblue",   0x6495ED },
-    { "dodgerblue",       0x1E90FF },
-    { "steelblue",        0x4682B4 },
-    { "skyblue",          0x87CEEB },
-    { "darkred",          0x8B0000 },
-    { "darkgreen",        0x006400 },
-    { "darkblue",         0x00008B },
-    { "lightyellow",      0xFFFFE0 },
-    { "lightblue",        0xADD8E6 },
-    { "lightgreen",       0x90EE90 },
-    { "transparent",      0x000000 },   /* synthetic; needs has_back=0   */
-    { NULL, 0 }
-};
-
-/* Case-insensitive comparison on a byte range.  Table keys are all
- * lowercase ASCII so this plain tolower fold suffices regardless of
- * locale -- we deliberately don't reach into ctype. */
-static int ci_strneq(const char *a, const char *b, u32 n)
-{
-    for (u32 i = 0; i < n; i++) {
-        unsigned char ac = (unsigned char)a[i];
-        unsigned char bc = (unsigned char)b[i];
-        if (ac >= 'A' && ac <= 'Z') ac = (unsigned char)(ac + 32);
-        if (bc >= 'A' && bc <= 'Z') bc = (unsigned char)(bc + 32);
-        if (ac != bc) return 0;
-    }
-    return 1;
-}
-
-/* Look up `name` in g_named_colors.  Returns 1 on hit (writes *rgb_out
- * as 0xRRGGBB), 0 otherwise. */
-static int lookup_named_color(const char *name, u32 n, unsigned int *rgb_out)
-{
-    if (!name || n == 0) return 0;
-    for (const NamedColor *p = g_named_colors; p->name; p++) {
-        u32 keylen = (u32)strlen(p->name);
-        if (keylen != n) continue;
-        if (ci_strneq(name, p->name, n)) { *rgb_out = p->rgb; return 1; }
-    }
-    return 0;
-}
-
-/* Parse "#RRGGBB", "#RGB" (CSS-style 3-digit shorthand), "#AARRGGBB"
- * (alpha dropped) or the same without the leading '#'.  Returns 1 on
- * success and writes the canonical 0xRRGGBB into *rgb_out. */
-static int parse_hex_color(const char *s, u32 n, unsigned int *rgb_out)
-{
-    if (!s || n == 0) return 0;
-    if (s[0] == '#') { s++; n--; }
-    if (n != 3 && n != 6 && n != 8) return 0;
-    unsigned int v = 0;
-    for (u32 i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        unsigned int d;
-        if      (c >= '0' && c <= '9') d = (unsigned)c - '0';
-        else if (c >= 'a' && c <= 'f') d = (unsigned)c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') d = (unsigned)c - 'A' + 10;
-        else return 0;
-        v = (v << 4) | d;
-    }
-    if (n == 3) {
-        unsigned r = (v >> 8) & 0xF;
-        unsigned g = (v >> 4) & 0xF;
-        unsigned b = (v     ) & 0xF;
-        v = ((r * 0x11) << 16) | ((g * 0x11) << 8) | (b * 0x11);
-    } else if (n == 8) {
-        v &= 0x00FFFFFFu;          /* drop alpha */
-    }
-    *rgb_out = v & 0xFFFFFFu;
-    return 1;
-}
-
-/* Convert 0xRRGGBB into a Win32 COLORREF (0x00BBGGRR). */
-static unsigned int rgb_to_colorref(unsigned int rgb)
-{
-    unsigned char r = (rgb >> 16) & 0xFF;
-    unsigned char g = (rgb >>  8) & 0xFF;
-    unsigned char b = (rgb >>  0) & 0xFF;
-    return (unsigned int)(((unsigned)b << 16) | ((unsigned)g << 8) | (unsigned)r);
-}
-
-/* Inverse of rgb_to_colorref: COLORREF -> 0xRRGGBB. */
-static unsigned int colorref_to_rgb(unsigned int colorref)
-{
-    unsigned char b = (colorref >> 16) & 0xFF;
-    unsigned char g = (colorref >>  8) & 0xFF;
-    unsigned char r = (colorref >>  0) & 0xFF;
-    return (unsigned int)(((unsigned)r << 16) | ((unsigned)g << 8) | (unsigned)b);
-}
+/* DockRect + compute_dock_rect now live in src/core/geom.h
+ * (#included above).  The colour helpers (NamedColor, g_named_colors,
+ * ci_strneq, lookup_named_color, parse_hex_color, rgb_to_colorref,
+ * colorref_to_rgb) now live in src/core/color.{h,c}; pulled in here
+ * so every existing call site keeps compiling unchanged. */
+#include "src/core/color.h"
 
 typedef struct FormsSlot {
     int          alive;
