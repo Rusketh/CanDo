@@ -30,6 +30,48 @@ INCLUDES   = -iquote $(ROOT)/source -iquote $(ROOT)/source/core \
 
 CFLAGS     = -std=c11 -Wall -Wextra -Wpedantic -fPIC $(INCLUDES)
 
+# Pure-C support TUs split out under src/core/.  See REWRITE_PLAN.md.
+# Each is free-standing (no Win32, no libcando) so it compiles
+# identically for the .so / .dll / test builds.
+CORE_C     = src/core/color.c        src/core/geom.c   src/core/events.c \
+             src/core/slots.c        src/core/dispatch.c \
+             src/core/textconv.c     src/core/layout.c \
+             src/controls/ctl_common.c \
+             src/controls/ctl_checkbox.c \
+             src/controls/ctl_progress.c \
+             src/controls/ctl_trackbar.c \
+             src/controls/ctl_numeric.c \
+             src/controls/ctl_textbox.c \
+             src/controls/ctl_listbox.c \
+             src/controls/ctl_form.c \
+             src/controls/ctl_scrollpanel.c \
+             src/controls/ctl_tabcontrol.c \
+             src/controls/ctl_flowlayout.c \
+             src/controls/ctl_tablelayout.c \
+             src/controls/ctl_splitter.c \
+             src/controls/ctl_treeview.c \
+             src/controls/ctl_listview.c
+CORE_H     = src/core/color.h        src/core/geom.h   src/core/events.h \
+             src/core/sync.h         src/core/cando_compat.h \
+             src/core/slots.h        src/core/manager.h \
+             src/core/dispatch.h     src/core/textconv.h \
+             src/core/layout.h       \
+             src/controls/ctl_common.h \
+             src/controls/ctl_checkbox.h \
+             src/controls/ctl_progress.h \
+             src/controls/ctl_trackbar.h \
+             src/controls/ctl_numeric.h \
+             src/controls/ctl_textbox.h \
+             src/controls/ctl_listbox.h \
+             src/controls/ctl_form.h \
+             src/controls/ctl_scrollpanel.h \
+             src/controls/ctl_tabcontrol.h \
+             src/controls/ctl_flowlayout.h \
+             src/controls/ctl_tablelayout.h \
+             src/controls/ctl_splitter.h \
+             src/controls/ctl_treeview.h \
+             src/controls/ctl_listview.h
+
 ifeq ($(OS),Windows_NT)
     SHARED      = forms.dll
     LDLIBS      = -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lole32 -luuid
@@ -55,17 +97,17 @@ all: $(SHARED) test_forms
 # present but every native errors with "forms is Windows-only" so scripts
 # can do a feature check without crashing.)
 # ---------------------------------------------------------------------------
-forms.so: forms_module.c
-	$(CC) $(CFLAGS) -shared forms_module.c -o $@ $(LDLIBS)
+forms.so: forms_module.c $(CORE_C) $(CORE_H)
+	$(CC) $(CFLAGS) -shared forms_module.c $(CORE_C) -o $@ $(LDLIBS)
 
-forms.dylib: forms_module.c
+forms.dylib: forms_module.c $(CORE_C) $(CORE_H)
 	$(CC) $(CFLAGS) -dynamiclib -undefined dynamic_lookup \
-	    forms_module.c -o $@ $(LDLIBS)
+	    forms_module.c $(CORE_C) -o $@ $(LDLIBS)
 
 # ---------------------------------------------------------------------------
 # Windows DLL (cross-compile from Linux).  Real Win32 backend.
 # ---------------------------------------------------------------------------
-forms.dll: forms_module.c
+forms.dll: forms_module.c $(CORE_C) $(CORE_H)
 	$(MINGW_CC) -std=c11 -Wall -Wextra -Wpedantic -DCANDO_PLATFORM_WINDOWS \
 	    -D_WIN32_WINNT=0x0600 -DUNICODE -D_UNICODE \
 	    -iquote $(ROOT)/source -iquote $(ROOT)/source/core \
@@ -73,10 +115,11 @@ forms.dll: forms_module.c
 	    -iquote $(ROOT)/source/object -iquote $(ROOT)/source/compat \
 	    -I$(ROOT)/include \
 	    -static-libgcc \
-	    -shared forms_module.c -o $@ \
+	    -shared forms_module.c $(CORE_C) -o $@ \
 	    -L$(ROOT) -lcando \
 	    -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive \
 	    -Wl,-Bdynamic -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lole32 -luuid \
+	                  -lshell32 \
 	    -Wl,-Bstatic
 
 # ---------------------------------------------------------------------------
@@ -84,9 +127,9 @@ forms.dll: forms_module.c
 # property name dispatcher).  Compile the C tests with no Win32 deps so
 # they run on Linux CI even though the runtime backend is Windows-only.
 # ---------------------------------------------------------------------------
-test_forms: test_forms.c forms_module.c
+test_forms: test_forms.c forms_module.c $(CORE_C) $(CORE_H)
 	$(CC) $(CFLAGS) -DFORMS_MODULE_TEST_BUILD \
-	    test_forms.c -o $@ $(LDLIBS)
+	    test_forms.c $(CORE_C) -o $@ $(LDLIBS)
 
 test: test_forms
 	./test_forms
