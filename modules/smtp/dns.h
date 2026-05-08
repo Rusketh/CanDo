@@ -43,7 +43,16 @@ typedef struct {
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
 /* ----------------------------------------------------------------------
  * Windows (DnsQuery_A from dnsapi.lib)
+ *
+ * Include winsock2.h before windows.h so the legacy winsock1 headers
+ * pulled in by windows.h don't conflict with anything else in this
+ * translation unit (sockutil.h, spf.h).
  * -------------------------------------------------------------------- */
+#ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <windns.h>
 

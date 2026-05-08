@@ -21,7 +21,16 @@
 #include "smtp_helpers.h"
 #include "dns.h"
 
-#include <arpa/inet.h>
+#if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#else
+#  include <arpa/inet.h>
+#  include <netdb.h>
+#endif
 
 #define SPF_MAX_DEPTH 10
 

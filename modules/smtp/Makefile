@@ -65,6 +65,7 @@ smtp.dylib: smtp_module.c smtp_helpers.h mime.h dns.h dkim.h spf.h storage.h
 # ---------------------------------------------------------------------------
 smtp.dll: smtp_module.c smtp_helpers.h mime.h dns.h dkim.h spf.h storage.h
 	$(MINGW_CC) -std=c11 -Wall -Wextra -Wno-unused-parameter \
+	    -Wno-unused-function -Wno-format-truncation \
 	    -DCANDO_PLATFORM_WINDOWS -D_WIN32_WINNT=0x0600 \
 	    -iquote $(ROOT)/source -iquote $(ROOT)/source/core \
 	    -iquote $(ROOT)/source/parser -iquote $(ROOT)/source/vm \
@@ -72,7 +73,9 @@ smtp.dll: smtp_module.c smtp_helpers.h mime.h dns.h dkim.h spf.h storage.h
 	    -iquote $(ROOT)/source/lib \
 	    -I$(ROOT)/include \
 	    -shared smtp_module.c -o $@ \
-	    -L$(ROOT) -lcando -lssl -lcrypto -lws2_32 -ldnsapi
+	    -L$(ROOT) -lcando \
+	    -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic \
+	    -lws2_32 -ldnsapi -lcrypt32
 
 # ---------------------------------------------------------------------------
 # C unit tests for module-internal helpers

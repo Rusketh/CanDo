@@ -19,7 +19,39 @@
 #include <fcntl.h>
 #include <errno.h>
 
-#if !(defined(_WIN32) || defined(_WIN64))
+#if defined(_WIN32) || defined(_WIN64)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <winsock2.h>      /* gethostname */
+#  include <io.h>            /* _open, _write, _close, _unlink */
+#  include <direct.h>        /* _mkdir */
+#  include <process.h>       /* getpid */
+#  ifndef open
+#    define open  _open
+#  endif
+#  ifndef write
+#    define write _write
+#  endif
+#  ifndef close
+#    define close _close
+#  endif
+#  ifndef unlink
+#    define unlink _unlink
+#  endif
+#  ifndef fsync
+#    define fsync(fd) ((void)(fd))
+#  endif
+#  ifndef O_CREAT
+#    define O_CREAT  _O_CREAT
+#  endif
+#  ifndef O_WRONLY
+#    define O_WRONLY _O_WRONLY
+#  endif
+#  ifndef O_EXCL
+#    define O_EXCL   _O_EXCL
+#  endif
+#else
 #  include <unistd.h>
 #endif
 
@@ -34,7 +66,7 @@ static int mkdirs(const char *path, int mode)
         if (*p == '/') {
             *p = '\0';
 #if defined(_WIN32) || defined(_WIN64)
-            (void)mode; if (mkdir(tmp) != 0 && errno != EEXIST) return -1;
+            (void)mode; if (_mkdir(tmp) != 0 && errno != EEXIST) return -1;
 #else
             if (mkdir(tmp, (mode_t)mode) != 0 && errno != EEXIST) return -1;
 #endif

@@ -48,11 +48,21 @@
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
 #  endif
+   /* winsock2.h must be included before windows.h to avoid the
+    * legacy winsock1 declarations being pulled in implicitly. */
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
 #  include <windows.h>
    typedef CRITICAL_SECTION smtp_mutex_t;
 #  define SMTP_MUTEX_INIT(m)   InitializeCriticalSection(m)
 #  define SMTP_MUTEX_LOCK(m)   EnterCriticalSection(m)
 #  define SMTP_MUTEX_UNLOCK(m) LeaveCriticalSection(m)
+#  ifndef strncasecmp
+#    define strncasecmp _strnicmp
+#  endif
+#  ifndef strcasecmp
+#    define strcasecmp  _stricmp
+#  endif
 #else
 #  include <pthread.h>
 #  include <strings.h>
