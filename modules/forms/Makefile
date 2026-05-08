@@ -119,6 +119,7 @@ forms.dll: forms_module.c $(CORE_C) $(CORE_H)
 	    -L$(ROOT) -lcando \
 	    -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive \
 	    -Wl,-Bdynamic -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lole32 -luuid \
+	                  -lshell32 \
 	    -Wl,-Bstatic
 
 # ---------------------------------------------------------------------------

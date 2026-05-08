@@ -2393,18 +2393,23 @@ static int filter_to_wide_pairs(const char *u8, wchar_t *out, int outcap)
  * ===================================================================== */
 
 /* Set Per-Monitor V2 DPI awareness if the running OS supports it.
- * Idempotent; called once from cando_module_init on Windows. */
+ * Idempotent; called once from cando_module_init on Windows.
+ *
+ * Uses raw HANDLE parameter rather than the DPI_AWARENESS_CONTEXT
+ * typedef so the code compiles against MinGW headers that target
+ * pre-1703 Windows (we set _WIN32_WINNT = 0x0600 / Vista in the
+ * Makefile to keep the rest of the surface portable). */
 static void try_enable_per_monitor_v2(void)
 {
 #if FORMS_HAVE_WIN32
-    typedef BOOL (WINAPI *SetCtxFn)(DPI_AWARENESS_CONTEXT);
+    typedef BOOL (WINAPI *SetCtxFn)(HANDLE);
     HMODULE u32 = GetModuleHandleW(L"user32.dll");
     if (!u32) return;
     SetCtxFn fn = (SetCtxFn)(void *)GetProcAddress(
         u32, "SetProcessDpiAwarenessContext");
     if (fn) {
         /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4 */
-        fn((DPI_AWARENESS_CONTEXT)-4);
+        fn((HANDLE)(LONG_PTR)-4);
     }
 #endif
 }
@@ -2678,7 +2683,9 @@ static int native_folder_dialog(CandoVM *vm, int argc, CandoValue *args)
     BROWSEINFOW bi; memset(&bi, 0, sizeof(bi));
     bi.lpszTitle = wtitle;
     bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+    /* PIDLIST_ABSOLUTE is a Vista+ alias for LPITEMIDLIST; use the
+     * older typedef so older MinGW SDKs still compile. */
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
     if (!pidl) { cando_vm_push(vm, cando_null()); return 1; }
     wchar_t buf[MAX_PATH] = {0};
     BOOL ok = SHGetPathFromIDListW(pidl, buf);
