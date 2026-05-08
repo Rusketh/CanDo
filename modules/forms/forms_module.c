@@ -107,36 +107,11 @@
 /* =========================================================================
  * Tiny mutex / cond / thread wrapper.  libcando does not export its own
  * threading primitives to extension modules, so each binary module bundles
- * its own; this matches the pattern in modules/window.
+ * its own; this matches the pattern in modules/window.  Now lives in
+ * src/core/sync.h so every core TU shares a single source of truth.
  * ===================================================================== */
 
-#if FORMS_HAVE_WIN32
-   typedef CRITICAL_SECTION fm_mutex_t;
-   typedef CONDITION_VARIABLE fm_cond_t;
-   typedef HANDLE             fm_thread_t;
-#  define FM_MUTEX_INIT(m)    InitializeCriticalSection(m)
-#  define FM_MUTEX_DESTROY(m) DeleteCriticalSection(m)
-#  define FM_MUTEX_LOCK(m)    EnterCriticalSection(m)
-#  define FM_MUTEX_UNLOCK(m)  LeaveCriticalSection(m)
-#  define FM_COND_INIT(c)     InitializeConditionVariable(c)
-#  define FM_COND_DESTROY(c)  ((void)(c))
-#  define FM_COND_WAIT(c,m)   SleepConditionVariableCS((c),(m),INFINITE)
-#  define FM_COND_SIGNAL(c)   WakeConditionVariable(c)
-#  define FM_COND_BROADCAST(c) WakeAllConditionVariable(c)
-#else
-   typedef pthread_mutex_t fm_mutex_t;
-   typedef pthread_cond_t  fm_cond_t;
-   typedef pthread_t       fm_thread_t;
-#  define FM_MUTEX_INIT(m)    pthread_mutex_init((m), NULL)
-#  define FM_MUTEX_DESTROY(m) pthread_mutex_destroy(m)
-#  define FM_MUTEX_LOCK(m)    pthread_mutex_lock(m)
-#  define FM_MUTEX_UNLOCK(m)  pthread_mutex_unlock(m)
-#  define FM_COND_INIT(c)     pthread_cond_init((c), NULL)
-#  define FM_COND_DESTROY(c)  pthread_cond_destroy(c)
-#  define FM_COND_WAIT(c,m)   pthread_cond_wait((c),(m))
-#  define FM_COND_SIGNAL(c)   pthread_cond_signal(c)
-#  define FM_COND_BROADCAST(c) pthread_cond_broadcast(c)
-#endif
+#include "src/core/sync.h"
 
 /* =========================================================================
  * obj_set_* helpers (mirrors modules/window).
@@ -357,92 +332,13 @@ static fm_mutex_t g_slot_mutex;
 /* =========================================================================
  * Event queue.
  *
- * Win32 callbacks (WndProc, control notifications) post Event records here.
- * The dispatcher thread drains them and calls user-supplied callbacks via
- * the child VM.  Single global queue, single producer (the manager thread)
- * + single consumer (the dispatcher thread).
+ * Win32 callbacks (WndProc, control notifications) post FormsEvent
+ * records into a single global ring buffer; the dispatcher thread
+ * drains it and calls user-supplied callbacks via the child VM.
+ * Implementation lives in src/core/events.{c,h}.
  * ===================================================================== */
 
-typedef enum {
-    EV_NONE = 0,
-    EV_CLICK,
-    EV_CLOSE,
-    EV_TEXT_CHANGED,
-    EV_VALUE_CHANGED,
-    EV_SELECTION_CHANGED,
-    EV_KEY_DOWN,
-    EV_KEY_UP,
-    EV_MOUSE_DOWN,
-    EV_MOUSE_UP,
-    EV_MOUSE_MOVE,
-    EV_FOCUS,
-    EV_BLUR,
-    EV_RESIZE,
-    EV_SHOWN,
-} EventKind;
-
-typedef struct FormsEvent {
-    EventKind kind;
-    int       slot;
-    int       generation;
-    int       i0, i1, i2;            /* general-purpose ints (button, key)*/
-    double    d0, d1;                /* general-purpose floats (mouse)    */
-} FormsEvent;
-
-#define FORMS_EV_QUEUE_CAP 512
-
-static FormsEvent g_ev_queue[FORMS_EV_QUEUE_CAP];
-static int        g_ev_head = 0;     /* read index                        */
-static int        g_ev_tail = 0;     /* write index                       */
-static fm_mutex_t g_ev_mutex;
-static fm_cond_t  g_ev_cond;
-
-/* Public for unit tests: clear the queue between cases. */
-static void event_queue_reset(void)
-{
-    g_ev_head = 0;
-    g_ev_tail = 0;
-}
-
-/* True if pushing onto a full ring would step on the read cursor. */
-static int event_queue_is_full(void)
-{
-    int next = (g_ev_tail + 1) % FORMS_EV_QUEUE_CAP;
-    return next == g_ev_head;
-}
-
-static int event_queue_is_empty(void)
-{
-    return g_ev_head == g_ev_tail;
-}
-
-/* Producer side -- enqueues if space, drops the new event otherwise (the
- * window module uses the same drop-newest policy for input flooding). */
-static void event_queue_push(FormsEvent ev)
-{
-    FM_MUTEX_LOCK(&g_ev_mutex);
-    if (!event_queue_is_full()) {
-        g_ev_queue[g_ev_tail] = ev;
-        g_ev_tail = (g_ev_tail + 1) % FORMS_EV_QUEUE_CAP;
-        FM_COND_SIGNAL(&g_ev_cond);
-    }
-    FM_MUTEX_UNLOCK(&g_ev_mutex);
-}
-
-/* Consumer side -- pops one event into *out, returns 1 on success or
- * 0 if the queue is empty.  Non-blocking. */
-static int event_queue_try_pop(FormsEvent *out)
-{
-    int ok = 0;
-    FM_MUTEX_LOCK(&g_ev_mutex);
-    if (!event_queue_is_empty()) {
-        *out = g_ev_queue[g_ev_head];
-        g_ev_head = (g_ev_head + 1) % FORMS_EV_QUEUE_CAP;
-        ok = 1;
-    }
-    FM_MUTEX_UNLOCK(&g_ev_mutex);
-    return ok;
-}
+#include "src/core/events.h"
 
 /* =========================================================================
  * Slot allocator.
@@ -552,8 +448,7 @@ static void sync_init_once(void)
     int expected = 0;
     if (atomic_compare_exchange_strong(&once, &expected, 1)) {
         FM_MUTEX_INIT(&g_slot_mutex);
-        FM_MUTEX_INIT(&g_ev_mutex);
-        FM_COND_INIT(&g_ev_cond);
+        event_queue_init();
         FM_MUTEX_INIT(&g_mgr_mutex);
         FM_COND_INIT(&g_mgr_cond);
         atomic_store(&g_sync_inited, 1);
