@@ -157,6 +157,13 @@ static void obj_set_bool(CdoObject *obj, const char *key, bool value)
  * the setText / setFont setters call it from anywhere in the file. */
 static void autosize_apply(FormsSlot *s);
 
+/* Forward decl: meta_name_for_kind is defined just before
+ * cando_module_init (where the meta tables are also built); used by
+ * build_instance to attach the right per-kind meta. */
+#ifndef FORMS_MODULE_TEST_BUILD
+static const char *meta_name_for_kind(ControlKind k);
+#endif
+
 /* =========================================================================
  * Event queue.
  *
@@ -1272,7 +1279,10 @@ static CandoValue build_instance(CandoVM *vm, int slot, ControlKind kind,
     obj_set_number(o, "width",  (f64)w);
     obj_set_number(o, "height", (f64)h);
 
-    cando_lib_meta_attach(vm, o, "forms_control");
+    /* Phase 1.1: per-kind meta table.  cando_lib_meta_attach wires
+     * `o.__index = _meta.<name>`; the per-kind tables chain their
+     * own __index to forms_control_base in cando_module_init. */
+    cando_lib_meta_attach(vm, o, meta_name_for_kind(kind));
 
     g_slots[slot].inst_val      = cando_value_copy(v);
     g_slots[slot].inst_val_held = 1;
@@ -4272,6 +4282,59 @@ static int native_set_range(CandoVM *vm, int argc, CandoValue *args)
 #endif /* !FORMS_MODULE_TEST_BUILD */
 
 /* =========================================================================
+ * Meta-table inheritance + per-kind name lookup.
+ *
+ * Phase 1.1 replaces the single shared "forms_control" meta with a base
+ * table plus per-control-kind tables that prototype-chain to it.
+ * Methods land on the most specific table possible -- e.g. addItem
+ * lives only on forms_listbox / forms_combobox, so calling it on a
+ * Button is a hard error from the VM rather than a silent no-op.
+ * ===================================================================== */
+
+#ifndef FORMS_MODULE_TEST_BUILD
+/* Wire `child.__index = parent` so dispatch on instances stamped with
+ * the child meta falls through to the parent for any name the child
+ * hasn't overridden. */
+static void meta_inherit(CdoObject *child, CdoObject *parent)
+{
+    if (!child || !parent) return;
+    cdo_object_rawset(child, g_meta_index,
+                      cdo_object_value(parent), FIELD_NONE);
+}
+
+/* Map a ControlKind to its meta-table name.  Kept in step with
+ * register_forms_meta_tables below. */
+static const char *meta_name_for_kind(ControlKind k)
+{
+    switch (k) {
+    case KIND_FORM:            return "forms_form";
+    case KIND_BUTTON:          return "forms_button";
+    case KIND_LABEL:           return "forms_label";
+    case KIND_LINKLABEL:       return "forms_linklabel";
+    case KIND_TEXTBOX:         return "forms_textbox";
+    case KIND_CHECKBOX:        return "forms_checkbox";
+    case KIND_RADIO:           return "forms_radiobutton";
+    case KIND_COMBOBOX:        return "forms_combobox";
+    case KIND_LISTBOX:         return "forms_listbox";
+    case KIND_PANEL:           return "forms_panel";
+    case KIND_GROUPBOX:        return "forms_groupbox";
+    case KIND_PROGRESS:        return "forms_progress";
+    case KIND_TRACKBAR:        return "forms_trackbar";
+    case KIND_NUMERIC:         return "forms_numeric";
+    case KIND_PICTUREBOX:      return "forms_picturebox";
+    case KIND_DATETIMEPICKER:  return "forms_datetimepicker";
+    case KIND_MONTHCALENDAR:   return "forms_monthcalendar";
+    case KIND_STATUSBAR:       return "forms_statusbar";
+    case KIND_SPINNER:         return "forms_spinner";
+    case KIND_NONE:
+    case KIND_KIND_COUNT:
+        break;
+    }
+    return "forms_control_base";    /* unreachable from valid slots */
+}
+#endif /* !FORMS_MODULE_TEST_BUILD */
+
+/* =========================================================================
  * Module entry point (chunk 1: minimal -- VERSION + platform fields).
  * Constructors and method tables land in subsequent chunks.
  * ===================================================================== */
@@ -4282,180 +4345,241 @@ CandoValue cando_module_init(CandoVM *vm)
     sync_init_once();
     cando_lib_meta_register(vm);
 
-    /* All forms instances share a single meta table -- methods like
-     * setText / setSize work uniformly across forms and every control. */
-    CdoObject *meta = cando_lib_meta_table(vm, "forms_control");
-    cando_lib_meta_define(vm, meta, "setText",      native_set_text);
-    cando_lib_meta_define(vm, meta, "getText",      native_get_text);
-    cando_lib_meta_define(vm, meta, "setTitle",     native_set_text);     /* alias */
-    cando_lib_meta_define(vm, meta, "setSize",      native_set_size);
-    cando_lib_meta_define(vm, meta, "getSize",      native_get_size);
-    cando_lib_meta_define(vm, meta, "setWidth",     native_set_width);
-    cando_lib_meta_define(vm, meta, "setHeight",    native_set_height);
-    cando_lib_meta_define(vm, meta, "getWidth",     native_get_width);
-    cando_lib_meta_define(vm, meta, "getHeight",    native_get_height);
-    cando_lib_meta_define(vm, meta, "sizeToContent",       native_size_to_content);
-    cando_lib_meta_define(vm, meta, "sizeToContentWidth",  native_size_to_content_width);
-    cando_lib_meta_define(vm, meta, "sizeToContentHeight", native_size_to_content_height);
-    cando_lib_meta_define(vm, meta, "getPreferredSize",    native_get_preferred_size);
-    cando_lib_meta_define(vm, meta, "setLocation",  native_set_location);
-    cando_lib_meta_define(vm, meta, "getLocation",  native_get_location);
-    cando_lib_meta_define(vm, meta, "setPosition",  native_set_location); /* alias */
-    cando_lib_meta_define(vm, meta, "getPosition",  native_get_location); /* alias */
-    cando_lib_meta_define(vm, meta, "show",         native_show);
-    cando_lib_meta_define(vm, meta, "hide",         native_hide);
-    cando_lib_meta_define(vm, meta, "setVisible",   native_set_visible);
-    cando_lib_meta_define(vm, meta, "setEnabled",   native_set_enabled);
-    cando_lib_meta_define(vm, meta, "focus",        native_focus);
-    cando_lib_meta_define(vm, meta, "destroy",      native_destroy);
-    cando_lib_meta_define(vm, meta, "isOpen",       native_is_open);
-    cando_lib_meta_define(vm, meta, "setParent",    native_set_parent);
-    cando_lib_meta_define(vm, meta, "setChecked",   native_set_checked);
-    cando_lib_meta_define(vm, meta, "getChecked",   native_get_checked);
-    cando_lib_meta_define(vm, meta, "addItem",      native_add_item);
-    cando_lib_meta_define(vm, meta, "clearItems",   native_clear_items);
-    cando_lib_meta_define(vm, meta, "getSelectedIndex", native_get_selected_index);
-    cando_lib_meta_define(vm, meta, "setSelectedIndex", native_set_selected_index);
-    cando_lib_meta_define(vm, meta, "setValue",     native_set_value);
-    cando_lib_meta_define(vm, meta, "getValue",     native_get_value);
-    cando_lib_meta_define(vm, meta, "setRange",     native_set_range);
+    /* ------------------------------------------------------------
+     * Phase 1.1: per-kind meta tables.
+     *
+     * `forms_control_base` carries the methods every control inherits.
+     * Each per-kind table chains its __index to the base and adds its
+     * specific methods on top.  build_instance() looks up the right
+     * name via meta_name_for_kind(kind) so type-incorrect calls (e.g.
+     * `addItem` on a Button) become hard errors rather than silent
+     * no-ops.
+     *
+     * Clean break from forms 1.x: the Derma PascalCase aliases and the
+     * cross-kind silent-no-op coverage are dropped.  Old scripts must
+     * port to the canonical camelCase / per-kind surface. */
+    CdoObject *base = cando_lib_meta_table(vm, "forms_control_base");
 
-    /* Item accessors (ListBox, ComboBox). */
-    cando_lib_meta_define(vm, meta, "getItem",      native_get_item);
-    cando_lib_meta_define(vm, meta, "getItems",     native_get_items);
-    cando_lib_meta_define(vm, meta, "getItemCount", native_get_item_count);
-    cando_lib_meta_define(vm, meta, "removeItem",   native_remove_item);
+    /* Text. */
+    cando_lib_meta_define(vm, base, "setText",        native_set_text);
+    cando_lib_meta_define(vm, base, "getText",        native_get_text);
 
-    /* Colours. */
-    cando_lib_meta_define(vm, meta, "setForeColor",   native_set_fore_color);
-    cando_lib_meta_define(vm, meta, "setBackColor",   native_set_back_color);
-    cando_lib_meta_define(vm, meta, "getForeColor",   native_get_fore_color);
-    cando_lib_meta_define(vm, meta, "getBackColor",   native_get_back_color);
-    cando_lib_meta_define(vm, meta, "clearForeColor", native_clear_fore_color);
-    cando_lib_meta_define(vm, meta, "clearBackColor", native_clear_back_color);
-    cando_lib_meta_define(vm, meta, "setColor",       native_set_fore_color);  /* alias */
-    cando_lib_meta_define(vm, meta, "setBackground",  native_set_back_color);  /* alias */
+    /* Geometry. */
+    cando_lib_meta_define(vm, base, "setSize",        native_set_size);
+    cando_lib_meta_define(vm, base, "getSize",        native_get_size);
+    cando_lib_meta_define(vm, base, "setWidth",       native_set_width);
+    cando_lib_meta_define(vm, base, "setHeight",      native_set_height);
+    cando_lib_meta_define(vm, base, "getWidth",       native_get_width);
+    cando_lib_meta_define(vm, base, "getHeight",      native_get_height);
+    cando_lib_meta_define(vm, base, "setLocation",    native_set_location);
+    cando_lib_meta_define(vm, base, "getLocation",    native_get_location);
+    cando_lib_meta_define(vm, base, "sizeToContent",       native_size_to_content);
+    cando_lib_meta_define(vm, base, "sizeToContentWidth",  native_size_to_content_width);
+    cando_lib_meta_define(vm, base, "sizeToContentHeight", native_size_to_content_height);
+    cando_lib_meta_define(vm, base, "getPreferredSize",    native_get_preferred_size);
 
-    /* Fonts. */
-    cando_lib_meta_define(vm, meta, "setFont",      native_set_font);
-    cando_lib_meta_define(vm, meta, "setFontSize",  native_set_font_size);
-    cando_lib_meta_define(vm, meta, "setBold",      native_set_bold);
-    cando_lib_meta_define(vm, meta, "setItalic",    native_set_italic);
-    cando_lib_meta_define(vm, meta, "setUnderline", native_set_underline);
-    cando_lib_meta_define(vm, meta, "setStrikeout", native_set_strikeout);
-    cando_lib_meta_define(vm, meta, "clearFont",    native_clear_font);
-    cando_lib_meta_define(vm, meta, "getFont",      native_get_font);
+    /* Visibility / state / lifetime. */
+    cando_lib_meta_define(vm, base, "show",           native_show);
+    cando_lib_meta_define(vm, base, "hide",           native_hide);
+    cando_lib_meta_define(vm, base, "setVisible",     native_set_visible);
+    cando_lib_meta_define(vm, base, "getVisible",     native_get_visible);
+    cando_lib_meta_define(vm, base, "setEnabled",     native_set_enabled);
+    cando_lib_meta_define(vm, base, "getEnabled",     native_get_enabled);
+    cando_lib_meta_define(vm, base, "focus",          native_focus);
+    cando_lib_meta_define(vm, base, "hasFocus",       native_has_focus);
+    cando_lib_meta_define(vm, base, "destroy",        native_destroy);
+    cando_lib_meta_define(vm, base, "isOpen",         native_is_open);
 
-    /* Form-only extras (silent no-ops on child controls). */
-    cando_lib_meta_define(vm, meta, "setOpacity",     native_set_opacity);
-    cando_lib_meta_define(vm, meta, "getOpacity",     native_get_opacity);
-    cando_lib_meta_define(vm, meta, "setTopMost",     native_set_topmost);
-    cando_lib_meta_define(vm, meta, "center",         native_center);
-    cando_lib_meta_define(vm, meta, "centre",         native_center);  /* alias */
-    cando_lib_meta_define(vm, meta, "setMinSize",     native_set_min_size);
-    cando_lib_meta_define(vm, meta, "setMaxSize",     native_set_max_size);
-    cando_lib_meta_define(vm, meta, "setBorderStyle", native_set_border_style);
+    /* Hierarchy. */
+    cando_lib_meta_define(vm, base, "setParent",      native_set_parent);
+    cando_lib_meta_define(vm, base, "getParent",      native_get_parent);
+    cando_lib_meta_define(vm, base, "getChildren",    native_get_children);
+    cando_lib_meta_define(vm, base, "contains",       native_contains);
+    cando_lib_meta_define(vm, base, "bringToFront",   native_bring_to_front);
+    cando_lib_meta_define(vm, base, "sendToBack",     native_send_to_back);
 
-    /* General extras shared by every control. */
-    cando_lib_meta_define(vm, meta, "bringToFront", native_bring_to_front);
-    cando_lib_meta_define(vm, meta, "sendToBack",   native_send_to_back);
-    cando_lib_meta_define(vm, meta, "refresh",      native_refresh);
-    cando_lib_meta_define(vm, meta, "invalidate",   native_refresh);  /* alias */
-    cando_lib_meta_define(vm, meta, "getEnabled",   native_get_enabled);
-    cando_lib_meta_define(vm, meta, "getVisible",   native_get_visible);
-    cando_lib_meta_define(vm, meta, "isEnabled",    native_get_enabled);  /* alias */
-    cando_lib_meta_define(vm, meta, "isVisible",    native_get_visible);  /* alias */
+    /* Look. */
+    cando_lib_meta_define(vm, base, "setForeColor",   native_set_fore_color);
+    cando_lib_meta_define(vm, base, "setBackColor",   native_set_back_color);
+    cando_lib_meta_define(vm, base, "getForeColor",   native_get_fore_color);
+    cando_lib_meta_define(vm, base, "getBackColor",   native_get_back_color);
+    cando_lib_meta_define(vm, base, "clearForeColor", native_clear_fore_color);
+    cando_lib_meta_define(vm, base, "clearBackColor", native_clear_back_color);
+    cando_lib_meta_define(vm, base, "setFont",        native_set_font);
+    cando_lib_meta_define(vm, base, "setFontSize",    native_set_font_size);
+    cando_lib_meta_define(vm, base, "setBold",        native_set_bold);
+    cando_lib_meta_define(vm, base, "setItalic",      native_set_italic);
+    cando_lib_meta_define(vm, base, "setUnderline",   native_set_underline);
+    cando_lib_meta_define(vm, base, "setStrikeout",   native_set_strikeout);
+    cando_lib_meta_define(vm, base, "clearFont",      native_clear_font);
+    cando_lib_meta_define(vm, base, "getFont",        native_get_font);
+    cando_lib_meta_define(vm, base, "setBorderStyle", native_set_border_style);
+    cando_lib_meta_define(vm, base, "setCursor",      native_set_cursor);
+    cando_lib_meta_define(vm, base, "setToolTip",     native_set_tooltip);
 
-    /* Docking. */
-    cando_lib_meta_define(vm, meta, "setDock",      native_set_dock);
-    cando_lib_meta_define(vm, meta, "getDock",      native_get_dock);
-    cando_lib_meta_define(vm, meta, "relayout",     native_relayout);
+    /* Layout. */
+    cando_lib_meta_define(vm, base, "setPadding",      native_set_padding);
+    cando_lib_meta_define(vm, base, "getPadding",      native_get_padding);
+    cando_lib_meta_define(vm, base, "setMargin",       native_set_margin);
+    cando_lib_meta_define(vm, base, "getMargin",       native_get_margin);
+    cando_lib_meta_define(vm, base, "setAnchor",       native_set_anchor);
+    cando_lib_meta_define(vm, base, "getAnchor",       native_get_anchor);
+    cando_lib_meta_define(vm, base, "setDock",         native_set_dock);
+    cando_lib_meta_define(vm, base, "getDock",         native_get_dock);
+    cando_lib_meta_define(vm, base, "setAutoSize",     native_set_autosize);
+    cando_lib_meta_define(vm, base, "getAutoSize",     native_get_autosize);
+    cando_lib_meta_define(vm, base, "setAutoSizeMode", native_set_autosize_mode);
+    cando_lib_meta_define(vm, base, "relayout",        native_relayout);
+    cando_lib_meta_define(vm, base, "refresh",         native_refresh);
 
-    /* ProgressBar extras. */
-    cando_lib_meta_define(vm, meta, "setMarquee",   native_set_marquee);
-    cando_lib_meta_define(vm, meta, "setState",     native_set_state);
+    /* Tab order. */
+    cando_lib_meta_define(vm, base, "setTabIndex",    native_set_tab_index);
+    cando_lib_meta_define(vm, base, "getTabIndex",    native_get_tab_index);
+    cando_lib_meta_define(vm, base, "setTabStop",     native_set_tab_stop);
 
-    /* Padding / Margin / AutoSize / Anchor. */
-    cando_lib_meta_define(vm, meta, "setPadding",      native_set_padding);
-    cando_lib_meta_define(vm, meta, "getPadding",      native_get_padding);
-    cando_lib_meta_define(vm, meta, "setMargin",       native_set_margin);
-    cando_lib_meta_define(vm, meta, "getMargin",       native_get_margin);
-    cando_lib_meta_define(vm, meta, "setAutoSize",     native_set_autosize);
-    cando_lib_meta_define(vm, meta, "getAutoSize",     native_get_autosize);
-    cando_lib_meta_define(vm, meta, "setAutoSizeMode", native_set_autosize_mode);
-    cando_lib_meta_define(vm, meta, "setAnchor",       native_set_anchor);
-    cando_lib_meta_define(vm, meta, "getAnchor",       native_get_anchor);
+    /* ----- Per-kind meta tables (each chains __index to base) ----- */
 
-    /* TextBox enrichment. */
-    cando_lib_meta_define(vm, meta, "setMultiline",     native_set_multiline);
-    cando_lib_meta_define(vm, meta, "setReadOnly",      native_set_readonly);
-    cando_lib_meta_define(vm, meta, "setPlaceholder",   native_set_placeholder);
-    cando_lib_meta_define(vm, meta, "setHint",          native_set_placeholder); /* alias */
-    cando_lib_meta_define(vm, meta, "setPasswordChar",  native_set_password_char);
-    cando_lib_meta_define(vm, meta, "setMaxLength",     native_set_max_length);
-    cando_lib_meta_define(vm, meta, "setTextAlign",     native_set_text_alignment);
-    cando_lib_meta_define(vm, meta, "setTextAlignment", native_set_text_alignment); /* alias */
-    cando_lib_meta_define(vm, meta, "selectAll",        native_select_all);
-    cando_lib_meta_define(vm, meta, "appendText",       native_append_text);
-    cando_lib_meta_define(vm, meta, "clear",            native_clear_text);
+    /* Form: top-level window extras. */
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_form");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "setOpacity",        native_set_opacity);
+        cando_lib_meta_define(vm, m, "getOpacity",        native_get_opacity);
+        cando_lib_meta_define(vm, m, "setTopMost",        native_set_topmost);
+        cando_lib_meta_define(vm, m, "center",            native_center);
+        cando_lib_meta_define(vm, m, "setMinSize",        native_set_min_size);
+        cando_lib_meta_define(vm, m, "setMaxSize",        native_set_max_size);
+        cando_lib_meta_define(vm, m, "setIcon",           native_set_icon);
+        cando_lib_meta_define(vm, m, "flash",             native_flash);
+        cando_lib_meta_define(vm, m, "setWindowState",    native_set_window_state);
+        cando_lib_meta_define(vm, m, "getWindowState",    native_get_window_state);
+        cando_lib_meta_define(vm, m, "maximize",          native_maximize);
+        cando_lib_meta_define(vm, m, "minimize",          native_minimize);
+        cando_lib_meta_define(vm, m, "restore",           native_restore);
+        cando_lib_meta_define(vm, m, "setResizable",      native_set_resizable);
+        cando_lib_meta_define(vm, m, "setMinimizeBox",    native_set_minimize_box);
+        cando_lib_meta_define(vm, m, "setMaximizeBox",    native_set_maximize_box);
+        cando_lib_meta_define(vm, m, "setShowInTaskbar",  native_set_show_in_taskbar);
+        cando_lib_meta_define(vm, m, "setAcceptButton",   native_set_accept_button);
+        cando_lib_meta_define(vm, m, "setCancelButton",   native_set_cancel_button);
+    }
 
-    /* Tooltip + cursor. */
-    cando_lib_meta_define(vm, meta, "setToolTip", native_set_tooltip);
-    cando_lib_meta_define(vm, meta, "setTooltip", native_set_tooltip);  /* alias */
-    cando_lib_meta_define(vm, meta, "setCursor",  native_set_cursor);
+    /* Button -- pure base; placeholder kept so script-side type() reads
+     * "forms_button" and per-kind extensions can land here later. */
+    meta_inherit(cando_lib_meta_table(vm, "forms_button"), base);
 
-    /* Form-level state. */
-    cando_lib_meta_define(vm, meta, "setIcon",           native_set_icon);
-    cando_lib_meta_define(vm, meta, "flash",             native_flash);
-    cando_lib_meta_define(vm, meta, "setWindowState",    native_set_window_state);
-    cando_lib_meta_define(vm, meta, "getWindowState",    native_get_window_state);
-    cando_lib_meta_define(vm, meta, "maximize",          native_maximize);
-    cando_lib_meta_define(vm, meta, "minimize",          native_minimize);
-    cando_lib_meta_define(vm, meta, "restore",           native_restore);
-    cando_lib_meta_define(vm, meta, "setResizable",      native_set_resizable);
-    cando_lib_meta_define(vm, meta, "setMinimizeBox",    native_set_minimize_box);
-    cando_lib_meta_define(vm, meta, "setMaximizeBox",    native_set_maximize_box);
-    cando_lib_meta_define(vm, meta, "setShowInTaskbar",  native_set_show_in_taskbar);
-    cando_lib_meta_define(vm, meta, "setAcceptButton",   native_set_accept_button);
-    cando_lib_meta_define(vm, meta, "setCancelButton",   native_set_cancel_button);
+    /* Label -- pure base for now. */
+    meta_inherit(cando_lib_meta_table(vm, "forms_label"), base);
 
-    /* Numeric / Progress / TrackBar enrichments. */
-    cando_lib_meta_define(vm, meta, "setStep",           native_set_step);
-    cando_lib_meta_define(vm, meta, "stepIt",            native_step_it);
-    cando_lib_meta_define(vm, meta, "setTickFrequency",  native_set_tick_frequency);
-    cando_lib_meta_define(vm, meta, "setSmallStep",      native_set_small_step);
-    cando_lib_meta_define(vm, meta, "setLargeStep",      native_set_large_step);
-    cando_lib_meta_define(vm, meta, "setIncrement",      native_set_increment);
+    /* LinkLabel -- pure base for now. */
+    meta_inherit(cando_lib_meta_table(vm, "forms_linklabel"), base);
 
-    /* Convenience: tree, focus, tab order. */
-    cando_lib_meta_define(vm, meta, "remove",       native_remove);
-    cando_lib_meta_define(vm, meta, "getParent",    native_get_parent);
-    cando_lib_meta_define(vm, meta, "getChildren",  native_get_children);
-    cando_lib_meta_define(vm, meta, "hasFocus",     native_has_focus);
-    cando_lib_meta_define(vm, meta, "contains",     native_contains);
-    cando_lib_meta_define(vm, meta, "setTabIndex",  native_set_tab_index);
-    cando_lib_meta_define(vm, meta, "getTabIndex",  native_get_tab_index);
-    cando_lib_meta_define(vm, meta, "setTabStop",   native_set_tab_stop);
+    /* TextBox -- text manipulation. */
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_textbox");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "setMultiline",     native_set_multiline);
+        cando_lib_meta_define(vm, m, "setReadOnly",      native_set_readonly);
+        cando_lib_meta_define(vm, m, "setPlaceholder",   native_set_placeholder);
+        cando_lib_meta_define(vm, m, "setPasswordChar",  native_set_password_char);
+        cando_lib_meta_define(vm, m, "setMaxLength",     native_set_max_length);
+        cando_lib_meta_define(vm, m, "setTextAlign",     native_set_text_alignment);
+        cando_lib_meta_define(vm, m, "selectAll",        native_select_all);
+        cando_lib_meta_define(vm, m, "appendText",       native_append_text);
+        cando_lib_meta_define(vm, m, "clearText",        native_clear_text);
+        cando_lib_meta_define(vm, m, "setValue",         native_set_value);
+        cando_lib_meta_define(vm, m, "getValue",         native_get_value);
+    }
 
-    /* Derma-style aliases that script users coming from gmod will reach
-     * for instinctively.  These are pure aliases; everything important
-     * lives behind the camelCase names above. */
-    cando_lib_meta_define(vm, meta, "SetText",      native_set_text);
-    cando_lib_meta_define(vm, meta, "GetText",      native_get_text);
-    cando_lib_meta_define(vm, meta, "SetSize",      native_set_size);
-    cando_lib_meta_define(vm, meta, "SetPos",       native_set_location);
-    cando_lib_meta_define(vm, meta, "GetPos",       native_get_location);
-    cando_lib_meta_define(vm, meta, "SetVisible",   native_set_visible);
-    cando_lib_meta_define(vm, meta, "SetEnabled",   native_set_enabled);
-    cando_lib_meta_define(vm, meta, "MoveToFront",  native_bring_to_front);
-    cando_lib_meta_define(vm, meta, "MoveToBack",   native_send_to_back);
-    cando_lib_meta_define(vm, meta, "Remove",       native_remove);
-    cando_lib_meta_define(vm, meta, "Center",       native_center);
-    cando_lib_meta_define(vm, meta, "Dock",         native_set_dock);
-    cando_lib_meta_define(vm, meta, "DockPadding",  native_set_padding);
-    cando_lib_meta_define(vm, meta, "DockMargin",   native_set_margin);
-    cando_lib_meta_define(vm, meta, "InvalidateLayout", native_relayout);
-    cando_lib_meta_define(vm, meta, "SizeToContents",   native_size_to_content);
+    /* CheckBox + RadioButton -- check state. */
+    {
+        CdoObject *cb = cando_lib_meta_table(vm, "forms_checkbox");
+        meta_inherit(cb, base);
+        cando_lib_meta_define(vm, cb, "setChecked",      native_set_checked);
+        cando_lib_meta_define(vm, cb, "getChecked",      native_get_checked);
+
+        CdoObject *rb = cando_lib_meta_table(vm, "forms_radiobutton");
+        meta_inherit(rb, base);
+        cando_lib_meta_define(vm, rb, "setChecked",      native_set_checked);
+        cando_lib_meta_define(vm, rb, "getChecked",      native_get_checked);
+    }
+
+    /* ComboBox + ListBox -- item lists. */
+    {
+        const char *list_metas[] = { "forms_combobox", "forms_listbox" };
+        for (size_t i = 0; i < sizeof(list_metas) / sizeof(list_metas[0]); i++) {
+            CdoObject *m = cando_lib_meta_table(vm, list_metas[i]);
+            meta_inherit(m, base);
+            cando_lib_meta_define(vm, m, "addItem",          native_add_item);
+            cando_lib_meta_define(vm, m, "removeItem",       native_remove_item);
+            cando_lib_meta_define(vm, m, "clearItems",       native_clear_items);
+            cando_lib_meta_define(vm, m, "getItem",          native_get_item);
+            cando_lib_meta_define(vm, m, "getItems",         native_get_items);
+            cando_lib_meta_define(vm, m, "getItemCount",     native_get_item_count);
+            cando_lib_meta_define(vm, m, "getSelectedIndex", native_get_selected_index);
+            cando_lib_meta_define(vm, m, "setSelectedIndex", native_set_selected_index);
+            cando_lib_meta_define(vm, m, "clear",            native_clear_text);
+        }
+    }
+
+    /* Panel + GroupBox -- containers; pure base for now. */
+    meta_inherit(cando_lib_meta_table(vm, "forms_panel"),    base);
+    meta_inherit(cando_lib_meta_table(vm, "forms_groupbox"), base);
+
+    /* ProgressBar -- value/range/state. */
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_progress");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "setValue",         native_set_value);
+        cando_lib_meta_define(vm, m, "getValue",         native_get_value);
+        cando_lib_meta_define(vm, m, "setRange",         native_set_range);
+        cando_lib_meta_define(vm, m, "setMarquee",       native_set_marquee);
+        cando_lib_meta_define(vm, m, "setState",         native_set_state);
+        cando_lib_meta_define(vm, m, "setStep",          native_set_step);
+        cando_lib_meta_define(vm, m, "stepIt",           native_step_it);
+    }
+
+    /* TrackBar -- value/range/tick. */
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_trackbar");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "setValue",         native_set_value);
+        cando_lib_meta_define(vm, m, "getValue",         native_get_value);
+        cando_lib_meta_define(vm, m, "setRange",         native_set_range);
+        cando_lib_meta_define(vm, m, "setTickFrequency", native_set_tick_frequency);
+        cando_lib_meta_define(vm, m, "setSmallStep",     native_set_small_step);
+        cando_lib_meta_define(vm, m, "setLargeStep",     native_set_large_step);
+    }
+
+    /* NumericUpDown -- value/range/increment. */
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_numeric");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "setValue",         native_set_value);
+        cando_lib_meta_define(vm, m, "getValue",         native_get_value);
+        cando_lib_meta_define(vm, m, "setRange",         native_set_range);
+        cando_lib_meta_define(vm, m, "setIncrement",     native_set_increment);
+    }
+
+    /* PictureBox -- pure base for now. */
+    meta_inherit(cando_lib_meta_table(vm, "forms_picturebox"), base);
+
+    /* DateTimePicker / MonthCalendar -- pure base; future setValue/getValue
+     * land here once the new API spec is implemented. */
+    meta_inherit(cando_lib_meta_table(vm, "forms_datetimepicker"), base);
+    meta_inherit(cando_lib_meta_table(vm, "forms_monthcalendar"),  base);
+
+    /* StatusBar -- pure base for now. */
+    meta_inherit(cando_lib_meta_table(vm, "forms_statusbar"), base);
+
+    /* Spinner -- value/range. */
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_spinner");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "setValue",         native_set_value);
+        cando_lib_meta_define(vm, m, "getValue",         native_get_value);
+        cando_lib_meta_define(vm, m, "setRange",         native_set_range);
+    }
 
     CandoValue tbl = cando_bridge_new_object(vm);
     CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
