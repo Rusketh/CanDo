@@ -110,6 +110,52 @@ CANDO_INLINE bool cando_is_string(CandoValue v) { return v.tag == TYPE_STRING; }
 CANDO_INLINE bool cando_is_object(CandoValue v) { return v.tag == TYPE_OBJECT; }
 
 /* -----------------------------------------------------------------------
+ * Accessors -- prefer these over direct .tag / .as.* reads.
+ *
+ * Today they are a thin shim over the tagged union.  The Phase 1 NaN-box
+ * migration (docs/jit-plan.md §4.2) will reshape the underlying storage
+ * but keep these signatures stable, so any code written against the
+ * accessors will not need editing when the flip lands.
+ *
+ * No type checking: passing the wrong tag is undefined behaviour.  Use
+ * the cando_is_* predicates first when the tag is not statically known.
+ * --------------------------------------------------------------------- */
+CANDO_INLINE TypeTag cando_value_tag(CandoValue v) {
+    return (TypeTag)v.tag;
+}
+CANDO_INLINE bool cando_as_bool(CandoValue v) {
+    return v.as.boolean;
+}
+CANDO_INLINE f64 cando_as_number(CandoValue v) {
+    return v.as.number;
+}
+CANDO_INLINE CandoString *cando_as_string(CandoValue v) {
+    return v.as.string;
+}
+CANDO_INLINE HandleIndex cando_as_handle(CandoValue v) {
+    return v.as.handle;
+}
+
+/* -----------------------------------------------------------------------
+ * Native function sentinel.
+ *
+ * Native functions are encoded as TYPE_NUMBER values with a negative
+ * payload: native #N is stored as -(f64)(N + 1).  The macros below
+ * isolate this convention so the NaN-box migration can replace it with
+ * a dedicated tag without breaking call sites.  See
+ * docs/value-types.md and docs/jit-plan.md §9.7.
+ * --------------------------------------------------------------------- */
+CANDO_INLINE bool cando_is_native_fn(CandoValue v) {
+    return cando_is_number(v) && cando_as_number(v) < 0.0;
+}
+CANDO_INLINE u32 cando_native_index(CandoValue v) {
+    return (u32)(-cando_as_number(v) - 1.0);
+}
+CANDO_INLINE CandoValue cando_native_value(u32 index) {
+    return cando_number(-(f64)(index + 1u));
+}
+
+/* -----------------------------------------------------------------------
  * Value operations
  * --------------------------------------------------------------------- */
 
