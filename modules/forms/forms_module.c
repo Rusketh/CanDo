@@ -4683,12 +4683,21 @@ static int native_set_range(CandoVM *vm, int argc, CandoValue *args)
 #ifndef FORMS_MODULE_TEST_BUILD
 /* Wire `child.__index = parent` so dispatch on instances stamped with
  * the child meta falls through to the parent for any name the child
- * hasn't overridden. */
+ * hasn't overridden.
+ *
+ * Uses a per-call cdo_string_intern("__index", 7) rather than the
+ * pre-interned global g_meta_index from libcando.  g_meta_index isn't
+ * annotated with CANDO_API in source/object/object.h, so on Windows
+ * its symbol isn't dllimport'd and a forms.dll reference produces
+ * `undefined reference to 'g_meta_index'` at link time.  String
+ * interning is hash-table-cheap, runs once per kind at module init,
+ * and avoids touching libcando's public header. */
 static void meta_inherit(CdoObject *child, CdoObject *parent)
 {
     if (!child || !parent) return;
-    cdo_object_rawset(child, g_meta_index,
-                      cdo_object_value(parent), FIELD_NONE);
+    CdoString *idx = cdo_string_intern("__index", 7);
+    cdo_object_rawset(child, idx, cdo_object_value(parent), FIELD_NONE);
+    cdo_string_release(idx);
 }
 
 /* Map a ControlKind to its meta-table name.  Kept in step with
