@@ -3838,106 +3838,13 @@ static int native_set_cancel_button(CandoVM *vm, int argc, CandoValue *args)
  * Numeric / Progress / TrackBar enrichments.
  * ===================================================================== */
 
-static int native_set_step(CandoVM *vm, int argc, CandoValue *args)
-{
-    FormsSlot *s = arg_self(vm, argc, args, "setStep");
-    if (!s) return -1;
-    int step = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-               (int)args[1].as.number : 1;
-#if FORMS_HAVE_WIN32
-    if (s->hwnd && s->kind == KIND_PROGRESS) {
-        SendMessageW(s->hwnd, PBM_SETSTEP, (WPARAM)step, 0);
-    }
-#else
-    (void)step;
-#endif
-    cando_vm_push(vm, args[0]);
-    return 1;
-}
-
-static int native_step_it(CandoVM *vm, int argc, CandoValue *args)
-{
-    FormsSlot *s = arg_self(vm, argc, args, "stepIt");
-    if (!s) return -1;
-#if FORMS_HAVE_WIN32
-    if (s->hwnd && s->kind == KIND_PROGRESS) {
-        SendMessageW(s->hwnd, PBM_STEPIT, 0, 0);
-    }
-#endif
-    cando_vm_push(vm, args[0]);
-    return 1;
-}
-
-static int native_set_tick_frequency(CandoVM *vm, int argc, CandoValue *args)
-{
-    FormsSlot *s = arg_self(vm, argc, args, "setTickFrequency");
-    if (!s) return -1;
-    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-            (int)args[1].as.number : 1;
-#if FORMS_HAVE_WIN32
-    if (s->hwnd && s->kind == KIND_TRACKBAR) {
-        SendMessageW(s->hwnd, TBM_SETTICFREQ, (WPARAM)n, 0);
-    }
-#else
-    (void)n;
-#endif
-    cando_vm_push(vm, args[0]);
-    return 1;
-}
-
-static int native_set_small_step(CandoVM *vm, int argc, CandoValue *args)
-{
-    FormsSlot *s = arg_self(vm, argc, args, "setSmallStep");
-    if (!s) return -1;
-    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-            (int)args[1].as.number : 1;
-#if FORMS_HAVE_WIN32
-    if (s->hwnd && s->kind == KIND_TRACKBAR) {
-        SendMessageW(s->hwnd, TBM_SETLINESIZE, 0, (LPARAM)n);
-    }
-#else
-    (void)n;
-#endif
-    cando_vm_push(vm, args[0]);
-    return 1;
-}
-
-static int native_set_large_step(CandoVM *vm, int argc, CandoValue *args)
-{
-    FormsSlot *s = arg_self(vm, argc, args, "setLargeStep");
-    if (!s) return -1;
-    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-            (int)args[1].as.number : 5;
-#if FORMS_HAVE_WIN32
-    if (s->hwnd && s->kind == KIND_TRACKBAR) {
-        SendMessageW(s->hwnd, TBM_SETPAGESIZE, 0, (LPARAM)n);
-    }
-#else
-    (void)n;
-#endif
-    cando_vm_push(vm, args[0]);
-    return 1;
-}
-
-static int native_set_increment(CandoVM *vm, int argc, CandoValue *args)
-{
-    FormsSlot *s = arg_self(vm, argc, args, "setIncrement");
-    if (!s) return -1;
-    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-            (int)args[1].as.number : 1;
-#if FORMS_HAVE_WIN32
-    if (s->hwnd && s->kind == KIND_NUMERIC) {
-        /* For NumericUpDown the spinner is a sibling msctls_updown32; the
-         * UDM_SETACCEL message tunes how fast its repeat-arrow climbs.   */
-        UDACCEL acc; acc.nSec = 0; acc.nInc = (UINT)n;
-        SendMessageW(s->hwnd, UDM_SETACCEL, 1, (LPARAM)&acc);
-    }
-#else
-    (void)n;
-#endif
-    cando_vm_push(vm, args[0]);
-    return 1;
-}
+/* setStep / stepIt           moved to src/controls/ctl_progress.{c,h}
+ * setTickFrequency / setSmall/LargeStep
+ *                            moved to src/controls/ctl_trackbar.{c,h}
+ * setIncrement               moved to src/controls/ctl_numeric.{c,h}  */
+#include "src/controls/ctl_progress.h"
+#include "src/controls/ctl_trackbar.h"
+#include "src/controls/ctl_numeric.h"
 
 /* =========================================================================
  * Convenience helpers: remove / getParent / getChildren / hasFocus /
@@ -4094,54 +4001,7 @@ static int native_get_dock(CandoVM *vm, int argc, CandoValue *args)
  * ProgressBar extras: marquee animation + colour state.
  * ===================================================================== */
 
-static int native_set_marquee(CandoVM *vm, int argc, CandoValue *args)
-{
-    FormsSlot *s = arg_self(vm, argc, args, "setMarquee");
-    if (!s) return -1;
-    bool active = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
-    int  speed  = (argc >= 3 && args[2].tag == CDO_NUMBER) ?
-                  (int)args[2].as.number : 30;
-#if FORMS_HAVE_WIN32
-    if (s->hwnd && s->kind == KIND_PROGRESS) {
-        SendMessageW(s->hwnd, PBM_SETMARQUEE,
-                     (WPARAM)(active ? TRUE : FALSE), (LPARAM)speed);
-    }
-#endif
-    cando_vm_push(vm, args[0]);
-    return 1;
-}
-
-static int native_set_state(CandoVM *vm, int argc, CandoValue *args)
-{
-    FormsSlot *s = arg_self(vm, argc, args, "setState");
-    if (!s) return -1;
-    int state = 1;  /* PBST_NORMAL */
-    if (argc >= 2) {
-        if (args[1].tag == CDO_NUMBER) {
-            state = (int)args[1].as.number;
-        } else if (args[1].tag == CDO_STRING && args[1].as.string) {
-            const char *t = args[1].as.string->data;
-            u32 n = args[1].as.string->length;
-            #define MATCH(name, val) \
-                if (n == sizeof(name)-1 && memcmp(t, name, sizeof(name)-1) == 0) state = val
-            MATCH("normal",  1);  /* PBST_NORMAL */
-            MATCH("error",   2);  /* PBST_ERROR  */
-            MATCH("paused",  3);  /* PBST_PAUSED */
-            MATCH("warning", 2);  /* alias -> error (red) for ergonomics */
-            MATCH("green",   1);  /* alias -> normal */
-            MATCH("yellow",  3);  /* alias -> paused (amber) */
-            MATCH("red",     2);  /* alias -> error */
-            #undef MATCH
-        }
-    }
-#if FORMS_HAVE_WIN32
-    if (s->hwnd && s->kind == KIND_PROGRESS) {
-        SendMessageW(s->hwnd, PBM_SETSTATE, (WPARAM)state, 0);
-    }
-#endif
-    cando_vm_push(vm, args[0]);
-    return 1;
-}
+/* setMarquee / setState moved to src/controls/ctl_progress.{c,h}. */
 
 /* Force-relayout helper -- script can call form:relayout() if it has
  * mutated child sizes manually and wants the dock pass to re-run. */

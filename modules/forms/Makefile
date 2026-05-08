@@ -36,13 +36,19 @@ CFLAGS     = -std=c11 -Wall -Wextra -Wpedantic -fPIC $(INCLUDES)
 CORE_C     = src/core/color.c        src/core/geom.c   src/core/events.c \
              src/core/slots.c        src/core/dispatch.c \
              src/controls/ctl_common.c \
-             src/controls/ctl_checkbox.c
+             src/controls/ctl_checkbox.c \
+             src/controls/ctl_progress.c \
+             src/controls/ctl_trackbar.c \
+             src/controls/ctl_numeric.c
 CORE_H     = src/core/color.h        src/core/geom.h   src/core/events.h \
              src/core/sync.h         src/core/cando_compat.h \
              src/core/slots.h        src/core/manager.h \
              src/core/dispatch.h \
              src/controls/ctl_common.h \
-             src/controls/ctl_checkbox.h
+             src/controls/ctl_checkbox.h \
+             src/controls/ctl_progress.h \
+             src/controls/ctl_trackbar.h \
+             src/controls/ctl_numeric.h
 
 ifeq ($(OS),Windows_NT)
     SHARED      = forms.dll
