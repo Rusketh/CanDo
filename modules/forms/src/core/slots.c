@@ -58,6 +58,9 @@ int slot_alloc_locked(ControlKind kind, int parent_slot)
             s->tooltip = NULL;
             s->accept_btn_slot = -1;
             s->cancel_btn_slot = -1;
+            s->auto_scroll = 0;
+            s->scroll_w = s->scroll_h = 0;
+            s->scroll_x = s->scroll_y = 0;
 #if FORMS_HAVE_WIN32
             s->hwnd        = NULL;
             s->orig_proc   = NULL;

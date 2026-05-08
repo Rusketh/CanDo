@@ -170,6 +170,13 @@ typedef struct FormsSlot {
     char        *tooltip;
     int          accept_btn_slot;
     int          cancel_btn_slot;
+    /* Scroll state (Phase 2 ScrollPanel).  auto_scroll == 1 means the
+     * control owns WS_VSCROLL | WS_HSCROLL and tracks a virtual
+     * scrollable area (scroll_w x scroll_h).  scroll_x / scroll_y are
+     * the current top-left of the viewport in virtual coordinates. */
+    int          auto_scroll;
+    int          scroll_w, scroll_h;
+    int          scroll_x, scroll_y;
 #if FORMS_HAVE_WIN32
     HICON        hicon_small;
     HICON        hicon_big;

@@ -379,9 +379,52 @@ static LRESULT CALLBACK panel_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
     WNDPROC orig = (slot > 0 && slot < FORMS_MAX_SLOTS)
                    ? g_slots[slot].orig_proc : NULL;
     switch (msg) {
-    case WM_COMMAND:
     case WM_HSCROLL:
-    case WM_VSCROLL:
+    case WM_VSCROLL: {
+        /* ScrollPanel owns its scroll bars and consumes scroll events
+         * locally; plain Panel forwards them to its parent so e.g. a
+         * TextBox child whose scroll bar was clicked still works. */
+        if (slot > 0 && slot < FORMS_MAX_SLOTS &&
+            g_slots[slot].kind == KIND_SCROLLPANEL &&
+            g_slots[slot].auto_scroll) {
+            int is_vert = (msg == WM_VSCROLL);
+            int bar  = is_vert ? SB_VERT : SB_HORZ;
+            SCROLLINFO si; memset(&si, 0, sizeof(si));
+            si.cbSize = sizeof(si);
+            si.fMask  = SIF_ALL;
+            GetScrollInfo(h, bar, &si);
+            int old_pos = si.nPos;
+            int new_pos = old_pos;
+            switch (LOWORD(w)) {
+            case SB_LINEUP:        new_pos -= 16; break;
+            case SB_LINEDOWN:      new_pos += 16; break;
+            case SB_PAGEUP:        new_pos -= (int)si.nPage; break;
+            case SB_PAGEDOWN:      new_pos += (int)si.nPage; break;
+            case SB_THUMBTRACK:
+            case SB_THUMBPOSITION: new_pos = si.nTrackPos; break;
+            case SB_TOP:           new_pos = si.nMin; break;
+            case SB_BOTTOM:        new_pos = si.nMax; break;
+            }
+            int max_pos = si.nMax - (int)si.nPage + 1;
+            if (max_pos < si.nMin) max_pos = si.nMin;
+            if (new_pos < si.nMin) new_pos = si.nMin;
+            if (new_pos > max_pos) new_pos = max_pos;
+            if (new_pos != old_pos) {
+                si.fMask = SIF_POS;
+                si.nPos  = new_pos;
+                SetScrollInfo(h, bar, &si, TRUE);
+                int dx = is_vert ? 0 : (old_pos - new_pos);
+                int dy = is_vert ? (old_pos - new_pos) : 0;
+                ScrollWindowEx(h, dx, dy, NULL, NULL, NULL, NULL,
+                               SW_SCROLLCHILDREN | SW_INVALIDATE);
+                if (is_vert) g_slots[slot].scroll_y = new_pos;
+                else         g_slots[slot].scroll_x = new_pos;
+            }
+            return 0;
+        }
+    } /* fall through to the parent-forwarding case */
+    /* fall through */
+    case WM_COMMAND:
     case WM_NOTIFY: {
         HWND parent = GetAncestor(h, GA_PARENT);
         if (parent) return SendMessageW(parent, msg, w, l);
@@ -479,6 +522,16 @@ static int do_create_control(FormsCommand *c)
         style |= SS_NOTIFY;
         ex = WS_EX_CONTROLPARENT;
         break;
+    case KIND_SCROLLPANEL:
+        /* Same backing class as Panel (STATIC SS_NOTIFY) plus WS_VSCROLL |
+         * WS_HSCROLL so the scroll bars are present.  The script has to
+         * call setAutoScroll(true) / setScrollSize(w, h) before they
+         * actually become functional -- see panel_wndproc's WM_VSCROLL /
+         * WM_HSCROLL handler for the scroll behaviour. */
+        cls = L"STATIC";
+        style |= SS_NOTIFY | WS_VSCROLL | WS_HSCROLL | WS_CLIPCHILDREN;
+        ex = WS_EX_CONTROLPARENT;
+        break;
     case KIND_PROGRESS:
         cls = PROGRESS_CLASSW;
         if (c->style_extra & 4) style |= PBS_MARQUEE;
@@ -567,8 +620,9 @@ static int do_create_control(FormsCommand *c)
 
     /* Subclass panels so notifications from their children (BN_CLICKED,
      * EN_CHANGE, ...) reach the form's WndProc -- the default STATIC
-     * wndproc would otherwise swallow them. */
-    if (c->kind == KIND_PANEL) {
+     * wndproc would otherwise swallow them.  ScrollPanel rides the same
+     * subclass (it routes WM_VSCROLL / WM_HSCROLL through there too). */
+    if (c->kind == KIND_PANEL || c->kind == KIND_SCROLLPANEL) {
         WNDPROC prev = (WNDPROC)SetWindowLongPtrW(
             hwnd, GWLP_WNDPROC, (LONG_PTR)panel_wndproc);
         s->orig_proc = prev;
@@ -1384,6 +1438,8 @@ FORMS_DEFINE_CTOR("DateTimePicker", KIND_DATETIMEPICKER, native_datetime_create)
 FORMS_DEFINE_CTOR("MonthCalendar",  KIND_MONTHCALENDAR,  native_calendar_create)
 FORMS_DEFINE_CTOR("StatusBar",   KIND_STATUSBAR,   native_statusbar_create)
 FORMS_DEFINE_CTOR("Spinner",     KIND_SPINNER,     native_spinner_create)
+/* Phase 2 container constructors. */
+FORMS_DEFINE_CTOR("ScrollPanel", KIND_SCROLLPANEL, native_scrollpanel_create)
 
 /* =========================================================================
  * Methods on every control instance.  Most setters cross threads via
@@ -2204,6 +2260,9 @@ static int native_get_font(CandoVM *vm, int argc, CandoValue *args)
 /* Form-only natives setOpacity/getOpacity/setTopMost/center/
  * setMinSize/setMaxSize moved to src/controls/ctl_form.{c,h}. */
 #include "src/controls/ctl_form.h"
+
+/* Phase 2 ScrollPanel natives. */
+#include "src/controls/ctl_scrollpanel.h"
 
 /* parse_border_style moved to src/core/layout.{c,h}. */
 
@@ -3529,7 +3588,14 @@ CandoValue cando_module_init(CandoVM *vm)
      * instances of these kinds even before the container-specific
      * natives (addTab, scrollTo, setSplitterDistance, etc.) land.
      * Constructors land alongside the per-kind native files. */
-    meta_inherit(cando_lib_meta_table(vm, "forms_scrollpanel"),    base);
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_scrollpanel");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "setAutoScroll",      native_set_auto_scroll);
+        cando_lib_meta_define(vm, m, "setScrollSize",      native_set_scroll_size);
+        cando_lib_meta_define(vm, m, "scrollTo",           native_scroll_to);
+        cando_lib_meta_define(vm, m, "getScrollPosition",  native_get_scroll_position);
+    }
     meta_inherit(cando_lib_meta_table(vm, "forms_tabcontrol"),     base);
     meta_inherit(cando_lib_meta_table(vm, "forms_tabpage"),        base);
     meta_inherit(cando_lib_meta_table(vm, "forms_splitcontainer"), base);
@@ -3570,6 +3636,8 @@ CandoValue cando_module_init(CandoVM *vm)
     libutil_set_method(vm, obj, "MonthCalendar", native_calendar_create);
     libutil_set_method(vm, obj, "StatusBar",     native_statusbar_create);
     libutil_set_method(vm, obj, "Spinner",       native_spinner_create);
+    /* Phase 2 containers. */
+    libutil_set_method(vm, obj, "ScrollPanel",   native_scrollpanel_create);
 
     /* forms.Color -- a small palette of CSS-style named colours that
      * scripts can drop straight into setForeColor / setBackColor without
