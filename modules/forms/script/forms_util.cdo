@@ -1,0 +1,621 @@
+// modules/forms/script/forms_util.cdo -- declarative wrapper layer.
+//
+// Phase 6 of the rewrite (REWRITE_PLAN.md / API_SPEC.md §17).
+//
+// Use:
+//
+//   VAR ui = include("./forms_util.cdo");
+//
+// `ui` re-exports everything `forms` does, so a single include is
+// usually enough.  On top of the raw native API it adds:
+//
+//   ui.Window({...})           Form + body builder
+//   ui.Stack / Row / Column    FlowLayoutPanel wrappers
+//   ui.Grid({columns, ..., children = [...]})
+//                              TableLayoutPanel + auto-place via add()
+//   ui.Tabs({pages = [...]})   TabControl + per-tab content panel
+//   ui.Split({...})            SplitContainer-equivalent (2 panels + Splitter)
+//   ui.ScrollArea / ui.Group / ui.Panel
+//   ui.Label / Button / TextBox / CheckBox / RadioButton / ComboBox /
+//     ListBox / TreeView / ListView / NumericUpDown / TrackBar /
+//     ProgressBar / DateTimePicker / RichTextBox / PictureBox /
+//     PaintSurface / LinkLabel
+//
+//   id-registry:    descriptor `id = "foo"` -> form:field("foo")
+//   role shorthand: descriptor `role = "accept" | "cancel"` ->
+//                   wires form:setAcceptButton / setCancelButton.
+//   ui.dialog.*     ergonomic wrappers over forms.MessageBox /
+//                   OpenFileDialog / SaveFileDialog / ColorDialog /
+//                   FontDialog / FolderBrowserDialog.
+//   ui.menu({...})  declarative menu tree.
+//   ui.applyTheme(form, theme)
+//                   walks the form tree applying font + palette.
+//   ui.toast(form, text, [opts])
+//                   non-modal label that fades after a duration.
+//   ui.observable({...}) / ui.eventBus()
+//                   small helpers for binding / pub-sub.
+//
+// The wrapper only consumes the public native API; nothing in
+// forms.dll depends on this file.  Scripts can ignore it entirely
+// and use forms.* directly.
+
+VAR forms = NULL;
+TRY {
+    forms = include("./forms.dll");
+} CATCH (e) {
+    forms = include("./forms.so");
+}
+
+// -------------------------------------------------------------------
+// ui table -- mirrors forms.* with extras layered on top.
+// -------------------------------------------------------------------
+
+VAR ui = {};
+ui.VERSION    = forms.VERSION;
+ui.platform   = forms.platform;
+ui.supported  = forms.supported;
+ui.Color      = forms.Color;
+ui.Cursor     = forms.Cursor;
+ui.Dock       = forms.Dock;
+ui.Anchor     = forms.Anchor;
+ui.AutoSizeMode = forms.AutoSizeMode;
+ui.BorderStyle  = forms.BorderStyle;
+
+// Pass-through dialog primitives.
+ui.MessageBox          = forms.MessageBox;
+ui.OpenFileDialog      = forms.OpenFileDialog;
+ui.SaveFileDialog      = forms.SaveFileDialog;
+ui.FolderBrowserDialog = forms.FolderBrowserDialog;
+ui.ColorDialog         = forms.ColorDialog;
+ui.FontDialog          = forms.FontDialog;
+
+// -------------------------------------------------------------------
+// Internal helpers.
+// -------------------------------------------------------------------
+
+// Apply common option-table fields to a freshly-constructed control
+// (text, size, location, dock, anchor, padding, margin, foreColor,
+// backColor, font, enabled, visible, tabIndex, tabStop, toolTip,
+// cursor, borderStyle).  Quietly ignores unknown keys.
+VAR applyCommonOpts = FUNCTION(ctrl, opts) {
+    IF opts == NULL { return; }
+    IF opts.text != NULL    { ctrl:setText(opts.text); }
+    IF opts.size != NULL    { ctrl:setSize(opts.size[0], opts.size[1]); }
+    IF opts.location != NULL{ ctrl:setLocation(opts.location[0], opts.location[1]); }
+    IF opts.width != NULL   { ctrl:setWidth(opts.width); }
+    IF opts.height != NULL  { ctrl:setHeight(opts.height); }
+    IF opts.dock != NULL    { ctrl:setDock(opts.dock); }
+    IF opts.anchor != NULL  { ctrl:setAnchor(opts.anchor); }
+    IF opts.padding != NULL {
+        IF type(opts.padding) == "number" {
+            ctrl:setPadding(opts.padding);
+        } ELSE {
+            ctrl:setPadding(opts.padding[0], opts.padding[1],
+                            opts.padding[2], opts.padding[3]);
+        }
+    }
+    IF opts.margin != NULL  {
+        IF type(opts.margin) == "number" {
+            ctrl:setMargin(opts.margin);
+        } ELSE {
+            ctrl:setMargin(opts.margin[0], opts.margin[1],
+                           opts.margin[2], opts.margin[3]);
+        }
+    }
+    IF opts.foreColor != NULL  { ctrl:setForeColor(opts.foreColor); }
+    IF opts.backColor != NULL  { ctrl:setBackColor(opts.backColor); }
+    IF opts.font != NULL       { ctrl:setFont(opts.font); }
+    IF opts.fontSize != NULL   { ctrl:setFontSize(opts.fontSize); }
+    IF opts.bold != NULL       { ctrl:setBold(opts.bold); }
+    IF opts.italic != NULL     { ctrl:setItalic(opts.italic); }
+    IF opts.enabled != NULL    { ctrl:setEnabled(opts.enabled); }
+    IF opts.visible != NULL    { ctrl:setVisible(opts.visible); }
+    IF opts.tabIndex != NULL   { ctrl:setTabIndex(opts.tabIndex); }
+    IF opts.tabStop != NULL    { ctrl:setTabStop(opts.tabStop); }
+    IF opts.toolTip != NULL    { ctrl:setToolTip(opts.toolTip); }
+    IF opts.cursor != NULL     { ctrl:setCursor(opts.cursor); }
+    IF opts.borderStyle != NULL{ ctrl:setBorderStyle(opts.borderStyle); }
+    IF opts.autoSize != NULL   { ctrl:setAutoSize(opts.autoSize); }
+};
+
+// Wire generic event handlers from the descriptor.
+VAR applyEventHandlers = FUNCTION(ctrl, opts) {
+    IF opts == NULL { return; }
+    IF opts.onClick != NULL          { ctrl.onClick          = opts.onClick; }
+    IF opts.onMouseDown != NULL      { ctrl.onMouseDown      = opts.onMouseDown; }
+    IF opts.onMouseUp != NULL        { ctrl.onMouseUp        = opts.onMouseUp; }
+    IF opts.onMouseMove != NULL      { ctrl.onMouseMove      = opts.onMouseMove; }
+    IF opts.onKeyDown != NULL        { ctrl.onKeyDown        = opts.onKeyDown; }
+    IF opts.onKeyUp != NULL          { ctrl.onKeyUp          = opts.onKeyUp; }
+    IF opts.onFocus != NULL          { ctrl.onFocus          = opts.onFocus; }
+    IF opts.onBlur != NULL           { ctrl.onBlur           = opts.onBlur; }
+    IF opts.onResize != NULL         { ctrl.onResize         = opts.onResize; }
+    IF opts.onTextChanged != NULL    { ctrl.onTextChanged    = opts.onTextChanged; }
+    IF opts.onValueChanged != NULL   { ctrl.onValueChanged   = opts.onValueChanged; }
+    IF opts.onSelectionChanged != NULL { ctrl.onSelectionChanged = opts.onSelectionChanged; }
+    IF opts.onTabChanged != NULL     { ctrl.onTabChanged     = opts.onTabChanged; }
+    IF opts.onNodeSelected != NULL   { ctrl.onNodeSelected   = opts.onNodeSelected; }
+    IF opts.onItemActivated != NULL  { ctrl.onItemActivated  = opts.onItemActivated; }
+    IF opts.onTick != NULL           { ctrl.onTick           = opts.onTick; }
+    IF opts.onPaint != NULL          { ctrl.onPaint          = opts.onPaint; }
+    IF opts.onClose != NULL          { ctrl.onClose          = opts.onClose; }
+    IF opts.onShown != NULL          { ctrl.onShown          = opts.onShown; }
+};
+
+// Register an `id`-tagged control on the form's `__fields` table.
+VAR registerId = FUNCTION(form, id, ctrl) {
+    IF id == NULL || form == NULL { return; }
+    IF form.__fields == NULL { form.__fields = {}; }
+    form.__fields[id] = ctrl;
+};
+
+// `form:field(name)` lookup helper attached to every Window.
+VAR formFieldFn = FUNCTION(self, name) {
+    IF self.__fields == NULL { return NULL; }
+    return self.__fields[name];
+};
+
+// Forward declaration: instantiateChild builds a single descriptor
+// into a control under `parent`, propagating the form for id /
+// role handling.  Defined further down.
+VAR instantiateChild = NULL;
+
+// -------------------------------------------------------------------
+// Leaf control wrappers -- ui.Label / Button / TextBox / etc.
+// Each accepts (parent, opts) where opts is a descriptor table.
+// Returns the live native instance.
+// -------------------------------------------------------------------
+
+VAR makeLeaf = FUNCTION(ctor) {
+    return FUNCTION(parent, opts) {
+        VAR ctrl = ctor(parent, opts);
+        applyCommonOpts(ctrl, opts);
+        applyEventHandlers(ctrl, opts);
+        return ctrl;
+    };
+};
+
+ui.Label         = makeLeaf(forms.Label);
+ui.Button        = makeLeaf(forms.Button);
+ui.TextBox       = makeLeaf(forms.TextBox);
+ui.CheckBox      = makeLeaf(forms.CheckBox);
+ui.RadioButton   = makeLeaf(forms.RadioButton);
+ui.ComboBox      = makeLeaf(forms.ComboBox);
+ui.ListBox       = makeLeaf(forms.ListBox);
+ui.LinkLabel     = makeLeaf(forms.LinkLabel);
+ui.PictureBox    = makeLeaf(forms.PictureBox);
+ui.NumericUpDown = makeLeaf(forms.NumericUpDown);
+ui.TrackBar      = makeLeaf(forms.TrackBar);
+ui.ProgressBar   = makeLeaf(forms.ProgressBar);
+ui.DateTimePicker= makeLeaf(forms.DateTimePicker);
+ui.MonthCalendar = makeLeaf(forms.MonthCalendar);
+ui.StatusBar     = makeLeaf(forms.StatusBar);
+ui.Spinner       = makeLeaf(forms.Spinner);
+ui.GroupBox      = makeLeaf(forms.GroupBox);
+ui.Panel         = makeLeaf(forms.Panel);
+ui.ScrollArea    = makeLeaf(forms.ScrollPanel);
+ui.PaintSurface  = makeLeaf(forms.PaintSurface);
+ui.TreeView      = makeLeaf(forms.TreeView);
+ui.ListView      = makeLeaf(forms.ListView);
+
+// Non-visual wrappers (no parent).
+ui.Timer = FUNCTION(opts) {
+    VAR t = forms.Timer();
+    IF opts != NULL {
+        IF opts.interval != NULL { t:setInterval(opts.interval); }
+        IF opts.onTick != NULL   { t.onTick = opts.onTick; }
+        IF opts.autoStart == TRUE { t:start(); }
+    }
+    return t;
+};
+
+ui.NotifyIcon = FUNCTION(opts) {
+    VAR n = forms.NotifyIcon();
+    IF opts != NULL {
+        IF opts.icon != NULL    { n:setIcon(opts.icon); }
+        IF opts.text != NULL    { n:setText(opts.text); }
+        IF opts.onClick != NULL { n.onClick = opts.onClick; }
+        IF opts.visible == TRUE { n:show(); }
+    }
+    return n;
+};
+
+// -------------------------------------------------------------------
+// Container builders.
+//
+// Each container builder takes (parent, opts).  Opts.children is an
+// array of descriptors; the builder instantiates them under the
+// container.  Containers also propagate the form (the top-level
+// Window) so id / role / accept / cancel buttons resolve correctly.
+// -------------------------------------------------------------------
+
+// Build children of `parent` from an array of descriptors.  `form`
+// is the owning Window (for id registry + role wiring).
+VAR buildChildren = FUNCTION(parent, form, children) {
+    IF children == NULL { return; }
+    FOR child OF children {
+        instantiateChild(parent, form, child);
+    }
+};
+
+// Stack / Row / Column -- FlowLayoutPanel with direction defaults.
+ui.Stack = FUNCTION(parent, opts) {
+    VAR p = forms.FlowLayoutPanel(parent, opts);
+    applyCommonOpts(p, opts);
+    applyEventHandlers(p, opts);
+    IF opts != NULL {
+        IF opts.direction != NULL { p:setFlowDirection(opts.direction); }
+        IF opts.wrap != NULL      { p:setWrapContents(opts.wrap); }
+        IF opts.children != NULL  { buildChildren(p, opts.__form, opts.children); }
+    }
+    return p;
+};
+
+ui.Row = FUNCTION(parent, opts) {
+    IF opts == NULL { opts = {}; }
+    opts.direction = "leftToRight";
+    return ui.Stack(parent, opts);
+};
+
+ui.Column = FUNCTION(parent, opts) {
+    IF opts == NULL { opts = {}; }
+    opts.direction = "topDown";
+    return ui.Stack(parent, opts);
+};
+
+// Grid -- TableLayoutPanel.  Children are auto-placed in row-major
+// order unless their descriptor carries `cell = { col, row[, colSpan, rowSpan] }`.
+ui.Grid = FUNCTION(parent, opts) {
+    VAR g = forms.TableLayoutPanel(parent, opts);
+    applyCommonOpts(g, opts);
+    applyEventHandlers(g, opts);
+    IF opts != NULL {
+        IF opts.columns != NULL { g:setColumns(opts.columns); }
+        IF opts.rows != NULL    { g:setRows(opts.rows); }
+        IF opts.cellPadding != NULL { g:setCellPadding(opts.cellPadding); }
+        IF opts.children != NULL {
+            FOR child OF opts.children {
+                VAR ctrl = instantiateChild(g, opts.__form, child);
+                IF child.cell != NULL {
+                    g:add(ctrl, child.cell[0], child.cell[1],
+                          child.cell.colSpan == NULL ? 1 : child.cell.colSpan,
+                          child.cell.rowSpan == NULL ? 1 : child.cell.rowSpan);
+                }
+            }
+        }
+    }
+    return g;
+};
+
+// Tabs -- TabControl with content panels per page.
+ui.Tabs = FUNCTION(parent, opts) {
+    VAR t = forms.TabControl(parent, opts);
+    applyCommonOpts(t, opts);
+    applyEventHandlers(t, opts);
+    IF opts != NULL && opts.pages != NULL {
+        VAR pageBodies = [];
+        FOR page OF opts.pages {
+            t:addTab(page.title);
+            // Each page body is a Panel parented to the Tab control.
+            // The script toggles visibility on tab change below.
+            VAR body = forms.Panel(t, { dock: "fill" });
+            IF page.body != NULL {
+                instantiateChild(body, opts.__form, page.body);
+            }
+            body:setVisible(FALSE);
+            pageBodies[#pageBodies] = body;
+        }
+        IF #pageBodies > 0 { pageBodies[0]:setVisible(TRUE); }
+        t.onTabChanged = FUNCTION(self, idx) {
+            FOR i IN 0 -> #pageBodies - 1 {
+                pageBodies[i]:setVisible(i == idx);
+            }
+        };
+    }
+    return t;
+};
+
+// Split -- approximates SplitContainer using a Panel + Splitter +
+// Panel triplet, all docked to follow the orientation.
+ui.Split = FUNCTION(parent, opts) {
+    IF opts == NULL { opts = {}; }
+    VAR orient = opts.orientation == NULL ? "vertical" : opts.orientation;
+    VAR distance = opts.distance == NULL ? 200 : opts.distance;
+    VAR p = forms.Panel(parent, opts);
+    applyCommonOpts(p, opts);
+    VAR side, splitter, body;
+    IF orient == "vertical" {
+        side     = forms.Panel(p,    { dock: "left", size: [distance, 0] });
+        splitter = forms.Splitter(p, { dock: "left", size: [4, 0] });
+        body     = forms.Panel(p,    { dock: "fill" });
+    } ELSE {
+        side     = forms.Panel(p,    { dock: "top", size: [0, distance] });
+        splitter = forms.Splitter(p, { dock: "top", size: [0, 4] });
+        body     = forms.Panel(p,    { dock: "fill" });
+        splitter:setOrientation("horizontal");
+    }
+    splitter:setTarget(side);
+    IF opts.panel1 != NULL { instantiateChild(side, opts.__form, opts.panel1); }
+    IF opts.panel2 != NULL { instantiateChild(body, opts.__form, opts.panel2); }
+    p.panel1 = side;
+    p.panel2 = body;
+    return p;
+};
+
+// -------------------------------------------------------------------
+// Top-level: ui.Window
+// -------------------------------------------------------------------
+
+ui.Window = FUNCTION(opts) {
+    IF opts == NULL { opts = {}; }
+    VAR f = forms.Form(opts);
+    f.__fields = {};
+    f.field    = formFieldFn;
+
+    IF opts.title    != NULL { f:setText(opts.title); }
+    IF opts.size     != NULL { f:setSize(opts.size[0], opts.size[1]); }
+    IF opts.minSize  != NULL { f:setMinSize(opts.minSize[0],  opts.minSize[1]); }
+    IF opts.maxSize  != NULL { f:setMaxSize(opts.maxSize[0],  opts.maxSize[1]); }
+    IF opts.icon     != NULL { f:setIcon(opts.icon); }
+    IF opts.center   == TRUE { f:center(); }
+    IF opts.topMost  == TRUE { f:setTopMost(TRUE); }
+    IF opts.opacity  != NULL { f:setOpacity(opts.opacity); }
+    IF opts.resizable == FALSE { f:setResizable(FALSE); }
+    applyEventHandlers(f, opts);
+
+    IF opts.body != NULL {
+        // Tag the body descriptor with the form so nested children
+        // can register their `id` and `role` tags.
+        opts.body.__form = f;
+        instantiateChild(f, f, opts.body);
+    }
+    IF opts.menu != NULL {
+        VAR m = ui.menu(opts.menu);
+        f:setMenu(m);
+    }
+    return f;
+};
+
+// -------------------------------------------------------------------
+// instantiateChild dispatches a descriptor to the right builder.
+// Recognises descriptors of two shapes:
+//   - { kind = "Stack", direction = ..., children = [...] }    OR
+//   - any object built by ui.<Builder>(NULL, opts) returns the
+//     control directly when "kind" is omitted -- handled by the
+//     caller already passing a constructor reference.
+//
+// For declarative trees, descriptors include a `kind` string the
+// dispatcher resolves into a builder.
+// -------------------------------------------------------------------
+
+VAR builderForKind = {
+    Stack:          ui.Stack,
+    Row:            ui.Row,
+    Column:         ui.Column,
+    Grid:           ui.Grid,
+    Tabs:           ui.Tabs,
+    Split:          ui.Split,
+    Panel:          ui.Panel,
+    Group:          ui.GroupBox,
+    GroupBox:       ui.GroupBox,
+    ScrollArea:     ui.ScrollArea,
+    Label:          ui.Label,
+    Button:         ui.Button,
+    TextBox:        ui.TextBox,
+    CheckBox:       ui.CheckBox,
+    RadioButton:    ui.RadioButton,
+    ComboBox:       ui.ComboBox,
+    ListBox:        ui.ListBox,
+    LinkLabel:      ui.LinkLabel,
+    PictureBox:     ui.PictureBox,
+    NumericUpDown:  ui.NumericUpDown,
+    TrackBar:       ui.TrackBar,
+    ProgressBar:    ui.ProgressBar,
+    DateTimePicker: ui.DateTimePicker,
+    MonthCalendar:  ui.MonthCalendar,
+    StatusBar:      ui.StatusBar,
+    Spinner:        ui.Spinner,
+    PaintSurface:   ui.PaintSurface,
+    TreeView:       ui.TreeView,
+    ListView:       ui.ListView
+};
+
+instantiateChild = FUNCTION(parent, form, descriptor) {
+    IF descriptor == NULL { return NULL; }
+    VAR kind = descriptor.kind;
+    VAR builder = NULL;
+    IF kind != NULL {
+        builder = builderForKind[kind];
+    }
+    IF builder == NULL {
+        // Untagged object -- fall back to Panel so unknown descriptors
+        // at least get a place to live.
+        builder = ui.Panel;
+    }
+    descriptor.__form = form;
+    VAR ctrl = builder(parent, descriptor);
+
+    // id registry.
+    IF descriptor.id != NULL { registerId(form, descriptor.id, ctrl); }
+
+    // role wiring for buttons.
+    IF descriptor.role != NULL && form != NULL {
+        IF descriptor.role == "accept" { form:setAcceptButton(ctrl); }
+        IF descriptor.role == "cancel" { form:setCancelButton(ctrl); }
+    }
+
+    return ctrl;
+};
+
+// -------------------------------------------------------------------
+// ui.menu -- declarative menu tree.
+//
+// Pass an array of items.  Each item is either:
+//   { text = "...", items = [...] }                  submenu
+//   { text = "...", onClick = function ... }         leaf
+//   { separator = TRUE }                             divider
+//
+// Returns a forms.MenuStrip ready to be passed to form:setMenu(...).
+// -------------------------------------------------------------------
+
+VAR populateMenu = NULL;
+populateMenu = FUNCTION(parent, items) {
+    IF items == NULL { return; }
+    FOR item OF items {
+        IF item.separator == TRUE {
+            parent:addSeparator();
+        } ELSE {
+            VAR mi = parent:addItem(item.text == NULL ? "" : item.text);
+            IF item.onClick != NULL { mi.onClick = item.onClick; }
+            IF item.enabled == FALSE { mi:setEnabled(FALSE); }
+            IF item.items != NULL { populateMenu(mi, item.items); }
+        }
+    }
+};
+
+ui.menu = FUNCTION(items) {
+    VAR m = forms.MenuStrip();
+    populateMenu(m, items);
+    return m;
+};
+
+ui.contextMenu = FUNCTION(items) {
+    VAR m = forms.ContextMenu();
+    populateMenu(m, items);
+    return m;
+};
+
+// -------------------------------------------------------------------
+// ui.dialog.* -- ergonomic wrappers over the native dialog primitives.
+// -------------------------------------------------------------------
+
+VAR dialog = {};
+
+dialog.message = FUNCTION(text, opts) {
+    return forms.MessageBox(text,
+        opts == NULL || opts.title == NULL ? "Notice" : opts.title,
+        opts == NULL ? { icon: "info" } : opts);
+};
+
+dialog.confirm = FUNCTION(text, opts) {
+    IF opts == NULL { opts = {}; }
+    opts.buttons = "yesNo";
+    IF opts.icon == NULL { opts.icon = "question"; }
+    VAR result = forms.MessageBox(text,
+        opts.title == NULL ? "Confirm" : opts.title, opts);
+    return result == "yes";
+};
+
+dialog.openFile  = FUNCTION(opts) { return forms.OpenFileDialog(opts); };
+dialog.saveFile  = FUNCTION(opts) { return forms.SaveFileDialog(opts); };
+dialog.openFolder= FUNCTION(opts) { return forms.FolderBrowserDialog(opts); };
+dialog.color     = FUNCTION(initial) { return forms.ColorDialog(initial); };
+dialog.font      = FUNCTION() { return forms.FontDialog(); };
+
+ui.dialog = dialog;
+
+// -------------------------------------------------------------------
+// ui.observable -- minimal state holder + subscribe.
+//
+// Returns an object with :get(k), :set(k, v), :snapshot(),
+// :subscribe(fn) where fn(key, oldVal, newVal).
+// -------------------------------------------------------------------
+
+ui.observable = FUNCTION(initial) {
+    VAR state = initial == NULL ? {} : initial;
+    VAR listeners = [];
+    VAR obs = {};
+    obs.get = FUNCTION(self, k) { return state[k]; };
+    obs.set = FUNCTION(self, k, v) {
+        VAR oldv = state[k];
+        state[k] = v;
+        FOR fn OF listeners { fn(k, oldv, v); }
+    };
+    obs.snapshot = FUNCTION(self) {
+        VAR copy = {};
+        FOR k IN state { copy[k] = state[k]; }
+        return copy;
+    };
+    obs.subscribe = FUNCTION(self, fn) {
+        listeners[#listeners] = fn;
+    };
+    return obs;
+};
+
+// -------------------------------------------------------------------
+// ui.eventBus -- tiny pub/sub.
+// -------------------------------------------------------------------
+
+ui.eventBus = FUNCTION() {
+    VAR subs = {};
+    VAR bus = {};
+    bus.on = FUNCTION(self, ev, fn) {
+        IF subs[ev] == NULL { subs[ev] = []; }
+        VAR list = subs[ev];
+        list[#list] = fn;
+    };
+    bus.emit = FUNCTION(self, ev, payload) {
+        IF subs[ev] != NULL {
+            FOR fn OF subs[ev] { fn(payload); }
+        }
+    };
+    return bus;
+};
+
+// -------------------------------------------------------------------
+// ui.applyTheme -- walk a form's tree and apply font + colours.
+// -------------------------------------------------------------------
+
+VAR applyThemeRecursive = NULL;
+applyThemeRecursive = FUNCTION(ctrl, theme) {
+    IF theme.fontFace != NULL || theme.fontSize != NULL {
+        ctrl:setFont({
+            face: theme.fontFace == NULL ? "Segoe UI" : theme.fontFace,
+            size: theme.fontSize == NULL ? 9          : theme.fontSize
+        });
+    }
+    IF theme.foreColor != NULL { ctrl:setForeColor(theme.foreColor); }
+    IF theme.backColor != NULL { ctrl:setBackColor(theme.backColor); }
+    VAR children = ctrl:getChildren();
+    IF children != NULL {
+        FOR c OF children { applyThemeRecursive(c, theme); }
+    }
+};
+
+ui.applyTheme = FUNCTION(form, theme) {
+    IF theme == NULL { return; }
+    applyThemeRecursive(form, theme);
+};
+
+// -------------------------------------------------------------------
+// ui.toast -- non-modal short-lived label.
+// -------------------------------------------------------------------
+
+ui.toast = FUNCTION(form, text, opts) {
+    VAR duration = opts == NULL || opts.duration == NULL ? 2.0 : opts.duration;
+    VAR label = forms.Label(form, {
+        text:      text,
+        backColor: opts == NULL || opts.backColor == NULL
+                    ? "lightyellow" : opts.backColor,
+        foreColor: opts == NULL || opts.foreColor == NULL
+                    ? "black" : opts.foreColor,
+        autoSize:  TRUE,
+        padding:   [8, 4, 8, 4]
+    });
+    // Position: bottom-right by default.
+    VAR fw = form:getWidth(), fh = form:getHeight();
+    VAR lw = label:getWidth(), lh = label:getHeight();
+    label:setLocation(fw - lw - 16, fh - lh - 16);
+    label:setAnchor("bottom right");
+
+    VAR t = forms.Timer();
+    t:setInterval(duration * 1000);
+    t.onTick = FUNCTION(self) {
+        label:destroy();
+        self:stop();
+    };
+    t:start();
+    return label;
+};
+
+return ui;
