@@ -1,0 +1,94 @@
+/* nbody.cdo -- 5-body gravitational simulation, scaled-down port of the
+ * classic Computer Language Benchmarks Game program.
+ *
+ * Stresses: array indexing, loop-carried floating-point dependencies,
+ * sqrt() native call from a hot loop.  Good showcase for allocation
+ * sinking once we have a JIT -- the temporary objects from each
+ * acceleration update never escape the inner loop.
+ */
+
+CONST PI            = 3.141592653589793;
+CONST SOLAR_MASS    = 4.0 * PI * PI;
+CONST DAYS_PER_YEAR = 365.24;
+
+/* Parallel arrays: x[i],y[i],z[i],vx[i],vy[i],vz[i],m[i] for body i. */
+VAR x  = [0.0, 4.84143144246472090, 8.34336671824457987,
+          12.894369562139131, 15.379697114850917];
+VAR y  = [0.0, -1.16032004402742839, 4.12479856412430479,
+          -10.533236981337303, -25.919314609987];
+VAR z  = [0.0, -0.103622044471123109, -0.403523417114321381,
+          -0.207659938025821, 0.179258772950371];
+VAR vx = [0.0, 0.00166007664274403694 * DAYS_PER_YEAR,
+                0.00276742510726862411 * DAYS_PER_YEAR,
+                0.00288930126590906 * DAYS_PER_YEAR,
+                0.00268067772490389 * DAYS_PER_YEAR];
+VAR vy = [0.0, 0.00769901118419740425 * DAYS_PER_YEAR,
+                0.00499852801234917238 * DAYS_PER_YEAR,
+                0.00114002714709443 * DAYS_PER_YEAR,
+                0.00162824170038242 * DAYS_PER_YEAR];
+VAR vz = [0.0, -0.0000690460016972063023 * DAYS_PER_YEAR,
+                 0.0000230417297573763929 * DAYS_PER_YEAR,
+                -0.0000253238486424767 * DAYS_PER_YEAR,
+                -0.0000951592254519 * DAYS_PER_YEAR];
+VAR m  = [SOLAR_MASS,
+          0.000954791938424326609 * SOLAR_MASS,
+          0.000285885980666130812 * SOLAR_MASS,
+          0.0000436624404335156298 * SOLAR_MASS,
+          0.0000515138902046611451 * SOLAR_MASS];
+
+CONST N = 5;
+
+/* Offset Sun's momentum so the system has zero net momentum. */
+VAR px = 0.0; VAR py = 0.0; VAR pz = 0.0;
+FOR i IN 0 -> N - 1 {
+    px = px + vx[i] * m[i];
+    py = py + vy[i] * m[i];
+    pz = pz + vz[i] * m[i];
+}
+vx[0] = -px / SOLAR_MASS;
+vy[0] = -py / SOLAR_MASS;
+vz[0] = -pz / SOLAR_MASS;
+
+FUNCTION energy() {
+    VAR e = 0.0;
+    FOR i IN 0 -> N - 1 {
+        e = e + 0.5 * m[i] * (vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
+        FOR j IN i + 1 -> N - 1 {
+            VAR dx = x[i] - x[j];
+            VAR dy = y[i] - y[j];
+            VAR dz = z[i] - z[j];
+            VAR d  = math.sqrt(dx*dx + dy*dy + dz*dz);
+            e = e - m[i] * m[j] / d;
+        }
+    }
+    RETURN e;
+}
+
+FUNCTION advance(dt) {
+    FOR i IN 0 -> N - 1 {
+        FOR j IN i + 1 -> N - 1 {
+            VAR dx = x[i] - x[j];
+            VAR dy = y[i] - y[j];
+            VAR dz = z[i] - z[j];
+            VAR d2 = dx*dx + dy*dy + dz*dz;
+            VAR mag = dt / (d2 * math.sqrt(d2));
+            vx[i] = vx[i] - dx * m[j] * mag;
+            vy[i] = vy[i] - dy * m[j] * mag;
+            vz[i] = vz[i] - dz * m[j] * mag;
+            vx[j] = vx[j] + dx * m[i] * mag;
+            vy[j] = vy[j] + dy * m[i] * mag;
+            vz[j] = vz[j] + dz * m[i] * mag;
+        }
+    }
+    FOR i IN 0 -> N - 1 {
+        x[i] = x[i] + dt * vx[i];
+        y[i] = y[i] + dt * vy[i];
+        z[i] = z[i] + dt * vz[i];
+    }
+}
+
+print(energy());
+FOR step IN 1 -> 1000 {
+    advance(0.01);
+}
+print(energy());

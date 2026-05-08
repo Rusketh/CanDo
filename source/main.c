@@ -6,10 +6,18 @@
  * main.c only handles command-line argument parsing and exit codes.
  *
  * Usage:
- *   cando <file.cdo> [--disasm] [args...]
+ *   cando <file.cdo> [interpreter-flags] [args...]
  *
- * Anything after the script path that is not the `--disasm` switch is
- * forwarded to the script via the global `args` array.
+ * Interpreter flags (consumed here, not forwarded to the script):
+ *   --disasm        disassemble the chunk before execution
+ *   --jit           request the JIT (no-op until it lands; see
+ *                   docs/jit-plan.md)
+ *   --no-jit        force-disable the JIT (no-op until it lands)
+ *   --jit-stats     print one-line JIT summary at exit (no-op until
+ *                   the JIT lands)
+ *
+ * Anything else after the script path is forwarded to the script via
+ * the global `args` array.
  *
  * Must compile with gcc -std=c11.
  */
@@ -24,15 +32,27 @@ int main(int argc, char *argv[])
 {
     if (argc < 2) {
         fprintf(stderr, "CanDo %s\n", CANDO_VERSION);
-        fprintf(stderr, "usage: %s <file.cdo> [--disasm] [args...]\n", argv[0]);
+        fprintf(stderr, "usage: %s <file.cdo> "
+                        "[--disasm] [--jit|--no-jit] [--jit-stats] "
+                        "[args...]\n", argv[0]);
         return 1;
     }
 
-    const char *path   = argv[1];
-    bool        disasm = false;
+    const char *path        = argv[1];
+    bool        disasm      = false;
+    bool        jit_stats   = false;
+    /* The --jit / --no-jit flags are parsed and accepted today so scripts
+     * and CI invocations can rely on the spelling, but they have no effect
+     * on the interpreter -- the JIT is not yet implemented.  See
+     * docs/jit-plan.md for the roadmap.  Keep the variables to silence
+     * unused-warning linting when the JIT lands. */
+    bool        jit_request = false;
+    bool        jit_disable = false;
+    (void)jit_request;
+    (void)jit_disable;
 
-    /* Collect script args: everything after argv[1] except the --disasm
-     * switch (which is consumed by the interpreter, not the script). */
+    /* Collect script args: everything after argv[1] that isn't an
+     * interpreter flag. */
     const char **script_argv = NULL;
     int          script_argc = 0;
     if (argc > 2) {
@@ -44,6 +64,12 @@ int main(int argc, char *argv[])
         for (int i = 2; i < argc; i++) {
             if (strcmp(argv[i], "--disasm") == 0) {
                 disasm = true;
+            } else if (strcmp(argv[i], "--jit") == 0) {
+                jit_request = true;
+            } else if (strcmp(argv[i], "--no-jit") == 0) {
+                jit_disable = true;
+            } else if (strcmp(argv[i], "--jit-stats") == 0) {
+                jit_stats = true;
             } else {
                 script_argv[script_argc++] = argv[i];
             }
@@ -109,5 +135,12 @@ int main(int argc, char *argv[])
 
     cando_close(vm);
     free(script_argv);
+
+    if (jit_stats) {
+        /* Stub: the JIT does not yet exist.  Once it lands this will
+         * print traces compiled / aborts / side-exits / mcode bytes. */
+        fprintf(stderr, "jit: not built (see docs/jit-plan.md)\n");
+    }
+
     return rc;
 }

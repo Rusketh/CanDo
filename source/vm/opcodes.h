@@ -229,6 +229,53 @@ typedef enum {
 } CandoOpFmt;
 
 /* -------------------------------------------------------------------------
+ * Opcode side-effect classes -- CandoOpInfo.effect.
+ *
+ * EFFECT_PURE     -- no side effect, no observable state read.  Foldable.
+ * EFFECT_LOAD     -- reads VM state (locals/globals/upvalues/fields)
+ *                    but does not mutate it.
+ * EFFECT_STORE    -- writes VM state (assignment, field/index store).
+ * EFFECT_CALL     -- transfers control into another chunk or native.
+ * EFFECT_THROW    -- always raises an exception when reached.
+ * EFFECT_CONTROL  -- changes ip / call-frame / try-frame / loop-frame
+ *                    state in a way the recorder must model directly
+ *                    (jumps, returns, try begins, break/continue).
+ *
+ * The values are stable across releases; do not renumber.
+ * ---------------------------------------------------------------------- */
+typedef enum {
+    EFFECT_PURE    = 0,
+    EFFECT_LOAD    = 1,
+    EFFECT_STORE   = 2,
+    EFFECT_CALL    = 3,
+    EFFECT_THROW   = 4,
+    EFFECT_CONTROL = 5,
+} CandoOpEffect;
+
+/* -------------------------------------------------------------------------
+ * CandoOpInfo -- per-opcode descriptor used by the disassembler, by
+ * static analysis, and (eventually) by the JIT recorder.
+ *
+ * in_arity / out_arity describe the *fixed* number of values consumed
+ * from / pushed onto the stack.  Variable-arity opcodes (OP_CALL,
+ * OP_NEW_ARRAY, OP_THROW, OP_POP_N, …) report 0 here -- their real
+ * arity is encoded in the operand A and the recorder must read it.
+ *
+ * may_throw    -- this opcode can raise a runtime error.  The recorder
+ *                 must snapshot before emitting.
+ * may_recurse  -- this opcode can re-enter the VM dispatch loop on a
+ *                 different chunk (calls, eval, tail calls, awaits).
+ *                 The recorder treats these specially or aborts.
+ * ---------------------------------------------------------------------- */
+typedef struct CandoOpInfo {
+    u8 in_arity;
+    u8 out_arity;
+    u8 effect;       /* CandoOpEffect */
+    u8 may_throw;
+    u8 may_recurse;
+} CandoOpInfo;
+
+/* -------------------------------------------------------------------------
  * cando_opcode_name -- return a static ASCII name, e.g. "OP_ADD".
  *                      Returns "OP_UNKNOWN" for out-of-range values.
  * ---------------------------------------------------------------------- */
@@ -238,6 +285,12 @@ const char *cando_opcode_name(CandoOpcode op);
  * cando_opcode_fmt -- return the operand format for `op`.
  * ---------------------------------------------------------------------- */
 CandoOpFmt cando_opcode_fmt(CandoOpcode op);
+
+/* -------------------------------------------------------------------------
+ * cando_opcode_info -- return the descriptor for `op`.  Out-of-range
+ * opcodes return a zeroed descriptor (PURE, no effect, fixed arity 0/0).
+ * ---------------------------------------------------------------------- */
+CandoOpInfo cando_opcode_info(CandoOpcode op);
 
 /* -------------------------------------------------------------------------
  * Convenience: byte-size of the full instruction (opcode + operands).

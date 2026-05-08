@@ -296,6 +296,189 @@ static const CandoOpFmt s_opcode_fmts[OP_COUNT] = {
 };
 
 /* -------------------------------------------------------------------------
+ * Per-opcode descriptor table -- parallel to CandoOpcode enum.
+ *
+ * Variable-arity opcodes (OP_CALL, OP_NEW_ARRAY, OP_THROW, OP_POP_N,
+ * OP_RETURN, OP_TAIL_CALL, OP_METHOD_CALL, OP_FLUENT_CALL, OP_UNPACK,
+ * OP_LOAD_VARARG-with-spread) report (0, 0) and the consumer reads the
+ * actual arity from the operand or from runtime state.  See
+ * docs/vm-internals.md for the per-opcode call convention.
+ *
+ * Effect classification follows docs/jit-plan.md §4.1.  When in doubt
+ * between LOAD and PURE, prefer LOAD: the recorder must conservatively
+ * assume any state read may not be reordered with calls.
+ * ---------------------------------------------------------------------- */
+#define _OP(arity_in, arity_out, eff, throw_, recurse_) \
+    { (u8)(arity_in), (u8)(arity_out), (u8)(eff), (u8)(throw_), (u8)(recurse_) }
+
+static const CandoOpInfo s_opcode_info[OP_COUNT] = {
+    /* Band 0: literals -- pure pushes */
+    [OP_CONST]               = _OP(0, 1, EFFECT_LOAD,    0, 0),
+    [OP_NULL]                = _OP(0, 1, EFFECT_PURE,    0, 0),
+    [OP_TRUE]                = _OP(0, 1, EFFECT_PURE,    0, 0),
+    [OP_FALSE]               = _OP(0, 1, EFFECT_PURE,    0, 0),
+
+    /* Band 1: stack -- POP_N is variable */
+    [OP_POP]                 = _OP(1, 0, EFFECT_PURE,    0, 0),
+    [OP_POP_N]               = _OP(0, 0, EFFECT_PURE,    0, 0),
+    [OP_DUP]                 = _OP(1, 2, EFFECT_PURE,    0, 0),
+
+    /* Band 2: locals -- read or write the slot table */
+    [OP_LOAD_LOCAL]          = _OP(0, 1, EFFECT_LOAD,    0, 0),
+    [OP_STORE_LOCAL]         = _OP(1, 1, EFFECT_STORE,   0, 0), /* peek+store */
+    [OP_DEF_LOCAL]           = _OP(1, 0, EFFECT_STORE,   0, 0),
+    [OP_DEF_CONST_LOCAL]     = _OP(1, 0, EFFECT_STORE,   0, 0),
+
+    /* Band 3: globals -- LOAD may throw on undefined name */
+    [OP_LOAD_GLOBAL]         = _OP(0, 1, EFFECT_LOAD,    1, 0),
+    [OP_STORE_GLOBAL]        = _OP(1, 1, EFFECT_STORE,   1, 0), /* peek+store */
+    [OP_DEF_GLOBAL]          = _OP(1, 0, EFFECT_STORE,   0, 0),
+    [OP_DEF_CONST_GLOBAL]    = _OP(1, 0, EFFECT_STORE,   0, 0),
+
+    /* Band 4: upvalues */
+    [OP_LOAD_UPVAL]          = _OP(0, 1, EFFECT_LOAD,    0, 0),
+    [OP_STORE_UPVAL]         = _OP(1, 1, EFFECT_STORE,   0, 0),
+    [OP_CLOSE_UPVAL]         = _OP(0, 0, EFFECT_STORE,   0, 0),
+
+    /* Band 5: arithmetic -- may throw on type mismatch */
+    [OP_ADD]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_SUB]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_MUL]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_DIV]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_MOD]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_POW]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_NEG]                 = _OP(1, 1, EFFECT_PURE,    1, 0),
+    [OP_POS]                 = _OP(1, 1, EFFECT_PURE,    1, 0),
+    [OP_INCR]                = _OP(1, 1, EFFECT_PURE,    1, 0), /* in-place */
+    [OP_DECR]                = _OP(1, 1, EFFECT_PURE,    1, 0),
+
+    /* Band 6: comparison -- may throw if metamethod misbehaves */
+    [OP_EQ]                  = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_NEQ]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_LT]                  = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_GT]                  = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_LEQ]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_GEQ]                 = _OP(2, 1, EFFECT_PURE,    1, 0),
+    /* _STACK variants: variable left-side + A right-sides; arity=0 */
+    [OP_EQ_STACK]            = _OP(0, 1, EFFECT_PURE,    1, 0),
+    [OP_NEQ_STACK]           = _OP(0, 1, EFFECT_PURE,    1, 0),
+    [OP_LT_STACK]            = _OP(0, 1, EFFECT_PURE,    1, 0),
+    [OP_GT_STACK]            = _OP(0, 1, EFFECT_PURE,    1, 0),
+    [OP_LEQ_STACK]           = _OP(0, 1, EFFECT_PURE,    1, 0),
+    [OP_GEQ_STACK]           = _OP(0, 1, EFFECT_PURE,    1, 0),
+    [OP_RANGE_CHECK]         = _OP(3, 1, EFFECT_PURE,    1, 0),
+
+    /* Band 7: bitwise -- may throw on non-numeric */
+    [OP_BIT_AND]             = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_BIT_OR]              = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_BIT_XOR]             = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_BIT_NOT]             = _OP(1, 1, EFFECT_PURE,    1, 0),
+    [OP_LSHIFT]              = _OP(2, 1, EFFECT_PURE,    1, 0),
+    [OP_RSHIFT]              = _OP(2, 1, EFFECT_PURE,    1, 0),
+
+    /* Band 8: logical -- AND_JUMP/OR_JUMP peek without popping */
+    [OP_NOT]                 = _OP(1, 1, EFFECT_PURE,    0, 0),
+    [OP_AND_JUMP]            = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_OR_JUMP]             = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+
+    /* Band 9: objects -- everything here can heap-allocate or trigger
+     * a metamethod call, hence may_throw + may_recurse on field/index
+     * ops that route through __index / __newindex. */
+    [OP_NEW_OBJECT]          = _OP(0, 1, EFFECT_LOAD,    0, 0),
+    [OP_NEW_ARRAY]           = _OP(0, 1, EFFECT_LOAD,    0, 0), /* var-arity */
+    [OP_GET_FIELD]           = _OP(1, 1, EFFECT_LOAD,    1, 1),
+    [OP_SET_FIELD]           = _OP(1, 1, EFFECT_STORE,   1, 1), /* peek obj */
+    [OP_GET_INDEX]           = _OP(2, 1, EFFECT_LOAD,    1, 1),
+    [OP_SET_INDEX]           = _OP(2, 1, EFFECT_STORE,   1, 1), /* peek obj */
+    [OP_LEN]                 = _OP(1, 1, EFFECT_LOAD,    1, 1),
+    [OP_KEYS_OF]             = _OP(1, 0, EFFECT_LOAD,    1, 0), /* var-arity push */
+    [OP_VALS_OF]             = _OP(1, 0, EFFECT_LOAD,    1, 0),
+
+    /* Band 10: control flow */
+    [OP_JUMP]                = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_JUMP_IF_FALSE]       = _OP(1, 0, EFFECT_CONTROL, 0, 0),
+    [OP_JUMP_IF_TRUE]        = _OP(1, 0, EFFECT_CONTROL, 0, 0),
+    [OP_JUMP_IF_NULL]        = _OP(0, 0, EFFECT_CONTROL, 0, 0), /* peek */
+    [OP_LOOP]                = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_BREAK]               = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_CONTINUE]            = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_LOOP_MARK]           = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_LOOP_END]            = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+
+    /* Band 11: functions and calls -- all may_recurse */
+    [OP_CLOSURE]             = _OP(0, 1, EFFECT_LOAD,    0, 0), /* var tail */
+    [OP_CALL]                = _OP(0, 0, EFFECT_CALL,    1, 1), /* var-arity */
+    [OP_METHOD_CALL]         = _OP(0, 0, EFFECT_CALL,    1, 1),
+    [OP_FLUENT_CALL]         = _OP(0, 0, EFFECT_CALL,    1, 1),
+    [OP_RETURN]              = _OP(0, 0, EFFECT_CONTROL, 0, 0), /* var-arity */
+    [OP_TAIL_CALL]           = _OP(0, 0, EFFECT_CALL,    1, 1),
+
+    /* Band 12: varargs */
+    [OP_LOAD_VARARG]         = _OP(0, 1, EFFECT_LOAD,    0, 0), /* var-arity if A=UINT16_MAX */
+    [OP_VARARG_LEN]          = _OP(0, 1, EFFECT_LOAD,    0, 0),
+    [OP_UNPACK]              = _OP(1, 0, EFFECT_LOAD,    1, 0), /* var-arity */
+
+    /* Band 13: iteration */
+    [OP_RANGE_ASC]           = _OP(2, 1, EFFECT_LOAD,    1, 0),
+    [OP_RANGE_DESC]          = _OP(2, 1, EFFECT_LOAD,    1, 0),
+    [OP_FOR_INIT]            = _OP(0, 0, EFFECT_CONTROL, 1, 0),
+    [OP_FOR_NEXT]            = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_FOR_OVER_INIT]       = _OP(0, 0, EFFECT_CONTROL, 1, 0),
+    [OP_FOR_OVER_NEXT]       = _OP(0, 0, EFFECT_CONTROL, 1, 1), /* calls iter fn */
+    [OP_PIPE_INIT]           = _OP(0, 0, EFFECT_CONTROL, 1, 0),
+    [OP_PIPE_NEXT]           = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_FILTER_NEXT]         = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_PIPE_END]            = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_PIPE_COLLECT]        = _OP(1, 0, EFFECT_STORE,   0, 0),
+    [OP_FILTER_COLLECT]      = _OP(1, 0, EFFECT_STORE,   0, 0),
+    [OP_COND_FILTER_COLLECT] = _OP(1, 0, EFFECT_STORE,   0, 0),
+
+    /* Band 14: error handling */
+    [OP_TRY_BEGIN]           = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_TRY_END]             = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_CATCH_BEGIN]         = _OP(0, 0, EFFECT_CONTROL, 0, 0), /* var pushes */
+    [OP_FINALLY_BEGIN]       = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_THROW]               = _OP(0, 0, EFFECT_THROW,   1, 0), /* var-arity */
+    [OP_RERAISE]             = _OP(0, 0, EFFECT_THROW,   1, 0),
+
+    /* Band 15: threads -- all may_recurse since they re-enter the VM */
+    [OP_ASYNC]               = _OP(0, 0, EFFECT_CALL,    1, 1),
+    [OP_AWAIT]               = _OP(1, 0, EFFECT_CALL,    1, 1), /* var ret */
+    [OP_YIELD]               = _OP(0, 0, EFFECT_CALL,    1, 1),
+    [OP_THREAD]              = _OP(1, 1, EFFECT_CALL,    1, 1),
+
+    /* Band 16: classes */
+    [OP_NEW_CLASS]           = _OP(0, 1, EFFECT_LOAD,    0, 0),
+    [OP_BIND_METHOD]         = _OP(1, 0, EFFECT_STORE,   0, 0), /* class stays on TOS */
+    [OP_INHERIT]             = _OP(2, 1, EFFECT_STORE,   1, 0),
+    [OP_BIND_DEFAULT_CALL]   = _OP(0, 0, EFFECT_STORE,   0, 0),
+
+    /* Band 17: mask/selector -- pure stack shuffles */
+    [OP_MASK_PASS]           = _OP(0, 0, EFFECT_PURE,    0, 0),
+    [OP_MASK_SKIP]           = _OP(1, 0, EFFECT_PURE,    0, 0),
+    [OP_MASK_APPLY]          = _OP(0, 0, EFFECT_PURE,    0, 0), /* var-arity */
+
+    /* Band 18: multi-return spreading -- adjust counters, no stack change */
+    [OP_SPREAD_RET]          = _OP(0, 0, EFFECT_PURE,    0, 0),
+    [OP_ARRAY_SPREAD]        = _OP(0, 0, EFFECT_PURE,    0, 0),
+
+    /* Band 19: call-result comparison -- consume last_ret_count + 1 */
+    [OP_TRUNCATE_RET]        = _OP(0, 0, EFFECT_PURE,    0, 0),
+    [OP_EQ_SPREAD]           = _OP(0, 1, EFFECT_PURE,    1, 0),
+    [OP_NEQ_SPREAD]          = _OP(0, 1, EFFECT_PURE,    1, 0),
+    [OP_LT_SPREAD]           = _OP(0, 1, EFFECT_PURE,    1, 0),
+    [OP_GT_SPREAD]           = _OP(0, 1, EFFECT_PURE,    1, 0),
+    [OP_LEQ_SPREAD]          = _OP(0, 1, EFFECT_PURE,    1, 0),
+    [OP_GEQ_SPREAD]          = _OP(0, 1, EFFECT_PURE,    1, 0),
+
+    /* Sentinels */
+    [OP_NOP]                 = _OP(0, 0, EFFECT_PURE,    0, 0),
+    [OP_HALT]                = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+};
+
+#undef _OP
+
+/* -------------------------------------------------------------------------
  * Public API
  * ---------------------------------------------------------------------- */
 
@@ -308,6 +491,13 @@ const char *cando_opcode_name(CandoOpcode op) {
 CandoOpFmt cando_opcode_fmt(CandoOpcode op) {
     if ((u32)op >= OP_COUNT) return OPFMT_NONE;
     return s_opcode_fmts[(u32)op];
+}
+
+CandoOpInfo cando_opcode_info(CandoOpcode op) {
+    if ((u32)op >= OP_COUNT) {
+        return (CandoOpInfo){ 0, 0, EFFECT_PURE, 0, 0 };
+    }
+    return s_opcode_info[(u32)op];
 }
 
 u32 cando_instr_size_at(const u8 *code, u32 offset) {

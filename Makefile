@@ -170,7 +170,7 @@ TEST_SOCKUTIL_SRCS = $(CORE_SRCS) source/lib/sockutil.c tests/test_sockutil.c
 
 .PHONY: all cando libcando.so libcando.a \
         test test_core test_object test_lexer test_parser test_vm test_thread \
-        test_sockutil test_yaml test_integration clean \
+        test_sockutil test_yaml test_integration clean bench \
         modules modules-test modules-windows modules-clean
 
 all: libcando.so libcando.a $(CANDO_BIN) \
@@ -281,6 +281,21 @@ test_sockutil: $(TEST_SOCKUTIL_BIN)
 
 test_yaml: $(TEST_YAML_BIN)
 	./$(TEST_YAML_BIN)
+
+# ---------------------------------------------------------------------------
+# Benchmarks -- baseline numbers for the JIT effort (see docs/jit-plan.md).
+#
+# Runs every script in tests/bench/ through the cando interpreter and
+# reports wall-clock time for each.  Output is purely informational; this
+# target never fails on slow times -- it's a stopwatch, not a regression
+# gate.
+# ---------------------------------------------------------------------------
+
+BENCH_SCRIPTS = $(sort $(wildcard tests/bench/*.cdo))
+
+bench: $(CANDO_BIN)
+	@echo "==> bench (interpreter)"
+	@bash tests/bench/run_bench.sh ./$(CANDO_BIN) $(BENCH_SCRIPTS)
 
 # ---------------------------------------------------------------------------
 # Windows cross-compilation (requires mingw-w64)
