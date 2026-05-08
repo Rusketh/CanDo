@@ -88,6 +88,7 @@ int slot_alloc_locked(ControlKind kind, int parent_slot)
             s->hicon_small = NULL;
             s->hicon_big   = NULL;
             s->tooltip_hwnd = NULL;
+            s->hmenu        = NULL;
 #endif
             return i;
         }

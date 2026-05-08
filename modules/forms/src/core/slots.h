@@ -75,6 +75,11 @@ typedef enum {
     /* Phase 4 -- non-visual + dialog kinds. */
     KIND_TIMER,
     KIND_NOTIFYICON,
+    KIND_MENUSTRIP,
+    KIND_CONTEXTMENU,
+    KIND_MENUITEM,
+    /* Phase 5 -- custom-paint surface. */
+    KIND_PAINTSURFACE,
     KIND_KIND_COUNT
 } ControlKind;
 
@@ -226,6 +231,7 @@ typedef struct FormsSlot {
     HICON        hicon_small;
     HICON        hicon_big;
     HWND         tooltip_hwnd;
+    HMENU        hmenu;          /* MenuStrip / ContextMenu container */
 #endif
     /* Retained handle to the script-side instance so callbacks survive
      * the script returning. */

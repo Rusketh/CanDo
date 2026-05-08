@@ -1041,12 +1041,23 @@ static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
     }
     case WM_COMMAND: {
         /* Child control notifications.  HIWORD(w)=notify code,
-         * LOWORD(w)=control ID (== slot), l=child HWND. */
+         * LOWORD(w)=control ID (== slot), l=child HWND.
+         * For menu commands, l == 0 and HIWORD(w) == 0; the slot is
+         * a KIND_MENUITEM whose onClick fires. */
         int code = HIWORD(w);
         int cid  = LOWORD(w);
         if (cid > 0 && cid < FORMS_MAX_SLOTS && g_slots[cid].alive) {
             int cgen = g_slots[cid].generation;
             ControlKind k = g_slots[cid].kind;
+            if (k == KIND_MENUITEM) {
+                FormsEvent ev = {0};
+                ev.kind       = EV_MENU_ITEM_CLICKED;
+                ev.slot       = cid;
+                ev.generation = cgen;
+                ev.i0         = cid;     /* item id == slot */
+                event_queue_push(ev);
+                return 0;
+            }
             if (k == KIND_BUTTON && code == BN_CLICKED) {
                 push_event(EV_CLICK, cid, cgen);
             } else if ((k == KIND_CHECKBOX || k == KIND_RADIO) && code == BN_CLICKED) {
@@ -2074,6 +2085,216 @@ static int native_notify_hide(CandoVM *vm, int argc, CandoValue *args)
 #endif
         s->notify_visible = 0;
     }
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* =========================================================================
+ * Phase 4.3 -- MenuStrip / ContextMenu / MenuItem.
+ *
+ * Each menu kind owns an HMENU.  Items are KIND_MENUITEM slots; the
+ * slot's index doubles as the Win32 command id, so WM_COMMAND in the
+ * form's WndProc dispatches directly via the slot table.  For
+ * MenuStrip we attach via SetMenu(form, hmenu); for ContextMenu we
+ * pop up via TrackPopupMenu (synchronously, returns the chosen id
+ * and is dispatched by the form's wndproc on the manager thread via
+ * CMD_MENU_POPUP).
+ * ===================================================================== */
+
+static int native_menu_create_common(CandoVM *vm, ControlKind kind,
+                                     const char *who)
+{
+    if (!require_supported(vm, who)) return -1;
+    if (!ensure_manager()) {
+        forms_throw(vm, "%s: failed to start manager thread", who);
+        return -1;
+    }
+    prep_dispatch_vm(vm);
+    int slot = slot_alloc(kind, -1);
+    if (slot < 0) { forms_throw(vm, "%s: slot table is full", who); return -1; }
+#if FORMS_HAVE_WIN32
+    g_slots[slot].hmenu = (kind == KIND_CONTEXTMENU)
+                          ? CreatePopupMenu()
+                          : CreateMenu();
+#endif
+    CandoValue inst = build_instance(vm, slot, kind, NULL, 0, 0, 0, 0);
+    cando_vm_push(vm, inst);
+    return 1;
+}
+
+static int native_menustrip_create(CandoVM *vm, int argc, CandoValue *args)
+{
+    (void)argc; (void)args;
+    return native_menu_create_common(vm, KIND_MENUSTRIP, "forms.MenuStrip");
+}
+
+static int native_contextmenu_create(CandoVM *vm, int argc, CandoValue *args)
+{
+    (void)argc; (void)args;
+    return native_menu_create_common(vm, KIND_CONTEXTMENU, "forms.ContextMenu");
+}
+
+/* MenuStrip / ContextMenu / MenuItem.addItem(text, [onClick]) -> MenuItem.
+ * Allocates a KIND_MENUITEM slot with the given text and inserts it
+ * into the parent's HMENU.  The script-side onClick (passed positionally
+ * or installed afterwards) fires from the form's WM_COMMAND. */
+static int native_menu_add_item(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "addItem");
+    if (!s) return -1;
+    if (s->kind != KIND_MENUSTRIP && s->kind != KIND_CONTEXTMENU &&
+        s->kind != KIND_MENUITEM) {
+        forms_throw(vm, "addItem: receiver is not a menu container");
+        return -1;
+    }
+    char buf[256] = {0};
+    if (argc >= 2) parse_text_arg(vm, args[1], buf, sizeof(buf));
+
+    int item_slot = slot_alloc(KIND_MENUITEM, -1);
+    if (item_slot < 0) {
+        forms_throw(vm, "addItem: slot table is full");
+        return -1;
+    }
+#if FORMS_HAVE_WIN32
+    if (!s->hmenu) s->hmenu = CreateMenu();
+    /* Each MenuItem may itself become a submenu host -- start with no
+     * submenu HMENU; addItem-on-MenuItem will lazily create one. */
+    g_slots[item_slot].hmenu = NULL;
+    wchar_t *w = utf8_to_wide(buf, -1);
+    if (w) {
+        AppendMenuW(s->hmenu, MF_STRING, (UINT_PTR)item_slot, w);
+        free(w);
+    }
+#endif
+    CandoValue inst = build_instance(vm, item_slot, KIND_MENUITEM, buf, 0, 0, 0, 0);
+    /* Scripts attach onClick after construction:
+     *     VAR item = menu:addItem("New");
+     *     item.onClick = function(self) { ... };
+     * The inline-callback form (3rd argument) is reserved for the
+     * forms_util.cdo wrapper which will translate it to an onClick
+     * assignment script-side. */
+    cando_vm_push(vm, inst);
+    return 1;
+}
+
+static int native_menu_add_separator(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "addSeparator");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->hmenu) AppendMenuW(s->hmenu, MF_SEPARATOR, 0, NULL);
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* MenuItem.setEnabled(b). */
+static int native_menuitem_set_enabled(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setEnabled");
+    if (!s) return -1;
+    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    s->enabled = on;
+#if FORMS_HAVE_WIN32
+    if (s->kind == KIND_MENUITEM) {
+        /* Need the parent menu's HMENU to call EnableMenuItem.  We
+         * don't track the parent slot directly -- but the item's
+         * command id is its slot, so any owner that contains it
+         * can EnableMenuItem(parentHmenu, slot, ...).  Best effort:
+         * walk the slot table for a menu container that has this
+         * item registered.  For v1 we accept that a script must
+         * call this on the parent menu's items only via
+         * setEnabledById helper.  TODO: track parent_hmenu on the
+         * MenuItem slot for a direct lookup.  For now we attempt
+         * EnableMenuItem against every alive container. */
+        for (int i = 1; i < FORMS_MAX_SLOTS; i++) {
+            FormsSlot *p = &g_slots[i];
+            if (!p->alive) continue;
+            if (p->kind != KIND_MENUSTRIP && p->kind != KIND_CONTEXTMENU &&
+                p->kind != KIND_MENUITEM) continue;
+            if (!p->hmenu) continue;
+            EnableMenuItem(p->hmenu, (UINT)(s - g_slots),
+                           MF_BYCOMMAND | (on ? MF_ENABLED : MF_GRAYED));
+        }
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* Form.setMenu(menustrip) -- attaches a MenuStrip's HMENU to the form. */
+static int native_form_set_menu(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *form = arg_self(vm, argc, args, "setMenu");
+    if (!form) return -1;
+    if (form->kind != KIND_FORM) {
+        forms_throw(vm, "setMenu: receiver must be a Form");
+        return -1;
+    }
+    if (argc < 2) { cando_vm_push(vm, args[0]); return 1; }
+    FormsSlot *menu = slot_from_inst(vm, args[1]);
+    if (!menu || menu->kind != KIND_MENUSTRIP) {
+        forms_throw(vm, "setMenu: argument must be a forms.MenuStrip");
+        return -1;
+    }
+#if FORMS_HAVE_WIN32
+    if (form->hwnd && menu->hmenu) {
+        SetMenu(form->hwnd, menu->hmenu);
+        DrawMenuBar(form->hwnd);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+/* ContextMenu.show(control, x, y) -- TrackPopupMenu against the
+ * control's HWND at the requested screen coordinates.  Run via the
+ * manager thread (CMD_MENU_POPUP) since TrackPopupMenu must run on
+ * the thread that owns the host HWND. */
+static int native_contextmenu_show(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "show");
+    if (!s) return -1;
+    if (s->kind != KIND_CONTEXTMENU) {
+        forms_throw(vm, "show: receiver must be a forms.ContextMenu");
+        return -1;
+    }
+#if FORMS_HAVE_WIN32
+    HWND owner = NULL;
+    int  x = 0, y = 0;
+    if (argc >= 2) {
+        FormsSlot *ctl = slot_from_inst(vm, args[1]);
+        if (ctl) owner = ctl->hwnd;
+    }
+    if (argc >= 3 && args[2].tag == CDO_NUMBER) x = (int)args[2].as.number;
+    if (argc >= 4 && args[3].tag == CDO_NUMBER) y = (int)args[3].as.number;
+    if (!s->hmenu) { cando_vm_push(vm, args[0]); return 1; }
+    /* If x/y are 0 (default), use the cursor position. */
+    if (x == 0 && y == 0) {
+        POINT cp; GetCursorPos(&cp);
+        x = cp.x; y = cp.y;
+    }
+    FormsCommand cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.op   = CMD_MENU_POPUP;
+    cmd.slot = (int)(s - g_slots);
+    cmd.ptr0 = s->hmenu;
+    cmd.ptr1 = owner;
+    cmd.x    = x;
+    cmd.y    = y;
+    if (g_mgr_hwnd)
+        SendMessageW(g_mgr_hwnd, WM_FORMS_CMD, 0, (LPARAM)&cmd);
+    /* If TrackPopupMenu returned a command id, simulate the menu
+     * dispatch by pushing the EV_MENU_ITEM_CLICKED event for it. */
+    if (cmd.intval > 0 && cmd.intval < FORMS_MAX_SLOTS &&
+        g_slots[cmd.intval].alive &&
+        g_slots[cmd.intval].kind == KIND_MENUITEM) {
+        FormsEvent ev = {0};
+        ev.kind       = EV_MENU_ITEM_CLICKED;
+        ev.slot       = cmd.intval;
+        ev.generation = g_slots[cmd.intval].generation;
+        event_queue_push(ev);
+    }
+#endif
     cando_vm_push(vm, args[0]);
     return 1;
 }
@@ -4338,6 +4559,11 @@ static const char *meta_name_for_kind(ControlKind k)
     /* Phase 4 -- non-visual + dialog kinds. */
     case KIND_TIMER:           return "forms_timer";
     case KIND_NOTIFYICON:      return "forms_notifyicon";
+    case KIND_MENUSTRIP:       return "forms_menustrip";
+    case KIND_CONTEXTMENU:     return "forms_contextmenu";
+    case KIND_MENUITEM:        return "forms_menuitem";
+    /* Phase 5 -- paint surface. */
+    case KIND_PAINTSURFACE:    return "forms_paintsurface";
     case KIND_NONE:
     case KIND_KIND_COUNT:
         break;
@@ -4670,6 +4896,35 @@ CandoValue cando_module_init(CandoVM *vm)
     }
     /* Phase 4 -- non-visual + dialog kinds. */
     {
+        CdoObject *fm = cando_lib_meta_table(vm, "forms_form");
+        cando_lib_meta_define(vm, fm, "setMenu", native_form_set_menu);
+    }
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_menustrip");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "addItem",      native_menu_add_item);
+        cando_lib_meta_define(vm, m, "addSeparator", native_menu_add_separator);
+    }
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_contextmenu");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "addItem",      native_menu_add_item);
+        cando_lib_meta_define(vm, m, "addSeparator", native_menu_add_separator);
+        cando_lib_meta_define(vm, m, "show",         native_contextmenu_show);
+    }
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_menuitem");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "addItem",      native_menu_add_item);
+        cando_lib_meta_define(vm, m, "addSeparator", native_menu_add_separator);
+        cando_lib_meta_define(vm, m, "setEnabled",   native_menuitem_set_enabled);
+    }
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_paintsurface");
+        meta_inherit(m, base);
+        /* Phase 5.1 will populate paint-specific natives. */
+    }
+    {
         CdoObject *m = cando_lib_meta_table(vm, "forms_timer");
         meta_inherit(m, base);
         cando_lib_meta_define(vm, m, "setInterval",  native_set_interval);
@@ -4750,9 +5005,11 @@ CandoValue cando_module_init(CandoVM *vm)
     /* Phase 3 item controls. */
     libutil_set_method(vm, obj, "TreeView",         native_treeview_create);
     libutil_set_method(vm, obj, "ListView",         native_listview_create);
-    /* Phase 4 non-visual + tray. */
+    /* Phase 4 non-visual + tray + menus. */
     libutil_set_method(vm, obj, "Timer",            native_timer_create);
     libutil_set_method(vm, obj, "NotifyIcon",       native_notifyicon_create);
+    libutil_set_method(vm, obj, "MenuStrip",        native_menustrip_create);
+    libutil_set_method(vm, obj, "ContextMenu",      native_contextmenu_create);
     /* Phase 4.2 -- common dialogs. */
     libutil_set_method(vm, obj, "MessageBox",          native_messagebox);
     libutil_set_method(vm, obj, "OpenFileDialog",      native_open_file_dialog);
