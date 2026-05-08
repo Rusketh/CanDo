@@ -14,12 +14,16 @@
  *                   docs/jit-plan.md -- the JIT itself does not exist
  *                   yet, but counters become readable via --jit-stats
  *                   and via the script-level jit.stats() native).
- *   --no-jit        force-disable the JIT (overrides CANDO_JIT=1).
+ *   --no-jit        force-disable the JIT.  Wins over --jit,
+ *                   --jit-stats, and CANDO_JIT.
  *   --jit-stats     print a one-line summary of profiling counters at
- *                   exit.  Implies --jit if CANDO_JIT is unset.
+ *                   exit.  Always implies --jit (otherwise the output
+ *                   is meaningless); use --no-jit if you want to
+ *                   suppress the print without disabling globally.
  *
  * Environment variables:
- *   CANDO_JIT=1     equivalent to --jit (CLI flag wins on conflict).
+ *   CANDO_JIT=1     equivalent to --jit when no CLI flag overrides.
+ *                   Any other value (including 0 or empty) is ignored.
  *
  * Anything else after the script path is forwarded to the script via
  * the global `args` array.
