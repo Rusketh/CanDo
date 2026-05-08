@@ -1,9 +1,34 @@
 /*
- * value.h -- Tagged-union value type for the Cando runtime.
+ * value.h -- NaN-boxed value type for the Cando runtime.
  *
- * Every script-visible datum is a CandoValue.  The TypeTag identifies
- * which union member is live.  The lock header (LockID) is embedded so
- * that the auto-locking layer can protect individual values.
+ * Every script-visible datum is a CandoValue.  Storage is an 8-byte
+ * union of an IEEE 754 double and a u64 bit pattern.
+ *
+ *   - Numbers are stored as ordinary doubles (the dominant case).
+ *   - Other types are encoded as quiet NaNs whose mantissa carries a
+ *     3-bit type tag and a 48-bit payload (pointer / handle / bool).
+ *
+ * Boxed-value bit layout (high to low):
+ *
+ *     63     | sign      = 1
+ *     62..52 | exponent  = 0x7FF (NaN)
+ *     51     | qNaN bit  = 1
+ *     50..48 | tag       = TYPE_BOOL / TYPE_STRING / TYPE_OBJECT (1..3)
+ *     47..0  | payload   = bool / CandoString* / HandleIndex
+ *
+ * TYPE_NULL uses tag=0; the canonical null value is 0xFFF8000000000000.
+ * TYPE_NUMBER has no tag -- any value that does not match the boxed
+ * pattern is interpreted as a number.
+ *
+ * Native-function sentinels (legacy) are encoded as negative finite
+ * doubles, which are still TYPE_NUMBER under the new scheme.  See
+ * cando_is_native_fn / cando_native_value below.
+ *
+ * NaN canonicalisation: arithmetic that produces NaN must canonicalise
+ * to a positive-sign qNaN (0x7FF8000000000000) so the negative-sign
+ * NaN encoding (0xFFF8000000000000) is reserved exclusively for boxed
+ * null.  cando_number() does this canonicalisation when called with
+ * isnan(n) input.
  *
  * Must compile with gcc -std=c11.
  */
@@ -11,43 +36,42 @@
 #ifndef CANDO_VALUE_H
 #define CANDO_VALUE_H
 
+#include <math.h>     /* isnan */
+#include <stdint.h>   /* uintptr_t */
+
 #include "common.h"
 
 /* -----------------------------------------------------------------------
- * TypeTag -- 8-bit discriminant for a CandoValue
+ * TypeTag -- script-visible type identifier.
  *
- * Declared as int enum for C11 compatibility; stored in value structs as u8.
+ * The numeric values match the bit-encoded tag for boxed values
+ * (TYPE_NULL..TYPE_OBJECT) plus an extra TYPE_NUMBER that has no
+ * physical bit pattern -- any non-boxed CandoValue is a number.
+ *
+ * The values are stable; do not renumber.
  * --------------------------------------------------------------------- */
 typedef enum {
-    TYPE_NULL   = 0,   /* The nil / absent value                          */
-    TYPE_BOOL   = 1,   /* Boolean: true / false                           */
-    TYPE_NUMBER = 2,   /* IEEE 754 double                                 */
-    TYPE_STRING = 3,   /* Immutable heap string                           */
-    TYPE_OBJECT = 4,   /* Heap object referenced via a HandleIndex        */
+    TYPE_NULL   = 0,   /* boxed: tag=0, payload=0                        */
+    TYPE_BOOL   = 1,   /* boxed: tag=1, payload=0|1                      */
+    TYPE_NUMBER = 2,   /* not boxed -- stored as IEEE 754 double         */
+    TYPE_STRING = 3,   /* boxed: tag=3, payload=CandoString*              */
+    TYPE_OBJECT = 4,   /* boxed: tag=4, payload=HandleIndex u32           */
 } TypeTag;
 
 /* -----------------------------------------------------------------------
  * HandleIndex -- opaque index into the global Handle Table.
- * An object is never stored by raw pointer inside a CandoValue; only by
- * its handle index so that the GC can move memory freely.
  * --------------------------------------------------------------------- */
 typedef u32 HandleIndex;
 #define CANDO_INVALID_HANDLE ((HandleIndex)UINT32_MAX)
 
 /* -----------------------------------------------------------------------
- * CandoString -- ref-counted, immutable heap string
- *
- * ref_count and hash are atomic so retain/release and the lazy-hash
- * fast path are safe to call concurrently from multiple threads (a
- * single CandoString may be shared across thread boundaries via a
- * VM stack value or a captured closure upvalue).  Same pattern as
- * CdoString in source/object/string.h.
+ * CandoString -- ref-counted, immutable heap string (unchanged).
  * --------------------------------------------------------------------- */
 typedef struct CandoString {
-    _Atomic(u32) ref_count; /* Managed by cando_string_retain / _release  */
-    u32          length;    /* Byte length, excluding NUL                 */
-    _Atomic(u32) hash;      /* FNV-1a hash (0 = not yet computed)         */
-    char         data[];    /* Flexible array member; NUL-terminated      */
+    _Atomic(u32) ref_count;
+    u32          length;
+    _Atomic(u32) hash;
+    char         data[];
 } CandoString;
 
 CANDO_API CandoString *cando_string_new(const char *src, u32 length);
@@ -55,101 +79,123 @@ CANDO_API CandoString *cando_string_retain(CandoString *s);
 CANDO_API void         cando_string_release(CandoString *s);
 
 /* -----------------------------------------------------------------------
- * CandoValue -- the core tagged union
- *
- * Layout (16 bytes on 64-bit):
- *   [type : u8][padding : u8 x 3][lock_id : atomic_u64 — in header]
- *
- * LockID lives in the *object* header (CandoObjectHeader), not in every
- * CandoValue copy, so that primitive copies remain cheap.  For objects the
- * CandoValue holds a HandleIndex; the actual lock is on the pointed-to
- * block.
+ * CandoValue -- 8-byte NaN-boxed union.
  * --------------------------------------------------------------------- */
-typedef struct CandoValue {
-    u8 tag;        /* discriminant — TypeTag values, stored as u8 */
-    union {
-        bool         boolean;  /* TYPE_BOOL   */
-        f64          number;   /* TYPE_NUMBER */
-        CandoString *string;   /* TYPE_STRING */
-        HandleIndex  handle;   /* TYPE_OBJECT */
-    } as;
+typedef union CandoValue {
+    f64 d;
+    u64 u;
 } CandoValue;
 
 /* -----------------------------------------------------------------------
- * Convenience constructors
+ * NaN-box constants.
+ *
+ * CANDO_NB_MASK  -- the high 13 bits (sign + NaN exp + qNaN bit) that
+ *                   together identify a boxed value.  Anything that
+ *                   doesn't AND-equal this mask is a number.
+ *
+ * CANDO_NB_TAG_* -- the full high 16 bits (mask + 3-bit tag) for each
+ *                   boxed type, prepositioned at bits 63..48.
+ * --------------------------------------------------------------------- */
+#define CANDO_NB_MASK         ((u64)0xFFF8000000000000ULL)
+#define CANDO_NB_PAYLOAD_MASK ((u64)0x0000FFFFFFFFFFFFULL)
+
+#define CANDO_NB_TAG_NULL     ((u64)0xFFF8000000000000ULL)  /* tag = 0 */
+#define CANDO_NB_TAG_BOOL     ((u64)0xFFF9000000000000ULL)  /* tag = 1 */
+                                                            /* tag = 2 reserved (was TYPE_NUMBER) */
+#define CANDO_NB_TAG_STRING   ((u64)0xFFFB000000000000ULL)  /* tag = 3 */
+#define CANDO_NB_TAG_OBJECT   ((u64)0xFFFC000000000000ULL)  /* tag = 4 */
+
+#define CANDO_NB_TAG_BITS_MASK ((u64)0xFFFF000000000000ULL)
+
+/* -----------------------------------------------------------------------
+ * Predicates
+ * --------------------------------------------------------------------- */
+CANDO_INLINE bool cando_is_number(CandoValue v) {
+    /* Anything that isn't a boxed pattern is a number, including all
+     * finite doubles, +/-inf, and the canonical positive qNaN. */
+    return (v.u & CANDO_NB_MASK) != CANDO_NB_MASK;
+}
+CANDO_INLINE bool cando_is_null(CandoValue v) {
+    return v.u == CANDO_NB_TAG_NULL;
+}
+CANDO_INLINE bool cando_is_bool(CandoValue v) {
+    return (v.u & CANDO_NB_TAG_BITS_MASK) == CANDO_NB_TAG_BOOL;
+}
+CANDO_INLINE bool cando_is_string(CandoValue v) {
+    return (v.u & CANDO_NB_TAG_BITS_MASK) == CANDO_NB_TAG_STRING;
+}
+CANDO_INLINE bool cando_is_object(CandoValue v) {
+    return (v.u & CANDO_NB_TAG_BITS_MASK) == CANDO_NB_TAG_OBJECT;
+}
+
+/* -----------------------------------------------------------------------
+ * Constructors
  * --------------------------------------------------------------------- */
 CANDO_INLINE CandoValue cando_null(void) {
-    return (CandoValue){ .tag = TYPE_NULL };
+    CandoValue v; v.u = CANDO_NB_TAG_NULL; return v;
 }
-
-CANDO_INLINE CandoValue cando_bool(bool v) {
-    return (CandoValue){ .tag = TYPE_BOOL, .as = { .boolean = v } };
+CANDO_INLINE CandoValue cando_bool(bool b) {
+    CandoValue v; v.u = CANDO_NB_TAG_BOOL | (u64)(b ? 1u : 0u); return v;
 }
-
-CANDO_INLINE CandoValue cando_number(f64 v) {
-    return (CandoValue){ .tag = TYPE_NUMBER, .as = { .number = v } };
+CANDO_INLINE CandoValue cando_number(f64 n) {
+    CandoValue v;
+    v.d = n;
+    /* Force any NaN to canonical positive qNaN so the negative-sign
+     * encoding stays exclusive to boxed null. */
+    if (CANDO_UNLIKELY(isnan(n))) {
+        v.u = (u64)0x7FF8000000000000ULL;
+    }
+    return v;
 }
-
-/* Takes ownership of the string pointer (caller should cando_string_retain
- * first if they want to keep their own reference). */
+/* Takes ownership of the string pointer. */
 CANDO_INLINE CandoValue cando_string_value(CandoString *s) {
-    return (CandoValue){ .tag = TYPE_STRING, .as = { .string = s } };
+    CandoValue v;
+    v.u = CANDO_NB_TAG_STRING | ((u64)(uintptr_t)s & CANDO_NB_PAYLOAD_MASK);
+    return v;
 }
-
 CANDO_INLINE CandoValue cando_object_value(HandleIndex h) {
-    return (CandoValue){ .tag = TYPE_OBJECT, .as = { .handle = h } };
+    CandoValue v;
+    v.u = CANDO_NB_TAG_OBJECT | (u64)h;
+    return v;
 }
 
 /* -----------------------------------------------------------------------
- * Type predicates
- * --------------------------------------------------------------------- */
-CANDO_INLINE bool cando_is_null(CandoValue v)   { return v.tag == TYPE_NULL;   }
-CANDO_INLINE bool cando_is_bool(CandoValue v)   { return v.tag == TYPE_BOOL;   }
-CANDO_INLINE bool cando_is_number(CandoValue v) { return v.tag == TYPE_NUMBER; }
-CANDO_INLINE bool cando_is_string(CandoValue v) { return v.tag == TYPE_STRING; }
-CANDO_INLINE bool cando_is_object(CandoValue v) { return v.tag == TYPE_OBJECT; }
-
-/* -----------------------------------------------------------------------
- * Accessors -- prefer these over direct .tag / .as.* reads.
- *
- * Today they are a thin shim over the tagged union.  The Phase 1 NaN-box
- * migration (docs/jit-plan.md §4.2) will reshape the underlying storage
- * but keep these signatures stable, so any code written against the
- * accessors will not need editing when the flip lands.
- *
- * No type checking: passing the wrong tag is undefined behaviour.  Use
- * the cando_is_* predicates first when the tag is not statically known.
+ * Accessors -- assume the predicate has already been checked.
  * --------------------------------------------------------------------- */
 CANDO_INLINE TypeTag cando_value_tag(CandoValue v) {
-    return (TypeTag)v.tag;
+    if ((v.u & CANDO_NB_MASK) != CANDO_NB_MASK) return TYPE_NUMBER;
+    /* Read the 3-bit tag at bits 50..48; map back to TypeTag. */
+    u64 t = (v.u >> 48) & 0x7u;
+    switch (t) {
+        case 0: return TYPE_NULL;
+        case 1: return TYPE_BOOL;
+        case 3: return TYPE_STRING;
+        case 4: return TYPE_OBJECT;
+        default: return TYPE_NULL;  /* unreachable for well-formed values */
+    }
 }
 CANDO_INLINE bool cando_as_bool(CandoValue v) {
-    return v.as.boolean;
+    return (v.u & 0x1u) != 0;
 }
 CANDO_INLINE f64 cando_as_number(CandoValue v) {
-    return v.as.number;
+    return v.d;
 }
 CANDO_INLINE CandoString *cando_as_string(CandoValue v) {
-    return v.as.string;
+    return (CandoString *)(uintptr_t)(v.u & CANDO_NB_PAYLOAD_MASK);
 }
 CANDO_INLINE HandleIndex cando_as_handle(CandoValue v) {
-    return v.as.handle;
+    return (HandleIndex)(v.u & 0xFFFFFFFFu);
 }
 
 /* -----------------------------------------------------------------------
  * Native function sentinel.
  *
- * Native functions are encoded as TYPE_NUMBER values with a negative
- * payload: native #N is stored as -(f64)(N + 1).  The macros below
- * isolate this convention so the NaN-box migration can replace it with
- * a dedicated tag without breaking call sites.  See
- * docs/value-types.md and docs/jit-plan.md §9.7.
+ * Encoded as a negative finite double: native #N is stored as
+ * -(f64)(N + 1).  Survives the NaN-box flip unchanged because negative
+ * finite doubles are still TYPE_NUMBER.
  *
- * Limit: index must satisfy index < UINT32_MAX.  The encoding wraps
- * silently at index == UINT32_MAX (the "+1u" overflows to 0 and the
- * sentinel becomes 0.0 -- which cando_is_native_fn reads as non-native).
- * The native-function table in CandoVM caps at CANDO_NATIVE_MAX (128),
- * so this limit is comfortably out of reach in practice.
+ * Limit: index < UINT32_MAX (the +1 wraps at the boundary).  The native
+ * table caps at CANDO_NATIVE_MAX (128) so the limit is unreachable.
  * --------------------------------------------------------------------- */
 CANDO_INLINE bool cando_is_native_fn(CandoValue v) {
     return cando_is_number(v) && cando_as_number(v) < 0.0;
@@ -164,28 +210,22 @@ CANDO_INLINE CandoValue cando_native_value(u32 index) {
 }
 
 /* -----------------------------------------------------------------------
+ * In-place setter -- replaces the value at *p with cando_number(n).
+ * Used by OP_INCR / OP_DECR / iterator-index updates that previously did
+ * `p->as.number += 1.0`.  No tag check; caller must guarantee *p is
+ * already a number.
+ * --------------------------------------------------------------------- */
+CANDO_INLINE void cando_set_number(CandoValue *p, f64 n) {
+    *p = cando_number(n);
+}
+
+/* -----------------------------------------------------------------------
  * Value operations
  * --------------------------------------------------------------------- */
-
-/* Returns a human-readable type name string (static lifetime). */
 CANDO_API const char *cando_value_type_name(TypeTag tag);
-
-/* Equality check (structural for primitives, identity for objects). */
-CANDO_API bool cando_value_equal(CandoValue a, CandoValue b);
-
-/* Returns a heap-allocated string representation; caller must free. */
-CANDO_API char *cando_value_tostring(CandoValue v);
-
-/*
- * Deep copy: for TYPE_STRING increments ref_count; for TYPE_OBJECT the
- * same HandleIndex is copied (the object itself is not cloned).
- */
-CANDO_API CandoValue cando_value_copy(CandoValue v);
-
-/*
- * Release resources held by a value (decrements string ref_count, etc.).
- * Safe to call on any tag.
- */
-CANDO_API void cando_value_release(CandoValue v);
+CANDO_API bool        cando_value_equal(CandoValue a, CandoValue b);
+CANDO_API char       *cando_value_tostring(CandoValue v);
+CANDO_API CandoValue  cando_value_copy(CandoValue v);
+CANDO_API void        cando_value_release(CandoValue v);
 
 #endif /* CANDO_VALUE_H */

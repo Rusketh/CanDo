@@ -100,9 +100,11 @@ typedef struct CandoVM CandoVM;
 typedef int (*CandoNativeFn)(CandoVM *vm, int argc, CandoValue *args);
 
 /* IS_NATIVE_FN -- true when a value is a native-function sentinel.
- * NATIVE_INDEX -- extract 0-based index from a native-function sentinel. */
-#define IS_NATIVE_FN(v)  (cando_is_number(v) && (v).as.number < 0.0)
-#define NATIVE_INDEX(v)  ((u32)(-(v).as.number - 1.0))
+ * NATIVE_INDEX -- extract 0-based index from a native-function sentinel.
+ * Both forward to the accessors in value.h so the encoding stays
+ * isolated. */
+#define IS_NATIVE_FN(v)  cando_is_native_fn(v)
+#define NATIVE_INDEX(v)  cando_native_index(v)
 
 /* =========================================================================
  * CandoUpvalue -- a captured variable.

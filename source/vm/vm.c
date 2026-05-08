@@ -2042,7 +2042,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "'++'  requires a number");
                 goto handle_error;
             }
-            vm->stack_top[-1].as.number += 1.0;
+            cando_set_number(&vm->stack_top[-1],
+                             cando_as_number(vm->stack_top[-1]) + 1.0);
             DISPATCH();
         }
         OP_CASE(OP_DECR): {
@@ -2050,7 +2051,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "'--' requires a number");
                 goto handle_error;
             }
-            vm->stack_top[-1].as.number -= 1.0;
+            cando_set_number(&vm->stack_top[-1],
+                             cando_as_number(vm->stack_top[-1]) - 1.0);
             DISPATCH();
         }
 
@@ -3410,7 +3412,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     PUSH(cando_bridge_to_cando(vm, cv));
                 }
                 /* PUSH above moved stack_top; the index slot is now at -2. */
-                (vm->stack_top - 2)->as.number = index_f + 1.0;
+                cando_set_number(&vm->stack_top[-2], index_f + 1.0);
             }
             DISPATCH();
         }
@@ -3470,7 +3472,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * 3. If new control is NULL -> exit loop.
              */
             i16 off = (i16)(READ_U16());
-            u16 nvar = (u16)((vm->stack_top - 1)->as.number);
+            u16 nvar = (u16)(cando_as_number(vm->stack_top[-1]));
             CandoValue control = *(vm->stack_top - 2);
             CandoValue state   = *(vm->stack_top - 3);
             CandoValue iter    = *(vm->stack_top - 4);
@@ -3579,12 +3581,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * If src_idx >= count: jump forward A bytes (exit).
              * Else: push v[src_idx] for DEF_LOCAL pipe; increment src_idx. */
             i16 off = READ_I16();
-            f64 src_index = (vm->stack_top - 1)->as.number;
-            f64 count     = (vm->stack_top - 2)->as.number;
+            f64 src_index = cando_as_number(vm->stack_top[-1]);
+            f64 count     = cando_as_number(vm->stack_top[-2]);
             if (src_index >= count) {
                 ip += off;
             } else {
-                (vm->stack_top - 1)->as.number = src_index + 1.0;
+                cando_set_number(&vm->stack_top[-1], src_index + 1.0);
                 CandoValue *val_ptr =
                     vm->stack_top - 2 - (i64)count + (i64)src_index;
                 PUSH(cando_value_copy(*val_ptr));
@@ -3594,12 +3596,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
         OP_CASE(OP_FILTER_NEXT): {
             /* Identical to PIPE_NEXT; filter logic is in OP_FILTER_COLLECT. */
             i16 off = READ_I16();
-            f64 src_index = (vm->stack_top - 1)->as.number;
-            f64 count     = (vm->stack_top - 2)->as.number;
+            f64 src_index = cando_as_number(vm->stack_top[-1]);
+            f64 count     = cando_as_number(vm->stack_top[-2]);
             if (src_index >= count) {
                 ip += off;
             } else {
-                (vm->stack_top - 1)->as.number = src_index + 1.0;
+                cando_set_number(&vm->stack_top[-1], src_index + 1.0);
                 CandoValue *val_ptr =
                     vm->stack_top - 2 - (i64)count + (i64)src_index;
                 PUSH(cando_value_copy(*val_ptr));
@@ -3623,11 +3625,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * After POP: stack_top[-1]=src_idx, stack_top[-2]=count=N
              * result_arr is at stack_top - 3 - N                          */
             CandoValue result = POP();
-            f64 count_f = (vm->stack_top - 2)->as.number;
+            f64 count_f = cando_as_number(vm->stack_top[-2]);
             i64 N = (i64)count_f;
             CandoValue *arr_ptr = vm->stack_top - 3 - N;
             CdoObject  *arr = cando_bridge_resolve(vm,
-                                  (HandleIndex)arr_ptr->as.handle);
+                                  (HandleIndex)cando_as_handle(*arr_ptr));
             CdoValue cdo_result = cando_bridge_to_cdo(vm, result);
             cdo_array_push(arr, cdo_result);   /* retains */
             cdo_value_release(cdo_result);
@@ -3638,11 +3640,11 @@ static CandoVMResult vm_run(CandoVM *vm) {
             /* Like PIPE_COLLECT but null results are not appended. */
             CandoValue result = POP();
             if (!cando_is_null(result)) {
-                f64 count_f = (vm->stack_top - 2)->as.number;
+                f64 count_f = cando_as_number(vm->stack_top[-2]);
                 i64 N = (i64)count_f;
                 CandoValue *arr_ptr = vm->stack_top - 3 - N;
                 CdoObject  *arr = cando_bridge_resolve(vm,
-                                      (HandleIndex)arr_ptr->as.handle);
+                                      (HandleIndex)cando_as_handle(*arr_ptr));
                 CdoValue cdo_result = cando_bridge_to_cdo(vm, result);
                 cdo_array_push(arr, cdo_result);   /* retains */
                 cdo_value_release(cdo_result);
@@ -3659,14 +3661,14 @@ static CandoVMResult vm_run(CandoVM *vm) {
             bool keep = vm_is_truthy(pred);
             cando_value_release(pred);
             if (keep) {
-                f64 src_idx_f = (vm->stack_top - 1)->as.number;
-                f64 count_f   = (vm->stack_top - 2)->as.number;
+                f64 src_idx_f = cando_as_number(vm->stack_top[-1]);
+                f64 count_f   = cando_as_number(vm->stack_top[-2]);
                 i64 N   = (i64)count_f;
                 i64 idx = (i64)src_idx_f - 1;
                 CandoValue *val_ptr = vm->stack_top - 2 - N + idx;
                 CandoValue *arr_ptr = vm->stack_top - 3 - N;
                 CdoObject  *arr = cando_bridge_resolve(vm,
-                                      (HandleIndex)arr_ptr->as.handle);
+                                      (HandleIndex)cando_as_handle(*arr_ptr));
                 CandoValue elem_copy = cando_value_copy(*val_ptr);
                 CdoValue cdo_elem = cando_bridge_to_cdo(vm, elem_copy);
                 cdo_array_push(arr, cdo_elem);   /* retains */

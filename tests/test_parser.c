@@ -118,7 +118,7 @@ static bool const_is_number(const CandoChunk *c, u32 idx, f64 expected)
     if (idx >= c->const_count) return false;
     CandoValue v = c->constants[idx];
     if (!cando_is_number(v)) return false;
-    return v.as.number == expected;
+    return cando_as_number(v) == expected;
 }
 
 /* Check that constant at index idx is a string equal to expected. */
@@ -127,7 +127,7 @@ static bool const_is_string(const CandoChunk *c, u32 idx, const char *expected)
     if (idx >= c->const_count) return false;
     CandoValue v = c->constants[idx];
     if (!cando_is_string(v)) return false;
-    CandoString *s = v.as.string;
+    CandoString *s = cando_as_string(v);
     return s->length == (u32)strlen(expected) &&
            memcmp(s->data, expected, s->length) == 0;
 }
@@ -511,7 +511,7 @@ TEST(test_var_declaration)
     EXPECT_TRUE(find_op(c, OP_DEF_GLOBAL) >= 0);
     bool found = false;
     for (u32 i = 0; i < c->const_count; i++) {
-        if (cando_is_number(c->constants[i]) && c->constants[i].as.number == 10.0)
+        if (cando_is_number(c->constants[i]) && cando_as_number(c->constants[i]) == 10.0)
             found = true;
     }
     EXPECT_TRUE(found);
@@ -713,7 +713,7 @@ TEST(test_try_catch_finaly)
     bool has1 = false, has2 = false, has3 = false;
     for (u32 i = 0; i < c->const_count; i++) {
         if (!cando_is_number(c->constants[i])) continue;
-        f64 n = c->constants[i].as.number;
+        f64 n = cando_as_number(c->constants[i]);
         if (n == 1.0) has1 = true;
         if (n == 2.0) has2 = true;
         if (n == 3.0) has3 = true;

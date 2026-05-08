@@ -172,7 +172,7 @@ TEST(test_chunk_const_pool) {
     EXPECT_EQ(c->const_count, 2u);
 
     EXPECT_TRUE(cando_is_number(c->constants[i1]));
-    EXPECT_TRUE(fabs(c->constants[i1].as.number - 3.14) < 1e-9);
+    EXPECT_TRUE(fabs(cando_as_number(c->constants[i1]) - 3.14) < 1e-9);
 
     cando_chunk_free(c);
 }
@@ -246,10 +246,10 @@ TEST(test_vm_push_pop_peek) {
 
     CandoValue top = cando_vm_peek(&vm, 0);
     EXPECT_TRUE(cando_is_number(top));
-    EXPECT_TRUE(fabs(top.as.number - 3.0) < 1e-9);
+    EXPECT_TRUE(fabs(cando_as_number(top) - 3.0) < 1e-9);
 
     CandoValue popped = cando_vm_pop(&vm);
-    EXPECT_TRUE(fabs(popped.as.number - 3.0) < 1e-9);
+    EXPECT_TRUE(fabs(cando_as_number(popped) - 3.0) < 1e-9);
     EXPECT_EQ(cando_vm_stack_depth(&vm), 2u);
 
     cando_vm_destroy(&vm);
@@ -266,18 +266,18 @@ TEST(test_vm_globals) {
     EXPECT_TRUE(cando_vm_set_global(&vm, "x", cando_number(42.0), false));
     CandoValue out;
     EXPECT_TRUE(cando_vm_get_global(&vm, "x", &out));
-    EXPECT_TRUE(fabs(out.as.number - 42.0) < 1e-9);
+    EXPECT_TRUE(fabs(cando_as_number(out) - 42.0) < 1e-9);
 
     /* Overwrite it. */
     EXPECT_TRUE(cando_vm_set_global(&vm, "x", cando_number(99.0), false));
     EXPECT_TRUE(cando_vm_get_global(&vm, "x", &out));
-    EXPECT_TRUE(fabs(out.as.number - 99.0) < 1e-9);
+    EXPECT_TRUE(fabs(cando_as_number(out) - 99.0) < 1e-9);
 
     /* Const global cannot be overwritten. */
     EXPECT_TRUE(cando_vm_set_global(&vm, "C", cando_bool(true), true));
     EXPECT_FALSE(cando_vm_set_global(&vm, "C", cando_bool(false), false));
     EXPECT_TRUE(cando_vm_get_global(&vm, "C", &out));
-    EXPECT_TRUE(out.as.boolean); /* still true */
+    EXPECT_TRUE(cando_as_bool(out)); /* still true */
 
     /* Missing global returns false. */
     EXPECT_FALSE(cando_vm_get_global(&vm, "no_such_var", &out));
@@ -304,8 +304,8 @@ static CandoVMResult exec_simple(const char *name,
     if (result_bool) *result_bool = false;
     if (cando_vm_stack_depth(&vm) > 0) {
         CandoValue top = cando_vm_peek(&vm, 0);
-        if (result_num  && cando_is_number(top)) *result_num  = top.as.number;
-        if (result_bool && cando_is_bool(top))   *result_bool = top.as.boolean;
+        if (result_num  && cando_is_number(top)) *result_num  = cando_as_number(top);
+        if (result_bool && cando_is_bool(top))   *result_bool = cando_as_bool(top);
     }
     if (out_vm) *out_vm = vm;          /* copy state for inspection */
     else        cando_vm_destroy(&vm);
@@ -664,7 +664,7 @@ TEST(test_exec_try_catch) {
     /* After catch the stack should have TRUE on top. */
     if (cando_vm_stack_depth(&vm) > 0) {
         CandoValue top = cando_vm_peek(&vm, 0);
-        EXPECT_TRUE(cando_is_bool(top) && top.as.boolean);
+        EXPECT_TRUE(cando_is_bool(top) && cando_as_bool(top));
     } else {
         EXPECT_TRUE(false); /* expected TRUE on stack */
     }
@@ -711,9 +711,9 @@ TEST(test_exec_throw_multi) {
     CandoValue first  = cando_vm_peek(&vm, 0); /* top = first thrown arg  */
     CandoValue second = cando_vm_peek(&vm, 1); /* next = second thrown arg */
     EXPECT_TRUE(cando_is_number(first)
-                && fabs(first.as.number  - 42.0) < 1e-9);
+                && fabs(cando_as_number(first)  - 42.0) < 1e-9);
     EXPECT_TRUE(cando_is_number(second)
-                && fabs(second.as.number - 99.0) < 1e-9);
+                && fabs(cando_as_number(second) - 99.0) < 1e-9);
     cando_vm_destroy(&vm);
     cando_chunk_free(c);
 }
@@ -754,7 +754,7 @@ TEST(test_exec_throw_fewer_than_catch) {
     CandoValue first  = cando_vm_peek(&vm, 0); /* thrown value */
     CandoValue second = cando_vm_peek(&vm, 1); /* padded null  */
     EXPECT_TRUE(cando_is_number(first)
-                && fabs(first.as.number - 42.0) < 1e-9);
+                && fabs(cando_as_number(first) - 42.0) < 1e-9);
     EXPECT_TRUE(cando_is_null(second));
     cando_vm_destroy(&vm);
     cando_chunk_free(c);
@@ -796,7 +796,7 @@ TEST(test_exec_throw_more_than_catch) {
     EXPECT_TRUE(cando_vm_stack_depth(&vm) >= 1u);
     CandoValue first = cando_vm_peek(&vm, 0);
     EXPECT_TRUE(cando_is_number(first)
-                && fabs(first.as.number - 42.0) < 1e-9);
+                && fabs(cando_as_number(first) - 42.0) < 1e-9);
     cando_vm_destroy(&vm);
     cando_chunk_free(c);
 }
@@ -846,7 +846,7 @@ TEST(test_exec_catch_native_error) {
     CandoValue caught = cando_vm_peek(&vm, 0);
     EXPECT_TRUE(cando_is_string(caught));
     if (cando_is_string(caught)) {
-        EXPECT_TRUE(strncmp(caught.as.string->data,
+        EXPECT_TRUE(strncmp(cando_as_string(caught)->data,
                             "test error from native", 22) == 0);
     }
     cando_vm_destroy(&vm);
@@ -1040,7 +1040,7 @@ TEST(test_exec_multi_return_16) {
     /* Stack: NULL-sentinel + 16 values = depth 17 */
     EXPECT_EQ(cando_vm_stack_depth(&vm), 17u);
     for (int i = 0; i < 16; i++) {
-        EXPECT_EQ((int)cando_vm_peek(&vm, i).as.number, 16 - i);
+        EXPECT_EQ((int)cando_as_number(cando_vm_peek(&vm, i)), 16 - i);
     }
     EXPECT_EQ(vm.last_ret_count, 16);
     cando_vm_destroy(&vm);
@@ -1058,7 +1058,7 @@ TEST(test_exec_multi_return_method_16) {
     /* Stack: NULL-sentinel + 16 values = depth 17 */
     EXPECT_EQ(cando_vm_stack_depth(&vm), 17u);
     for (int i = 0; i < 16; i++) {
-        EXPECT_EQ((int)cando_vm_peek(&vm, i).as.number, 16 - i);
+        EXPECT_EQ((int)cando_as_number(cando_vm_peek(&vm, i)), 16 - i);
     }
     EXPECT_EQ(vm.last_ret_count, 16);
     cando_vm_destroy(&vm);
@@ -1085,7 +1085,7 @@ TEST(test_eval_multi_return_16) {
     EXPECT_EQ(count, 16u);
     if (count == 16) {
         for (int i = 0; i < 16; i++) {
-            EXPECT_EQ((int)results[i].as.number, i + 1);
+            EXPECT_EQ((int)cando_as_number(results[i]), i + 1);
             cando_value_release(results[i]);
         }
     }
@@ -1244,7 +1244,7 @@ TEST(test_exec_mask_skip) {
     /* sentinel + TRUE: depth 2; NULL was skipped by MASK_SKIP. */
     EXPECT_EQ(cando_vm_stack_depth(&vm), 2u);
     EXPECT_TRUE(cando_is_bool(cando_vm_peek(&vm, 0)));
-    EXPECT_TRUE(cando_vm_peek(&vm, 0).as.boolean);
+    EXPECT_TRUE(cando_as_bool(cando_vm_peek(&vm, 0)));
     cando_vm_destroy(&vm);
     cando_chunk_free(c);
 }

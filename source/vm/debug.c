@@ -231,7 +231,7 @@ void cando_vm_dump_stack(const CandoVM *vm, FILE *out) {
     for (const CandoValue *v = vm->stack; v < vm->stack_top; v++) {
         if (v != vm->stack) fprintf(out, ", ");
         char *s = cando_value_tostring(*v);
-        fprintf(out, "%s:%s", cando_value_type_name((TypeTag)v->tag), s);
+        fprintf(out, "%s:%s", cando_value_type_name(cando_value_tag(*v)), s);
         cando_free(s);
     }
     fprintf(out, "]\n");

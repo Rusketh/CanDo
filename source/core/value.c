@@ -1,5 +1,10 @@
 /*
  * value.c -- CandoValue and CandoString implementation.
+ *
+ * Storage is NaN-boxed (see value.h for layout).  The accessor inlines
+ * in value.h handle the bit-pattern manipulation; this file holds the
+ * routines that operate on whole CandoValues -- equality, tostring,
+ * copy, release, and the type-name table.
  */
 
 #include "value.h"
@@ -41,8 +46,6 @@ CandoString *cando_string_retain(CandoString *s) {
 
 void cando_string_release(CandoString *s) {
     if (!s) return;
-    /* fetch_sub returns the value *before* the subtraction; if it was
-     * 1 the count just hit 0 and we own the final deallocation.       */
     u32 prev = atomic_fetch_sub_explicit(&s->ref_count, 1u,
                                          memory_order_acq_rel);
     CANDO_ASSERT_MSG(prev > 0, "cando_string_release: ref_count underflow");
@@ -51,10 +54,6 @@ void cando_string_release(CandoString *s) {
 }
 
 static u32 cando_string_hash(CandoString *s) {
-    /* Relaxed load: any thread's previously-computed value is fine.
-     * Two threads computing it concurrently is a benign race -- they
-     * deterministically produce the same value and the last write
-     * wins.                                                            */
     u32 h = atomic_load_explicit(&s->hash, memory_order_relaxed);
     if (h == 0) {
         h = fnv1a(s->data, s->length);
@@ -79,23 +78,29 @@ const char *cando_value_type_name(TypeTag tag) {
 
 /* -----------------------------------------------------------------------
  * Equality
+ *
+ * For boxed values (everything except numbers) the bit pattern uniquely
+ * identifies the value, so a u64 compare suffices for the common case.
+ * The exceptions:
+ *   - Number == Number is a double compare (NaN != NaN, -0.0 == 0.0).
+ *   - String == String falls back to hash + memcmp for interned content
+ *     equality (two distinct CandoString allocations with the same
+ *     bytes must compare equal).
  * --------------------------------------------------------------------- */
 bool cando_value_equal(CandoValue a, CandoValue b) {
-    if (a.tag != b.tag) return false;
-    switch (a.tag) {
-        case TYPE_NULL:   return true;
-        case TYPE_BOOL:   return a.as.boolean == b.as.boolean;
-        case TYPE_NUMBER: return a.as.number  == b.as.number;
-        case TYPE_STRING: {
-            CandoString *sa = a.as.string, *sb = b.as.string;
-            if (sa == sb) return true;
-            if (sa->length != sb->length) return false;
-            if (cando_string_hash(sa) != cando_string_hash(sb)) return false;
-            return memcmp(sa->data, sb->data, sa->length) == 0;
-        }
-        case TYPE_OBJECT: return a.as.handle == b.as.handle;
-        default:          return false;
+    if (cando_is_number(a) || cando_is_number(b)) {
+        if (!cando_is_number(a) || !cando_is_number(b)) return false;
+        return cando_as_number(a) == cando_as_number(b);
     }
+    if (a.u == b.u) return true;  /* same boxed bit pattern */
+    if (cando_is_string(a) && cando_is_string(b)) {
+        CandoString *sa = cando_as_string(a);
+        CandoString *sb = cando_as_string(b);
+        if (sa->length != sb->length) return false;
+        if (cando_string_hash(sa) != cando_string_hash(sb)) return false;
+        return memcmp(sa->data, sb->data, sa->length) == 0;
+    }
+    return false;
 }
 
 /* -----------------------------------------------------------------------
@@ -103,41 +108,38 @@ bool cando_value_equal(CandoValue a, CandoValue b) {
  * --------------------------------------------------------------------- */
 char *cando_value_tostring(CandoValue v) {
     char buf[64];
-    switch (v.tag) {
-        case TYPE_NULL:
-            return strdup("null");
-        case TYPE_BOOL:
-            return strdup(v.as.boolean ? "true" : "false");
-        case TYPE_NUMBER: {
-            /* Omit trailing .0 for whole numbers */
-            f64 n = v.as.number;
-            if (n == (i64)n)
-                snprintf(buf, sizeof(buf), "%" PRId64, (i64)n);
-            else
-                snprintf(buf, sizeof(buf), "%.17g", n);
-            return strdup(buf);
-        }
-        case TYPE_STRING:
-            return strdup(v.as.string->data);
-        case TYPE_OBJECT:
-            snprintf(buf, sizeof(buf), "object(%" PRIu32 ")", v.as.handle);
-            return strdup(buf);
-        default:
-            return strdup("?");
+    if (cando_is_null(v)) return strdup("null");
+    if (cando_is_bool(v)) return strdup(cando_as_bool(v) ? "true" : "false");
+    if (cando_is_number(v)) {
+        f64 n = cando_as_number(v);
+        if (n == (i64)n)
+            snprintf(buf, sizeof(buf), "%" PRId64, (i64)n);
+        else
+            snprintf(buf, sizeof(buf), "%.17g", n);
+        return strdup(buf);
     }
+    if (cando_is_string(v)) return strdup(cando_as_string(v)->data);
+    if (cando_is_object(v)) {
+        snprintf(buf, sizeof(buf), "object(%" PRIu32 ")",
+                 cando_as_handle(v));
+        return strdup(buf);
+    }
+    return strdup("?");
 }
 
 /* -----------------------------------------------------------------------
  * Copy / release
  * --------------------------------------------------------------------- */
 CandoValue cando_value_copy(CandoValue v) {
-    if (v.tag == TYPE_STRING && v.as.string)
-        cando_string_retain(v.as.string);
+    if (cando_is_string(v)) {
+        CandoString *s = cando_as_string(v);
+        if (s) cando_string_retain(s);
+    }
     return v;
 }
 
 void cando_value_release(CandoValue v) {
-    if (v.tag == TYPE_STRING)
-        cando_string_release(v.as.string);
+    if (cando_is_string(v))
+        cando_string_release(cando_as_string(v));
     /* Objects are managed through the Handle Table / GC; no action here. */
 }
