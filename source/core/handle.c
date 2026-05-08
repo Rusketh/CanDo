@@ -96,15 +96,7 @@ HandleIndex cando_handle_alloc(CandoHandleTable *t, void *ptr) {
     return (HandleIndex)idx;
 }
 
-void *cando_handle_get(CandoHandleTable *t, HandleIndex idx) {
-    CANDO_ASSERT(idx < t->capacity);
-    CANDO_ASSERT(t->slots[idx].live);
-
-    cando_lock_read_acquire(&t->lock);
-    void *result = t->slots[idx].ptr;
-    cando_lock_read_release(&t->lock);
-    return result;
-}
+/* cando_handle_get is now inline in handle.h. */
 
 void cando_handle_set(CandoHandleTable *t, HandleIndex idx, void *ptr) {
     CANDO_ASSERT(idx < t->capacity);
