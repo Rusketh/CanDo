@@ -3259,6 +3259,14 @@ static const char *meta_name_for_kind(ControlKind k)
     case KIND_MONTHCALENDAR:   return "forms_monthcalendar";
     case KIND_STATUSBAR:       return "forms_statusbar";
     case KIND_SPINNER:         return "forms_spinner";
+    /* Phase 2 container kinds. */
+    case KIND_SCROLLPANEL:     return "forms_scrollpanel";
+    case KIND_TABCONTROL:      return "forms_tabcontrol";
+    case KIND_TABPAGE:         return "forms_tabpage";
+    case KIND_SPLITCONTAINER:  return "forms_splitcontainer";
+    case KIND_SPLITTER:        return "forms_splitter";
+    case KIND_FLOWLAYOUT:      return "forms_flowlayout";
+    case KIND_TABLELAYOUT:     return "forms_tablelayout";
     case KIND_NONE:
     case KIND_KIND_COUNT:
         break;
@@ -3513,6 +3521,21 @@ CandoValue cando_module_init(CandoVM *vm)
         cando_lib_meta_define(vm, m, "getValue",         native_get_value);
         cando_lib_meta_define(vm, m, "setRange",         native_set_range);
     }
+
+    /* ----- Phase 2 container kinds ----- *
+     * Each meta table chains __index to base so every common method
+     * (setText, setSize, setLocation, setEnabled, setForeColor,
+     * setFont, setPadding, setAnchor, setDock, etc.) is available on
+     * instances of these kinds even before the container-specific
+     * natives (addTab, scrollTo, setSplitterDistance, etc.) land.
+     * Constructors land alongside the per-kind native files. */
+    meta_inherit(cando_lib_meta_table(vm, "forms_scrollpanel"),    base);
+    meta_inherit(cando_lib_meta_table(vm, "forms_tabcontrol"),     base);
+    meta_inherit(cando_lib_meta_table(vm, "forms_tabpage"),        base);
+    meta_inherit(cando_lib_meta_table(vm, "forms_splitcontainer"), base);
+    meta_inherit(cando_lib_meta_table(vm, "forms_splitter"),       base);
+    meta_inherit(cando_lib_meta_table(vm, "forms_flowlayout"),     base);
+    meta_inherit(cando_lib_meta_table(vm, "forms_tablelayout"),    base);
 
     CandoValue tbl = cando_bridge_new_object(vm);
     CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);

@@ -37,7 +37,7 @@ extern "C" {
 
 /* Control taxonomy.  Stable enum values: the C unit tests pin
  * specific positions and a lot of WndProc routing keys off these.
- * Append new kinds at the end. */
+ * Append new kinds at the end -- never reorder. */
 typedef enum {
     KIND_NONE = 0,
     KIND_FORM,
@@ -59,6 +59,16 @@ typedef enum {
     KIND_MONTHCALENDAR,
     KIND_STATUSBAR,
     KIND_SPINNER,
+    /* Phase 2 -- new container kinds.  Registered with their own
+     * meta tables in cando_module_init; constructors and per-kind
+     * native methods land in subsequent commits. */
+    KIND_SCROLLPANEL,
+    KIND_TABCONTROL,
+    KIND_TABPAGE,
+    KIND_SPLITCONTAINER,
+    KIND_SPLITTER,
+    KIND_FLOWLAYOUT,
+    KIND_TABLELAYOUT,
     KIND_KIND_COUNT
 } ControlKind;
 
