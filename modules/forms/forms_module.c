@@ -152,6 +152,7 @@ static void obj_set_bool(CdoObject *obj, const char *key, bool value)
 #include "src/core/geom.h"
 #include "src/core/color.h"
 #include "src/core/slots.h"
+#include "src/core/layout.h"
 
 /* Forward decl: autosize_apply lives near the layout code far below;
  * the setText / setFont setters call it from anywhere in the file. */
@@ -2204,28 +2205,7 @@ static int native_get_font(CandoVM *vm, int argc, CandoValue *args)
  * setMinSize/setMaxSize moved to src/controls/ctl_form.{c,h}. */
 #include "src/controls/ctl_form.h"
 
-/* Translate a border-style string into the FormsBorderStyle enum.
- *   "none"   -> 1
- *   "single" -> 2
- *   "3d"     -> 3
- * Numeric arguments are accepted as-is. */
-static int parse_border_style(CandoValue v)
-{
-    if (v.tag == CDO_NUMBER) {
-        int n = (int)v.as.number;
-        if (n < 1 || n > 3) return 0;
-        return n;
-    }
-    if (v.tag == CDO_STRING && v.as.string) {
-        const char *s = v.as.string->data;
-        u32 n = v.as.string->length;
-        if (n == 4 && memcmp(s, "none",   4) == 0) return 1;
-        if (n == 6 && memcmp(s, "single", 6) == 0) return 2;
-        if (n == 2 && memcmp(s, "3d",     2) == 0) return 3;
-        if (n == 5 && memcmp(s, "fixed3d", 5) == 0) return 3;
-    }
-    return 0;
-}
+/* parse_border_style moved to src/core/layout.{c,h}. */
 
 static int native_set_border_style(CandoVM *vm, int argc, CandoValue *args)
 {
@@ -2399,23 +2379,7 @@ static int measure_text_extent(FormsSlot *s, const wchar_t *text,
     return 1;
 }
 
-/* Compute the bounding box of every alive child of `parent_slot`. */
-static int children_bbox(int parent_slot, int *out_w, int *out_h)
-{
-    int max_right = 0, max_bottom = 0, any = 0;
-    for (int i = 1; i < FORMS_MAX_SLOTS; i++) {
-        FormsSlot *c = &g_slots[i];
-        if (!c->alive || c->parent_slot != parent_slot) continue;
-        any = 1;
-        int right  = c->x + c->w;
-        int bottom = c->y + c->h;
-        if (right  > max_right ) max_right  = right;
-        if (bottom > max_bottom) max_bottom = bottom;
-    }
-    *out_w = max_right;
-    *out_h = max_bottom;
-    return any;
-}
+/* children_bbox moved to src/core/layout.{c,h}. */
 
 static void compute_preferred_size(FormsSlot *s, int *out_w, int *out_h)
 {
@@ -2707,23 +2671,7 @@ static int native_size_to_content_height(CandoVM *vm, int argc, CandoValue *args
  * track the parent's edges on resize.
  * ===================================================================== */
 
-/* Parse a 1, 2, or 4 number argument list into LTRB.  One value means
- * "all four"; two means "horizontal, vertical"; four means LTRB.       */
-static void parse_quad_args(int argc, CandoValue *args,
-                             int *l, int *t, int *r, int *b)
-{
-    int v0 = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
-    if (argc < 3 || args[2].tag != CDO_NUMBER) {
-        *l = *t = *r = *b = v0; return;
-    }
-    int v1 = (int)args[2].as.number;
-    if (argc < 4 || args[3].tag != CDO_NUMBER) {
-        *l = *r = v0; *t = *b = v1; return;
-    }
-    int v2 = (int)args[3].as.number;
-    int v3 = (argc >= 5 && args[4].tag == CDO_NUMBER) ? (int)args[4].as.number : v2;
-    *l = v0; *t = v1; *r = v2; *b = v3;
-}
+/* parse_quad_args moved to src/core/layout.{c,h}. */
 
 static int native_set_padding(CandoVM *vm, int argc, CandoValue *args)
 {
@@ -2819,35 +2767,7 @@ static int native_set_autosize_mode(CandoVM *vm, int argc, CandoValue *args)
     return 1;
 }
 
-/* Parse an anchor argument: a single string ("left" / "right" / "top" /
- * "bottom" / "all" / "none" / "fill"), a space/pipe-separated list
- * ("left top right"), or a numeric bitmask. */
-static int parse_anchor_arg(CandoValue v)
-{
-    if (v.tag == CDO_NUMBER) return (int)v.as.number;
-    if (v.tag != CDO_STRING || !v.as.string) return FORMS_ANCHOR_DEFAULT;
-    const char *str = v.as.string->data;
-    u32 n = v.as.string->length;
-    int mask = 0;
-    u32 i = 0;
-    while (i < n) {
-        while (i < n && (str[i] == ' ' || str[i] == '|' ||
-                         str[i] == ',' || str[i] == '+')) i++;
-        u32 start = i;
-        while (i < n && str[i] != ' ' && str[i] != '|' &&
-               str[i] != ',' && str[i] != '+') i++;
-        u32 len = i - start;
-        const char *t = str + start;
-        if      (len == 4 && memcmp(t, "left",   4) == 0) mask |= FORMS_ANCHOR_LEFT;
-        else if (len == 3 && memcmp(t, "top",    3) == 0) mask |= FORMS_ANCHOR_TOP;
-        else if (len == 5 && memcmp(t, "right",  5) == 0) mask |= FORMS_ANCHOR_RIGHT;
-        else if (len == 6 && memcmp(t, "bottom", 6) == 0) mask |= FORMS_ANCHOR_BOTTOM;
-        else if (len == 3 && memcmp(t, "all",    3) == 0) mask |= FORMS_ANCHOR_ALL;
-        else if (len == 4 && memcmp(t, "fill",   4) == 0) mask |= FORMS_ANCHOR_ALL;
-        else if (len == 4 && memcmp(t, "none",   4) == 0) mask  = FORMS_ANCHOR_NONE;
-    }
-    return mask ? mask : FORMS_ANCHOR_DEFAULT;
-}
+/* parse_anchor_arg moved to src/core/layout.{c,h}. */
 
 /* Capture the current gaps so subsequent resizes can reproduce them. */
 #if FORMS_HAVE_WIN32 && !defined(FORMS_MODULE_TEST_BUILD)
@@ -3205,8 +3125,10 @@ static int native_set_tab_stop(CandoVM *vm, int argc, CandoValue *args)
     return 1;
 }
 
-/* Translate a dock argument (number or "top"/"bottom"/"left"/"right"/
- * "fill"/"none") into a FORMS_DOCK_* constant. */
+/* parse_dock_arg moved to src/core/layout.{c,h}.  This stub keeps the
+ * old function visible so the in-file callers keep compiling until
+ * their migration to layout.h's public name lands.  Phase 1.3a. */
+#if 0
 static int parse_dock_arg(CandoValue v)
 {
     if (v.tag == CDO_NUMBER) {
@@ -3229,6 +3151,7 @@ static int parse_dock_arg(CandoValue v)
     }
     return FORMS_DOCK_NONE;
 }
+#endif /* parse_dock_arg moved -- see src/core/layout.h */
 
 static int native_set_dock(CandoVM *vm, int argc, CandoValue *args)
 {

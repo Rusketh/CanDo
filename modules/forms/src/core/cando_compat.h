@@ -37,10 +37,42 @@
    typedef struct CandoVM     CandoVM;
    typedef struct CdoObject   CdoObject;
    typedef struct CdoString   CdoString;
+   /* Stub CandoString carries just enough surface (data + length) to
+    * let parsers that look at `v.as.string->data` / `->length`
+    * compile in both modes.  Production CandoString has a richer
+    * layout in source/core/value.h; the parsers only touch these
+    * two fields. */
+   typedef struct CandoString {
+       const char *data;
+       u32         length;
+   } CandoString;
+   /* Field names mirror the production CandoValue layout in
+    * source/core/value.h so any TU that compiles in both modes can
+    * use `v.as.number` / `v.as.string` / `v.as.boolean` / `v.as.handle`
+    * uniformly. */
    typedef struct CandoValue {
        int tag;
-       union { double n; bool b; void *p; } as;
+       union {
+           bool          boolean;
+           double        number;
+           CandoString  *string;
+           unsigned int  handle;
+       } as;
    } CandoValue;
+   /* CdoTypeTag values mirror source/object/value.h so the parsers that
+    * compare `v.tag == CDO_NUMBER` keep working in the test build. */
+   #ifndef CDO_NULL
+   enum {
+       CDO_NULL     = 0,
+       CDO_BOOL     = 1,
+       CDO_NUMBER   = 2,
+       CDO_STRING   = 3,
+       CDO_OBJECT   = 4,
+       CDO_ARRAY    = 5,
+       CDO_FUNCTION = 6,
+       CDO_NATIVE   = 7,
+   };
+   #endif
    static inline CdoString *cdo_string_intern(const char *s, u32 n) {
        (void)s; (void)n; return (CdoString *)0;
    }
@@ -49,10 +81,10 @@
        (void)s; CandoValue v = {0,{0}}; return v;
    }
    static inline CandoValue cdo_number(double d) {
-       CandoValue v = {0,{0}}; v.as.n = d; return v;
+       CandoValue v = {0,{0}}; v.as.number = d; return v;
    }
    static inline CandoValue cdo_bool(bool b) {
-       CandoValue v = {0,{0}}; v.as.b = b; return v;
+       CandoValue v = {0,{0}}; v.as.boolean = b; return v;
    }
    static inline bool cdo_object_rawset(CdoObject *o, CdoString *k,
                                         CandoValue v, int f) {
