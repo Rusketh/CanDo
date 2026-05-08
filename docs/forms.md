@@ -1,338 +1,174 @@
-# forms — Windows Forms binding
+# forms — native Windows GUI module
 
 The `forms` module ships a binary extension (`forms.dll` on Windows,
 `forms.so` stub on Linux/macOS) that lets CanDo scripts build native
-GUIs.  The public surface is shaped after `System.Windows.Forms` and
-the calling convention is styled after Garry's Mod's Derma — every
-form / control is an object you configure with chained
-`obj:setX(...)` setters and to which you attach event handlers by
-writing functions onto named properties:
+GUIs.  The public surface is shaped after `System.Windows.Forms`:
+every form / control is a script object configured with chained
+`obj:setX(...)` setters and event handlers attached as functions to
+named properties.
 
 ```cando
 VAR forms = include("./forms.dll");
 
-VAR f = forms.Form()
-f:setText("Hello")
-f:setSize(400, 300)
+VAR f = forms.Form({ title: "Hello", size: [400, 300] });
 
-VAR b = forms.Button(f)
-b:setText("Click me")
-b:setLocation(20, 20)
-b.onClick = function(self) { print("clicked"); }
+VAR b = forms.Button(f, {
+    text:     "Click me",
+    location: [20, 20],
+    size:     [100, 30],
+    onClick:  function(self) { print("clicked"); }
+});
 
-f:show()
+f:show();
 ```
 
 The script is **never blocked** by an open form.  Every form holds a
-VM lifeline that keeps the process alive until the form is destroyed
-(either by the user calling `:destroy()` from a callback or by closing
-the last form's window).  Callbacks run on a dedicated manager thread
-inside a child VM that shares globals + handles with the script's VM.
+VM lifeline that keeps the process alive until it is destroyed (via
+`self:destroy()` from a callback or by closing the last form's
+window).  Callbacks run on a dedicated manager thread inside a child
+VM that shares globals + handles with the script's VM.
 
-## Loading the module
+For the full reference — every constructor, method, event,
+`forms_util.cdo` builder, dialog helper, layout cookbook, and
+worked end-to-end example — see [`modules/forms/README.md`][readme].
+
+[readme]: ../modules/forms/README.md
+
+## At a glance
+
+### Loading
 
 ```cando
 VAR forms = NULL;
 TRY {
-    forms = include("./forms.dll");        // Windows
+    forms = include("./forms.dll");
 } CATCH (e) {
-    forms = include("./forms.so");         // Linux / macOS stub
+    forms = include("./forms.so");
 }
 
 IF forms.supported == FALSE {
-    print("forms not supported on this platform");
+    print(`forms not supported on this platform (${forms.platform})`);
     EXIT(0);
 }
 ```
 
-Module-level fields:
+### Module-level fields
 
-| Field              | Type      | Meaning                                |
-| ------------------ | --------- | -------------------------------------- |
-| `forms.VERSION`    | string    | semantic-version string                |
-| `forms.platform`   | string    | `"windows"` or `"stub"`                |
-| `forms.supported`  | bool      | `TRUE` only on Windows                 |
+| Field             | Type    | Meaning                              |
+| ----------------- | ------- | ------------------------------------ |
+| `forms.VERSION`   | string  | semantic version                     |
+| `forms.platform`  | string  | `"windows"` or `"stub"`              |
+| `forms.supported` | bool    | `TRUE` only on Windows               |
 
-## Constructors
+### Controls
 
-All constructors return a fresh object stamped with the
-`_meta.forms_control` meta table.  Forms have no parent; every other
-control requires a parent passed as the first argument.  Each
-constructor accepts one of three call shapes:
+| Category    | Constructors                                                |
+| ----------- | ----------------------------------------------------------- |
+| Form        | `Form`                                                      |
+| Inputs      | `Button` `CheckBox` `RadioButton` `TextBox` `ComboBox` `ListBox` `NumericUpDown` `TrackBar` `DateTimePicker` `MonthCalendar` `Spinner` `LinkLabel` |
+| Display     | `Label` `PictureBox` `ProgressBar` `StatusBar` `PaintSurface` |
+| Containers  | `Panel` `GroupBox` `ScrollPanel` `TabControl` `FlowLayoutPanel` `TableLayoutPanel` `Splitter` |
+| Trees / lists | `TreeView` `ListView`                                     |
+| Menus       | `MenuStrip` `ContextMenu` (items via `menu:addItem(text)`)  |
+| Non-visual  | `Timer` `NotifyIcon`                                        |
 
-```cando
-forms.Button(parent)                          // bare
-forms.Button(parent, "label text")            // text shorthand
-forms.Button(parent, {                        // options table
-    text     = "Save",
-    x        = 20, y = 20,
-    width    = 120, height = 30,
-    multiline = FALSE,                        // TextBox only
-    password  = FALSE,                        // TextBox only
-})
-```
-
-Constructors:
-
-| Native                          | Underlying control      |
-| ------------------------------- | ----------------------- |
-| `forms.Form([opts])`            | top-level window        |
-| `forms.Button(parent, ...)`     | `BUTTON`                |
-| `forms.Label(parent, ...)`      | `STATIC SS_LEFT`        |
-| `forms.TextBox(parent, ...)`    | `EDIT`                  |
-| `forms.CheckBox(parent, ...)`   | `BUTTON BS_AUTOCHECKBOX` |
-| `forms.RadioButton(parent, ...)`| `BUTTON BS_AUTORADIOBUTTON` |
-| `forms.ComboBox(parent, ...)`   | `COMBOBOX`              |
-| `forms.ListBox(parent, ...)`    | `LISTBOX`               |
-| `forms.Panel(parent, ...)`      | static container        |
-| `forms.GroupBox(parent, ...)`   | `BUTTON BS_GROUPBOX`    |
-| `forms.ProgressBar(parent, ...)`| `msctls_progress32`     |
-| `forms.TrackBar(parent, ...)`   | `msctls_trackbar32`     |
-| `forms.NumericUpDown(parent, ...)` | numeric-only `EDIT`  |
-| `forms.PictureBox(parent, ...)` | `STATIC SS_BITMAP`      |
-
-## Common methods
-
-Every instance carries the same method set via the
-`_meta.forms_control` meta table.  All setters return `self` for
-chaining.
+### Dialogs
 
 ```cando
-btn:setText("Hi"):setSize(100, 30):setLocation(10, 10);
+forms.MessageBox(text, [title], [opts])  -> "ok" | "cancel" | "yes" | …
+forms.OpenFileDialog([opts])             -> path string or NULL
+forms.SaveFileDialog([opts])             -> path string or NULL
+forms.FolderBrowserDialog([opts])        -> path string or NULL
+forms.ColorDialog([initial])             -> 0xRRGGBB number or NULL
+forms.FontDialog()                       -> {face, size, bold, ...} or NULL
 ```
 
-| Method                       | Returns       | Notes                          |
-| ---------------------------- | ------------- | ------------------------------ |
-| `setText(s)` / `setTitle(s)` | self          |                                |
-| `getText()`                  | string        | reads the live HWND text       |
-| `setSize(w, h)`              | self          |                                |
-| `getSize()`                  | `w, h`        | two return values              |
-| `setLocation(x, y)`          | self          | aliased `setPosition`          |
-| `getLocation()`              | `x, y`        | two return values              |
-| `show()` / `hide()`          | self          | shortcuts for `setVisible`     |
-| `setVisible(b)`              | self          |                                |
-| `setEnabled(b)`              | self          |                                |
-| `focus()`                    | self          | grab keyboard focus            |
-| `setParent(other)`           | self          | pass `NULL` to detach          |
-| `destroy()`                  | bool          | tears down the HWND            |
-| `isOpen()`                   | bool          | `TRUE` while the HWND lives    |
-
-Plus, control-specific methods that no-op on the wrong kind:
-
-| Method                  | Applies to                       |
-| ----------------------- | -------------------------------- |
-| `setChecked(b)` / `getChecked()` | CheckBox, RadioButton    |
-| `addItem(text)`         | ComboBox, ListBox                |
-| `removeItem(index)`     | ComboBox, ListBox                |
-| `clearItems()`          | ComboBox, ListBox                |
-| `getItem(index)`        | ComboBox, ListBox -- returns string or `NULL` |
-| `getItems()`            | ComboBox, ListBox -- returns array |
-| `getItemCount()`        | ComboBox, ListBox -- returns number |
-| `getSelectedIndex()` / `setSelectedIndex(i)` | ComboBox, ListBox |
-| `setValue(n)` / `getValue()` | ProgressBar, TrackBar, NumericUpDown, TextBox |
-| `setRange(lo, hi)`      | ProgressBar, TrackBar            |
-| `setMarquee(active, [speed_ms])` | ProgressBar (needs `marquee=true` at construction) |
-| `setState(name)`        | ProgressBar -- `"normal"`, `"warning"` (amber), `"error"` (red), `"paused"` |
-
-### Colours
+### Module-level helpers
 
 ```cando
-btn:setForeColor(255, 255, 255);     // R, G, B
-btn:setBackColor(0x2266AA);          // packed 0xRRGGBB
-btn:clearBackColor();                // revert to system default
+forms.dpiFor(control)      -- effective DPI of the control's monitor
+forms.darkMode(b)          -- toggle immersive dark mode on every form
 ```
 
-`setForeColor` and `setBackColor` set the text and background colours
-honoured via `WM_CTLCOLOR*` in the parent form's WndProc.  Both accept
-either a packed `0xRRGGBB` integer or three separate `(r, g, b)`
-arguments (0-255 each).  The form itself also honours `setBackColor`
-via `WM_ERASEBKGND`.
+### Layout
 
-### Docking
+Every control supports `setDock("top" | "bottom" | "left" | "right" |
+"fill" | "none")` and `setAnchor("top right" | "all" | …)`.  In
+addition:
+
+- `forms.FlowLayoutPanel` arranges children in flow order with
+  optional wrap.
+- `forms.TableLayoutPanel` arranges children in an auto-sized
+  grid; `:add(child, col, row, [colSpan, rowSpan])`.
+- `forms.Splitter` is a thin draggable bar that resizes its previous
+  alive sibling (or an explicit `:setTarget(other)`).
+
+### Events
+
+Set as instance properties: `onClick`, `onMouseDown` / `Up` /
+`Move`, `onKeyDown` / `Up`, `onFocus` / `Blur`, `onTextChanged`,
+`onValueChanged`, `onSelectionChanged`, `onItemActivated`,
+`onTabChanged`, `onNodeSelected` / `Expanded` / `Collapsed`,
+`onTick`, `onPaint`, `onClose` / `Shown` / `Resize`.  See the
+README's [Events catalogue][events] for the per-control signatures.
+
+[events]: ../modules/forms/README.md#events-catalogue
+
+### `forms_util.cdo`
+
+A pure-CanDo wrapper at `modules/forms/script/forms_util.cdo`
+provides a declarative tree API on top of the raw native surface:
 
 ```cando
-top:setDock("top");          // string form
-side:setDock(forms.Dock.left);  // numeric constant form
+VAR ui = include("./script/forms_util.cdo");
+
+VAR f = ui.Window({
+    title:  "Settings",
+    size:   [400, 280],
+    body: {
+        kind: "Tabs",
+        pages: [
+            { title: "General", body: {
+                kind: "Grid", columns: 2, cellPadding: 4,
+                children: [
+                    { kind: "Label",   text: "Theme:" },
+                    { kind: "ComboBox", id: "theme", items: ["Light", "Dark"] }
+                ]
+            }},
+            { title: "Advanced", body: { kind: "Label", text: "(coming soon)" } }
+        ]
+    }
+});
+f:show();
 ```
 
-`setDock(value)` accepts either a string name or a numeric constant
-from `forms.Dock` (`none`, `top`, `bottom`, `left`, `right`, `fill`).
-The semantics mirror `System.Windows.Forms.DockStyle`:
-
-* `top` / `bottom` -- child gets the parent's full width and uses its
-  own stored height.  Anchors to the top or bottom of whatever client
-  area is left after earlier-docked children peel their rects.
-* `left` / `right` -- analogous on the horizontal axis using the
-  child's stored width.
-* `fill` -- child takes the entire remaining client area.  Use at
-  most one fill child per parent.
-
-Docking re-runs automatically on every parent resize and on
-`setDock()`.  Call `parent:relayout()` to force a relayout if the
-script has mutated child sizes manually.
-
-```cando
-VAR top    = forms.Panel(f);    top:setSize(0, 40):setDock("top")
-VAR side   = forms.Panel(f);    side:setSize(120, 0):setDock("left")
-VAR status = forms.Label(f);    status:setSize(0, 20):setDock("bottom")
-VAR body   = forms.Panel(f);    body:setDock("fill")    // takes the rest
-```
-
-A `0` in the unused dimension is a hint that the layout will fill it
-in -- e.g. a `top`-docked child with `setSize(0, 40)` says "I want 40
-pixels tall; pick the width from whatever the parent's client area
-gives me."
-
-## Events
-
-You attach an event handler by **writing a function onto a named
-property** of the instance.  No `:on(...)` registration call, no
-disposable subscription:
-
-```cando
-btn.onClick = function(self, button, x, y) {
-    print("clicked at", x, y);
-};
-```
-
-Event property names and signatures:
-
-| Property                | Signature                            | Fires for                        |
-| ----------------------- | ------------------------------------ | -------------------------------- |
-| `onClick`               | `(self, button, x, y)`               | Button, CheckBox/Radio (after toggle), Form |
-| `onClose`               | `(self)`                             | Form (X button pressed)          |
-| `onShown`               | `(self)`                             | Form (after first `show()`)      |
-| `onResize`              | `(self, w, h)`                       | Form                             |
-| `onTextChanged`         | `(self)`                             | TextBox, NumericUpDown           |
-| `onValueChanged`        | `(self)`                             | CheckBox, Radio, ProgressBar, TrackBar |
-| `onSelectionChanged`    | `(self)`                             | ComboBox, ListBox                |
-| `onKeyDown` / `onKeyUp` | `(self, vk_code)`                    | Form                             |
-| `onMouseDown` / `onMouseUp` | `(self, button, x, y)`           | Form                             |
-| `onMouseMove`           | `(self, x, y)`                       | Form                             |
-| `onFocus` / `onBlur`    | `(self)`                             | Form                             |
-
-The default `onClose` for a form hides it (matching WinForms'
-`FormClosing`).  Call `self:destroy()` from your handler if you want
-the form actually torn down:
-
-```cando
-f.onClose = function(self) { self:destroy(); };
-```
-
-## Threading model
-
-There is one dedicated **manager thread** that owns every Win32
-HWND and runs the single shared message pump for the whole module.
-This is the same model `Application.Run` uses internally for WinForms
-and matches the existing `modules/window` GLFW manager.
-
-The script thread (the VM running your `.cdo` code) and the manager
-thread are different.  Cross-thread calls are handled for you:
-
-| Operation                      | Crosses to manager via |
-| ------------------------------ | ---------------------- |
-| Constructors                   | synchronous `SendMessageW(WM_FORMS_CMD)` |
-| `setText`, `setSize`, ...      | `SendMessageW` directly (Win32 marshals) |
-| Property mirrors (getText, etc.)| `SendMessageW` directly                  |
-| `destroy`                      | `SendMessageW(WM_FORMS_CMD)`             |
-| Event dispatch                 | manager pulls events from a ring buffer and calls the child VM |
-
-Callbacks run inside a **child VM** (`cando_vm_init_child`) that shares
-globals, handles, strings, and lifelines with the root VM, so they can
-read and mutate the same script-side state — but each callback is
-invoked in isolation: errors in one call don't poison the next, and
-the manager doesn't hold any locks while a callback runs.
-
-## Lifecycle
-
-1. The first call to any constructor lazy-starts the manager thread
-   and (on first form creation) initialises the dispatch child VM.
-2. The instance acquires a VM **lifeline** so the script can `return`
-   without the process exiting.
-3. The manager pumps Win32 messages, queues input events into a ring
-   buffer, and drains the ring on a 16 ms timer (and after every
-   message dispatch).
-4. Callbacks fire on the manager thread inside the child VM.
-5. `instance:destroy()` (or the user closing every form) releases the
-   lifeline; once the count hits zero the script's VM exits.
-
-## Errors
-
-* All script-visible errors are throwables — wrap construction in
-  `TRY { ... } CATCH (e) { ... }` if you need to recover.
-* On non-Windows, every constructor throws
-  `"forms is only supported on Windows (loaded module is the stub
-  build)"`.  Feature-detect with `forms.supported` to skip the GUI
-  path entirely.
-
-## Runtime dependencies
-
-`forms.dll` is **fully self-contained** apart from the Windows OS
-itself.  Specifically:
-
-| Dependency       | How it's satisfied                                |
-| ---------------- | ------------------------------------------------- |
-| libgcc           | statically linked (`-static-libgcc`)              |
-| winpthread       | statically linked (`--whole-archive -lwinpthread`)|
-| `user32.dll`, `gdi32.dll`, `comctl32.dll`, `comdlg32.dll`, `ole32.dll`, `uuid.dll` | shipped with every Windows install |
-| `libcando.dll`   | ships next to `cando.exe` in the cando distro     |
-
-No .NET runtime is required.  The "WinForms-shaped" API is implemented
-directly on top of the Win32 common controls that WinForms itself
-wraps internally — `BUTTON`, `EDIT`, `STATIC`, `LISTBOX`, `COMBOBOX`,
-`msctls_progress32`, `msctls_trackbar32`.  This means the module:
-
-- works on every Windows version supported by `cando.exe` (Vista+),
-- has no MSVC redistributable requirement,
-- has no OpenSSL or other third-party DLL requirement,
-- has no managed runtime requirement.
-
-The CI workflow's `Verify no MinGW runtime DLL deps` step explicitly
-checks `forms.dll` against an allow-list and fails the build if any
-MinGW or OpenSSL runtime DLLs sneak in as imports.
+`ui.dialog.message / confirm / openFile / saveFile / openFolder /
+color / font` wrap the native dialog functions; `ui.menu` /
+`ui.contextMenu` build menu trees from declarative tables;
+`ui.observable` / `ui.eventBus` provide light state-management
+helpers.
 
 ## Building
 
 ```bash
-make -C modules/forms                                 # forms.so (host)
-make -C modules/forms forms.dll \
-    MINGW_CC=x86_64-w64-mingw32-gcc                   # cross to Windows
-make -C modules/forms test                            # C unit tests
+make -C modules/forms                        # forms.so + test_forms (Linux)
+make -C modules/forms forms.dll \            # Windows DLL via MinGW
+    MINGW_CC=x86_64-w64-mingw32-gcc
+make -C modules/forms test                   # run C unit tests
 ```
 
-The artefact is dropped alongside the source (`modules/forms/forms.dll`
-or `forms.so`) and is also packaged in the per-platform CI artefact
-under `dist/modules/forms/`, so it ships next to `cando.exe` /
-`libcando.dll`.
+`forms.dll` is fully self-contained against the User32 / GDI /
+Comctl32 / Comdlg32 / Shell32 / DwmApi / Ole32 stack that ships with
+every Windows install.  No .NET runtime, no MSVC redistributable.
 
-## Worked example
+## Files
 
-```cando
-VAR forms = include("./forms.dll");
-
-VAR f = forms.Form();
-f:setText("Counter");
-f:setSize(240, 160);
-
-VAR label = forms.Label(f);
-label:setText("0");
-label:setLocation(20, 20);
-label:setSize(200, 24);
-
-VAR up = forms.Button(f);
-up:setText("+");
-up:setLocation(20, 60);
-up:setSize(80, 30);
-
-VAR down = forms.Button(f);
-down:setText("-");
-down:setLocation(120, 60);
-down:setSize(80, 30);
-
-VAR n = 0;
-up.onClick   = function(self) { n = n + 1; label:setText(string.from(n)); };
-down.onClick = function(self) { n = n - 1; label:setText(string.from(n)); };
-
-f.onClose = function(self) { self:destroy(); };
-f:show();
-```
+| File                                    | Purpose                          |
+| --------------------------------------- | -------------------------------- |
+| `modules/forms/forms_module.c`          | module entry + Win32 backend     |
+| `modules/forms/src/core/`               | shared infrastructure (slots, events, layout, …) |
+| `modules/forms/src/controls/`           | per-kind native method TUs       |
+| `modules/forms/script/forms_util.cdo`   | declarative wrapper              |
+| `modules/forms/test_forms.c`            | C unit tests                     |
+| `modules/forms/test_forms.cdo`          | Windows-only integration script  |
+| `modules/forms/test_forms_smoke.cdo`    | headless smoke check             |
