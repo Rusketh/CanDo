@@ -172,6 +172,12 @@ jobs:
         # the forms_control meta table without actually opening a form.
         run: cd modules/forms && ../../cando.exe test_forms_smoke.cdo
 
+      - name: Smoke-test modules (Windows -- smtp)
+        # Verifies smtp.dll loads, the public API surface registers,
+        # and the offline parse/build round-trip works.  Doesn't make
+        # any network calls (the unreachable-host check uses 127.0.0.1).
+        run: cd modules/smtp && ../../cando.exe test_smtp_smoke.cdo
+
       - name: Verify no MinGW runtime DLL deps
         run: |
           set -e
@@ -179,7 +185,7 @@ jobs:
           objdump -p cando.exe | grep "DLL Name" || true
           echo "=== libcando.dll imports ==="
           objdump -p libcando.dll | grep "DLL Name" || true
-          for bin in cando.exe libcando.dll modules/sqlite/sqlite.dll modules/sql/sql.dll modules/window/window.dll modules/draw/draw.dll modules/forms/forms.dll; do
+          for bin in cando.exe libcando.dll modules/sqlite/sqlite.dll modules/sql/sql.dll modules/window/window.dll modules/draw/draw.dll modules/forms/forms.dll modules/smtp/smtp.dll; do
             for dll in libwinpthread-1.dll libgcc_s_seh-1.dll libstdc++-6.dll libssl-3-x64.dll libcrypto-3-x64.dll; do
               if objdump -p "$bin" | grep -qi "DLL Name: $dll"; then
                 echo "ERROR: $bin still imports $dll"

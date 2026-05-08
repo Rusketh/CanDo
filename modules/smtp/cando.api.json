@@ -1,0 +1,68 @@
+{
+    "$comment": "API manifest for the smtp module. Read by the vscode-cando language server.",
+    "name": "smtp",
+    "version": "1.0.0",
+    "doc": "SMTP / IMAP / POP3 / MIME -- send, fetch, parse, sign, store. Function-style; session handle is the first argument for low-level calls.",
+    "exports": {
+        "VERSION":         { "kind": "value",    "type": "string" },
+        "PORT_SMTP":       { "kind": "constant", "type": "number", "doc": "25" },
+        "PORT_SUBMISSION": { "kind": "constant", "type": "number", "doc": "587" },
+        "PORT_SMTPS":      { "kind": "constant", "type": "number", "doc": "465 (implicit TLS)" },
+        "PORT_POP3":       { "kind": "constant", "type": "number", "doc": "110" },
+        "PORT_POP3S":      { "kind": "constant", "type": "number", "doc": "995 (implicit TLS)" },
+        "PORT_IMAP":       { "kind": "constant", "type": "number", "doc": "143" },
+        "PORT_IMAPS":      { "kind": "constant", "type": "number", "doc": "993 (implicit TLS)" },
+        "MAX_LINE":        { "kind": "constant", "type": "number", "doc": "RFC 5321 line limit" },
+
+        "send":              { "kind": "function", "params": [{ "name": "opts", "type": "object", "doc": "{ server?, user?, password?, from, to, cc?, bcc?, subject, text?, html?, attachments?, dkim? }" }], "returns": "object" },
+
+        "connect":           { "kind": "function", "params": [{ "name": "opts", "type": "object", "doc": "{ host, port, tls?, starttls?, verifyPeer?, timeout?, auth?, ehloName? }" }], "returns": "Session" },
+        "capabilities":      { "kind": "function", "params": [{ "name": "session", "type": "Session" }], "returns": "array" },
+        "mailFrom":          { "kind": "function", "params": [{ "name": "session", "type": "Session" }, { "name": "address", "type": "string" }], "returns": "bool" },
+        "rcptTo":            { "kind": "function", "params": [{ "name": "session", "type": "Session" }, { "name": "address", "type": "string" }], "returns": "bool" },
+        "data":              { "kind": "function", "params": [{ "name": "session", "type": "Session" }, { "name": "raw_message", "type": "string" }], "returns": "bool" },
+        "reset":             { "kind": "function", "params": [{ "name": "session", "type": "Session" }], "returns": "bool" },
+        "noop":              { "kind": "function", "params": [{ "name": "session", "type": "Session" }], "returns": "bool" },
+        "close":             { "kind": "function", "params": [{ "name": "session", "type": "Session" }], "returns": "bool" },
+
+        "parse":             { "kind": "function", "params": [{ "name": "raw", "type": "string" }], "returns": "object", "doc": "Parse RFC 5322 / MIME message into { headers, rawHeaders, text, html, attachments }." },
+        "build":             { "kind": "function", "params": [{ "name": "opts", "type": "object" }], "returns": "string", "doc": "Build a MIME message; returns the raw bytes (CRLF-terminated)." },
+
+        "parseAddress":      { "kind": "function", "params": [{ "name": "value", "type": "string" }], "returns": "object" },
+        "parseAddressList":  { "kind": "function", "params": [{ "name": "value", "type": "string" }], "returns": "array" },
+        "formatAddress":     { "kind": "function", "params": [{ "name": "addr", "type": "object" }], "returns": "string" },
+        "encodeHeader":      { "kind": "function", "params": [{ "name": "value", "type": "string" }], "returns": "string", "doc": "RFC 2047 Q-encoded word." },
+        "decodeHeader":      { "kind": "function", "params": [{ "name": "value", "type": "string" }], "returns": "string" },
+
+        "mx":                { "kind": "function", "params": [{ "name": "domain", "type": "string" }], "returns": "array", "doc": "Returns [{priority, host}, ...] sorted by priority." },
+        "txt":               { "kind": "function", "params": [{ "name": "domain", "type": "string" }], "returns": "array" },
+        "ptr":               { "kind": "function", "params": [{ "name": "ip", "type": "string" }], "returns": "array" },
+
+        "spfCheck":          { "kind": "function", "params": [{ "name": "sender", "type": "string" }, { "name": "ip", "type": "string" }], "returns": "object" },
+        "dkimSign":          { "kind": "function", "params": [{ "name": "raw", "type": "string" }, { "name": "opts", "type": "object", "doc": "{ selector, domain, key (PEM) }" }], "returns": "string", "doc": "Returns raw bytes with DKIM-Signature prepended." },
+        "dkimVerify":        { "kind": "function", "params": [{ "name": "raw", "type": "string" }], "returns": "object", "doc": "{ pass, domain, selector, reason }" },
+
+        "deliverMaildir":    { "kind": "function", "params": [{ "name": "raw", "type": "string" }, { "name": "maildir_path", "type": "string" }], "returns": "bool" },
+        "deliverMbox":       { "kind": "function", "params": [{ "name": "raw", "type": "string" }, { "name": "mbox_path", "type": "string" }, { "name": "envelope_from", "type": "string", "optional": true }], "returns": "bool" },
+
+        "popConnect":        { "kind": "function", "params": [{ "name": "opts", "type": "object" }], "returns": "Session" },
+        "popList":           { "kind": "function", "params": [{ "name": "session", "type": "Session" }], "returns": "array" },
+        "popRetr":           { "kind": "function", "params": [{ "name": "session", "type": "Session" }, { "name": "n", "type": "number" }], "returns": "string" },
+        "popDele":           { "kind": "function", "params": [{ "name": "session", "type": "Session" }, { "name": "n", "type": "number" }], "returns": "bool" },
+        "popQuit":           { "kind": "function", "params": [{ "name": "session", "type": "Session" }], "returns": "bool" },
+
+        "imapConnect":       { "kind": "function", "params": [{ "name": "opts", "type": "object" }], "returns": "Session" },
+        "imapSelect":        { "kind": "function", "params": [{ "name": "session", "type": "Session" }, { "name": "mailbox", "type": "string" }], "returns": "bool" },
+        "imapSearch":        { "kind": "function", "params": [{ "name": "session", "type": "Session" }, { "name": "query", "type": "string" }], "returns": "array" },
+        "imapFetch":         { "kind": "function", "params": [{ "name": "session", "type": "Session" }, { "name": "uid", "type": "number" }, { "name": "item", "type": "string", "optional": true }], "returns": "string" },
+        "imapMove":          { "kind": "function", "params": [{ "name": "session", "type": "Session" }, { "name": "uid", "type": "number" }, { "name": "mailbox", "type": "string" }], "returns": "bool" },
+        "imapLogout":        { "kind": "function", "params": [{ "name": "session", "type": "Session" }], "returns": "bool" }
+    },
+
+    "types": {
+        "Session": {
+            "doc": "Open SMTP / POP3 / IMAP session. Function-style API: pass `session` as the first argument to every call.",
+            "members": {}
+        }
+    }
+}
