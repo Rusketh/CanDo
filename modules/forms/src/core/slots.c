@@ -61,6 +61,8 @@ int slot_alloc_locked(ControlKind kind, int parent_slot)
             s->auto_scroll = 0;
             s->scroll_w = s->scroll_h = 0;
             s->scroll_x = s->scroll_y = 0;
+            s->flow_direction = 0;   /* leftToRight */
+            s->wrap_contents  = 1;   /* wrap by default */
 #if FORMS_HAVE_WIN32
             s->hwnd        = NULL;
             s->orig_proc   = NULL;

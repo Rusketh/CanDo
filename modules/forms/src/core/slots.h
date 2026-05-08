@@ -177,6 +177,12 @@ typedef struct FormsSlot {
     int          auto_scroll;
     int          scroll_w, scroll_h;
     int          scroll_x, scroll_y;
+    /* Flow layout state (Phase 2.4 FlowLayoutPanel).
+     *   flow_direction: 0 = leftToRight, 1 = rightToLeft,
+     *                   2 = topDown,     3 = bottomUp
+     *   wrap_contents:  1 = wrap to next row/column at edge, 0 = single row */
+    int          flow_direction;
+    int          wrap_contents;
 #if FORMS_HAVE_WIN32
     HICON        hicon_small;
     HICON        hicon_big;

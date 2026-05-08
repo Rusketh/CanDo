@@ -452,8 +452,20 @@ static LRESULT CALLBACK panel_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
             int cw = LOWORD(l), ch = HIWORD(l);
             g_slots[slot].w = cw;
             g_slots[slot].h = ch;
-            layout_anchor_children(slot);
-            layout_dock_children(slot);
+            /* Phase 2.4: dispatch via the layout vtable.  If a
+             * container kind has registered a custom arrange (e.g.
+             * FlowLayoutPanel, future Table/Split), use it
+             * exclusively -- those layouts replace the default
+             * dock+anchor pass.  Otherwise fall back to the standard
+             * anchor + dock chain. */
+            forms_arrange_fn arrange =
+                forms_layout_for((int)g_slots[slot].kind);
+            if (arrange) {
+                arrange(slot, cw, ch);
+            } else {
+                layout_anchor_children(slot);
+                layout_dock_children(slot);
+            }
         }
         break;
     }
@@ -592,6 +604,16 @@ static int do_create_control(FormsCommand *c)
         style |= WS_CLIPSIBLINGS | WS_TABSTOP;
         ex = WS_EX_CONTROLPARENT;
         break;
+    case KIND_FLOWLAYOUT:
+        /* FlowLayoutPanel: same backing class as Panel (STATIC SS_NOTIFY).
+         * The flow arrangement (wrap, direction) is purely a script-side
+         * concern -- panel_wndproc consults forms_layout_for(KIND_FLOWLAYOUT)
+         * on WM_SIZE and routes children through the registered arrange
+         * function instead of the default dock+anchor pass. */
+        cls = L"STATIC";
+        style |= SS_NOTIFY;
+        ex = WS_EX_CONTROLPARENT;
+        break;
     default:
         snprintf(c->err, sizeof(c->err), "unsupported control kind %d",
                  (int)c->kind);
@@ -630,8 +652,11 @@ static int do_create_control(FormsCommand *c)
     /* Subclass panels so notifications from their children (BN_CLICKED,
      * EN_CHANGE, ...) reach the form's WndProc -- the default STATIC
      * wndproc would otherwise swallow them.  ScrollPanel rides the same
-     * subclass (it routes WM_VSCROLL / WM_HSCROLL through there too). */
-    if (c->kind == KIND_PANEL || c->kind == KIND_SCROLLPANEL) {
+     * subclass (it routes WM_VSCROLL / WM_HSCROLL through there too).
+     * FlowLayoutPanel uses the same subclass plus the layout vtable
+     * (forms_layout_for) on WM_SIZE. */
+    if (c->kind == KIND_PANEL || c->kind == KIND_SCROLLPANEL ||
+        c->kind == KIND_FLOWLAYOUT) {
         WNDPROC prev = (WNDPROC)SetWindowLongPtrW(
             hwnd, GWLP_WNDPROC, (LONG_PTR)panel_wndproc);
         s->orig_proc = prev;
@@ -736,10 +761,17 @@ static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
         event_queue_push(ev);
         if (slot > 0 && slot < FORMS_MAX_SLOTS) {
             g_slots[slot].w = cw; g_slots[slot].h = ch;
-            /* Anchor pass first (children that should stretch / track an
-             * edge) then the dock pass for children that want a strip. */
-            layout_anchor_children(slot);
-            layout_dock_children(slot);
+            /* Phase 2.4 -- per-kind arrange via the layout vtable.
+             * Falls back to the default anchor + dock pass when no
+             * specific arrange has been registered for this kind. */
+            forms_arrange_fn arrange =
+                forms_layout_for((int)g_slots[slot].kind);
+            if (arrange) {
+                arrange(slot, cw, ch);
+            } else {
+                layout_anchor_children(slot);
+                layout_dock_children(slot);
+            }
         }
         return 0;
     }
@@ -1448,8 +1480,9 @@ FORMS_DEFINE_CTOR("MonthCalendar",  KIND_MONTHCALENDAR,  native_calendar_create)
 FORMS_DEFINE_CTOR("StatusBar",   KIND_STATUSBAR,   native_statusbar_create)
 FORMS_DEFINE_CTOR("Spinner",     KIND_SPINNER,     native_spinner_create)
 /* Phase 2 container constructors. */
-FORMS_DEFINE_CTOR("ScrollPanel", KIND_SCROLLPANEL, native_scrollpanel_create)
-FORMS_DEFINE_CTOR("TabControl",  KIND_TABCONTROL,  native_tabcontrol_create)
+FORMS_DEFINE_CTOR("ScrollPanel",     KIND_SCROLLPANEL, native_scrollpanel_create)
+FORMS_DEFINE_CTOR("TabControl",      KIND_TABCONTROL,  native_tabcontrol_create)
+FORMS_DEFINE_CTOR("FlowLayoutPanel", KIND_FLOWLAYOUT,  native_flowlayout_create)
 
 /* =========================================================================
  * Methods on every control instance.  Most setters cross threads via
@@ -2274,6 +2307,7 @@ static int native_get_font(CandoVM *vm, int argc, CandoValue *args)
 /* Phase 2 container natives. */
 #include "src/controls/ctl_scrollpanel.h"
 #include "src/controls/ctl_tabcontrol.h"
+#include "src/controls/ctl_flowlayout.h"
 
 /* parse_border_style moved to src/core/layout.{c,h}. */
 
@@ -3622,7 +3656,19 @@ CandoValue cando_module_init(CandoVM *vm)
     meta_inherit(cando_lib_meta_table(vm, "forms_tabpage"),        base);
     meta_inherit(cando_lib_meta_table(vm, "forms_splitcontainer"), base);
     meta_inherit(cando_lib_meta_table(vm, "forms_splitter"),       base);
-    meta_inherit(cando_lib_meta_table(vm, "forms_flowlayout"),     base);
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_flowlayout");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "setFlowDirection",  native_set_flow_direction);
+        cando_lib_meta_define(vm, m, "getFlowDirection",  native_get_flow_direction);
+        cando_lib_meta_define(vm, m, "setWrapContents",   native_set_wrap_contents);
+        cando_lib_meta_define(vm, m, "getWrapContents",   native_get_wrap_contents);
+        /* First real consumer of the layout vtable from Phase 1.3:
+         * panel_wndproc / form_wndproc dispatch their WM_SIZE pass
+         * through forms_layout_for(parent->kind) which returns this
+         * arrange function for KIND_FLOWLAYOUT slots. */
+        forms_layout_register(KIND_FLOWLAYOUT, flowlayout_arrange);
+    }
     meta_inherit(cando_lib_meta_table(vm, "forms_tablelayout"),    base);
 
     CandoValue tbl = cando_bridge_new_object(vm);
@@ -3659,8 +3705,9 @@ CandoValue cando_module_init(CandoVM *vm)
     libutil_set_method(vm, obj, "StatusBar",     native_statusbar_create);
     libutil_set_method(vm, obj, "Spinner",       native_spinner_create);
     /* Phase 2 containers. */
-    libutil_set_method(vm, obj, "ScrollPanel",   native_scrollpanel_create);
-    libutil_set_method(vm, obj, "TabControl",    native_tabcontrol_create);
+    libutil_set_method(vm, obj, "ScrollPanel",     native_scrollpanel_create);
+    libutil_set_method(vm, obj, "TabControl",      native_tabcontrol_create);
+    libutil_set_method(vm, obj, "FlowLayoutPanel", native_flowlayout_create);
 
     /* forms.Color -- a small palette of CSS-style named colours that
      * scripts can drop straight into setForeColor / setBackColor without
