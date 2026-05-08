@@ -393,6 +393,19 @@ static LRESULT CALLBACK panel_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
     int slot = slot_from_hwnd(h);
     WNDPROC orig = (slot > 0 && slot < FORMS_MAX_SLOTS)
                    ? g_slots[slot].orig_proc : NULL;
+    /* PaintSurface intercept: Phase 5.1 v1 acks the paint and pushes
+     * EV_PAINT.  Scripts can use this for timer-driven animation
+     * (call setSize / invalidate to retrigger).  A full draw-module
+     * bridge that exposes a synchronous gfx surface is Phase 5.1b. */
+    if (msg == WM_PAINT && slot > 0 && slot < FORMS_MAX_SLOTS &&
+        g_slots[slot].kind == KIND_PAINTSURFACE) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        (void)dc;
+        EndPaint(h, &ps);
+        push_event(EV_PAINT, slot, g_slots[slot].generation);
+        return 0;
+    }
     switch (msg) {
     case WM_HSCROLL:
     case WM_VSCROLL: {
@@ -773,6 +786,17 @@ static int do_create_control(FormsCommand *c)
         style |= LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP;
         ex = WS_EX_CLIENTEDGE;
         break;
+    case KIND_PAINTSURFACE:
+        /* Phase 5.1 v1: PaintSurface backs to a STATIC SS_NOTIFY HWND
+         * just like Panel.  WM_PAINT pushes EV_PAINT into the
+         * dispatcher queue so scripts can react to repaint notifications
+         * (e.g. for a timer-driven invalidate animation loop).  The
+         * full HDC bridge to modules/draw lands in Phase 5.1b and is
+         * tracked in REWRITE_PLAN.md. */
+        cls = L"STATIC";
+        style |= SS_NOTIFY;
+        ex = WS_EX_CONTROLPARENT;
+        break;
     default:
         snprintf(c->err, sizeof(c->err), "unsupported control kind %d",
                  (int)c->kind);
@@ -815,7 +839,8 @@ static int do_create_control(FormsCommand *c)
      * FlowLayoutPanel uses the same subclass plus the layout vtable
      * (forms_layout_for) on WM_SIZE. */
     if (c->kind == KIND_PANEL       || c->kind == KIND_SCROLLPANEL ||
-        c->kind == KIND_FLOWLAYOUT  || c->kind == KIND_TABLELAYOUT) {
+        c->kind == KIND_FLOWLAYOUT  || c->kind == KIND_TABLELAYOUT ||
+        c->kind == KIND_PAINTSURFACE) {
         WNDPROC prev = (WNDPROC)SetWindowLongPtrW(
             hwnd, GWLP_WNDPROC, (LONG_PTR)panel_wndproc);
         s->orig_proc = prev;
@@ -1848,6 +1873,8 @@ FORMS_DEFINE_CTOR("Splitter",         KIND_SPLITTER,    native_splitter_create)
 /* Phase 3 item controls. */
 FORMS_DEFINE_CTOR("TreeView",         KIND_TREEVIEW,    native_treeview_create)
 FORMS_DEFINE_CTOR("ListView",         KIND_LISTVIEW,    native_listview_create)
+/* Phase 5 -- custom paint surface. */
+FORMS_DEFINE_CTOR("PaintSurface",     KIND_PAINTSURFACE, native_paintsurface_create)
 
 /* =========================================================================
  * Phase 4 -- non-visual controls (Timer, NotifyIcon).
@@ -5005,6 +5032,8 @@ CandoValue cando_module_init(CandoVM *vm)
     /* Phase 3 item controls. */
     libutil_set_method(vm, obj, "TreeView",         native_treeview_create);
     libutil_set_method(vm, obj, "ListView",         native_listview_create);
+    /* Phase 5 paint surface. */
+    libutil_set_method(vm, obj, "PaintSurface",     native_paintsurface_create);
     /* Phase 4 non-visual + tray + menus. */
     libutil_set_method(vm, obj, "Timer",            native_timer_create);
     libutil_set_method(vm, obj, "NotifyIcon",       native_notifyicon_create);
