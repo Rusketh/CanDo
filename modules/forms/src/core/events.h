@@ -49,6 +49,11 @@ typedef enum {
     /* Phase 3.2 -- ListView notifications.  i0 carries the row index. */
     EV_ITEM_ACTIVATED,        /* NM_DBLCLK / RETURN -- "open" intent */
     EV_LIST_SELECTION_CHANGED,
+    /* Phase 4 -- timer + menu + tray + paint. */
+    EV_TICK,                  /* Timer.onTick(self)                       */
+    EV_MENU_ITEM_CLICKED,     /* MenuItem.onClick(self) -- i0 = item id   */
+    EV_NOTIFY_CLICK,          /* NotifyIcon.onClick(self, button)         */
+    EV_PAINT,                 /* PaintSurface.onPaint(self, gfx)          */
 } EventKind;
 
 typedef struct FormsEvent {

@@ -233,8 +233,9 @@ static void sync_init_once(void)
 
 #if FORMS_HAVE_WIN32 && !defined(FORMS_MODULE_TEST_BUILD)
 
-#define WM_FORMS_CMD     (WM_USER + 100)
-#define WM_FORMS_TICK    (WM_USER + 101)   /* drain event queue           */
+#define WM_FORMS_CMD        (WM_USER + 100)
+#define WM_FORMS_TICK       (WM_USER + 101)   /* drain event queue        */
+#define WM_FORMS_NOTIFYICON (WM_USER + 102)   /* tray-icon callback       */
 
 static const wchar_t FORMS_WNDCLASS_FORM[] = L"CanDoForms_Form";
 static const wchar_t FORMS_WNDCLASS_MGR[]  = L"CanDoForms_Manager";
@@ -243,6 +244,13 @@ typedef enum {
     CMD_CREATE_FORM = 1,
     CMD_CREATE_CONTROL,
     CMD_DESTROY,
+    /* Phase 4 -- non-HWND lifecycle commands. */
+    CMD_TIMER_START,
+    CMD_TIMER_STOP,
+    CMD_NOTIFY_SHOW,
+    CMD_NOTIFY_HIDE,
+    CMD_NOTIFY_BALLOON,
+    CMD_MENU_POPUP,
 } CmdOp;
 
 typedef struct FormsCommand {
@@ -253,6 +261,11 @@ typedef struct FormsCommand {
     wchar_t      text[512];
     int          x, y, w, h;
     int          style_extra;        /* per-kind style bits             */
+    /* Phase 4 -- generic opaque payload used by Timer / NotifyIcon /
+     * Menu commands.  HICON / HMENU / msec interval / NIM_* op id. */
+    void        *ptr0;
+    void        *ptr1;
+    int          intval;
     /* result */
     int          ok;
     char         err[200];
@@ -835,6 +848,61 @@ static LRESULT CALLBACK mgr_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
         case CMD_CREATE_FORM:    c->ok = do_create_form(c);    break;
         case CMD_CREATE_CONTROL: c->ok = do_create_control(c); break;
         case CMD_DESTROY:        c->ok = do_destroy(c);        break;
+        case CMD_TIMER_START: {
+            /* Use the slot index as the timer ID; on WM_TIMER we read
+             * back wparam to recover the slot. */
+            UINT_PTR id = (UINT_PTR)c->slot;
+            UINT     iv = (UINT)(c->intval > 0 ? c->intval : 1000);
+            c->ok = (SetTimer(h, id, iv, NULL) != 0);
+            if (!c->ok) snprintf(c->err, sizeof(c->err),
+                                 "SetTimer failed (GetLastError=%lu)",
+                                 (unsigned long)GetLastError());
+            break;
+        }
+        case CMD_TIMER_STOP: {
+            KillTimer(h, (UINT_PTR)c->slot);
+            c->ok = 1;
+            break;
+        }
+        case CMD_NOTIFY_SHOW:
+        case CMD_NOTIFY_HIDE:
+        case CMD_NOTIFY_BALLOON: {
+            NOTIFYICONDATAW nid; memset(&nid, 0, sizeof(nid));
+            nid.cbSize           = sizeof(nid);
+            nid.hWnd             = h;
+            nid.uID              = (UINT)c->slot;
+            nid.uFlags           = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+            nid.uCallbackMessage = WM_FORMS_NOTIFYICON;
+            nid.hIcon            = (HICON)c->ptr0;
+            wcsncpy(nid.szTip, c->text,
+                    sizeof(nid.szTip) / sizeof(nid.szTip[0]) - 1);
+            DWORD nim;
+            if (c->op == CMD_NOTIFY_SHOW) {
+                nim = c->intval ? NIM_MODIFY : NIM_ADD;
+            } else if (c->op == CMD_NOTIFY_HIDE) {
+                nim = NIM_DELETE;
+            } else {
+                nid.uFlags |= NIF_INFO;
+                wcsncpy(nid.szInfo, c->text,
+                        sizeof(nid.szInfo) / sizeof(nid.szInfo[0]) - 1);
+                wcsncpy(nid.szInfoTitle, c->text,
+                        sizeof(nid.szInfoTitle) / sizeof(nid.szInfoTitle[0]) - 1);
+                nid.dwInfoFlags = (DWORD)c->intval;
+                nim = NIM_MODIFY;
+            }
+            c->ok = Shell_NotifyIconW(nim, &nid) ? 1 : 0;
+            break;
+        }
+        case CMD_MENU_POPUP: {
+            HMENU m = (HMENU)c->ptr0;
+            HWND  o = (HWND)c->ptr1;
+            UINT  flags = TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY;
+            int cmd_id = (int)TrackPopupMenu(m, flags, c->x, c->y, 0,
+                                             o ? o : h, NULL);
+            c->intval = cmd_id;
+            c->ok     = 1;
+            break;
+        }
         default:
             snprintf(c->err, sizeof(c->err), "unknown op %d", (int)c->op);
             break;
@@ -843,6 +911,32 @@ static LRESULT CALLBACK mgr_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
     }
     if (msg == WM_FORMS_TICK) {
         dispatch_drain();
+        return 0;
+    }
+    if (msg == WM_TIMER) {
+        /* WM_TIMER fires on the manager thread because SetTimer was
+         * called with our hwnd.  wparam = the timer ID == slot index. */
+        int slot = (int)w;
+        if (slot > 0 && slot < FORMS_MAX_SLOTS && g_slots[slot].alive) {
+            push_event(EV_TICK, slot, g_slots[slot].generation);
+        }
+        return 0;
+    }
+    if (msg == WM_FORMS_NOTIFYICON) {
+        /* lparam holds the mouse event for the tray icon; wparam is
+         * the icon's uID (== slot).  Translate the common cases into
+         * EV_NOTIFY_CLICK. */
+        int slot = (int)w;
+        UINT ev  = LOWORD(l);
+        if (slot > 0 && slot < FORMS_MAX_SLOTS && g_slots[slot].alive &&
+            (ev == WM_LBUTTONUP || ev == WM_RBUTTONUP)) {
+            FormsEvent fe = {0};
+            fe.kind       = EV_NOTIFY_CLICK;
+            fe.slot       = slot;
+            fe.generation = g_slots[slot].generation;
+            fe.i0         = (ev == WM_RBUTTONUP) ? 2 : 1;
+            event_queue_push(fe);
+        }
         return 0;
     }
     return DefWindowProcW(h, msg, w, l);
@@ -1412,6 +1506,19 @@ static void dispatch_one(FormsEvent ev)
         /* onItemActivated / onSelectionChanged(self, rowIndex). */
         argv[argc++] = cando_number((f64)ev.i0);
         break;
+    case EV_TICK:
+        /* Timer.onTick(self) -- no extra args. */
+        break;
+    case EV_NOTIFY_CLICK:
+        /* NotifyIcon.onClick(self, button) -- 1=left, 2=right. */
+        argv[argc++] = cando_number((f64)ev.i0);
+        break;
+    case EV_MENU_ITEM_CLICKED:
+        /* MenuItem.onClick(self) -- no extra args (id resolves via slot). */
+        break;
+    case EV_PAINT:
+        /* PaintSurface.onPaint(self) -- no extra args (gfx wrapper TBD). */
+        break;
     default:
         break;
     }
@@ -1728,6 +1835,284 @@ FORMS_DEFINE_CTOR("Splitter",         KIND_SPLITTER,    native_splitter_create)
 /* Phase 3 item controls. */
 FORMS_DEFINE_CTOR("TreeView",         KIND_TREEVIEW,    native_treeview_create)
 FORMS_DEFINE_CTOR("ListView",         KIND_LISTVIEW,    native_listview_create)
+
+/* =========================================================================
+ * Phase 4 -- non-visual controls (Timer, NotifyIcon).
+ *
+ * These have no HWND of their own; they ride on the manager hidden
+ * window for SetTimer / Shell_NotifyIcon callbacks.  The constructor
+ * allocates a slot, attaches the right meta table, retains the
+ * instance, and acquires a VM lifeline -- but does not post a
+ * CMD_CREATE_* command.  The script then drives the actual lifecycle
+ * via :start() / :show() etc.
+ * ===================================================================== */
+
+static int native_nonvisual_create(CandoVM *vm, ControlKind kind,
+                                   const char *who)
+{
+    if (!require_supported(vm, who)) return -1;
+    if (!ensure_manager()) {
+        forms_throw(vm, "%s: failed to start manager thread", who);
+        return -1;
+    }
+    prep_dispatch_vm(vm);
+    int slot = slot_alloc(kind, -1);
+    if (slot < 0) {
+        forms_throw(vm, "%s: slot table is full", who);
+        return -1;
+    }
+    CandoValue inst = build_instance(vm, slot, kind, NULL, 0, 0, 0, 0);
+    cando_vm_push(vm, inst);
+    return 1;
+}
+
+static int native_timer_create(CandoVM *vm, int argc, CandoValue *args)
+{
+    (void)argc; (void)args;
+    return native_nonvisual_create(vm, KIND_TIMER, "forms.Timer");
+}
+
+static int native_notifyicon_create(CandoVM *vm, int argc, CandoValue *args)
+{
+    (void)argc; (void)args;
+    return native_nonvisual_create(vm, KIND_NOTIFYICON, "forms.NotifyIcon");
+}
+
+/* Timer.setInterval(ms) -- updates s->timer_interval; if the timer is
+ * already running, restart it with the new period. */
+static int native_set_interval(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setInterval");
+    if (!s) return -1;
+    int ms = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 1000;
+    if (ms < 1) ms = 1;
+    s->timer_interval = ms;
+#if FORMS_HAVE_WIN32
+    if (s->timer_running && s->kind == KIND_TIMER) {
+        FormsCommand cmd; memset(&cmd, 0, sizeof(cmd));
+        cmd.op = CMD_TIMER_START;
+        cmd.slot = (int)(s - g_slots);
+        cmd.intval = ms;
+        if (g_mgr_hwnd)
+            SendMessageW(g_mgr_hwnd, WM_FORMS_CMD, 0, (LPARAM)&cmd);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_get_interval(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "getInterval");
+    if (!s) return -1;
+    cando_vm_push(vm, cando_number((f64)s->timer_interval));
+    return 1;
+}
+
+static int native_timer_start(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "start");
+    if (!s) return -1;
+    if (s->kind == KIND_TIMER) {
+#if FORMS_HAVE_WIN32
+        FormsCommand cmd; memset(&cmd, 0, sizeof(cmd));
+        cmd.op = CMD_TIMER_START;
+        cmd.slot = (int)(s - g_slots);
+        cmd.intval = s->timer_interval > 0 ? s->timer_interval : 1000;
+        if (g_mgr_hwnd) {
+            SendMessageW(g_mgr_hwnd, WM_FORMS_CMD, 0, (LPARAM)&cmd);
+            if (cmd.ok) s->timer_running = 1;
+        }
+#endif
+    }
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_timer_stop(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "stop");
+    if (!s) return -1;
+    if (s->kind == KIND_TIMER && s->timer_running) {
+#if FORMS_HAVE_WIN32
+        FormsCommand cmd; memset(&cmd, 0, sizeof(cmd));
+        cmd.op = CMD_TIMER_STOP;
+        cmd.slot = (int)(s - g_slots);
+        if (g_mgr_hwnd)
+            SendMessageW(g_mgr_hwnd, WM_FORMS_CMD, 0, (LPARAM)&cmd);
+#endif
+        s->timer_running = 0;
+    }
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_timer_is_running(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "isRunning");
+    if (!s) return -1;
+    cando_vm_push(vm, cando_bool(s->timer_running ? true : false));
+    return 1;
+}
+
+/* NotifyIcon.setIcon(path) -- LoadImage + cache HICON in slot->hicon_small. */
+static int native_notify_set_icon(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setIcon");
+    if (!s) return -1;
+#if FORMS_HAVE_WIN32
+    if (s->kind == KIND_NOTIFYICON && argc >= 2 &&
+        args[1].tag == CDO_STRING && args[1].as.string) {
+        wchar_t *w = utf8_to_wide(args[1].as.string->data,
+                                  (int)args[1].as.string->length);
+        if (w) {
+            HICON ic = (HICON)LoadImageW(NULL, w, IMAGE_ICON, 16, 16,
+                                         LR_LOADFROMFILE | LR_DEFAULTSIZE);
+            if (ic) {
+                if (s->hicon_small) DestroyIcon(s->hicon_small);
+                s->hicon_small = ic;
+                if (s->notify_visible) {
+                    /* Refresh the live tray entry so the new icon shows. */
+                    FormsCommand cmd; memset(&cmd, 0, sizeof(cmd));
+                    cmd.op   = CMD_NOTIFY_SHOW;
+                    cmd.slot = (int)(s - g_slots);
+                    cmd.ptr0 = ic;
+                    cmd.intval = 1;   /* modify, not add */
+                    if (s->tooltip) {
+                        wchar_t *t = utf8_to_wide(s->tooltip, -1);
+                        if (t) {
+                            wcsncpy(cmd.text, t,
+                                    sizeof(cmd.text) / sizeof(cmd.text[0]) - 1);
+                            free(t);
+                        }
+                    }
+                    if (g_mgr_hwnd)
+                        SendMessageW(g_mgr_hwnd, WM_FORMS_CMD, 0, (LPARAM)&cmd);
+                }
+            }
+            free(w);
+        }
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_notify_set_text(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setText");
+    if (!s) return -1;
+    char buf[128] = {0};
+    if (argc >= 2) parse_text_arg(vm, args[1], buf, sizeof(buf));
+    if (s->kind == KIND_NOTIFYICON) {
+        free(s->tooltip);
+        s->tooltip = (buf[0]) ? strdup(buf) : NULL;
+#if FORMS_HAVE_WIN32
+        if (s->notify_visible) {
+            FormsCommand cmd; memset(&cmd, 0, sizeof(cmd));
+            cmd.op   = CMD_NOTIFY_SHOW;
+            cmd.slot = (int)(s - g_slots);
+            cmd.ptr0 = s->hicon_small;
+            cmd.intval = 1;
+            wchar_t *t = utf8_to_wide(buf, -1);
+            if (t) {
+                wcsncpy(cmd.text, t,
+                        sizeof(cmd.text) / sizeof(cmd.text[0]) - 1);
+                free(t);
+            }
+            if (g_mgr_hwnd)
+                SendMessageW(g_mgr_hwnd, WM_FORMS_CMD, 0, (LPARAM)&cmd);
+        }
+#endif
+    }
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_notify_show(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "show");
+    if (!s) return -1;
+    if (s->kind == KIND_NOTIFYICON) {
+#if FORMS_HAVE_WIN32
+        FormsCommand cmd; memset(&cmd, 0, sizeof(cmd));
+        cmd.op   = CMD_NOTIFY_SHOW;
+        cmd.slot = (int)(s - g_slots);
+        cmd.ptr0 = s->hicon_small;
+        cmd.intval = s->notify_visible ? 1 : 0;
+        if (s->tooltip) {
+            wchar_t *t = utf8_to_wide(s->tooltip, -1);
+            if (t) {
+                wcsncpy(cmd.text, t,
+                        sizeof(cmd.text) / sizeof(cmd.text[0]) - 1);
+                free(t);
+            }
+        }
+        if (g_mgr_hwnd) {
+            SendMessageW(g_mgr_hwnd, WM_FORMS_CMD, 0, (LPARAM)&cmd);
+            if (cmd.ok) s->notify_visible = 1;
+        }
+#endif
+    }
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_notify_hide(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "hide");
+    if (!s) return -1;
+    if (s->kind == KIND_NOTIFYICON && s->notify_visible) {
+#if FORMS_HAVE_WIN32
+        FormsCommand cmd; memset(&cmd, 0, sizeof(cmd));
+        cmd.op   = CMD_NOTIFY_HIDE;
+        cmd.slot = (int)(s - g_slots);
+        if (g_mgr_hwnd)
+            SendMessageW(g_mgr_hwnd, WM_FORMS_CMD, 0, (LPARAM)&cmd);
+#endif
+        s->notify_visible = 0;
+    }
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_notify_balloon(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "balloon");
+    if (!s) return -1;
+    if (s->kind != KIND_NOTIFYICON || !s->notify_visible) {
+        cando_vm_push(vm, args[0]);
+        return 1;
+    }
+    char body[256] = {0};
+    if (argc >= 2) parse_text_arg(vm, args[1], body, sizeof(body));
+    int icon_kind = 0; /* NIIF_NONE = 0; NIIF_INFO = 1; NIIF_WARNING = 2; NIIF_ERROR = 3 */
+    if (argc >= 3 && args[2].tag == CDO_STRING && args[2].as.string) {
+        const char *t = args[2].as.string->data;
+        u32 n = args[2].as.string->length;
+        if      (n == 4 && memcmp(t, "info",    4) == 0) icon_kind = 1;
+        else if (n == 7 && memcmp(t, "warning", 7) == 0) icon_kind = 2;
+        else if (n == 5 && memcmp(t, "error",   5) == 0) icon_kind = 3;
+    }
+#if FORMS_HAVE_WIN32
+    FormsCommand cmd; memset(&cmd, 0, sizeof(cmd));
+    cmd.op   = CMD_NOTIFY_BALLOON;
+    cmd.slot = (int)(s - g_slots);
+    cmd.ptr0 = s->hicon_small;
+    cmd.intval = icon_kind;
+    wchar_t *t = utf8_to_wide(body, -1);
+    if (t) {
+        wcsncpy(cmd.text, t, sizeof(cmd.text) / sizeof(cmd.text[0]) - 1);
+        free(t);
+    }
+    if (g_mgr_hwnd)
+        SendMessageW(g_mgr_hwnd, WM_FORMS_CMD, 0, (LPARAM)&cmd);
+#else
+    (void)body; (void)icon_kind;
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
 
 /* =========================================================================
  * Methods on every control instance.  Most setters cross threads via
@@ -3625,6 +4010,9 @@ static const char *meta_name_for_kind(ControlKind k)
     /* Phase 3 -- item controls. */
     case KIND_TREEVIEW:        return "forms_treeview";
     case KIND_LISTVIEW:        return "forms_listview";
+    /* Phase 4 -- non-visual + dialog kinds. */
+    case KIND_TIMER:           return "forms_timer";
+    case KIND_NOTIFYICON:      return "forms_notifyicon";
     case KIND_NONE:
     case KIND_KIND_COUNT:
         break;
@@ -3955,6 +4343,25 @@ CandoValue cando_module_init(CandoVM *vm)
         cando_lib_meta_define(vm, m, "setNodeText",      native_tree_set_node_text);
         cando_lib_meta_define(vm, m, "getNodeCount",     native_tree_get_node_count);
     }
+    /* Phase 4 -- non-visual + dialog kinds. */
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_timer");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "setInterval",  native_set_interval);
+        cando_lib_meta_define(vm, m, "getInterval",  native_get_interval);
+        cando_lib_meta_define(vm, m, "start",        native_timer_start);
+        cando_lib_meta_define(vm, m, "stop",         native_timer_stop);
+        cando_lib_meta_define(vm, m, "isRunning",    native_timer_is_running);
+    }
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_notifyicon");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "setIcon",      native_notify_set_icon);
+        cando_lib_meta_define(vm, m, "setText",      native_notify_set_text);
+        cando_lib_meta_define(vm, m, "show",         native_notify_show);
+        cando_lib_meta_define(vm, m, "hide",         native_notify_hide);
+        cando_lib_meta_define(vm, m, "balloon",      native_notify_balloon);
+    }
     {
         CdoObject *m = cando_lib_meta_table(vm, "forms_listview");
         meta_inherit(m, base);
@@ -4018,6 +4425,9 @@ CandoValue cando_module_init(CandoVM *vm)
     /* Phase 3 item controls. */
     libutil_set_method(vm, obj, "TreeView",         native_treeview_create);
     libutil_set_method(vm, obj, "ListView",         native_listview_create);
+    /* Phase 4 non-visual + tray. */
+    libutil_set_method(vm, obj, "Timer",            native_timer_create);
+    libutil_set_method(vm, obj, "NotifyIcon",       native_notifyicon_create);
 
     /* forms.Color -- a small palette of CSS-style named colours that
      * scripts can drop straight into setForeColor / setBackColor without

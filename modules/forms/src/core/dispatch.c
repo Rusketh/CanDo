@@ -30,6 +30,10 @@ const char *event_callback_name(EventKind k)
     case EV_NODE_COLLAPSED:     return "onNodeCollapsed";
     case EV_ITEM_ACTIVATED:          return "onItemActivated";
     case EV_LIST_SELECTION_CHANGED:  return "onSelectionChanged";
+    case EV_TICK:                    return "onTick";
+    case EV_MENU_ITEM_CLICKED:       return "onClick";
+    case EV_NOTIFY_CLICK:            return "onClick";
+    case EV_PAINT:                   return "onPaint";
     case EV_NONE:               return NULL;
     }
     return NULL;

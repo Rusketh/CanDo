@@ -76,6 +76,10 @@ int slot_alloc_locked(ControlKind kind, int parent_slot)
             s->splitter_drag_start_y = 0;
             s->splitter_drag_start_w = 0;
             s->splitter_drag_start_h = 0;
+            s->timer_interval = 1000;
+            s->timer_running  = 0;
+            s->notify_icon_id = i;       /* unique tray-icon id == slot # */
+            s->notify_visible = 0;
 #if FORMS_HAVE_WIN32
             s->hwnd        = NULL;
             s->orig_proc   = NULL;

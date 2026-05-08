@@ -72,6 +72,9 @@ typedef enum {
     /* Phase 3 -- complex item controls. */
     KIND_TREEVIEW,
     KIND_LISTVIEW,
+    /* Phase 4 -- non-visual + dialog kinds. */
+    KIND_TIMER,
+    KIND_NOTIFYICON,
     KIND_KIND_COUNT
 } ControlKind;
 
@@ -212,6 +215,13 @@ typedef struct FormsSlot {
     int          splitter_drag_start_y;
     int          splitter_drag_start_w;
     int          splitter_drag_start_h;
+    /* Timer state (Phase 4.1).  timer_interval is the SetTimer period
+     * in ms; timer_running tracks whether KillTimer has been called.
+     * NotifyIcon shares the slot's hicon_small for its tray icon. */
+    int          timer_interval;
+    int          timer_running;
+    int          notify_icon_id;
+    int          notify_visible;
 #if FORMS_HAVE_WIN32
     HICON        hicon_small;
     HICON        hicon_big;
