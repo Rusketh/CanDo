@@ -13,6 +13,13 @@
 #include "../core/textconv.h"
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
 #  include <commctrl.h>
+   /* LVM_GETCOLUMNCOUNT only exposes itself when _WIN32_WINNT >= 0x0501
+    * with certain SDK versions; the cross-compile uses 0x0600 but
+    * older MinGW commctrl.h still hides it.  Define the canonical
+    * value so we don't depend on the SDK shipping it. */
+#  ifndef LVM_GETCOLUMNCOUNT
+#    define LVM_GETCOLUMNCOUNT  (LVM_FIRST + 100)
+#  endif
 #endif
 
 #include <stdlib.h>

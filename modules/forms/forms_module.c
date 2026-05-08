@@ -75,6 +75,7 @@
 #  include <commctrl.h>
 #  include <commdlg.h>
 #  include <shlobj.h>
+#  include <shellapi.h>
 #  include <process.h>
 #else
 #  include <pthread.h>
