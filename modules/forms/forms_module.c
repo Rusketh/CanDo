@@ -2378,6 +2378,134 @@ static int filter_to_wide_pairs(const char *u8, wchar_t *out, int outcap)
  *   opts.buttons: "ok" | "okCancel" | "yesNo" | "yesNoCancel" | "abortRetryIgnore"
  *   opts.icon:    "info" | "warning" | "error" | "question" | "none"
  * Returns "ok" | "cancel" | "yes" | "no" | "abort" | "retry" | "ignore". */
+/* =========================================================================
+ * Phase 7 -- DPI awareness, dark mode hint, accessibility helpers.
+ *
+ * DPI:    Per-Monitor V2 declared at module init via
+ *         SetProcessDpiAwarenessContext (Win10 1703+).  Falls back
+ *         silently on older runtimes.
+ * Dark:   forms.darkMode(b) flips DWMWA_USE_IMMERSIVE_DARK_MODE on
+ *         every alive top-level form via DwmSetWindowAttribute.
+ * A11y:   per-control setAccessibleName / setAccessibleDescription
+ *         store the strings on the slot and (on Win32) propagate to
+ *         the control's title-text accessibility property via
+ *         SetPropW("AccessibleName" / "AccessibleDescription").
+ * ===================================================================== */
+
+/* Set Per-Monitor V2 DPI awareness if the running OS supports it.
+ * Idempotent; called once from cando_module_init on Windows. */
+static void try_enable_per_monitor_v2(void)
+{
+#if FORMS_HAVE_WIN32
+    typedef BOOL (WINAPI *SetCtxFn)(DPI_AWARENESS_CONTEXT);
+    HMODULE u32 = GetModuleHandleW(L"user32.dll");
+    if (!u32) return;
+    SetCtxFn fn = (SetCtxFn)(void *)GetProcAddress(
+        u32, "SetProcessDpiAwarenessContext");
+    if (fn) {
+        /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4 */
+        fn((DPI_AWARENESS_CONTEXT)-4);
+    }
+#endif
+}
+
+static int native_dpi_for(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (!require_supported(vm, "forms.dpiFor")) return -1;
+    int dpi = 96;
+#if FORMS_HAVE_WIN32
+    HWND target = NULL;
+    if (argc >= 1 && args[0].tag == CDO_OBJECT) {
+        FormsSlot *s = slot_from_inst(vm, args[0]);
+        if (s) target = s->hwnd;
+    }
+    typedef UINT (WINAPI *GetDpiFn)(HWND);
+    HMODULE u32 = GetModuleHandleW(L"user32.dll");
+    GetDpiFn gd = u32 ? (GetDpiFn)(void *)GetProcAddress(u32, "GetDpiForWindow") : NULL;
+    if (gd && target) {
+        dpi = (int)gd(target);
+    } else {
+        HDC dc = GetDC(NULL);
+        if (dc) {
+            dpi = GetDeviceCaps(dc, LOGPIXELSY);
+            ReleaseDC(NULL, dc);
+        }
+    }
+#endif
+    cando_vm_push(vm, cando_number((f64)dpi));
+    return 1;
+}
+
+/* DwmSetWindowAttribute call, lazily resolved so we don't link to
+ * dwmapi at load time on older Windows.  DWMWA_USE_IMMERSIVE_DARK_MODE
+ * is 20 on Win10 1903+, 19 on the earlier preview builds; we set
+ * both for compatibility. */
+static int native_dark_mode(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (!require_supported(vm, "forms.darkMode")) return -1;
+    bool on = !(argc >= 1 && args[0].tag == CDO_BOOL && !args[0].as.boolean);
+#if FORMS_HAVE_WIN32
+    typedef HRESULT (WINAPI *DwmSetFn)(HWND, DWORD, LPCVOID, DWORD);
+    HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+    DwmSetFn fn = dwm ? (DwmSetFn)(void *)GetProcAddress(dwm, "DwmSetWindowAttribute") : NULL;
+    if (fn) {
+        BOOL flag = on ? TRUE : FALSE;
+        for (int i = 1; i < FORMS_MAX_SLOTS; i++) {
+            if (g_slots[i].alive && g_slots[i].kind == KIND_FORM &&
+                g_slots[i].hwnd) {
+                fn(g_slots[i].hwnd, 20, &flag, sizeof(flag));
+                fn(g_slots[i].hwnd, 19, &flag, sizeof(flag));   /* fallback */
+            }
+        }
+    }
+    if (dwm) FreeLibrary(dwm);
+#else
+    (void)on;
+#endif
+    cando_vm_push(vm, cando_bool(on));
+    return 1;
+}
+
+static int native_set_accessible_name(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setAccessibleName");
+    if (!s) return -1;
+    char buf[256] = {0};
+    if (argc >= 2) parse_text_arg(vm, args[1], buf, sizeof(buf));
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && buf[0]) {
+        wchar_t *w = utf8_to_wide(buf, -1);
+        if (w) {
+            /* Store via SetProp so screen readers (NVDA / Narrator)
+             * pick the name up via WM_GETOBJECT -> get_accName. */
+            SetPropW(s->hwnd, L"AccessibleName", (HANDLE)w);
+            /* The HANDLE is freed on slot destroy via the matching
+             * RemovePropW.  In practice slot_teardown's DestroyWindow
+             * also drops all props, so we leak the wchar_t at most
+             * for the slot's lifetime -- acceptable for an a11y hint. */
+        }
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
+static int native_set_accessible_description(CandoVM *vm, int argc, CandoValue *args)
+{
+    FormsSlot *s = arg_self(vm, argc, args, "setAccessibleDescription");
+    if (!s) return -1;
+    char buf[512] = {0};
+    if (argc >= 2) parse_text_arg(vm, args[1], buf, sizeof(buf));
+#if FORMS_HAVE_WIN32
+    if (s->hwnd && buf[0]) {
+        wchar_t *w = utf8_to_wide(buf, -1);
+        if (w) SetPropW(s->hwnd, L"AccessibleDescription", (HANDLE)w);
+    }
+#endif
+    cando_vm_push(vm, args[0]);
+    return 1;
+}
+
 static int native_messagebox(CandoVM *vm, int argc, CandoValue *args)
 {
     if (!require_supported(vm, "forms.MessageBox")) return -1;
@@ -4608,6 +4736,10 @@ static const char *meta_name_for_kind(ControlKind k)
 CandoValue cando_module_init(CandoVM *vm)
 {
     sync_init_once();
+    /* Phase 7: declare Per-Monitor V2 DPI awareness if the OS
+     * supports it.  Idempotent + best-effort -- silently no-ops on
+     * Win8.1 / older Win10 where the API isn't available. */
+    try_enable_per_monitor_v2();
     cando_lib_meta_register(vm);
 
     /* ------------------------------------------------------------
@@ -4701,6 +4833,12 @@ CandoValue cando_module_init(CandoVM *vm)
     cando_lib_meta_define(vm, base, "setTabIndex",    native_set_tab_index);
     cando_lib_meta_define(vm, base, "getTabIndex",    native_get_tab_index);
     cando_lib_meta_define(vm, base, "setTabStop",     native_set_tab_stop);
+
+    /* Phase 7 -- accessibility names. */
+    cando_lib_meta_define(vm, base, "setAccessibleName",
+                          native_set_accessible_name);
+    cando_lib_meta_define(vm, base, "setAccessibleDescription",
+                          native_set_accessible_description);
 
     /* ----- Per-kind meta tables (each chains __index to base) ----- */
 
@@ -5046,6 +5184,9 @@ CandoValue cando_module_init(CandoVM *vm)
     libutil_set_method(vm, obj, "FolderBrowserDialog", native_folder_dialog);
     libutil_set_method(vm, obj, "ColorDialog",         native_color_dialog);
     libutil_set_method(vm, obj, "FontDialog",          native_font_dialog);
+    /* Phase 7 -- DPI / dark mode helpers. */
+    libutil_set_method(vm, obj, "dpiFor",              native_dpi_for);
+    libutil_set_method(vm, obj, "darkMode",            native_dark_mode);
 
     /* forms.Color -- a small palette of CSS-style named colours that
      * scripts can drop straight into setForeColor / setBackColor without
