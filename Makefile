@@ -111,6 +111,7 @@ CANDO_LIB_SRCS = \
     source/vm/debug.c             \
     source/natives.c              \
     source/lib/gc.c               \
+    source/lib/jit.c              \
     source/lib/math.c             \
     source/lib/file.c             \
     source/lib/eval.c             \

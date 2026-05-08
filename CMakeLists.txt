@@ -71,6 +71,9 @@ set(VM_SRCS
 )
 
 set(LIB_SRCS
+    source/lib/gc.c
+    source/lib/jit.c
+    source/lib/app.c
     source/lib/math.c
     source/lib/file.c
     source/lib/eval.c

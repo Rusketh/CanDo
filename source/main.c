@@ -10,11 +10,16 @@
  *
  * Interpreter flags (consumed here, not forwarded to the script):
  *   --disasm        disassemble the chunk before execution
- *   --jit           request the JIT (no-op until it lands; see
- *                   docs/jit-plan.md)
- *   --no-jit        force-disable the JIT (no-op until it lands)
- *   --jit-stats     print one-line JIT summary at exit (no-op until
- *                   the JIT lands)
+ *   --jit           enable JIT profiling counters (Phase 2 of
+ *                   docs/jit-plan.md -- the JIT itself does not exist
+ *                   yet, but counters become readable via --jit-stats
+ *                   and via the script-level jit.stats() native).
+ *   --no-jit        force-disable the JIT (overrides CANDO_JIT=1).
+ *   --jit-stats     print a one-line summary of profiling counters at
+ *                   exit.  Implies --jit if CANDO_JIT is unset.
+ *
+ * Environment variables:
+ *   CANDO_JIT=1     equivalent to --jit (CLI flag wins on conflict).
  *
  * Anything else after the script path is forwarded to the script via
  * the global `args` array.
@@ -27,6 +32,7 @@
 #include <stdlib.h>
 
 #include "cando.h"
+#include "vm/vm.h"
 
 int main(int argc, char *argv[])
 {
@@ -41,15 +47,8 @@ int main(int argc, char *argv[])
     const char *path        = argv[1];
     bool        disasm      = false;
     bool        jit_stats   = false;
-    /* The --jit / --no-jit flags are parsed and accepted today so scripts
-     * and CI invocations can rely on the spelling, but they have no effect
-     * on the interpreter -- the JIT is not yet implemented.  See
-     * docs/jit-plan.md for the roadmap.  Keep the variables to silence
-     * unused-warning linting when the JIT lands. */
     bool        jit_request = false;
     bool        jit_disable = false;
-    (void)jit_request;
-    (void)jit_disable;
 
     /* Collect script args: everything after argv[1] that isn't an
      * interpreter flag. */
@@ -85,6 +84,21 @@ int main(int argc, char *argv[])
     }
     cando_openlibs(vm);
     cando_set_args(vm, script_argc, script_argv);
+
+    /* JIT profiling state.  Resolution order:
+     *   1. --no-jit on the CLI wins over everything (force off).
+     *   2. --jit / --jit-stats on the CLI enable counters.
+     *   3. CANDO_JIT=1 in the environment enables counters.
+     *   4. Default: off. */
+    if (jit_disable) {
+        cando_jit_disable(vm);
+    } else if (jit_request || jit_stats) {
+        cando_jit_enable(vm);
+    } else {
+        const char *env = getenv("CANDO_JIT");
+        if (env && env[0] && env[0] != '0')
+            cando_jit_enable(vm);
+    }
 
     int rc = 0;
 
@@ -133,14 +147,17 @@ int main(int argc, char *argv[])
         }
     }
 
+    if (jit_stats) {
+        CandoJitStats st = cando_jit_get_stats(vm);
+        fprintf(stderr,
+            "jit: backedges=%llu func_entries=%llu iter_next=%llu\n",
+            (unsigned long long)st.backedge_hits,
+            (unsigned long long)st.func_entry_hits,
+            (unsigned long long)st.iter_next_hits);
+    }
+
     cando_close(vm);
     free(script_argv);
-
-    if (jit_stats) {
-        /* Stub: the JIT does not yet exist.  Once it lands this will
-         * print traces compiled / aborts / side-exits / mcode bytes. */
-        fprintf(stderr, "jit: not built (see docs/jit-plan.md)\n");
-    }
 
     return rc;
 }

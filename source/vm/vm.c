@@ -218,6 +218,11 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     /* Register the default class __call wrapper as an unnamed native. */
     vm->default_class_call =
         cando_vm_add_native(vm, vm_native_class_default_call);
+
+    /* JIT profiling: off by default, counters zeroed.  --jit / CANDO_JIT
+     * / jit.on() flip the flag at runtime. */
+    vm->jit_enabled = false;
+    vm->jit_stats   = (CandoJitStats){ 0, 0, 0 };
 }
 
 void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
@@ -268,6 +273,14 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
 
     child->globals_owned = NULL;
     child->globals       = parent->globals;   /* shared, locked on access */
+
+    /* JIT profiling: child inherits the parent's enabled flag.  Stats
+     * are per-VM (each child counts its own work) so they start zeroed
+     * and the parent's --jit-stats dump only reflects the parent's run.
+     * Aggregating across child VMs is left for Phase 4 when traces are
+     * cross-thread shareable.                                           */
+    child->jit_enabled = parent->jit_enabled;
+    child->jit_stats   = (CandoJitStats){ 0, 0, 0 };
 
     /* Copy native function registry (read-only after init; child gets its
      * own buffer so subsequent registrations on either VM cannot disturb
@@ -563,6 +576,35 @@ static void gc_free_handle(void *handle_user, void *obj) {
         h = ((CdoObject *)obj)->handle_idx;
     }
     if (h != CANDO_INVALID_HANDLE) cando_handle_free(vm->handles, h);
+}
+
+/* =========================================================================
+ * JIT profiling API -- see docs/jit-plan.md §5.
+ *
+ * The JIT itself does not exist yet.  These functions toggle and read
+ * the per-VM counter state that the dispatch loop maintains while
+ * jit_enabled is true.
+ * ===================================================================== */
+
+void cando_jit_enable(CandoVM *vm) {
+    if (vm) vm->jit_enabled = true;
+}
+
+void cando_jit_disable(CandoVM *vm) {
+    if (vm) vm->jit_enabled = false;
+}
+
+bool cando_jit_is_enabled(const CandoVM *vm) {
+    return vm ? vm->jit_enabled : false;
+}
+
+CandoJitStats cando_jit_get_stats(const CandoVM *vm) {
+    if (!vm) return (CandoJitStats){ 0, 0, 0 };
+    return vm->jit_stats;
+}
+
+void cando_jit_reset_stats(CandoVM *vm) {
+    if (vm) vm->jit_stats = (CandoJitStats){ 0, 0, 0 };
 }
 
 u32 cando_vm_gc_collect(CandoVM *vm) {
@@ -1199,6 +1241,8 @@ static bool vm_push_frame(CandoVM *vm, CandoClosure *closure, u8 *ip,
         for (u32 i = 0; i < n_extra; i++)
             cando_vm_push(vm, cando_null());
     }
+    if (CANDO_UNLIKELY(vm->jit_enabled))
+        vm->jit_stats.func_entry_hits++;
     return true;
 }
 
@@ -2665,6 +2709,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
         OP_CASE(OP_LOOP): {
             u16 back = READ_U16();
             ip -= back;
+            if (CANDO_UNLIKELY(vm->jit_enabled))
+                vm->jit_stats.backedge_hits++;
             DISPATCH();
         }
         OP_CASE(OP_BREAK): {
@@ -3413,6 +3459,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 }
                 /* PUSH above moved stack_top; the index slot is now at -2. */
                 cando_set_number(&vm->stack_top[-2], index_f + 1.0);
+                if (CANDO_UNLIKELY(vm->jit_enabled))
+                    vm->jit_stats.iter_next_hits++;
             }
             DISPATCH();
         }
@@ -3535,6 +3583,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 for (int i = 0; i < (int)nvar && i < 16; i++) {
                     PUSH(vars[i]);
                 }
+                if (CANDO_UNLIKELY(vm->jit_enabled))
+                    vm->jit_stats.iter_next_hits++;
             }
             DISPATCH();
         }
@@ -3590,6 +3640,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CandoValue *val_ptr =
                     vm->stack_top - 2 - (i64)count + (i64)src_index;
                 PUSH(cando_value_copy(*val_ptr));
+                if (CANDO_UNLIKELY(vm->jit_enabled))
+                    vm->jit_stats.iter_next_hits++;
             }
             DISPATCH();
         }
@@ -3605,6 +3657,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 CandoValue *val_ptr =
                     vm->stack_top - 2 - (i64)count + (i64)src_index;
                 PUSH(cando_value_copy(*val_ptr));
+                if (CANDO_UNLIKELY(vm->jit_enabled))
+                    vm->jit_stats.iter_next_hits++;
             }
             DISPATCH();
         }

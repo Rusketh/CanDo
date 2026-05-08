@@ -216,6 +216,21 @@ typedef struct CandoThreadRegistry {
 } CandoThreadRegistry;
 
 /* =========================================================================
+ * CandoJitStats -- profiling counters maintained while CandoVM.jit_enabled
+ * is true.
+ *
+ * Phase 2 of docs/jit-plan.md (hot-path detection).  Phase 4+ will add a
+ * per-(chunk, offset) hash table on top of these aggregate counters so
+ * the recorder can pick a specific bytecode site to trace.
+ * ===================================================================== */
+typedef struct CandoJitStats {
+    u64 backedge_hits;    /* OP_LOOP fires                                  */
+    u64 func_entry_hits;  /* a script function's first byte is dispatched   */
+    u64 iter_next_hits;   /* OP_FOR_NEXT / OP_FOR_OVER_NEXT / OP_PIPE_NEXT
+                             / OP_FILTER_NEXT advances by one element       */
+} CandoJitStats;
+
+/* =========================================================================
  * CandoVM -- the interpreter state.
  * ===================================================================== */
 typedef enum {
@@ -316,6 +331,15 @@ struct CandoVM {
     /* Root VM owns the registry; child VMs share it via pointer.          */
     CandoThreadRegistry *thread_registry;       /* shared pointer           */
     CandoThreadRegistry *thread_registry_owned; /* non-NULL only on root VM */
+
+    /* JIT profiling ---------------------------------------------------- */
+    /* When jit_enabled is true the dispatch loop bumps the counters in
+     * jit_stats on every loop backedge, function entry, and iterator
+     * NEXT.  No machine code is emitted yet -- counters are visible via
+     * `cando --jit-stats` and via the script-level `jit.stats()` native
+     * (source/lib/jit.c).  See docs/jit-plan.md §5.                      */
+    bool          jit_enabled;
+    CandoJitStats jit_stats;
 };
 
 /* =========================================================================
@@ -338,6 +362,23 @@ CANDO_API void cando_vm_init_child(CandoVM *child, const CandoVM *parent);
 
 /* cando_vm_destroy -- release all VM-owned resources. */
 CANDO_API void cando_vm_destroy(CandoVM *vm);
+
+/* =========================================================================
+ * JIT profiling (Phase 2 of docs/jit-plan.md)
+ *
+ * The JIT itself does not exist yet -- these entry points only manage
+ * the profiling counters.  Enabling counts every loop backedge,
+ * function entry, and iterator-NEXT through the dispatch loop;
+ * disabling makes the counters cold (single predictable branch in the
+ * hot path).  Read the counters via cando_jit_get_stats; reset them
+ * via cando_jit_reset_stats.
+ * ===================================================================== */
+
+CANDO_API void          cando_jit_enable(CandoVM *vm);
+CANDO_API void          cando_jit_disable(CandoVM *vm);
+CANDO_API bool          cando_jit_is_enabled(const CandoVM *vm);
+CANDO_API CandoJitStats cando_jit_get_stats(const CandoVM *vm);
+CANDO_API void          cando_jit_reset_stats(CandoVM *vm);
 
 /* =========================================================================
  * Closure helpers
