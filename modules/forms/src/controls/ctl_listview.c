@@ -130,9 +130,9 @@ int native_lv_add_item(CandoVM *vm, int argc, CandoValue *args)
                 /* Array form: each element -> matching column. */
                 CdoObject *arr = cando_bridge_resolve(vm, args[1].as.handle);
                 if (arr) {
-                    u32 len = cdo_array_len(arr);
-                    int cols = (int)SendMessageW(s->hwnd, LVM_GETCOLUMNCOUNT, 0, 0);
-                    for (u32 i = 0; i < len && (int)i < (u32)cols; i++) {
+                    u32 len  = cdo_array_len(arr);
+                    u32 cols = (u32)SendMessageW(s->hwnd, LVM_GETCOLUMNCOUNT, 0, 0);
+                    for (u32 i = 0; i < len && i < cols; i++) {
                         CdoValue cv;
                         if (!cdo_array_rawget_idx(arr, i, &cv)) continue;
                         if (cv.tag == CDO_STRING && cv.as.string) {

@@ -31,21 +31,6 @@ static inline HTREEITEM tv_number_to_handle(double n)
     return (HTREEITEM)(uintptr_t)n;
 }
 
-/* Recursively count the items in a subtree rooted at `start`. */
-static int tv_count_subtree(HWND hwnd, HTREEITEM start)
-{
-    int n = 0;
-    HTREEITEM it = start;
-    while (it) {
-        n++;
-        HTREEITEM child = (HTREEITEM)SendMessageW(hwnd, TVM_GETNEXTITEM,
-                                                  TVGN_CHILD, (LPARAM)it);
-        if (child) n += tv_count_subtree(hwnd, child);
-        it = (HTREEITEM)SendMessageW(hwnd, TVM_GETNEXTITEM,
-                                     TVGN_NEXT, (LPARAM)it);
-    }
-    return n;
-}
 #endif
 
 int native_tree_add_node(CandoVM *vm, int argc, CandoValue *args)

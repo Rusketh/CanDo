@@ -90,10 +90,14 @@ int native_scroll_to(CandoVM *vm, int argc, CandoValue *args)
         RECT rc; GetClientRect(s->hwnd, &rc);
         int client_w = rc.right - rc.left;
         int client_h = rc.bottom - rc.top;
-        int max_x = s->scroll_w - client_w; if (max_x < 0) max_x = 0;
-        int max_y = s->scroll_h - client_h; if (max_y < 0) max_y = 0;
-        if (x < 0) x = 0; if (x > max_x) x = max_x;
-        if (y < 0) y = 0; if (y > max_y) y = max_y;
+        int max_x = s->scroll_w - client_w;
+        if (max_x < 0) max_x = 0;
+        int max_y = s->scroll_h - client_h;
+        if (max_y < 0) max_y = 0;
+        if (x < 0)     x = 0;
+        if (x > max_x) x = max_x;
+        if (y < 0)     y = 0;
+        if (y > max_y) y = max_y;
         int dx = s->scroll_x - x;
         int dy = s->scroll_y - y;
         s->scroll_x = x;

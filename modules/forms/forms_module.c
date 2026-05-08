@@ -2406,11 +2406,15 @@ static void try_enable_per_monitor_v2(void)
     typedef BOOL (WINAPI *SetCtxFn)(HANDLE);
     HMODULE u32 = GetModuleHandleW(L"user32.dll");
     if (!u32) return;
-    SetCtxFn fn = (SetCtxFn)(void *)GetProcAddress(
-        u32, "SetProcessDpiAwarenessContext");
-    if (fn) {
+    /* Cast FARPROC -> our specific function-pointer type via an
+     * explicit FARPROC pivot.  The double-cast through void* would
+     * trip -Wpedantic on Clang and -Wcast-function-type on GCC; the
+     * union-pun approach below is the gcc-recommended alternative. */
+    union { FARPROC p; SetCtxFn f; } u_set;
+    u_set.p = GetProcAddress(u32, "SetProcessDpiAwarenessContext");
+    if (u_set.f) {
         /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4 */
-        fn((HANDLE)(LONG_PTR)-4);
+        u_set.f((HANDLE)(LONG_PTR)-4);
     }
 #endif
 }
@@ -2427,7 +2431,9 @@ static int native_dpi_for(CandoVM *vm, int argc, CandoValue *args)
     }
     typedef UINT (WINAPI *GetDpiFn)(HWND);
     HMODULE u32 = GetModuleHandleW(L"user32.dll");
-    GetDpiFn gd = u32 ? (GetDpiFn)(void *)GetProcAddress(u32, "GetDpiForWindow") : NULL;
+    union { FARPROC p; GetDpiFn f; } u_gd;
+    u_gd.p = u32 ? GetProcAddress(u32, "GetDpiForWindow") : NULL;
+    GetDpiFn gd = u_gd.f;
     if (gd && target) {
         dpi = (int)gd(target);
     } else {
@@ -2453,7 +2459,9 @@ static int native_dark_mode(CandoVM *vm, int argc, CandoValue *args)
 #if FORMS_HAVE_WIN32
     typedef HRESULT (WINAPI *DwmSetFn)(HWND, DWORD, LPCVOID, DWORD);
     HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
-    DwmSetFn fn = dwm ? (DwmSetFn)(void *)GetProcAddress(dwm, "DwmSetWindowAttribute") : NULL;
+    union { FARPROC p; DwmSetFn f; } u_dwm;
+    u_dwm.p = dwm ? GetProcAddress(dwm, "DwmSetWindowAttribute") : NULL;
+    DwmSetFn fn = u_dwm.f;
     if (fn) {
         BOOL flag = on ? TRUE : FALSE;
         for (int i = 1; i < FORMS_MAX_SLOTS; i++) {
@@ -4473,11 +4481,10 @@ static int native_set_cursor(CandoVM *vm, int argc, CandoValue *args)
  * setName / contains / tab order accessors.
  * ===================================================================== */
 
-static int native_remove(CandoVM *vm, int argc, CandoValue *args)
-{
-    /* Alias for destroy -- Derma uses :Remove(). */
-    return native_destroy(vm, argc, args);
-}
+/* native_remove was the Derma-style destroy alias; dropped along
+ * with the rest of the PascalCase aliases in Phase 1.1.  Scripts
+ * call destroy() directly. */
+
 
 static int native_get_parent(CandoVM *vm, int argc, CandoValue *args)
 {
