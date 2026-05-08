@@ -59,7 +59,13 @@
        (void)o; (void)k; (void)v; (void)f; return true;
    }
 #    ifndef FIELD_NONE
-#      define FIELD_NONE 0
+#      define FIELD_NONE    0
+#    endif
+#    ifndef FIELD_STATIC
+#      define FIELD_STATIC  1
+#    endif
+#    ifndef FIELD_PRIVATE
+#      define FIELD_PRIVATE 2
 #    endif
 #  endif /* FORMS_CANDO_COMPAT_TEST_STUBS_DEFINED */
 #endif

@@ -104,6 +104,21 @@ static void obj_set_string(CdoObject *obj, const char *key,
     cdo_string_release(k);
 }
 
+/* Like obj_set_number but stamps the slot as FIELD_STATIC so script
+ * code can't overwrite the value after construction.  Used for the
+ * native identity fields (__forms_slot, __forms_gen, __forms_kind)
+ * to harden slot_from_inst against a script that clobbers its own
+ * handle by accident or design.  Phase 0.5 protection step.  When
+ * libcando grows a true opaque-native-handle slot the identity will
+ * move there entirely; for now FIELD_STATIC is the cleanest fix that
+ * doesn't require a libcando ABI change. */
+static void obj_set_number_static(CdoObject *obj, const char *key, f64 value)
+{
+    CdoString *k = cdo_string_intern(key, (u32)strlen(key));
+    cdo_object_rawset(obj, k, cdo_number(value), FIELD_STATIC);
+    cdo_string_release(k);
+}
+
 static void obj_set_number(CdoObject *obj, const char *key, f64 value)
 {
     CdoString *k = cdo_string_intern(key, (u32)strlen(key));
@@ -1127,18 +1142,28 @@ static FormsSlot *slot_from_inst(CandoVM *vm, CandoValue v)
     if (!o) return NULL;
     CdoString *ks = cdo_string_intern(FORMS_SLOT_KEY, (u32)strlen(FORMS_SLOT_KEY));
     CdoString *kg = cdo_string_intern(FORMS_GEN_KEY,  (u32)strlen(FORMS_GEN_KEY));
-    CdoValue vs, vg;
+    CdoString *kk = cdo_string_intern(FORMS_KIND_KEY, (u32)strlen(FORMS_KIND_KEY));
+    CdoValue vs, vg, vk;
     bool has_s = cdo_object_rawget(o, ks, &vs);
     bool has_g = cdo_object_rawget(o, kg, &vg);
+    bool has_k = cdo_object_rawget(o, kk, &vk);
     cdo_string_release(ks);
     cdo_string_release(kg);
-    if (!has_s || !has_g) return NULL;
-    if (vs.tag != CDO_NUMBER || vg.tag != CDO_NUMBER) return NULL;
+    cdo_string_release(kk);
+    if (!has_s || !has_g || !has_k) return NULL;
+    if (vs.tag != CDO_NUMBER ||
+        vg.tag != CDO_NUMBER ||
+        vk.tag != CDO_NUMBER) return NULL;
     int slot = (int)vs.as.number;
     int gen  = (int)vg.as.number;
+    int kind = (int)vk.as.number;
     if (slot <= 0 || slot >= FORMS_MAX_SLOTS) return NULL;
     FormsSlot *s = &g_slots[slot];
     if (!s->alive || s->generation != gen) return NULL;
+    /* Phase 0.5: cross-check the kind too -- a forged handle that
+     * happens to land on a live slot still has to match the recorded
+     * kind, which build_instance stamped as FIELD_STATIC. */
+    if ((int)s->kind != kind) return NULL;
     return s;
 }
 
@@ -1235,9 +1260,12 @@ static CandoValue build_instance(CandoVM *vm, int slot, ControlKind kind,
     CandoValue v = cando_bridge_new_object(vm);
     CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
 
-    obj_set_number(o, FORMS_SLOT_KEY, (f64)slot);
-    obj_set_number(o, FORMS_GEN_KEY,  (f64)g_slots[slot].generation);
-    obj_set_number(o, FORMS_KIND_KEY, (f64)kind);
+    /* Native identity fields -- FIELD_STATIC so script code cannot
+     * silently overwrite them and de-sync from the slot table.  Phase
+     * 0.5 hardening step (REWRITE_PLAN.md). */
+    obj_set_number_static(o, FORMS_SLOT_KEY, (f64)slot);
+    obj_set_number_static(o, FORMS_GEN_KEY,  (f64)g_slots[slot].generation);
+    obj_set_number_static(o, FORMS_KIND_KEY, (f64)kind);
     if (text) obj_set_string(o, "text", text, (u32)strlen(text));
     obj_set_number(o, "x", (f64)x);
     obj_set_number(o, "y", (f64)y);
