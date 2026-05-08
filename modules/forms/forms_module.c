@@ -583,6 +583,15 @@ static int do_create_control(FormsCommand *c)
         style |= UDS_SETBUDDYINT | UDS_ARROWKEYS | UDS_HOTTRACK |
                  UDS_ALIGNRIGHT | UDS_NOTHOUSANDS;
         break;
+    case KIND_TABCONTROL:
+        /* SysTabControl32 -- comctl32-provided tab strip.  TCS_TABS is
+         * the default; WS_CLIPSIBLINGS keeps page repaints clean when
+         * tabs are switched.  WS_EX_CONTROLPARENT lets Tab key
+         * traverse children that live inside tab-page panels. */
+        cls = WC_TABCONTROLW;
+        style |= WS_CLIPSIBLINGS | WS_TABSTOP;
+        ex = WS_EX_CONTROLPARENT;
+        break;
     default:
         snprintf(c->err, sizeof(c->err), "unsupported control kind %d",
                  (int)c->kind);
@@ -1440,6 +1449,7 @@ FORMS_DEFINE_CTOR("StatusBar",   KIND_STATUSBAR,   native_statusbar_create)
 FORMS_DEFINE_CTOR("Spinner",     KIND_SPINNER,     native_spinner_create)
 /* Phase 2 container constructors. */
 FORMS_DEFINE_CTOR("ScrollPanel", KIND_SCROLLPANEL, native_scrollpanel_create)
+FORMS_DEFINE_CTOR("TabControl",  KIND_TABCONTROL,  native_tabcontrol_create)
 
 /* =========================================================================
  * Methods on every control instance.  Most setters cross threads via
@@ -2261,8 +2271,9 @@ static int native_get_font(CandoVM *vm, int argc, CandoValue *args)
  * setMinSize/setMaxSize moved to src/controls/ctl_form.{c,h}. */
 #include "src/controls/ctl_form.h"
 
-/* Phase 2 ScrollPanel natives. */
+/* Phase 2 container natives. */
 #include "src/controls/ctl_scrollpanel.h"
+#include "src/controls/ctl_tabcontrol.h"
 
 /* parse_border_style moved to src/core/layout.{c,h}. */
 
@@ -3596,7 +3607,18 @@ CandoValue cando_module_init(CandoVM *vm)
         cando_lib_meta_define(vm, m, "scrollTo",           native_scroll_to);
         cando_lib_meta_define(vm, m, "getScrollPosition",  native_get_scroll_position);
     }
-    meta_inherit(cando_lib_meta_table(vm, "forms_tabcontrol"),     base);
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_tabcontrol");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "addTab",             native_add_tab);
+        cando_lib_meta_define(vm, m, "removeTab",          native_remove_tab);
+        cando_lib_meta_define(vm, m, "clearTabs",          native_clear_tabs);
+        cando_lib_meta_define(vm, m, "getTabCount",        native_get_tab_count);
+        cando_lib_meta_define(vm, m, "getSelectedIndex",   native_get_selected_tab);
+        cando_lib_meta_define(vm, m, "setSelectedIndex",   native_set_selected_tab);
+        cando_lib_meta_define(vm, m, "getTabText",         native_get_tab_text);
+        cando_lib_meta_define(vm, m, "setTabText",         native_set_tab_text);
+    }
     meta_inherit(cando_lib_meta_table(vm, "forms_tabpage"),        base);
     meta_inherit(cando_lib_meta_table(vm, "forms_splitcontainer"), base);
     meta_inherit(cando_lib_meta_table(vm, "forms_splitter"),       base);
@@ -3638,6 +3660,7 @@ CandoValue cando_module_init(CandoVM *vm)
     libutil_set_method(vm, obj, "Spinner",       native_spinner_create);
     /* Phase 2 containers. */
     libutil_set_method(vm, obj, "ScrollPanel",   native_scrollpanel_create);
+    libutil_set_method(vm, obj, "TabControl",    native_tabcontrol_create);
 
     /* forms.Color -- a small palette of CSS-style named colours that
      * scripts can drop straight into setForeColor / setBackColor without
