@@ -152,6 +152,9 @@ int main(int argc, char *argv[])
     }
 
     if (jit_stats) {
+        /* Always prints, even with --no-jit -- in that case the counters
+         * are zero by construction, which is itself useful information
+         * (e.g. "did this run actually trigger anything?"). */
         CandoJitStats st = cando_jit_get_stats(vm);
         fprintf(stderr,
             "jit: backedges=%llu func_entries=%llu iter_next=%llu\n",

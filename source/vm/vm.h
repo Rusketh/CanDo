@@ -222,12 +222,21 @@ typedef struct CandoThreadRegistry {
  * Phase 2 of docs/jit-plan.md (hot-path detection).  Phase 4+ will add a
  * per-(chunk, offset) hash table on top of these aggregate counters so
  * the recorder can pick a specific bytecode site to trace.
+ *
+ * The script-level `jit.stats()` native (source/lib/jit.c) exposes these
+ * with shorter keys: backedge_hits → "backedges", func_entry_hits →
+ * "func_entries", iter_next_hits → "iter_next".
  * ===================================================================== */
 typedef struct CandoJitStats {
     u64 backedge_hits;    /* OP_LOOP fires                                  */
-    u64 func_entry_hits;  /* a script function's first byte is dispatched   */
+    u64 func_entry_hits;  /* every successful vm_push_frame, which includes
+                             OP_CALL, OP_TAIL_CALL, OP_METHOD_CALL, eval
+                             re-entry, thread spawn, and metamethod
+                             dispatch -- intentionally broad so the
+                             recorder sees every chunk-entry boundary       */
     u64 iter_next_hits;   /* OP_FOR_NEXT / OP_FOR_OVER_NEXT / OP_PIPE_NEXT
-                             / OP_FILTER_NEXT advances by one element       */
+                             / OP_FILTER_NEXT advances by one element
+                             (the loop-exhaustion exit does not count)      */
 } CandoJitStats;
 
 /* =========================================================================
