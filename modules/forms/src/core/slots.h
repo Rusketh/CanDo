@@ -69,6 +69,9 @@ typedef enum {
     KIND_SPLITTER,
     KIND_FLOWLAYOUT,
     KIND_TABLELAYOUT,
+    /* Phase 3 -- complex item controls. */
+    KIND_TREEVIEW,
+    KIND_LISTVIEW,
     KIND_KIND_COUNT
 } ControlKind;
 

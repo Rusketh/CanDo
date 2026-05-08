@@ -739,6 +739,25 @@ static int do_create_control(FormsCommand *c)
         cls = L"STATIC";
         style |= SS_NOTIFY;
         break;
+    case KIND_TREEVIEW:
+        /* SysTreeView32 -- hierarchical list with expand/collapse
+         * buttons.  TVS_HASLINES + TVS_LINESATROOT + TVS_HASBUTTONS
+         * are the WinForms-default look.  TVS_SHOWSELALWAYS keeps
+         * the selection highlight visible when the control loses
+         * focus. */
+        cls = WC_TREEVIEWW;
+        style |= TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS |
+                 TVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP;
+        ex = WS_EX_CLIENTEDGE;
+        break;
+    case KIND_LISTVIEW:
+        /* SysListView32 in report (details) mode by default --
+         * matches the most common WinForms ListView use case
+         * (multi-column rows). */
+        cls = WC_LISTVIEWW;
+        style |= LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP;
+        ex = WS_EX_CLIENTEDGE;
+        break;
     default:
         snprintf(c->err, sizeof(c->err), "unsupported control kind %d",
                  (int)c->kind);
@@ -1002,6 +1021,37 @@ static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
                     ev.slot       = cid;
                     ev.generation = cgen;
                     ev.i0         = idx;
+                    event_queue_push(ev);
+                }
+                /* TreeView selection / expand notifications.  Comctl32
+                 * sends ANSI (TVN_FIRST - 2 / -6) or Unicode (-51/-55)
+                 * variants depending on which character set the host
+                 * negotiated; match both for robustness.  The NMTREEVIEW
+                 * struct carries the affected HTREEITEM; pass it via d0
+                 * (uintptr_t fits exactly in a double's 53-bit mantissa
+                 * for every Windows pointer model). */
+                else if (k == KIND_TREEVIEW &&
+                         (code == (UINT)(TVN_FIRST - 2) ||
+                          code == (UINT)(TVN_FIRST - 51))) {
+                    NMTREEVIEWW *nmt = (NMTREEVIEWW *)l;
+                    FormsEvent ev = {0};
+                    ev.kind       = EV_NODE_SELECTED;
+                    ev.slot       = cid;
+                    ev.generation = cgen;
+                    ev.d0         = (double)(uintptr_t)nmt->itemNew.hItem;
+                    event_queue_push(ev);
+                }
+                else if (k == KIND_TREEVIEW &&
+                         (code == (UINT)(TVN_FIRST - 6) ||
+                          code == (UINT)(TVN_FIRST - 55))) {
+                    NMTREEVIEWW *nmt = (NMTREEVIEWW *)l;
+                    FormsEvent ev = {0};
+                    ev.kind       = (nmt->action == TVE_EXPAND)
+                                    ? EV_NODE_EXPANDED
+                                    : EV_NODE_COLLAPSED;
+                    ev.slot       = cid;
+                    ev.generation = cgen;
+                    ev.d0         = (double)(uintptr_t)nmt->itemNew.hItem;
                     event_queue_push(ev);
                 }
             }
@@ -1322,6 +1372,13 @@ static void dispatch_one(FormsEvent ev)
         /* onTabChanged(self, index) -- i0 carries the new selected tab. */
         argv[argc++] = cando_number((f64)ev.i0);
         break;
+    case EV_NODE_SELECTED:
+    case EV_NODE_EXPANDED:
+    case EV_NODE_COLLAPSED:
+        /* onNodeSelected/Expanded/Collapsed(self, nodeHandle) -- d0
+         * carries the HTREEITEM cast through uintptr_t -> double. */
+        argv[argc++] = cando_number(ev.d0);
+        break;
     default:
         break;
     }
@@ -1635,6 +1692,8 @@ FORMS_DEFINE_CTOR("TabControl",       KIND_TABCONTROL,  native_tabcontrol_create
 FORMS_DEFINE_CTOR("FlowLayoutPanel",  KIND_FLOWLAYOUT,  native_flowlayout_create)
 FORMS_DEFINE_CTOR("TableLayoutPanel", KIND_TABLELAYOUT, native_tablelayout_create)
 FORMS_DEFINE_CTOR("Splitter",         KIND_SPLITTER,    native_splitter_create)
+/* Phase 3 item controls. */
+FORMS_DEFINE_CTOR("TreeView",         KIND_TREEVIEW,    native_treeview_create)
 
 /* =========================================================================
  * Methods on every control instance.  Most setters cross threads via
@@ -2462,6 +2521,9 @@ static int native_get_font(CandoVM *vm, int argc, CandoValue *args)
 #include "src/controls/ctl_flowlayout.h"
 #include "src/controls/ctl_tablelayout.h"
 #include "src/controls/ctl_splitter.h"
+
+/* Phase 3 item controls. */
+#include "src/controls/ctl_treeview.h"
 
 /* parse_border_style moved to src/core/layout.{c,h}. */
 
@@ -3525,6 +3587,9 @@ static const char *meta_name_for_kind(ControlKind k)
     case KIND_SPLITTER:        return "forms_splitter";
     case KIND_FLOWLAYOUT:      return "forms_flowlayout";
     case KIND_TABLELAYOUT:     return "forms_tablelayout";
+    /* Phase 3 -- item controls. */
+    case KIND_TREEVIEW:        return "forms_treeview";
+    case KIND_LISTVIEW:        return "forms_listview";
     case KIND_NONE:
     case KIND_KIND_COUNT:
         break;
@@ -3840,6 +3905,24 @@ CandoValue cando_module_init(CandoVM *vm)
         forms_layout_register(KIND_TABLELAYOUT, tablelayout_arrange);
     }
 
+    /* ----- Phase 3 item controls ----- */
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_treeview");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "addNode",          native_tree_add_node);
+        cando_lib_meta_define(vm, m, "removeNode",       native_tree_remove_node);
+        cando_lib_meta_define(vm, m, "clearNodes",       native_tree_clear_nodes);
+        cando_lib_meta_define(vm, m, "getSelectedNode",  native_tree_get_selected_node);
+        cando_lib_meta_define(vm, m, "setSelectedNode",  native_tree_set_selected_node);
+        cando_lib_meta_define(vm, m, "expandNode",       native_tree_expand_node);
+        cando_lib_meta_define(vm, m, "collapseNode",     native_tree_collapse_node);
+        cando_lib_meta_define(vm, m, "getNodeText",      native_tree_get_node_text);
+        cando_lib_meta_define(vm, m, "setNodeText",      native_tree_set_node_text);
+        cando_lib_meta_define(vm, m, "getNodeCount",     native_tree_get_node_count);
+    }
+    /* ListView meta is staked here for Phase 3.2 -- bare base for now. */
+    meta_inherit(cando_lib_meta_table(vm, "forms_listview"), base);
+
     CandoValue tbl = cando_bridge_new_object(vm);
     CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
 
@@ -3879,6 +3962,8 @@ CandoValue cando_module_init(CandoVM *vm)
     libutil_set_method(vm, obj, "FlowLayoutPanel",  native_flowlayout_create);
     libutil_set_method(vm, obj, "TableLayoutPanel", native_tablelayout_create);
     libutil_set_method(vm, obj, "Splitter",         native_splitter_create);
+    /* Phase 3 item controls. */
+    libutil_set_method(vm, obj, "TreeView",         native_treeview_create);
 
     /* forms.Color -- a small palette of CSS-style named colours that
      * scripts can drop straight into setForeColor / setBackColor without

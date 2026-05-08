@@ -41,6 +41,11 @@ typedef enum {
     /* Phase 2.2b -- TabControl notifications.  i0 carries the new
      * selected tab index (or -1 on TCN_SELCHANGING when canceled). */
     EV_TAB_CHANGED,
+    /* Phase 3.1 -- TreeView notifications.  i0 / d0 carry the
+     * relevant HTREEITEM cast through uintptr_t -> double. */
+    EV_NODE_SELECTED,
+    EV_NODE_EXPANDED,
+    EV_NODE_COLLAPSED,
 } EventKind;
 
 typedef struct FormsEvent {
