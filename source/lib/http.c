@@ -1087,7 +1087,8 @@ static int res_json_fn(CandoVM *vm, int argc, CandoValue *args)
                          "application/json; charset=utf-8", 31);
     }
     if (cando_is_string(jstr)) {
-        res_send_impl(ctx, jstr.as.string->data, jstr.as.string->length);
+        CandoString *jss = cando_as_string(jstr);
+        res_send_impl(ctx, jss->data, jss->length);
     } else {
         res_send_impl(ctx, "null", 4);
     }

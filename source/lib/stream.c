@@ -881,10 +881,11 @@ static StreamStatus transform_write(void *vctx, const u8 *buf, usize len,
      * "filter chunk" semantics where returning null/non-string skips. */
     if (n_ret > 0) {
         CandoValue r = cando_vm_pop(&t->child_vm);
-        if (cando_is_string(r) && r.as.string && r.as.string->length > 0) {
+        CandoString *rs = cando_is_string(r) ? cando_as_string(r) : NULL;
+        if (rs && rs->length > 0) {
             transform_out_append(t,
-                                 (const u8 *)r.as.string->data,
-                                 r.as.string->length);
+                                 (const u8 *)rs->data,
+                                 rs->length);
             cando_os_cond_broadcast(&t->not_empty);
         }
         cando_value_release(r);

@@ -256,11 +256,11 @@ static CdoValue yp_to_cdo(YParser *p, CandoValue v)
 {
     switch (cando_value_tag(v)) {
         case TYPE_NULL:   return cdo_null();
-        case TYPE_BOOL:   return cdo_bool(v.as.boolean);
-        case TYPE_NUMBER: return cdo_number(v.as.number);
+        case TYPE_BOOL:   return cdo_bool(cando_as_bool(v));
+        case TYPE_NUMBER: return cdo_number(cando_as_number(v));
         case TYPE_STRING: {
-            CdoString *s = cdo_string_new(v.as.string->data,
-                                           v.as.string->length);
+            CandoString *vs = cando_as_string(v);
+            CdoString   *s  = cdo_string_new(vs->data, vs->length);
             return cdo_string_value(s);
         }
         case TYPE_OBJECT: {
@@ -663,7 +663,7 @@ static CandoValue yp_parse_flow_map(YParser *p, const char *s, u32 *i, u32 n)
         /* Coerce the key to a string. */
         CandoString *kstr = NULL;
         if (cando_is_string(key_val)) {
-            kstr = key_val.as.string;
+            kstr = cando_as_string(key_val);
         } else {
             char *tmp = cando_value_tostring(key_val);
             u32 tn = (u32)strlen(tmp);
@@ -1090,7 +1090,7 @@ static CandoValue yp_parse_block_map(YParser *p, u32 indent)
         /* Coerce key to a string if it parsed to bool/number/null. */
         CandoString *kstr;
         if (cando_is_string(key_val)) {
-            kstr = key_val.as.string;
+            kstr = cando_as_string(key_val);
         } else {
             char *tmp = cando_value_tostring(key_val);
             u32 tn = (u32)strlen(tmp);
@@ -1586,13 +1586,14 @@ static int yaml_stringify(CandoVM *vm, int argc, CandoValue *args)
         case TYPE_NULL:
             ybuf_push(&w.buf, "null", 4); break;
         case TYPE_BOOL:
-            ybuf_push_cstr(&w.buf, val.as.boolean ? "true" : "false"); break;
+            ybuf_push_cstr(&w.buf, cando_as_bool(val) ? "true" : "false"); break;
         case TYPE_NUMBER:
-            yw_write_number(&w, val.as.number); break;
-        case TYPE_STRING:
-            yw_write_string_scalar(&w, val.as.string->data,
-                                   val.as.string->length);
+            yw_write_number(&w, cando_as_number(val)); break;
+        case TYPE_STRING: {
+            CandoString *vs = cando_as_string(val);
+            yw_write_string_scalar(&w, vs->data, vs->length);
             break;
+        }
         case TYPE_OBJECT: {
             CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(val));
             if (obj->kind == OBJ_ARRAY)

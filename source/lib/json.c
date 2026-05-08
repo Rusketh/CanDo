@@ -297,11 +297,11 @@ static CdoValue jp_to_cdo(JParser *p, CandoValue v)
 {
     switch (cando_value_tag(v)) {
         case TYPE_NULL:   return cdo_null();
-        case TYPE_BOOL:   return cdo_bool(v.as.boolean);
-        case TYPE_NUMBER: return cdo_number(v.as.number);
+        case TYPE_BOOL:   return cdo_bool(cando_as_bool(v));
+        case TYPE_NUMBER: return cdo_number(cando_as_number(v));
         case TYPE_STRING: {
-            CdoString *s = cdo_string_new(v.as.string->data,
-                                           v.as.string->length);
+            CandoString *vs = cando_as_string(v);
+            CdoString   *s  = cdo_string_new(vs->data, vs->length);
             return cdo_string_value(s);
         }
         case TYPE_OBJECT: {
@@ -384,8 +384,8 @@ static CandoValue jp_parse_object(JParser *p)
         }
 
         /* Intern the key and set the field */
-        CdoString *key = cdo_string_intern(key_cando.as.string->data,
-                                            key_cando.as.string->length);
+        CandoString *kcs = cando_as_string(key_cando);
+        CdoString   *key = cdo_string_intern(kcs->data, kcs->length);
         cando_value_release(key_cando);
 
         CdoValue cv = jp_to_cdo(p, val_cando);
@@ -657,11 +657,13 @@ static int json_stringify(CandoVM *vm, int argc, CandoValue *args)
         case TYPE_NULL:
             jbuf_push(&w.buf, "null", 4); break;
         case TYPE_BOOL:
-            jbuf_push_cstr(&w.buf, val.as.boolean ? "true" : "false"); break;
+            jbuf_push_cstr(&w.buf, cando_as_bool(val) ? "true" : "false"); break;
         case TYPE_NUMBER:
-            jw_write_number(&w, val.as.number); break;
-        case TYPE_STRING:
-            jw_write_string(&w, val.as.string->data, val.as.string->length); break;
+            jw_write_number(&w, cando_as_number(val)); break;
+        case TYPE_STRING: {
+            CandoString *vs = cando_as_string(val);
+            jw_write_string(&w, vs->data, vs->length); break;
+        }
         case TYPE_OBJECT: {
             CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(val));
             if (obj->kind == OBJ_ARRAY)

@@ -161,7 +161,7 @@ static int arr_filter(CandoVM *vm, int argc, CandoValue *args) {
             CandoValue ret = cando_vm_pop(vm);
             /* Simple truthiness check: not null and not false. */
             bool keep = true;
-            if (cando_is_null(ret) || (cando_is_bool(ret) && !ret.as.boolean))
+            if (cando_is_null(ret) || (cando_is_bool(ret) && !cando_as_bool(ret)))
                 keep = false;
 
             if (keep) {

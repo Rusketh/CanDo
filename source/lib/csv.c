@@ -144,8 +144,8 @@ static CandoValue csv_parse_row(CsvParser *p)
 
         /* Store the field string as a CdoValue */
         if (cando_is_string(field)) {
-            CdoString *ds = cdo_string_new(field.as.string->data,
-                                            field.as.string->length);
+            CandoString *fs = cando_as_string(field);
+            CdoString   *ds = cdo_string_new(fs->data, fs->length);
             CdoValue   dv = cdo_string_value(ds);
             cdo_array_push(arr, dv);
             cdo_value_release(dv);
