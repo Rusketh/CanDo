@@ -38,6 +38,9 @@ typedef enum {
     EV_BLUR,
     EV_RESIZE,
     EV_SHOWN,
+    /* Phase 2.2b -- TabControl notifications.  i0 carries the new
+     * selected tab index (or -1 on TCN_SELCHANGING when canceled). */
+    EV_TAB_CHANGED,
 } EventKind;
 
 typedef struct FormsEvent {

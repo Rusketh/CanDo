@@ -866,6 +866,23 @@ static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
                          code == (UINT)(MCN_FIRST - 3)) {
                     push_event(EV_SELECTION_CHANGED, cid, cgen);
                 }
+                /* TabControl: TCN_SELCHANGE = (TCN_FIRST - 1).  The new
+                 * selected index isn't carried in the NMHDR; query the
+                 * control directly. */
+                else if (k == KIND_TABCONTROL &&
+                         code == (UINT)(TCN_FIRST - 1)) {
+                    int idx = -1;
+                    if (g_slots[cid].hwnd) {
+                        idx = (int)SendMessageW(g_slots[cid].hwnd,
+                                                TCM_GETCURSEL, 0, 0);
+                    }
+                    FormsEvent ev = {0};
+                    ev.kind       = EV_TAB_CHANGED;
+                    ev.slot       = cid;
+                    ev.generation = cgen;
+                    ev.i0         = idx;
+                    event_queue_push(ev);
+                }
             }
         }
         return 0;
@@ -1179,6 +1196,10 @@ static void dispatch_one(FormsEvent ev)
     case EV_RESIZE:
         argv[argc++] = cando_number((f64)ev.i0);
         argv[argc++] = cando_number((f64)ev.i1);
+        break;
+    case EV_TAB_CHANGED:
+        /* onTabChanged(self, index) -- i0 carries the new selected tab. */
+        argv[argc++] = cando_number((f64)ev.i0);
         break;
     default:
         break;

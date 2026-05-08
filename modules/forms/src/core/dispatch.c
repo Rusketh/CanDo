@@ -24,6 +24,7 @@ const char *event_callback_name(EventKind k)
     case EV_BLUR:               return "onBlur";
     case EV_RESIZE:             return "onResize";
     case EV_SHOWN:              return "onShown";
+    case EV_TAB_CHANGED:        return "onTabChanged";
     case EV_NONE:               return NULL;
     }
     return NULL;
