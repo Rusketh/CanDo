@@ -1,18 +1,50 @@
 /*
  * modules/smtp/test_smtp_smoke.cdo -- minimal CI smoke for the SMTP
- * module.  Loads the .so/.dll, exercises the offline surface (parse,
- * build, address parsing, header en/de), and confirms that connecting
- * to an unreachable host throws a clean error.
- *
- * Designed to run in environments without outbound network access.
+ * module.  Verifies LoadLibrary + cando_module_init succeed and the
+ * offline parts of the public surface (parse, build, address parsing)
+ * round-trip without network access.
  *
  *     ./cando modules/smtp/test_smtp_smoke.cdo
  */
 
-VAR mail = include("./smtp.so");
+print("smoke: starting");
+
+/* Try the Windows extension first; fall back to POSIX. */
+VAR mail = NULL;
+TRY {
+    mail = include("./smtp.dll");
+    print("smoke: loaded smtp.dll");
+} CATCH (e) {
+    print(`smoke: smtp.dll load failed: ${e}`);
+    TRY {
+        mail = include("./smtp.so");
+        print("smoke: loaded smtp.so");
+    } CATCH (e2) {
+        print(`smoke: smtp.so load failed: ${e2}`);
+        os.exit(1);
+    }
+}
 
 print(`smtp.VERSION = ${mail.VERSION}`);
 print(`smtp.PORT_SUBMISSION = ${mail.PORT_SUBMISSION}`);
+
+/* Basic surface check on a handful of representative methods. */
+VAR check = ["send", "connect", "parse", "build",
+             "parseAddress", "encodeHeader", "mx",
+             "spfCheck", "dkimSign", "dkimVerify",
+             "popConnect", "imapConnect",
+             "deliverMaildir", "deliverMbox"];
+VAR missing = 0;
+FOR m OF check {
+    IF type(mail[m]) != "number" {
+        print(`smoke: missing method: ${m}`);
+        missing = missing + 1;
+    }
+}
+IF missing > 0 {
+    print(`smoke: FAIL (${missing} missing method(s))`);
+    os.exit(1);
+}
 
 /* parse + build round-trip */
 VAR raw = mail.build({
@@ -20,14 +52,14 @@ VAR raw = mail.build({
 });
 VAR msg = mail.parse(raw);
 IF string.find(msg.text, "ok", TRUE) == NULL {
-    print("build/parse round-trip FAILED");
+    print("smoke: build/parse round-trip FAILED");
     os.exit(1);
 }
 
 /* address parsing */
 VAR a = mail.parseAddress("Alice <alice@example.com>");
 IF a.domain != "example.com" {
-    print("parseAddress FAILED");
+    print("smoke: parseAddress FAILED");
     os.exit(1);
 }
 
@@ -37,8 +69,8 @@ TRY { mail.send({server:"127.0.0.1:1", from:"a@b", to:"c@d",
                  subject:"x", text:"x"});
 } CATCH (m) { caught = TRUE; }
 IF !caught {
-    print("unreachable connect did not throw -- bug");
+    print("smoke: unreachable connect did not throw -- bug");
     os.exit(1);
 }
 
-print("smoke ok");
+print("OK");
