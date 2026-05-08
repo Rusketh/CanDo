@@ -30,6 +30,7 @@ icon.res
 modules/*/test_ldap
 modules/*/test_sqlite
 modules/*/test_sql
+modules/*/test_smtp
 modules/*/*.so
 modules/*/*.dylib
 modules/*/*.dll

@@ -1,0 +1,159 @@
+/*
+ * modules/smtp/test_smtp.cdo -- script-level integration tests for the
+ * SMTP module.  Run with:
+ *
+ *     ./cando modules/smtp/test_smtp.cdo
+ */
+
+VAR mail = include("./smtp.so");
+
+VAR passes   = 0;
+VAR failures = 0;
+
+VAR check = FUNCTION(name, ok) {
+    IF ok {
+        passes = passes + 1;
+        print(`  ok    ${name}`);
+    } ELSE {
+        failures = failures + 1;
+        print(`  FAIL  ${name}`);
+    }
+};
+
+VAR contains = FUNCTION(s, pat) {
+    RETURN string.find(s, pat, TRUE) != NULL;
+};
+
+print("=== SMTP module integration tests ===");
+
+/* ---------- Pure parsing ---------- */
+
+VAR a = mail.parseAddress("Alice <alice@example.com>");
+check("parseAddress name",    a.name    == "Alice");
+check("parseAddress address", a.address == "alice@example.com");
+check("parseAddress local",   a.local   == "alice");
+check("parseAddress domain",  a.domain  == "example.com");
+
+VAR list = mail.parseAddressList("alice@x.com, bob@y.com, carol@z.com");
+check("parseAddressList count == 3", array.length(list) == 3);
+check("parseAddressList[1] address",  list[1].address == "bob@y.com");
+check("parseAddressList[2] address",  list[2].address == "carol@z.com");
+
+VAR fmt = mail.formatAddress({name: "Alice the Great", address: "a@b"});
+check("formatAddress simple",
+      fmt == "Alice the Great <a@b>");
+
+VAR enc = mail.encodeHeader("hello");
+check("encodeHeader passes ascii through QP",
+      contains(enc, "=?UTF-8?Q?"));
+
+VAR dec = mail.decodeHeader("=?UTF-8?B?aGVsbG8=?=");
+check("decodeHeader B64 -> hello", dec == "hello");
+
+/* ---------- MIME build + parse roundtrip ---------- */
+
+VAR raw = mail.build({
+    from:    "Alice <a@x.com>",
+    to:      "Bob <b@y.com>",
+    subject: "Hello",
+    text:    "plain body",
+    html:    "<p>html body</p>"
+});
+check("build returns non-empty",       string.length(raw) > 50);
+check("build has subject",             contains(raw, "Subject: Hello"));
+check("build is multipart/alternative",contains(raw, "multipart/alternative"));
+
+VAR msg = mail.parse(raw);
+check("parse text contains body", contains(msg.text, "plain body"));
+check("parse html contains body", contains(msg.html, "<p>html body</p>"));
+check("parse subject preserved",  msg.headers.subject == "Hello");
+
+/* ---------- Network error path ---------- */
+
+VAR caught_unreach = FALSE;
+TRY {
+    mail.send({
+        server:  "127.0.0.1:1",       /* nothing listens here */
+        from:    "a@b",
+        to:      "c@d",
+        subject: "x",
+        text:    "x"
+    });
+} CATCH (m) {
+    caught_unreach = TRUE;
+}
+check("send to unreachable host throws", caught_unreach);
+
+/* ---------- DKIM round-trip with a local key pair ---------- */
+
+VAR has_openssl = FALSE;
+TRY {
+    VAR p = process.spawn(["openssl", "version"]);
+    p:wait();
+    has_openssl = TRUE;
+} CATCH (m) {
+    has_openssl = FALSE;
+}
+
+IF has_openssl {
+    VAR g = process.spawn(["sh", "-c", "openssl genrsa -out /tmp/cando_dkim.key 2048 2>/dev/null"]);
+    g:wait();
+    VAR key = "";
+    TRY { key = file.read("/tmp/cando_dkim.key"); } CATCH (m) { key = ""; }
+    IF key != NULL && string.length(key) > 100 {
+        VAR base = mail.build({
+            from:    "Alice <a@example.com>",
+            to:      "Bob <b@example.com>",
+            subject: "DKIM test",
+            text:    "hello"
+        });
+        VAR signed = mail.dkimSign(base, {
+            selector: "test", domain: "example.com",
+            key: key
+        });
+        check("dkimSign prepends DKIM-Signature",
+              string.find(signed, "DKIM-Signature:", TRUE) == 0);
+        /* Verify will fail on the DNS lookup; we just need it to return a
+         * structured object, not throw. */
+        VAR vres = mail.dkimVerify(signed);
+        check("dkimVerify returns object",
+              vres != NULL && vres.pass == FALSE);
+        file.delete("/tmp/cando_dkim.key");
+    } ELSE {
+        print("  skip  DKIM tests (key generation failed)");
+    }
+} ELSE {
+    print("  skip  DKIM tests (openssl CLI not available)");
+}
+
+/* ---------- Maildir + mbox delivery ---------- */
+
+VAR pid = process.pid();
+VAR maildir = `/tmp/cando_smtp_test_${pid}`;
+mail.deliverMaildir(raw, maildir);
+VAR newdir = `${maildir}/new`;
+VAR newfiles = file.list(newdir);
+check("Maildir delivery created a file", array.length(newfiles) >= 1);
+process.spawn(["rm", "-rf", maildir]);
+
+VAR mboxp = `/tmp/cando_smtp_${pid}.mbox`;
+mail.deliverMbox(raw, mboxp, "alice@example.com");
+VAR mb = "";
+TRY { mb = file.read(mboxp); } CATCH (m) { mb = ""; }
+check("mbox delivery has From line",
+      mb != NULL && string.find(mb, "From alice@example.com", TRUE) == 0);
+file.delete(mboxp);
+
+/* ---------- DNS (no crash on NXDOMAIN) ---------- */
+
+TRY {
+    mail.mx("nx.invalid.test");
+    /* Returning empty array is fine. */
+} CATCH (m) {
+    /* Throwing for an unresolvable name is also acceptable. */
+}
+check("mx() handles unknown domain", TRUE);
+
+print("");
+print(`Total: ${passes + failures}  passed: ${passes}  failed: ${failures}`);
+IF failures > 0 { os.exit(1); }
