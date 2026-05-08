@@ -131,7 +131,7 @@ source/jit/
   jit_asm_arm64.dasc       AArch64 template (phase 2)
   jit_mcode.c              executable page allocator (mmap RWX flip)
   jit_snapshot.c           snapshot/restore for side exits
-  jit_dump.c               -Xjit=dump tracing output (optional)
+  jit_dump.c               -Xjit-dump tracing output (optional)
 ```
 
 The interpreter stays put. A `CandoChunk` gains a `trace_table*`
@@ -476,7 +476,7 @@ and (where applicable) measurable performance numbers.
 
 - Add `tests/bench/` with `mandelbrot.cdo`, `nbody.cdo`,
   `fib.cdo`, `forms_event_loop.cdo`. Wire up `make bench`.
-- Add `--Xjit=stats` plumbing to `main.c` (stub for now).
+- Add `--jit-stats` plumbing to `main.c` (stub for now).
 - Add the `CandoOpInfo` table from §4.1.
 
 ### Phase 1 — NaN-boxing (2 weeks)
@@ -494,7 +494,7 @@ and (where applicable) measurable performance numbers.
 
 - Hot-path counters on backedges + function entry + iterator
   `_NEXT` ops.
-- `--Xjit=hotcount` dump for tuning thresholds.
+- `-Xjit-hotcount` knob + per-PC counter dump for tuning thresholds.
 - `vm->jit_enabled` flag with no-op codepath. Behind
   `CANDO_ENABLE_JIT` build flag.
 
@@ -540,7 +540,7 @@ and (where applicable) measurable performance numbers.
 ### Phase 8 — Stabilisation (2 weeks)
 
 - Full benchmark sweep vs interpreter; target ≥5× on numeric loops.
-- `--Xjit=dump` IR/mcode dumper for debugging.
+- `-Xjit-dump` IR/mcode dumper for debugging.
 - Stress tests: every existing `tests/` script under JIT.
 - Documentation: replace this plan with `docs/jit.md` (user-facing)
   + `docs/jit-internals.md` (contributor-facing).
@@ -555,7 +555,125 @@ Total: **~22 weeks** for x64-only v1. Realistic with one engineer.
 
 ---
 
-## 11. Build system
+## 11. User interface
+
+Three layers, ordered from "what a beginner types" to "what a JIT
+hacker types".
+
+### 11.1 CLI flags (`source/main.c`)
+
+User-facing — short and obvious:
+
+| Flag | Effect |
+|---|---|
+| `--jit` | enable the JIT (default in v2; opt-in in v1) |
+| `--no-jit` | disable the JIT for this run |
+| `--jit-stats` | print a one-line summary at exit: traces compiled, side exits, mcode bytes used |
+
+Power-user — namespaced under `-X` so we never collide with user
+flags, and so the surface can grow without polluting `--help`:
+
+| Flag | Effect |
+|---|---|
+| `-Xjit-hotcount=N` | set the trace-trigger threshold (default 56) |
+| `-Xjit-maxmcode=N` | mcode arena cap in MiB (default 64) |
+| `-Xjit-maxtrace=N` | per-trace IR instruction cap (default 4096) |
+| `-Xjit-force` | force-record on first backedge (test harness) |
+| `-Xjit-dump=ir,mcode,exits` | dump compiled traces (debug builds) |
+| `-Xjit-blacklist=PC` | prevent recording at a specific bytecode site |
+
+`cando --help` lists only the four `--jit*` flags. The `-X*` flags
+are documented in `docs/jit.md` for advanced users.
+
+### 11.2 Environment variables
+
+Mirror the CLI for embedders who don't go through `main.c`:
+
+| Var | Equivalent |
+|---|---|
+| `CANDO_JIT=1` / `CANDO_JIT=0` | `--jit` / `--no-jit` |
+| `CANDO_JIT_HOTCOUNT=N` | `-Xjit-hotcount=N` |
+| `CANDO_JIT_DUMP=ir,mcode` | `-Xjit-dump=...` |
+
+Precedence: explicit CLI flag > env var > built-in default.
+
+### 11.3 Script-level API: the `jit` stdlib module
+
+Modeled on the existing `gc` module (`source/lib/gc.c`), registered
+by `cando_openlibs()` and exposed as a global table named `jit`.
+Scripts can introspect and toggle the JIT on the fly — useful for
+benchmarking, for hot-loading code that the JIT shouldn't touch, and
+for self-tests.
+
+Final API surface:
+
+```cdo
+// --- on/off -----------------------------------------------------
+jit.on()                  // enable globally; same as --jit
+jit.off()                 // disable globally; flushes existing traces
+jit.toggle()              // flip current state, return new state
+jit.status()              // → "on" | "off" | "unavailable"
+jit.isAvailable()         // → TRUE if libcando was built with JIT
+
+// --- scoped control --------------------------------------------
+jit.with(FALSE, fn() {    // run fn with JIT temporarily off
+    benchmarkInterpreter()
+})
+
+jit.noTrace(fn() {        // mark the function so it never records;
+    debugSensitiveStuff() // calls inside still trace normally
+})
+
+// --- introspection ---------------------------------------------
+jit.stats()               // → { traces, aborts, side_exits, mcode_used, mcode_cap }
+jit.resetStats()
+jit.tracesFor(fn)         // → array of trace IDs that cover fn
+
+// --- tuning ----------------------------------------------------
+jit.hotcount(56)          // set/get trigger threshold
+jit.maxmcode(64)          // MiB cap on the mcode arena
+jit.flush()               // throw away every compiled trace; counters reset
+
+// --- diagnostics (debug builds only) ---------------------------
+jit.dump("ir", traceId)   // → string IR listing
+jit.dump("mcode", traceId)// → string disassembly
+jit.onTrace(fn(traceId, kind) { ... })  // callback per trace event
+```
+
+Implementation sketch:
+
+- New file `source/lib/jit.c` + header, exporting
+  `cando_lib_jit_register(CandoVM *vm)` to match the pattern in
+  `source/lib/gc.c`.
+- The natives are thin wrappers around a new public C API in
+  `source/jit/jit.h`:
+
+  ```c
+  CANDO_API bool cando_jit_is_available(void);          // build-flag
+  CANDO_API bool cando_jit_is_enabled(CandoVM *vm);
+  CANDO_API void cando_jit_set_enabled(CandoVM *vm, bool on);
+  CANDO_API void cando_jit_flush(CandoVM *vm);
+  CANDO_API void cando_jit_get_stats(CandoVM *vm, CandoJitStats *out);
+  CANDO_API void cando_jit_reset_stats(CandoVM *vm);
+  CANDO_API void cando_jit_set_hotcount(CandoVM *vm, u32 n);
+  CANDO_API u32  cando_jit_get_hotcount(const CandoVM *vm);
+  ```
+- `cando_lib_jit_register` is added to `cando_openlibs()` in
+  `source/cando_lib.c` so embedders get it for free.
+- When CanDo is built with `-DCANDO_ENABLE_JIT=OFF`, the same module
+  is still registered but every function returns
+  `"unavailable"` / `FALSE` and is a no-op. Scripts written for
+  the JIT-enabled build still load and run.
+
+Concurrency: `jit.on()` / `jit.off()` mutate `vm->jit_enabled`
+under the VM lock. Calling them from inside a JIT trace
+side-exits cleanly because `jit.off()` is a `CALLN` to a
+non-pure native, which always triggers a snapshot. `jit.flush()`
+walks the chunk trace tables, drops the mcode arena, and continues
+in the interpreter — currently-executing traces finish, future
+calls re-enter the interpreter.
+
+### 11.4 Build system
 
 `CMakeLists.txt` and `Makefile` both gain:
 
@@ -572,12 +690,17 @@ tree (`source/jit/gen/jit_asm_x64.h`) so end users build with plain
 Cross-compilation: the generated `.h` is host-arch-independent (it's
 just C with embedded byte sequences), so cross-builds work normally.
 
+When `CANDO_ENABLE_JIT=OFF`: `source/jit/` is excluded, the public
+`cando_jit_*` API in `jit.h` provides stubs (so embedders link
+unchanged), and the script-level `jit` module reports
+`"unavailable"`.
+
 ---
 
 ## 12. Testing strategy
 
 1. **Differential testing.** Every test in `tests/` runs under both
-   `--Xjit=off` and `--Xjit=force` (force-trace every backedge once).
+   `--no-jit` and `-Xjit-force` (force-trace every backedge once).
    Outputs must match byte-for-byte.
 2. **Trace replay.** A debug build records every IR trace to disk;
    a separate harness loads the IR back and runs the
@@ -632,14 +755,18 @@ Open questions to resolve before Phase 1:
 
 ## 15. Success criteria for v1 merge
 
-1. `--Xjit=on` matches `--Xjit=off` on every test in `tests/`,
-   including the `forms` UI scripts.
+1. `--jit` matches `--no-jit` on every test in `tests/`, including
+   the `forms` UI scripts.
 2. Geomean ≥5× speedup on `tests/bench/` numeric loops, ≥2× on
    mixed scripts.
 3. No measurable regression (>2%) when JIT is disabled.
-4. mcode arena bounded at 64 MiB by default; flushable at runtime.
-5. The new `docs/jit.md` documents how to enable, tune, and disable
-   the JIT, and how to interpret `--Xjit=dump` output.
+4. mcode arena bounded at 64 MiB by default; flushable at runtime
+   via `jit.flush()` from CanDo or `cando_jit_flush()` from C.
+5. `jit.on()`, `jit.off()`, `jit.stats()`, and `jit.flush()` work
+   from a script and round-trip through `--no-jit` builds as
+   no-ops returning `"unavailable"`.
+6. The new `docs/jit.md` documents the four user-facing CLI flags,
+   the `jit` script module, and how to read `-Xjit-dump` output.
 
 When all five hold, this plan file is deleted and replaced with the
 real `docs/jit.md` + `docs/jit-internals.md` (matching the
