@@ -55,7 +55,7 @@ int cando_native_print(CandoVM *vm, int argc, CandoValue *args)
     for (int i = 0; i < argc; i++) {
         /* Arrays (including range results) are expanded element-by-element. */
         if (cando_is_object(args[i])) {
-            CdoObject *obj = cando_bridge_resolve(vm, args[i].as.handle);
+            CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[i]));
             if (obj && obj->kind == OBJ_ARRAY) {
                 u32 len = cdo_array_len(obj);
                 for (u32 j = 0; j < len; j++) {
@@ -97,7 +97,7 @@ int cando_native_type(CandoVM *vm, int argc, CandoValue *args)
     if (cando_is_object(args[0]) && g_meta_type) {
         /* Follow the prototype (__index) chain so a class instance whose
          * class declares __type reports that class as its type. */
-        CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+        CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
         CdoValue type_val;
         if (cdo_object_get(obj, g_meta_type, &type_val)) {
             if (cdo_is_string(type_val)) {
@@ -112,7 +112,7 @@ int cando_native_type(CandoVM *vm, int argc, CandoValue *args)
         }
     }
     /* Default: built-in type tag name. */
-    const char *name = cando_value_type_name((TypeTag)args[0].tag);
+    const char *name = cando_value_type_name(cando_value_tag(args[0]));
     u32 len = (u32)strlen(name);
     CandoString *s = cando_string_new(name, len);
     cando_vm_push(vm, cando_string_value(s));
@@ -131,7 +131,7 @@ int cando_native_tostring(CandoVM *vm, int argc, CandoValue *args)
         return 1;
     }
     if (cando_is_object(args[0]) && g_meta_tostring) {
-        CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+        CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
         CdoValue ts_val;
         if (cdo_object_get(obj, g_meta_tostring, &ts_val)) {
             if (cdo_is_string(ts_val)) {
@@ -424,7 +424,7 @@ int cando_native_inspect(CandoVM *vm, int argc, CandoValue *args)
 {
     InspectCtx ctx = {0};
     if (argc >= 2 && cando_is_number(args[1])) {
-        int d = (int)args[1].as.number;
+        int d = (int)cando_as_number(args[1]);
         ctx.max_depth = (d > 0) ? d : 0;
     }
 
@@ -432,19 +432,20 @@ int cando_native_inspect(CandoVM *vm, int argc, CandoValue *args)
         inspect_push(&ctx, "null", 4);
     } else {
         CandoValue v = args[0];
-        switch ((TypeTag)v.tag) {
+        switch (cando_value_tag(v)) {
             case TYPE_NULL:
                 inspect_push(&ctx, "null", 4); break;
             case TYPE_BOOL:
-                inspect_push_cstr(&ctx, v.as.boolean ? "true" : "false"); break;
+                inspect_push_cstr(&ctx, cando_as_bool(v) ? "true" : "false"); break;
             case TYPE_NUMBER:
-                inspect_write_number(&ctx, v.as.number); break;
-            case TYPE_STRING:
-                inspect_write_quoted(&ctx, v.as.string->data,
-                                           v.as.string->length);
+                inspect_write_number(&ctx, cando_as_number(v)); break;
+            case TYPE_STRING: {
+                CandoString *vs = cando_as_string(v);
+                inspect_write_quoted(&ctx, vs->data, vs->length);
                 break;
+            }
             case TYPE_OBJECT: {
-                CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+                CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
                 if (!obj) {
                     inspect_push(&ctx, "null", 4);
                 } else if (obj->kind == OBJ_ARRAY) {
