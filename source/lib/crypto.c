@@ -172,7 +172,7 @@ static const LibutilMethodEntry crypto_methods[] = {
 void cando_lib_crypto_register(CandoVM *vm)
 {
     CandoValue crypto_val = cando_bridge_new_object(vm);
-    CdoObject *crypto_obj = cando_bridge_resolve(vm, crypto_val.as.handle);
+    CdoObject *crypto_obj = cando_bridge_resolve(vm, cando_as_handle(crypto_val));
 
     libutil_register_methods(vm, crypto_obj, crypto_methods,
                              CANDO_ARRAY_LEN(crypto_methods));

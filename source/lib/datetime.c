@@ -103,7 +103,7 @@ static int dt_parse(CandoVM *vm, int argc, CandoValue *args)
 void cando_lib_datetime_register(CandoVM *vm)
 {
     CandoValue dt_val = cando_bridge_new_object(vm);
-    CdoObject *dt_obj = cando_bridge_resolve(vm, dt_val.as.handle);
+    CdoObject *dt_obj = cando_bridge_resolve(vm, cando_as_handle(dt_val));
 
     libutil_set_method(vm, dt_obj, "now",    dt_now);
     libutil_set_method(vm, dt_obj, "format", dt_format);

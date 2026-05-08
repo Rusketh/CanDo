@@ -135,7 +135,7 @@ static const LibutilMethodEntry os_methods[] = {
 void cando_lib_os_register(CandoVM *vm)
 {
     CandoValue os_val = cando_bridge_new_object(vm);
-    CdoObject *os_obj = cando_bridge_resolve(vm, os_val.as.handle);
+    CdoObject *os_obj = cando_bridge_resolve(vm, cando_as_handle(os_val));
 
     libutil_register_methods(vm, os_obj, os_methods,
                              CANDO_ARRAY_LEN(os_methods));

@@ -187,7 +187,7 @@ static int tls_peerCertificate_fn(CandoVM *vm, int argc, CandoValue *args)
     }
 
     CandoValue obj_val = cando_bridge_new_object(vm);
-    CdoObject *obj     = cando_bridge_resolve(vm, obj_val.as.handle);
+    CdoObject *obj     = cando_bridge_resolve(vm, cando_as_handle(obj_val));
 
     /* subject + issuer as RFC 2253-ish "/CN=foo/O=bar" strings (the OpenSSL
      * default formatting suffices for inspection). */
@@ -355,7 +355,7 @@ static int tls_listen_fn(CandoVM *vm, int argc, CandoValue *args)
     }
     /* Slot index recovered from the SocketSlot pointer in the public API
      * is not exposed; round-trip via the receiver instead. */
-    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     CdoString *key = cdo_string_intern("__socket_id", 11);
     CdoValue   v   = cdo_null();
     bool ok        = cdo_object_rawget(obj, key, &v);
@@ -406,7 +406,7 @@ static int mod_tcp_fn(CandoVM *vm, int argc, CandoValue *args)
     SocketSlot *s = socket_pool_get(idx);
 
     if (argc >= 1 && cando_is_object(args[0])) {
-        CdoObject *opts = cando_bridge_resolve(vm, args[0].as.handle);
+        CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[0]));
 
         SockutilTlsClientOpts copts;
         fill_client_opts(opts, &copts);
@@ -459,7 +459,7 @@ static int mod_connect_fn(CandoVM *vm, int argc, CandoValue *args)
 
     CdoObject *opts = NULL;
     if (argc >= 3 && cando_is_object(args[2])) {
-        opts = cando_bridge_resolve(vm, args[2].as.handle);
+        opts = cando_bridge_resolve(vm, cando_as_handle(args[2]));
     }
 
     int timeout = opts ? opts_get_int(opts, "timeout", 0) : 0;
@@ -543,7 +543,7 @@ static int mod_createServer_fn(CandoVM *vm, int argc, CandoValue *args)
             "secure_socket.createServer: expected (opts, callback)");
         return -1;
     }
-    CdoObject *opts = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[0]));
 
     u32 cert_len = 0, key_len = 0;
     const char *cert = opts_get_str(opts, "cert", &cert_len);
@@ -595,7 +595,7 @@ void cando_lib_secure_socket_register(CandoVM *vm)
     cando_lib_meta_register(vm);
 
     CandoValue mod_val = cando_bridge_new_object(vm);
-    CdoObject *mod_obj = cando_bridge_resolve(vm, mod_val.as.handle);
+    CdoObject *mod_obj = cando_bridge_resolve(vm, cando_as_handle(mod_val));
     libutil_set_method(vm, mod_obj, "tcp",          mod_tcp_fn);
     libutil_set_method(vm, mod_obj, "connect",      mod_connect_fn);
     libutil_set_method(vm, mod_obj, "createServer", mod_createServer_fn);

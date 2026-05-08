@@ -42,7 +42,7 @@ static CdoThread *resolve_thread(CandoVM *vm, CandoValue *args, int argc,
     if (idx >= argc || !cando_is_object(args[idx]))
         return NULL;
 
-    CdoObject *obj = cando_bridge_resolve(vm, args[idx].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[idx]));
     if (!obj || obj->kind != OBJ_THREAD)
         return NULL;
 
@@ -136,7 +136,7 @@ static int thread_join(CandoVM *vm, int argc, CandoValue *args)
 
     /* Check if the single argument is an array of threads. */
     if (argc == 1 && cando_is_object(args[0])) {
-        CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+        CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
         if (obj && obj->kind == OBJ_ARRAY) {
             u32 len = cdo_array_len(obj);
             if (len == 0) {
@@ -150,7 +150,7 @@ static int thread_join(CandoVM *vm, int argc, CandoValue *args)
                 CandoValue v = cando_bridge_to_cando(vm, cv);
                 CdoThread *t = NULL;
                 if (cando_is_object(v)) {
-                    CdoObject *tobj = cando_bridge_resolve(vm, v.as.handle);
+                    CdoObject *tobj = cando_bridge_resolve(vm, cando_as_handle(v));
                     if (tobj && tobj->kind == OBJ_THREAD)
                         t = (CdoThread *)tobj;
                 }
@@ -408,7 +408,7 @@ static const LibutilMethodEntry thread_methods[] = {
 void cando_lib_thread_register(CandoVM *vm)
 {
     CandoValue thread_val = cando_bridge_new_object(vm);
-    CdoObject *thread_obj = cando_bridge_resolve(vm, thread_val.as.handle);
+    CdoObject *thread_obj = cando_bridge_resolve(vm, cando_as_handle(thread_val));
 
     libutil_register_methods(vm, thread_obj, thread_methods,
                              CANDO_ARRAY_LEN(thread_methods));

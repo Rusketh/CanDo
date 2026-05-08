@@ -320,7 +320,7 @@ static const LibutilMethodEntry math_methods[] = {
 void cando_lib_math_register(CandoVM *vm)
 {
     CandoValue math_val = cando_bridge_new_object(vm);
-    CdoObject *math_obj = cando_bridge_resolve(vm, math_val.as.handle);
+    CdoObject *math_obj = cando_bridge_resolve(vm, cando_as_handle(math_val));
 
     libutil_register_methods(vm, math_obj, math_methods,
                              CANDO_ARRAY_LEN(math_methods));

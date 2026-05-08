@@ -37,7 +37,7 @@ static int gc_count_native(CandoVM *vm, int argc, CandoValue *args)
 static int gc_threshold_native(CandoVM *vm, int argc, CandoValue *args)
 {
     if (vm->mem && argc >= 1 && cando_is_number(args[0])) {
-        f64 v = args[0].as.number;
+        f64 v = cando_as_number(args[0]);
         u32 n = (v < 0) ? 0 : (u32)v;
         vm->mem->next_collect_threshold = n;
     }
@@ -49,7 +49,7 @@ static int gc_threshold_native(CandoVM *vm, int argc, CandoValue *args)
 void cando_lib_gc_register(CandoVM *vm)
 {
     CandoValue val = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, val.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(val));
 
     libutil_set_method(vm, obj, "collect",   gc_collect_native);
     libutil_set_method(vm, obj, "count",     gc_count_native);

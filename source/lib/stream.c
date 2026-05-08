@@ -142,7 +142,7 @@ static void set_num_field(CdoObject *obj, const char *name, f64 n)
 StreamSlot *stream_resolve_receiver(CandoVM *vm, CandoValue receiver)
 {
     if (!cando_is_object(receiver)) return NULL;
-    CdoObject *obj = cando_bridge_resolve(vm, receiver.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(receiver));
     if (!obj) return NULL;
     int idx = -1;
     if (!get_int_field(obj, "__stream_id", &idx)) return NULL;
@@ -152,7 +152,7 @@ StreamSlot *stream_resolve_receiver(CandoVM *vm, CandoValue receiver)
 CandoValue stream_create_instance(CandoVM *vm, int slot_idx)
 {
     CandoValue val = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, val.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(val));
     set_num_field(obj, "__stream_id", (f64)slot_idx);
     cando_lib_meta_attach(vm, obj, "stream");
     return val;
@@ -542,7 +542,7 @@ static int stream_pipe_fn(CandoVM *vm, int argc, CandoValue *args)
 
     usize chunk = 64 * 1024;
     if (argc >= 3 && cando_is_object(args[2])) {
-        CdoObject *opts = cando_bridge_resolve(vm, args[2].as.handle);
+        CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[2]));
         int c = 0;
         if (opts && get_int_field(opts, "chunk", &c) && c > 0) {
             chunk = (usize)c;
@@ -1110,7 +1110,7 @@ void cando_lib_stream_register(CandoVM *vm)
 
     /* Module globals. */
     CandoValue mod_val = cando_bridge_new_object(vm);
-    CdoObject *mod_obj = cando_bridge_resolve(vm, mod_val.as.handle);
+    CdoObject *mod_obj = cando_bridge_resolve(vm, cando_as_handle(mod_val));
     libutil_set_method(vm, mod_obj, "memory",    mod_memory_fn);
     libutil_set_method(vm, mod_obj, "channel",   mod_channel_fn);
     libutil_set_method(vm, mod_obj, "transform", mod_transform_fn);

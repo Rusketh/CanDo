@@ -153,7 +153,7 @@ static void set_num_field(CdoObject *obj, const char *name, f64 n)
 static ProcSlot *proc_resolve_receiver(CandoVM *vm, CandoValue receiver)
 {
     if (!cando_is_object(receiver)) return NULL;
-    CdoObject *obj = cando_bridge_resolve(vm, receiver.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(receiver));
     if (!obj) return NULL;
     int idx = -1;
     if (!get_int_field(obj, "__proc_id", &idx)) return NULL;
@@ -163,7 +163,7 @@ static ProcSlot *proc_resolve_receiver(CandoVM *vm, CandoValue receiver)
 static CandoValue proc_create_instance(CandoVM *vm, int slot_idx)
 {
     CandoValue val = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, val.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(val));
     set_num_field(obj, "__proc_id", (f64)slot_idx);
     cando_lib_meta_attach(vm, obj, "proc");
     return val;
@@ -457,7 +457,7 @@ static int process_spawn_fn(CandoVM *vm, int argc, CandoValue *args)
         cando_vm_error(vm, "process.spawn: argv (array) required");
         return -1;
     }
-    CdoObject *argv_obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *argv_obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (!argv_obj) {
         cando_vm_error(vm, "process.spawn: argv is invalid");
         return -1;
@@ -492,7 +492,7 @@ static int process_spawn_fn(CandoVM *vm, int argc, CandoValue *args)
     StdioMode  err_mode = STDIO_INHERIT;
     const char *cwd     = NULL;
     if (argc >= 2 && cando_is_object(args[1])) {
-        CdoObject *opts = cando_bridge_resolve(vm, args[1].as.handle);
+        CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[1]));
         in_mode  = parse_stdio(opts, "stdin",  STDIO_INHERIT);
         out_mode = parse_stdio(opts, "stdout", STDIO_INHERIT);
         err_mode = parse_stdio(opts, "stderr", STDIO_INHERIT);
@@ -581,7 +581,7 @@ static int proc_stream_for(CandoVM *vm, ProcSlot *p, int *cache_idx,
         return -1;
     }
     /* Recover the slot index from the returned object so we can cache it. */
-    CdoObject *obj = cando_bridge_resolve(vm, sv.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(sv));
     int idx = -1;
     get_int_field(obj, "__stream_id", &idx);
     *cache_idx = idx;
@@ -743,7 +743,7 @@ void cando_lib_process_register(CandoVM *vm)
     cando_lib_meta_register(vm);
 
     CandoValue proc_val = cando_bridge_new_object(vm);
-    CdoObject *proc_obj = cando_bridge_resolve(vm, proc_val.as.handle);
+    CdoObject *proc_obj = cando_bridge_resolve(vm, cando_as_handle(proc_val));
 
     libutil_set_method(vm, proc_obj, "pid",   process_pid);
     libutil_set_method(vm, proc_obj, "ppid",  process_ppid);

@@ -27,7 +27,7 @@ static CdoObject *meta_root_obj(CandoVM *vm)
         return NULL;
     if (!cando_is_object(meta_val))
         return NULL;
-    return cando_bridge_resolve(vm, meta_val.as.handle);
+    return cando_bridge_resolve(vm, cando_as_handle(meta_val));
 }
 
 void cando_lib_meta_register(CandoVM *vm)
@@ -57,7 +57,7 @@ CdoObject *cando_lib_meta_table(CandoVM *vm, const char *name)
     /* Stale or wrong-type slot: replace it. */
 
     CandoValue tbl_val = cando_bridge_new_object(vm);
-    CdoObject *tbl     = cando_bridge_resolve(vm, tbl_val.as.handle);
+    CdoObject *tbl     = cando_bridge_resolve(vm, cando_as_handle(tbl_val));
 
     /* Stamp __type so type() on instances yields the meta name. */
     CdoString *type_key = cdo_string_intern(META_TYPE, (u32)(sizeof(META_TYPE) - 1));

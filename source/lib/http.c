@@ -387,14 +387,14 @@ int http_do_request_native(CandoVM *vm, int argc, CandoValue *args,
 
     CdoObject *opts = NULL;
     if (cando_is_string(args[0])) {
-        url_cstr = args[0].as.string->data;
-        url_len  = args[0].as.string->length;
+        url_cstr = cando_as_string(args[0])->data;
+        url_len  = cando_as_string(args[0])->length;
         /* fetch(url, opts) form: options may be in args[1]. */
         if (argc >= 2 && cando_is_object(args[1])) {
-            opts = cando_bridge_resolve(vm, args[1].as.handle);
+            opts = cando_bridge_resolve(vm, cando_as_handle(args[1]));
         }
     } else if (cando_is_object(args[0])) {
-        opts = cando_bridge_resolve(vm, args[0].as.handle);
+        opts = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     } else {
         cando_vm_error(vm, "http.request: expected url string or options object");
         return -1;
@@ -540,7 +540,7 @@ int http_do_request_native(CandoVM *vm, int argc, CandoValue *args,
          * `__stream_id` hidden field tells :stream() to surface the
          * lazy body adapter. */
         CandoValue result_val = cando_bridge_new_object(vm);
-        CdoObject *result     = cando_bridge_resolve(vm, result_val.as.handle);
+        CdoObject *result     = cando_bridge_resolve(vm, cando_as_handle(result_val));
         set_num_field (result, "status", (f64)bc->head.status);
         set_bool_field(result, "ok",
                        bc->head.status >= 200 && bc->head.status < 300);
@@ -552,7 +552,7 @@ int http_do_request_native(CandoVM *vm, int argc, CandoValue *args,
         cdo_string_release(kbody);
 
         CandoValue hdrs_val = cando_bridge_new_object(vm);
-        CdoObject *hdrs     = cando_bridge_resolve(vm, hdrs_val.as.handle);
+        CdoObject *hdrs     = cando_bridge_resolve(vm, cando_as_handle(hdrs_val));
         for (u32 i = 0; i < bc->head.headers.count; i++) {
             set_str_field(hdrs,
                           bc->head.headers.entries[i].name,
@@ -579,7 +579,7 @@ int http_do_request_native(CandoVM *vm, int argc, CandoValue *args,
 
     /* Build result object { status, ok, body, headers }. */
     CandoValue result_val = cando_bridge_new_object(vm);
-    CdoObject *result     = cando_bridge_resolve(vm, result_val.as.handle);
+    CdoObject *result     = cando_bridge_resolve(vm, cando_as_handle(result_val));
 
     set_num_field(result, "status", (f64)resp.status);
     set_bool_field(result, "ok", resp.status >= 200 && resp.status < 300);
@@ -589,7 +589,7 @@ int http_do_request_native(CandoVM *vm, int argc, CandoValue *args,
 
     /* headers: plain object with lowercased keys. */
     CandoValue hdrs_val = cando_bridge_new_object(vm);
-    CdoObject *hdrs     = cando_bridge_resolve(vm, hdrs_val.as.handle);
+    CdoObject *hdrs     = cando_bridge_resolve(vm, cando_as_handle(hdrs_val));
     for (u32 i = 0; i < resp.headers.count; i++) {
         set_str_field(hdrs,
                       resp.headers.entries[i].name,
@@ -620,8 +620,8 @@ static int http_get_fn(CandoVM *vm, int argc, CandoValue *args)
     if (!libutil_require_str_at(vm, args, argc, 0, "http.get")) return -1;
     /* Wrap into a tiny options object with method=GET and reuse the workhorse. */
     CandoValue opts_val = cando_bridge_new_object(vm);
-    CdoObject *opts     = cando_bridge_resolve(vm, opts_val.as.handle);
-    set_str_field(opts, "url", args[0].as.string->data, args[0].as.string->length);
+    CdoObject *opts     = cando_bridge_resolve(vm, cando_as_handle(opts_val));
+    set_str_field(opts, "url", cando_as_string(args[0])->data, cando_as_string(args[0])->length);
     set_str_field(opts, "method", "GET", 3);
 
     CandoValue single[1] = { opts_val };
@@ -641,7 +641,7 @@ static int fetch_fn(CandoVM *vm, int argc, CandoValue *args)
 static HttpResCtx *res_get_ctx_from(CandoVM *vm, CandoValue receiver)
 {
     if (!cando_is_object(receiver)) return NULL;
-    CdoObject *obj = cando_bridge_resolve(vm, receiver.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(receiver));
     if (!obj) return NULL;
     int idx = -1;
     if (!get_int_field(obj, "__res_id", &idx)) return NULL;
@@ -765,8 +765,8 @@ static int res_send_fn(CandoVM *vm, int argc, CandoValue *args)
 
     if (argc >= 2 && !cando_is_null(args[1])) {
         if (cando_is_string(args[1])) {
-            body = args[1].as.string->data;
-            blen = args[1].as.string->length;
+            body = cando_as_string(args[1])->data;
+            blen = cando_as_string(args[1])->length;
         } else {
             tmp = cando_value_tostring(args[1]);
             if (tmp) { body = tmp; blen = (u32)strlen(tmp); }
@@ -774,7 +774,7 @@ static int res_send_fn(CandoVM *vm, int argc, CandoValue *args)
     } else {
         /* Fall back to the receiver's `body` field so users can build the
          * response incrementally (e.g. via res:write) and call res:send(). */
-        CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+        CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
         if (obj) {
             CdoString *kbody = cdo_string_intern("body", 4);
             have_field = cdo_object_get(obj, kbody, &field_val);
@@ -997,7 +997,7 @@ static int http_client_response_stream_fn(CandoVM *vm, int argc,
         cando_vm_error(vm, "clientResponse:stream: invalid receiver");
         return -1;
     }
-    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (!obj) {
         cando_vm_error(vm, "clientResponse:stream: invalid receiver");
         return -1;
@@ -1054,7 +1054,7 @@ static int res_json_fn(CandoVM *vm, int argc, CandoValue *args)
         cando_vm_error(vm, "res.json: json global not available");
         return -1;
     }
-    CdoObject *json_obj = cando_bridge_resolve(vm, json_val.as.handle);
+    CdoObject *json_obj = cando_bridge_resolve(vm, cando_as_handle(json_val));
     CdoString *key = cdo_string_intern("stringify", 9);
     CdoValue stringify_cv = cdo_null();
     bool ok = cdo_object_rawget(json_obj, key, &stringify_cv);
@@ -1158,7 +1158,7 @@ static CANDO_THREAD_RETURN conn_thread_fn(void *arg_p)
 
     /* Build req object. */
     CandoValue req_val = cando_bridge_new_object(&child);
-    CdoObject *req_obj = cando_bridge_resolve(&child, req_val.as.handle);
+    CdoObject *req_obj = cando_bridge_resolve(&child, cando_as_handle(req_val));
     set_str_field(req_obj, "method",  preq.method,  (u32)strlen(preq.method));
     set_str_field(req_obj, "url",     preq.path,    (u32)strlen(preq.path));
     /* Split path and query at '?'. */
@@ -1176,7 +1176,7 @@ static CANDO_THREAD_RETURN conn_thread_fn(void *arg_p)
                   (u32)preq.body.len);
 
     CandoValue hdrs_val = cando_bridge_new_object(&child);
-    CdoObject *hdrs_obj = cando_bridge_resolve(&child, hdrs_val.as.handle);
+    CdoObject *hdrs_obj = cando_bridge_resolve(&child, cando_as_handle(hdrs_val));
     for (u32 i = 0; i < preq.headers.count; i++) {
         set_str_field(hdrs_obj,
                       preq.headers.entries[i].name,
@@ -1190,7 +1190,7 @@ static CANDO_THREAD_RETURN conn_thread_fn(void *arg_p)
      * extend them; we only stash the per-instance `__res_id` and an empty
      * mutable `body` accumulator here. */
     CandoValue res_val = cando_bridge_new_object(&child);
-    CdoObject *res_obj = cando_bridge_resolve(&child, res_val.as.handle);
+    CdoObject *res_obj = cando_bridge_resolve(&child, cando_as_handle(res_val));
     set_num_field(res_obj, "__res_id", (f64)res_idx);
     set_str_field(res_obj, "body", "", 0);
     cando_lib_meta_attach(&child, res_obj, "http_response");
@@ -1273,7 +1273,7 @@ static CANDO_THREAD_RETURN accept_thread_fn(void *arg)
 static HttpServer *server_get_from(CandoVM *vm, CandoValue receiver)
 {
     if (!cando_is_object(receiver)) return NULL;
-    CdoObject *obj = cando_bridge_resolve(vm, receiver.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(receiver));
     if (!obj) return NULL;
     int idx = -1;
     if (!get_int_field(obj, "__server_id", &idx)) return NULL;
@@ -1437,7 +1437,7 @@ int http_create_server_native_impl(CandoVM *vm, CandoValue callback,
     /* The instance only carries the per-server identifier; listen/close are
      * inherited from `_meta.http_server`. */
     CandoValue sobj_val = cando_bridge_new_object(vm);
-    CdoObject *sobj     = cando_bridge_resolve(vm, sobj_val.as.handle);
+    CdoObject *sobj     = cando_bridge_resolve(vm, cando_as_handle(sobj_val));
     set_num_field(sobj, "__server_id", (f64)sidx);
     cando_lib_meta_attach(vm, sobj, "http_server");
 
@@ -1499,7 +1499,7 @@ void cando_lib_http_register(CandoVM *vm)
     http_one_time_init();
 
     CandoValue http_val = cando_bridge_new_object(vm);
-    CdoObject *http_obj = cando_bridge_resolve(vm, http_val.as.handle);
+    CdoObject *http_obj = cando_bridge_resolve(vm, cando_as_handle(http_val));
 
     libutil_set_method(vm, http_obj, "request",      http_request_fn);
     libutil_set_method(vm, http_obj, "get",          http_get_fn);

@@ -162,7 +162,7 @@ static void set_str_field(CdoObject *obj, const char *name,
 SocketSlot *socket_resolve_receiver(CandoVM *vm, CandoValue receiver)
 {
     if (!cando_is_object(receiver)) return NULL;
-    CdoObject *obj = cando_bridge_resolve(vm, receiver.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(receiver));
     if (!obj) return NULL;
     int idx = -1;
     if (!get_int_field(obj, "__socket_id", &idx)) return NULL;
@@ -173,7 +173,7 @@ CandoValue socket_create_instance(CandoVM *vm, int slot_idx,
                                   const char *meta_name)
 {
     CandoValue val = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, val.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(val));
     set_num_field(obj, "__socket_id", (f64)slot_idx);
     cando_lib_meta_attach(vm, obj, meta_name);
     return val;
@@ -207,7 +207,7 @@ static void read_connect_opts(CandoVM *vm, CandoValue opts_val,
                               int *timeout_ms, int *family)
 {
     if (!cando_is_object(opts_val)) return;
-    CdoObject *opts = cando_bridge_resolve(vm, opts_val.as.handle);
+    CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(opts_val));
     if (!opts) return;
 
     if (timeout_ms) {
@@ -356,7 +356,7 @@ static int tcp_recv_fn(CandoVM *vm, int argc, CandoValue *args)
     if (maxlen > 16 * 1024 * 1024) maxlen = 16 * 1024 * 1024;
 
     if (argc >= 3 && cando_is_number(args[2])) {
-        sockutil_set_timeout(s->fd, (int)args[2].as.number);
+        sockutil_set_timeout(s->fd, (int)cando_as_number(args[2]));
     }
 
     char *buf = (char *)malloc((usize)maxlen);
@@ -527,7 +527,7 @@ static int tcp_setBlocking_fn(CandoVM *vm, int argc, CandoValue *args)
                                "socket:setBlocking", false);
     if (!s) return -1;
     bool blocking = (argc < 2) ? true
-                  : (cando_is_bool(args[1]) ? args[1].as.boolean : true);
+                  : (cando_is_bool(args[1]) ? cando_as_bool(args[1]) : true);
     if (s->fd != SOCKUTIL_INVALID_SOCKET)
         sockutil_set_blocking(s->fd, blocking);
     cando_vm_push(vm, args[0]);
@@ -561,13 +561,13 @@ static int tcp_setOption_fn(CandoVM *vm, int argc, CandoValue *args)
     }
     bool ok = false;
     if (strcmp(name, "tcp_nodelay") == 0) {
-        bool v = (argc >= 3 && cando_is_bool(args[2])) ? args[2].as.boolean : true;
+        bool v = (argc >= 3 && cando_is_bool(args[2])) ? cando_as_bool(args[2]) : true;
         ok = sockutil_set_nodelay(s->fd, v);
     } else if (strcmp(name, "so_keepalive") == 0) {
-        bool v = (argc >= 3 && cando_is_bool(args[2])) ? args[2].as.boolean : true;
+        bool v = (argc >= 3 && cando_is_bool(args[2])) ? cando_as_bool(args[2]) : true;
         ok = sockutil_set_keepalive(s->fd, v);
     } else if (strcmp(name, "so_reuseaddr") == 0) {
-        bool v = (argc >= 3 && cando_is_bool(args[2])) ? args[2].as.boolean : true;
+        bool v = (argc >= 3 && cando_is_bool(args[2])) ? cando_as_bool(args[2]) : true;
         ok = sockutil_set_reuseaddr(s->fd, v);
     } else if (strcmp(name, "so_rcvbuf") == 0) {
         int v = (int)libutil_arg_num_at(args, argc, 2, 0);
@@ -609,7 +609,7 @@ static int push_addr_object(CandoVM *vm, const struct sockaddr_storage *sa,
         return 1;
     }
     CandoValue obj_val = cando_bridge_new_object(vm);
-    CdoObject *obj     = cando_bridge_resolve(vm, obj_val.as.handle);
+    CdoObject *obj     = cando_bridge_resolve(vm, cando_as_handle(obj_val));
     set_str_field(obj, "host", host, (u32)strlen(host));
     set_num_field(obj, "port", (f64)port);
     set_str_field(obj, "family", family_name(family),
@@ -1183,7 +1183,7 @@ static int mod_resolve_fn(CandoVM *vm, int argc, CandoValue *args)
         return 1;
     }
     CandoValue arr_val = cando_bridge_new_array(vm);
-    CdoObject *arr     = cando_bridge_resolve(vm, arr_val.as.handle);
+    CdoObject *arr     = cando_bridge_resolve(vm, cando_as_handle(arr_val));
     for (int i = 0; i < n; i++) {
         CdoString *cs = cdo_string_new(addrs[i], (u32)strlen(addrs[i]));
         cdo_array_push(arr, cdo_string_value(cs));
@@ -1205,7 +1205,7 @@ void cando_lib_socket_register(CandoVM *vm)
 
     /* Module globals. */
     CandoValue mod_val = cando_bridge_new_object(vm);
-    CdoObject *mod_obj = cando_bridge_resolve(vm, mod_val.as.handle);
+    CdoObject *mod_obj = cando_bridge_resolve(vm, cando_as_handle(mod_val));
     libutil_set_method(vm, mod_obj, "tcp",          mod_tcp_fn);
     libutil_set_method(vm, mod_obj, "connect",      mod_connect_fn);
     libutil_set_method(vm, mod_obj, "createServer", mod_createServer_fn);
