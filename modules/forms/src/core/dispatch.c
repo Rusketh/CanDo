@@ -28,6 +28,8 @@ const char *event_callback_name(EventKind k)
     case EV_NODE_SELECTED:      return "onNodeSelected";
     case EV_NODE_EXPANDED:      return "onNodeExpanded";
     case EV_NODE_COLLAPSED:     return "onNodeCollapsed";
+    case EV_ITEM_ACTIVATED:          return "onItemActivated";
+    case EV_LIST_SELECTION_CHANGED:  return "onSelectionChanged";
     case EV_NONE:               return NULL;
     }
     return NULL;

@@ -1054,6 +1054,34 @@ static LRESULT CALLBACK form_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
                     ev.d0         = (double)(uintptr_t)nmt->itemNew.hItem;
                     event_queue_push(ev);
                 }
+                /* ListView: NM_DBLCLK fires for double-click activation;
+                 * LVN_ITEMCHANGED with newState carrying LVIS_SELECTED
+                 * announces selection updates.  ANSI/Unicode codes for
+                 * LVN_ITEMCHANGED are LVN_FIRST - 0 / -100 respectively. */
+                else if (k == KIND_LISTVIEW && code == (UINT)NM_DBLCLK) {
+                    NMITEMACTIVATE *nia = (NMITEMACTIVATE *)l;
+                    FormsEvent ev = {0};
+                    ev.kind       = EV_ITEM_ACTIVATED;
+                    ev.slot       = cid;
+                    ev.generation = cgen;
+                    ev.i0         = nia->iItem;
+                    event_queue_push(ev);
+                }
+                else if (k == KIND_LISTVIEW &&
+                         (code == (UINT)(LVN_FIRST - 0) ||
+                          code == (UINT)(LVN_FIRST - 100))) {
+                    NMLISTVIEW *nlv = (NMLISTVIEW *)l;
+                    /* Only report transitions where LVIS_SELECTED toggled. */
+                    if ((nlv->uChanged & LVIF_STATE) &&
+                        ((nlv->uOldState ^ nlv->uNewState) & LVIS_SELECTED)) {
+                        FormsEvent ev = {0};
+                        ev.kind       = EV_LIST_SELECTION_CHANGED;
+                        ev.slot       = cid;
+                        ev.generation = cgen;
+                        ev.i0         = nlv->iItem;
+                        event_queue_push(ev);
+                    }
+                }
             }
         }
         return 0;
@@ -1379,6 +1407,11 @@ static void dispatch_one(FormsEvent ev)
          * carries the HTREEITEM cast through uintptr_t -> double. */
         argv[argc++] = cando_number(ev.d0);
         break;
+    case EV_ITEM_ACTIVATED:
+    case EV_LIST_SELECTION_CHANGED:
+        /* onItemActivated / onSelectionChanged(self, rowIndex). */
+        argv[argc++] = cando_number((f64)ev.i0);
+        break;
     default:
         break;
     }
@@ -1694,6 +1727,7 @@ FORMS_DEFINE_CTOR("TableLayoutPanel", KIND_TABLELAYOUT, native_tablelayout_creat
 FORMS_DEFINE_CTOR("Splitter",         KIND_SPLITTER,    native_splitter_create)
 /* Phase 3 item controls. */
 FORMS_DEFINE_CTOR("TreeView",         KIND_TREEVIEW,    native_treeview_create)
+FORMS_DEFINE_CTOR("ListView",         KIND_LISTVIEW,    native_listview_create)
 
 /* =========================================================================
  * Methods on every control instance.  Most setters cross threads via
@@ -2524,6 +2558,7 @@ static int native_get_font(CandoVM *vm, int argc, CandoValue *args)
 
 /* Phase 3 item controls. */
 #include "src/controls/ctl_treeview.h"
+#include "src/controls/ctl_listview.h"
 
 /* parse_border_style moved to src/core/layout.{c,h}. */
 
@@ -3920,8 +3955,26 @@ CandoValue cando_module_init(CandoVM *vm)
         cando_lib_meta_define(vm, m, "setNodeText",      native_tree_set_node_text);
         cando_lib_meta_define(vm, m, "getNodeCount",     native_tree_get_node_count);
     }
-    /* ListView meta is staked here for Phase 3.2 -- bare base for now. */
-    meta_inherit(cando_lib_meta_table(vm, "forms_listview"), base);
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_listview");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "addColumn",          native_lv_add_column);
+        cando_lib_meta_define(vm, m, "setColumnWidth",     native_lv_set_column_width);
+        cando_lib_meta_define(vm, m, "getColumnCount",     native_lv_get_column_count);
+        cando_lib_meta_define(vm, m, "addItem",            native_lv_add_item);
+        cando_lib_meta_define(vm, m, "setSubItem",         native_lv_set_subitem);
+        cando_lib_meta_define(vm, m, "getItemText",        native_lv_get_item_text);
+        cando_lib_meta_define(vm, m, "removeItem",         native_lv_remove_item);
+        cando_lib_meta_define(vm, m, "clearItems",         native_lv_clear_items);
+        cando_lib_meta_define(vm, m, "getItemCount",       native_lv_get_item_count);
+        cando_lib_meta_define(vm, m, "getSelectedIndex",   native_lv_get_selected_index);
+        cando_lib_meta_define(vm, m, "setSelectedIndex",   native_lv_set_selected_index);
+        cando_lib_meta_define(vm, m, "getSelectedIndices", native_lv_get_selected_indices);
+        cando_lib_meta_define(vm, m, "setView",            native_lv_set_view);
+        cando_lib_meta_define(vm, m, "setFullRowSelect",   native_lv_set_full_row_select);
+        cando_lib_meta_define(vm, m, "setGridLines",       native_lv_set_grid_lines);
+        cando_lib_meta_define(vm, m, "setMultiSelect",     native_lv_set_multi_select);
+    }
 
     CandoValue tbl = cando_bridge_new_object(vm);
     CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
@@ -3964,6 +4017,7 @@ CandoValue cando_module_init(CandoVM *vm)
     libutil_set_method(vm, obj, "Splitter",         native_splitter_create);
     /* Phase 3 item controls. */
     libutil_set_method(vm, obj, "TreeView",         native_treeview_create);
+    libutil_set_method(vm, obj, "ListView",         native_listview_create);
 
     /* forms.Color -- a small palette of CSS-style named colours that
      * scripts can drop straight into setForeColor / setBackColor without

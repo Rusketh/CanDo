@@ -46,6 +46,9 @@ typedef enum {
     EV_NODE_SELECTED,
     EV_NODE_EXPANDED,
     EV_NODE_COLLAPSED,
+    /* Phase 3.2 -- ListView notifications.  i0 carries the row index. */
+    EV_ITEM_ACTIVATED,        /* NM_DBLCLK / RETURN -- "open" intent */
+    EV_LIST_SELECTION_CHANGED,
 } EventKind;
 
 typedef struct FormsEvent {
