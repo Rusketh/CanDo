@@ -4,17 +4,10 @@
  * arithmetic.  Useful as a sanity check that the JIT is recording the
  * smallest possible loop -- if this doesn't speed up, something is
  * wrong with hot-path detection.
- *
- * NOTE: today's interpreter materialises FOR-IN ranges on the value
- * stack (2048 slots), so the inner range is kept short and total
- * iteration count is driven by the outer loop.  Once a fix lands for
- * that, this benchmark can be a single 1M-iteration loop.
  */
 
 VAR sum = 0;
-FOR outer IN 1 -> 1000 {
-    FOR i IN 1 -> 1000 {
-        sum = sum + i;
-    }
+FOR i IN 1 -> 1000000 {
+    sum = sum + i;
 }
 print(sum);

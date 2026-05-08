@@ -2680,20 +2680,18 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cando_value_release(POP());
 
             /* Release the loop's own iterator state left on the stack.
-             * FOR IN/OF:   [..., val0..valN, count, index]  → pop 2 + count
-             * FOR OVER:    [..., iter, state, control, nvar] → pop 4
-             * WHILE:       no extra state                    → pop 0        */
+             * FOR IN/OF:   [..., source_array, len_signed, index]  → pop 3
+             * FOR OVER:    [..., iter, state, control, nvar]       → pop 4
+             * WHILE:       no extra state                          → pop 0 */
             if (ltyp == CANDO_LOOP_FOR_OVER) {
                 cando_value_release(POP()); /* nvar    */
                 cando_value_release(POP()); /* control */
                 cando_value_release(POP()); /* state   */
                 cando_value_release(POP()); /* iter    */
             } else if (ltyp == CANDO_LOOP_FOR) {
-                f64 count = (vm->stack_top - 1)->as.number; /* peek */
-                cando_value_release(POP()); /* index */
-                cando_value_release(POP()); /* count */
-                for (i64 vi = 0; vi < (i64)count; vi++)
-                    cando_value_release(POP());
+                cando_value_release(POP()); /* index   */
+                cando_value_release(POP()); /* len     */
+                cando_value_release(POP()); /* source  */
             }
 
             vm->spread_extra = 0;
@@ -3305,82 +3303,108 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
         OP_CASE(OP_FOR_INIT): {
             /* mode: 1 = keys (FOR IN), 0 = values (FOR OF/OVER)
+             *
              * Stack before: [..., iterable]
-             * Array IN:  push indices 0..len-1, then [count, 0].
-             * Array OF:  push element values,   then [count, 0].
-             * Object IN: push field name strings (FIFO order), then [count, 0].
-             * Object OF: push field values (FIFO order),       then [count, 0].
-             * Scalar:    push the scalar itself, then [1, 0].
-             * Stack after: [..., val0..valN-1, count, index=0]             */
+             * Stack after:  [..., source_array, len_signed, 0]
+             *
+             * The state is always 3 slots regardless of the iterable's
+             * size; this avoids the stack-overflow that the old design
+             * hit for FOR i IN 1 -> N with N >= ~2046 (each element was
+             * pushed onto the 2048-slot VM stack).
+             *
+             * `len_signed` encodes the iteration mode:
+             *   >= 0 -- values mode: NEXT pushes source_array[index]
+             *   <  0 -- keys mode (arrays only): NEXT pushes index;
+             *           the real length is -len_signed.
+             *
+             * For object IN/OF and scalar iteration the source array is
+             * a one-shot heap snapshot built here so that mutating the
+             * underlying object during the loop does not derail
+             * iteration -- same semantics as the old snapshot path.    */
             u16 keys_mode = READ_U16();
             CandoValue iterable = POP();
 
+            CandoValue source_val;
+            i64        signed_len;
+
             if (cando_is_object(iterable)) {
-                CdoObject *obj = cando_bridge_resolve(vm, (HandleIndex)iterable.as.handle);
+                CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(iterable));
                 if (obj->kind == OBJ_ARRAY) {
-                    u32 len = cdo_array_len(obj);
-                    if (keys_mode) {
-                        for (u32 ai = 0; ai < len; ai++)
-                            PUSH(cando_number((f64)ai));
-                    } else {
-                        for (u32 ai = 0; ai < len; ai++) {
-                            CdoValue cv = cdo_null();
-                            cdo_array_rawget_idx(obj, ai, &cv);
-                            PUSH(cando_bridge_to_cando(vm, cv));
-                        }
-                    }
-                    PUSH(cando_number((f64)len));
-                    PUSH(cando_number(0.0));
+                    /* Iterate the array in place -- no snapshot needed. */
+                    source_val = iterable;
+                    u32 len    = cdo_array_len(obj);
+                    signed_len = keys_mode ? -(i64)len : (i64)len;
                 } else {
-                    /* Plain object: walk FIFO list for keys or values.   */
-                    u32 count = 0;
+                    /* Plain object: snapshot keys-or-values into a heap
+                     * array so we get array-style indexed access in
+                     * OP_FOR_NEXT and never touch the VM stack per
+                     * element.                                          */
+                    SYNC_IP();
+                    source_val = cando_bridge_new_array(vm);
+                    CdoObject *snap =
+                        cando_bridge_resolve(vm, cando_as_handle(source_val));
                     u32 fi = obj->fifo_head;
+                    u32 count = 0;
                     while (fi != UINT32_MAX) {
                         ObjSlot *slot = &obj->slots[fi];
                         if (keys_mode) {
-                            CandoString *s = cando_string_new(
+                            CdoString *ks = cdo_string_intern(
                                 slot->key->data, slot->key->length);
-                            PUSH(cando_string_value(s));
+                            cdo_array_push(snap, cdo_string_value(ks));
                         } else {
-                            PUSH(cando_bridge_to_cando(vm, slot->value));
+                            cdo_array_push(snap, slot->value);
                         }
                         count++;
                         fi = slot->fifo_next;
                     }
-                    PUSH(cando_number((f64)count));
-                    PUSH(cando_number(0.0));
+                    signed_len = (i64)count;  /* values mode for snapshot */
                 }
             } else {
-                /* Scalar: iterate as single value.                       */
-                PUSH(iterable);
-                PUSH(cando_number(1.0));
-                PUSH(cando_number(0.0));
+                /* Scalar: wrap in a one-element heap array so the rest
+                 * of the iteration machinery is uniform.                */
+                SYNC_IP();
+                source_val = cando_bridge_new_array(vm);
+                CdoObject *snap =
+                    cando_bridge_resolve(vm, cando_as_handle(source_val));
+                cdo_array_push(snap, cando_bridge_to_cdo(vm, iterable));
+                cando_value_release(iterable);
+                signed_len = 1;
             }
+
+            PUSH(source_val);
+            PUSH(cando_number((f64)signed_len));
+            PUSH(cando_number(0.0));
             DISPATCH();
         }
         OP_CASE(OP_FOR_NEXT): {
-            /* Stack: [..., val0..valN-1, count, index]
-             * If index >= count: pop [count, index] and all N values,
-             *   then jump by offset (exit loop).
-             * Else: push vals[index] as loop variable, increment index.   */
-            i16 off = (i16)(READ_U16());
-            f64 index = (vm->stack_top - 1)->as.number;
-            f64 count = (vm->stack_top - 2)->as.number;
-            if (index >= count) {
-                /* Loop exhausted: pop state [count, index] */
-                cando_value_release(POP()); /* index */
-                cando_value_release(POP()); /* count */
-                /* Pop all iterable values */
-                i64 n = (i64)count;
-                for (i64 vi = 0; vi < n; vi++)
-                    cando_value_release(POP());
+            /* Stack: [..., source_array, len_signed, index]
+             * If index >= abs(len_signed): pop the 3-slot state, jump.
+             * Else (values mode):  push source_array[index], index++.
+             * Else (keys mode):    push index,                index++. */
+            i16 off       = (i16)(READ_U16());
+            f64 index_f   = cando_as_number(*(vm->stack_top - 1));
+            f64 len_f     = cando_as_number(*(vm->stack_top - 2));
+            i64 abs_len   = (i64)(len_f < 0.0 ? -len_f : len_f);
+            bool keys     = len_f < 0.0;
+
+            if ((i64)index_f >= abs_len) {
+                cando_value_release(POP()); /* index   */
+                cando_value_release(POP()); /* len     */
+                cando_value_release(POP()); /* source  */
                 ip += off;
             } else {
-                /* Copy value at position: stack_top[-2 - count + index] */
-                CandoValue *val_ptr = vm->stack_top - 2 - (i64)count + (i64)index;
-                /* Increment index in place before PUSH so it stays correct */
-                (vm->stack_top - 1)->as.number = index + 1.0;
-                PUSH(cando_value_copy(*val_ptr));
+                if (keys) {
+                    PUSH(cando_number(index_f));
+                } else {
+                    CandoValue source = *(vm->stack_top - 3);
+                    CdoObject *src    =
+                        cando_bridge_resolve(vm, cando_as_handle(source));
+                    CdoValue cv = cdo_null();
+                    cdo_array_rawget_idx(src, (u32)index_f, &cv);
+                    PUSH(cando_bridge_to_cando(vm, cv));
+                }
+                /* PUSH above moved stack_top; the index slot is now at -2. */
+                (vm->stack_top - 2)->as.number = index_f + 1.0;
             }
             DISPATCH();
         }
