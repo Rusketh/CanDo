@@ -60,6 +60,13 @@ typedef enum {
 
 /* -----------------------------------------------------------------------
  * HandleIndex -- opaque index into the global Handle Table.
+ *
+ * Width is locked at 32 bits because the NaN-box layout stores the
+ * payload in the low 32 bits of an OBJECT-tagged value (see
+ * cando_object_value / cando_as_handle).  Widening this typedef to
+ * u64 would silently truncate; if more than 4G live handles ever
+ * become a real possibility, repack the OBJECT tag to use the full
+ * 48-bit payload first.
  * --------------------------------------------------------------------- */
 typedef u32 HandleIndex;
 #define CANDO_INVALID_HANDLE ((HandleIndex)UINT32_MAX)
@@ -147,8 +154,17 @@ CANDO_INLINE CandoValue cando_number(f64 n) {
     }
     return v;
 }
-/* Takes ownership of the string pointer. */
+/* Takes ownership of the string pointer.
+ *
+ * Boxing-pointer assumption: CandoString* must fit in 48 bits.  Both
+ * x86-64 and AArch64 user-space pointers satisfy this today (canonical
+ * form: bits 47..63 are sign-extended copies of bit 47, and only bit
+ * patterns with the high bits clear are valid user-space addresses --
+ * heap allocations land far below 0x800000000000).  The debug build
+ * asserts the property; the release build masks unconditionally.       */
 CANDO_INLINE CandoValue cando_string_value(CandoString *s) {
+    CANDO_ASSERT_MSG(((uintptr_t)s & ~(uintptr_t)CANDO_NB_PAYLOAD_MASK) == 0,
+                     "CandoString pointer does not fit in 48 bits");
     CandoValue v;
     v.u = CANDO_NB_TAG_STRING | ((u64)(uintptr_t)s & CANDO_NB_PAYLOAD_MASK);
     return v;
@@ -164,14 +180,20 @@ CANDO_INLINE CandoValue cando_object_value(HandleIndex h) {
  * --------------------------------------------------------------------- */
 CANDO_INLINE TypeTag cando_value_tag(CandoValue v) {
     if ((v.u & CANDO_NB_MASK) != CANDO_NB_MASK) return TYPE_NUMBER;
-    /* Read the 3-bit tag at bits 50..48; map back to TypeTag. */
+    /* Read the 3-bit tag at bits 50..48; map back to TypeTag.  Tags 2,
+     * 5, 6, 7 are reserved -- a hit there means corruption (e.g. stale
+     * constant-pool entry) or a bug in a future tag addition.  Crash in
+     * debug builds; coerce to TYPE_NULL in release to keep the dispatch
+     * loop forward-progressing. */
     u64 t = (v.u >> 48) & 0x7u;
     switch (t) {
         case 0: return TYPE_NULL;
         case 1: return TYPE_BOOL;
         case 3: return TYPE_STRING;
         case 4: return TYPE_OBJECT;
-        default: return TYPE_NULL;  /* unreachable for well-formed values */
+        default:
+            CANDO_ASSERT_MSG(false, "malformed boxed CandoValue tag");
+            return TYPE_NULL;
     }
 }
 CANDO_INLINE bool cando_as_bool(CandoValue v) {

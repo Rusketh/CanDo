@@ -204,7 +204,7 @@ field access. Today it's a function call through
 array load:
 
 ```c
-#define CANDO_HANDLE_DEREF(t, h) ((t)->slots[(h)])
+#define CANDO_HANDLE_DEREF(t, h) ((t)->slots[(h)].ptr)
 ```
 
 …with the bounds check elided in JIT-emitted code (the recorder
@@ -212,6 +212,11 @@ already proved the handle is valid via a guard). Generation count for
 slot reuse is already in `CandoHandleTable` — keep it for the
 interpreter and skip it on traces by snapshotting the generation at
 record time and emitting a guard.
+
+(Phase 1.5 status: the inline `cando_handle_get` and the
+`CANDO_HANDLE_DEREF` macro both ship in `source/core/handle.h`. The
+macro currently has no call sites; it is consumed by the JIT recorder
+in Phase 4.)
 
 ---
 
