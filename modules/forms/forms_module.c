@@ -47,35 +47,12 @@
 #  endif
 #endif
 
-#ifndef FORMS_MODULE_TEST_BUILD
-#  include <cando.h>
-#  include "vm/bridge.h"
-#  include "object/object.h"
-#  include "object/string.h"
-#  include "object/value.h"
-#  include "lib/libutil.h"
-#  include "lib/meta.h"
-#else
-   /* Test build: stand-alone, no libcando headers.  Provide just enough
-    * type aliases so the obj_set_* helpers below compile (they are
-    * unused in the test path but kept in-tree to keep the file
-    * self-contained). */
-#  include <stdint.h>
-#  include <stdbool.h>
-   typedef double   f64;
-   typedef uint32_t u32;
-   typedef struct CandoVM     CandoVM;
-   typedef struct CdoObject   CdoObject;
-   typedef struct CdoString   CdoString;
-   typedef struct CandoValue { int tag; union { double n; bool b; void *p; } as; } CandoValue;
-   static inline CdoString *cdo_string_intern(const char *s, u32 n) { (void)s; (void)n; return (CdoString *)0; }
-   static inline void cdo_string_release(CdoString *s) { (void)s; }
-   static inline CandoValue cdo_string_value(CdoString *s) { (void)s; CandoValue v = {0,{0}}; return v; }
-   static inline CandoValue cdo_number(double d) { CandoValue v = {0,{0}}; v.as.n = d; return v; }
-   static inline CandoValue cdo_bool(bool b)     { CandoValue v = {0,{0}}; v.as.b = b; return v; }
-   static inline bool cdo_object_rawset(CdoObject *o, CdoString *k, CandoValue v, int f) { (void)o; (void)k; (void)v; (void)f; return true; }
-#  define FIELD_NONE 0
-#endif
+/* libcando includes (production) / test stubs are now in
+ * src/core/cando_compat.h so every src/core TU shares one source of
+ * truth.  Falling back to local stubs in the test build keeps this
+ * file self-contained for the existing `#include "forms_module.c"`
+ * test pattern. */
+#include "src/core/cando_compat.h"
 
 #include <stddef.h>
 #include <stdarg.h>
@@ -142,282 +119,38 @@ static void obj_set_bool(CdoObject *obj, const char *key, bool value)
 }
 
 /* =========================================================================
- * Slot table.
+ * Slot table + supporting helpers.
  *
- * Every form and every control is one slot.  The script-side instance has
- * a `__forms_slot` field that indexes back here, plus a `__forms_gen`
- * generation counter so a recycled slot does not silently retarget an
- * old handle.
+ * Every form and every control is one slot.  Implementation now lives
+ * in src/core/slots.{c,h}: the ControlKind enum, FormsSlot struct,
+ * the FORMS_MAX_SLOTS / FORMS_*_KEY / FORMS_ANCHOR_* / FORMS_AUTOSIZE_*
+ * / FORMS_CURSOR_* constants, the g_slots / g_slot_mutex storage, and
+ * the slot allocator (slot_alloc / slot_alloc_locked).  Phase 0.5 will
+ * replace the script-visible __forms_slot field with an opaque handle.
+ *
+ * Geometry helpers (DockRect, FORMS_DOCK_*, compute_dock_rect) live
+ * in src/core/geom.h; colour helpers (NamedColor, g_named_colors,
+ * ci_strneq, parse_hex_color, lookup_named_color, rgb_to_colorref,
+ * colorref_to_rgb) live in src/core/color.h.
  * ===================================================================== */
 
-typedef enum {
-    KIND_NONE = 0,
-    KIND_FORM,
-    KIND_BUTTON,
-    KIND_LABEL,
-    KIND_TEXTBOX,
-    KIND_CHECKBOX,
-    KIND_RADIO,
-    KIND_COMBOBOX,
-    KIND_LISTBOX,
-    KIND_PANEL,
-    KIND_GROUPBOX,
-    KIND_PROGRESS,
-    KIND_TRACKBAR,
-    KIND_NUMERIC,
-    KIND_PICTUREBOX,
-    KIND_LINKLABEL,
-    KIND_DATETIMEPICKER,
-    KIND_MONTHCALENDAR,
-    KIND_STATUSBAR,
-    KIND_SPINNER,
-    KIND_KIND_COUNT
-} ControlKind;
-
-#define FORMS_MAX_SLOTS 256
-#define FORMS_SLOT_KEY  "__forms_slot"
-#define FORMS_GEN_KEY   "__forms_gen"
-#define FORMS_KIND_KEY  "__forms_kind"
-
-/* Docking constants + DockRect + compute_dock_rect now live in
- * src/core/geom.h.  Pulled in below so the rest of this file (and the
- * test build via forms_module.c #include) keeps seeing them. */
 #include "src/core/geom.h"
-
-/* Anchor flags.  Combine via bitwise-or; defaults to LEFT|TOP. */
-#define FORMS_ANCHOR_NONE   0
-#define FORMS_ANCHOR_LEFT   (1 << 0)
-#define FORMS_ANCHOR_TOP    (1 << 1)
-#define FORMS_ANCHOR_RIGHT  (1 << 2)
-#define FORMS_ANCHOR_BOTTOM (1 << 3)
-#define FORMS_ANCHOR_ALL    (FORMS_ANCHOR_LEFT | FORMS_ANCHOR_TOP | \
-                             FORMS_ANCHOR_RIGHT | FORMS_ANCHOR_BOTTOM)
-#define FORMS_ANCHOR_DEFAULT (FORMS_ANCHOR_LEFT | FORMS_ANCHOR_TOP)
-
-/* Auto-size mode -- WinForms-flavoured: 1 = grow only, 2 = grow+shrink. */
-#define FORMS_AUTOSIZE_GROW         1
-#define FORMS_AUTOSIZE_GROW_SHRINK  2
-
-/* Cursor identifiers exposed to script via setCursor("..."). */
-#define FORMS_CURSOR_DEFAULT   0
-#define FORMS_CURSOR_ARROW     1
-#define FORMS_CURSOR_HAND      2
-#define FORMS_CURSOR_IBEAM     3
-#define FORMS_CURSOR_WAIT      4
-#define FORMS_CURSOR_CROSS     5
-#define FORMS_CURSOR_SIZE_NS   6
-#define FORMS_CURSOR_SIZE_WE   7
-#define FORMS_CURSOR_SIZE_NWSE 8
-#define FORMS_CURSOR_SIZE_NESW 9
-#define FORMS_CURSOR_SIZE_ALL  10
-#define FORMS_CURSOR_NO        11
-#define FORMS_CURSOR_HELP      12
-#define FORMS_CURSOR_APPSTART  13
-
-/* DockRect + compute_dock_rect now live in src/core/geom.h
- * (#included above).  The colour helpers (NamedColor, g_named_colors,
- * ci_strneq, lookup_named_color, parse_hex_color, rgb_to_colorref,
- * colorref_to_rgb) now live in src/core/color.{h,c}; pulled in here
- * so every existing call site keeps compiling unchanged. */
 #include "src/core/color.h"
+#include "src/core/slots.h"
 
-typedef struct FormsSlot {
-    int          alive;
-    int          generation;
-    ControlKind  kind;
-    int          parent_slot;       /* -1 for top-level forms             */
-    /* Win32 handles -- NULL on stub builds.                              */
-#if FORMS_HAVE_WIN32
-    HWND         hwnd;
-    WNDPROC      orig_proc;         /* for subclassed standard controls   */
-#endif
-    /* Cached desired geometry / text so getters can answer without a
-     * round-trip when the manager thread has not yet created the HWND.  */
-    int          x, y, w, h;
-    int          visible;
-    int          enabled;
-    /* Custom colours.  Win32 controls don't use these by default; the
-     * parent form's WndProc honours WM_CTLCOLOR* messages by looking
-     * up these fields on the slot of the calling child.  has_fore /
-     * has_back gate whether we override the system default.            */
-    int          has_fore;
-    int          has_back;
-    unsigned int fore_color;        /* 0x00BBGGRR (Win32 COLORREF order) */
-    unsigned int back_color;
-#if FORMS_HAVE_WIN32
-    HBRUSH       back_brush;        /* lazily created from back_color   */
-#endif
-    /* Docking style.  When the parent's client area resizes, the form's
-     * WM_SIZE handler walks the children and re-positions each one
-     * according to its dock value.                                     */
-    int          dock;              /* one of FORMS_DOCK_*               */
-    /* Font state.  has_font == 0 means the control inherits the parent
-     * form's font (set up at creation by sending WM_SETFONT).  When a
-     * script-side setFont* call sets has_font, the slot owns its own
-     * HFONT created from these fields.                                  */
-    int          has_font;
-    char         font_face[64];     /* face name -- empty = "Segoe UI"  */
-    int          font_size;         /* point size (positive)            */
-    int          font_bold;
-    int          font_italic;
-    int          font_underline;
-    int          font_strikeout;
-#if FORMS_HAVE_WIN32
-    HFONT        hfont;             /* lazily created from above fields */
-#endif
-    /* Border style override.  border_style_set means the script overrode
-     * the per-kind default; values mirror System.Windows.Forms.BorderStyle
-     * (1=none, 2=single line, 3=fixed-3D).                              */
-    int          border_style_set;
-    int          border_style;
-    /* Form opacity.  has_opacity gates whether the form's WS_EX_LAYERED
-     * style has been enabled and SetLayeredWindowAttributes called with
-     * the alpha value below (0..255, 255 = fully opaque).               */
-    int          has_opacity;
-    int          opacity;           /* 0..255                            */
-    int          topmost;           /* form-only: above all other windows */
-    /* Optional minimum and maximum size for forms.  When set, WM_GETMINMAXINFO
-     * clamps to these values so user-driven resizes can't shrink past
-     * something the layout assumes.                                     */
-    int          has_min_size, min_w, min_h;
-    int          has_max_size, max_w, max_h;
-    /* Auto-size: when set, the control resizes itself to fit its content
-     * after every setText / addItem / setFont call.  Mode 1 = grow only,
-     * mode 2 = grow and shrink (the default).                            */
-    int          autosize;
-    int          autosize_mode;
-    /* Inner padding -- consumed by sizeToContent / autosize and by the
-     * layout pass when this slot acts as a container.                   */
-    int          pad_l, pad_t, pad_r, pad_b;
-    /* Outer margin -- reserved for layout managers that walk siblings.  */
-    int          margin_l, margin_t, margin_r, margin_b;
-    /* Anchor: bitmask of FORMS_ANCHOR_* flags.  When the parent resizes,
-     * an anchored control's edge stays a fixed distance from the parent
-     * edge.  When both opposite edges are anchored the control stretches.
-     * anchor_l/t/r/b cache the original gap so the math is stable.       */
-    int          anchor;
-    int          anchor_l, anchor_t, anchor_r, anchor_b;
-    int          anchor_w, anchor_h; /* parent client size at anchor capture */
-    /* Tab order. */
-    int          tab_index;
-    int          tab_stop;
-    /* Cursor override.  0 = inherit. */
-    int          cursor_kind;
-    /* Tooltip text (UTF-8).  Optional -- only allocated when set. */
-    char        *tooltip;
-    /* Form-only: default Accept / Cancel buttons (slots).               */
-    int          accept_btn_slot;
-    int          cancel_btn_slot;
-    /* Form-only: icon handle (HICON cast to void*) and cached icon path
-     * for diagnostics.                                                  */
-#if FORMS_HAVE_WIN32
-    HICON        hicon_small;
-    HICON        hicon_big;
-    HWND         tooltip_hwnd;       /* form-only, lazily created       */
-#endif
-    /* Retained handle to the script-side instance so callbacks survive
-     * the script returning.                                              */
-    CandoValue   inst_val;
-    int          inst_val_held;
-    int          has_lifeline;
-} FormsSlot;
-
-/* Forward decl: autosize_apply lives near the layout code far below; the
- * setText / setFont setters call it from anywhere in the file. */
+/* Forward decl: autosize_apply lives near the layout code far below;
+ * the setText / setFont setters call it from anywhere in the file. */
 static void autosize_apply(FormsSlot *s);
-
-static FormsSlot g_slots[FORMS_MAX_SLOTS];
-static fm_mutex_t g_slot_mutex;
 
 /* =========================================================================
  * Event queue.
  *
- * Win32 callbacks (WndProc, control notifications) post FormsEvent
- * records into a single global ring buffer; the dispatcher thread
- * drains it and calls user-supplied callbacks via the child VM.
- * Implementation lives in src/core/events.{c,h}.
+ * Win32 callbacks post FormsEvent records into a global ring buffer;
+ * the dispatcher thread drains it and calls user-supplied callbacks
+ * via the child VM.  Implementation lives in src/core/events.{c,h}.
  * ===================================================================== */
 
 #include "src/core/events.h"
-
-/* =========================================================================
- * Slot allocator.
- *
- * Generation counter advances on every allocation, so a script holding an
- * old handle whose slot has been recycled gets caught by the generation
- * mismatch in slot_resolve below.
- * ===================================================================== */
-
-static int slot_alloc_locked(ControlKind kind, int parent_slot)
-{
-    for (int i = 1; i < FORMS_MAX_SLOTS; i++) {  /* index 0 reserved */
-        if (!g_slots[i].alive) {
-            FormsSlot *s = &g_slots[i];
-            s->alive       = 1;
-            s->generation += 1;
-            s->kind        = kind;
-            s->parent_slot = parent_slot;
-            s->x = s->y = s->w = s->h = 0;
-            s->visible = 0;
-            s->enabled = 1;
-            s->inst_val_held = 0;
-            s->has_lifeline  = 0;
-            s->has_fore = 0;
-            s->has_back = 0;
-            s->fore_color = 0;
-            s->back_color = 0;
-            s->dock = FORMS_DOCK_NONE;
-            s->has_font = 0;
-            s->font_face[0] = 0;
-            s->font_size = 0;
-            s->font_bold = 0;
-            s->font_italic = 0;
-            s->font_underline = 0;
-            s->font_strikeout = 0;
-            s->border_style_set = 0;
-            s->border_style = 0;
-            s->has_opacity = 0;
-            s->opacity = 255;
-            s->topmost = 0;
-            s->has_min_size = 0;
-            s->has_max_size = 0;
-            s->min_w = s->min_h = 0;
-            s->max_w = s->max_h = 0;
-            s->autosize      = 0;
-            s->autosize_mode = FORMS_AUTOSIZE_GROW_SHRINK;
-            s->pad_l = s->pad_t = s->pad_r = s->pad_b = 0;
-            s->margin_l = s->margin_t = s->margin_r = s->margin_b = 0;
-            s->anchor   = FORMS_ANCHOR_DEFAULT;
-            s->anchor_l = s->anchor_t = s->anchor_r = s->anchor_b = 0;
-            s->anchor_w = s->anchor_h = 0;
-            s->tab_index = -1;
-            s->tab_stop  = 1;
-            s->cursor_kind = FORMS_CURSOR_DEFAULT;
-            s->tooltip = NULL;
-            s->accept_btn_slot = -1;
-            s->cancel_btn_slot = -1;
-#if FORMS_HAVE_WIN32
-            s->hwnd        = NULL;
-            s->orig_proc   = NULL;
-            s->back_brush  = NULL;
-            s->hfont       = NULL;
-            s->hicon_small = NULL;
-            s->hicon_big   = NULL;
-            s->tooltip_hwnd = NULL;
-#endif
-            return i;
-        }
-    }
-    return -1;
-}
-
-static int slot_alloc(ControlKind kind, int parent_slot)
-{
-    FM_MUTEX_LOCK(&g_slot_mutex);
-    int slot = slot_alloc_locked(kind, parent_slot);
-    FM_MUTEX_UNLOCK(&g_slot_mutex);
-    return slot;
-}
 
 /* =========================================================================
  * Manager-thread state machine (lazy-start on first form creation).
