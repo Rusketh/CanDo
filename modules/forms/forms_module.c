@@ -614,6 +614,14 @@ static int do_create_control(FormsCommand *c)
         style |= SS_NOTIFY;
         ex = WS_EX_CONTROLPARENT;
         break;
+    case KIND_TABLELAYOUT:
+        /* TableLayoutPanel: Panel-equivalent HWND; tablelayout_arrange
+         * (registered with forms_layout_register at module init) handles
+         * the per-cell placement on every WM_SIZE. */
+        cls = L"STATIC";
+        style |= SS_NOTIFY;
+        ex = WS_EX_CONTROLPARENT;
+        break;
     default:
         snprintf(c->err, sizeof(c->err), "unsupported control kind %d",
                  (int)c->kind);
@@ -655,8 +663,8 @@ static int do_create_control(FormsCommand *c)
      * subclass (it routes WM_VSCROLL / WM_HSCROLL through there too).
      * FlowLayoutPanel uses the same subclass plus the layout vtable
      * (forms_layout_for) on WM_SIZE. */
-    if (c->kind == KIND_PANEL || c->kind == KIND_SCROLLPANEL ||
-        c->kind == KIND_FLOWLAYOUT) {
+    if (c->kind == KIND_PANEL       || c->kind == KIND_SCROLLPANEL ||
+        c->kind == KIND_FLOWLAYOUT  || c->kind == KIND_TABLELAYOUT) {
         WNDPROC prev = (WNDPROC)SetWindowLongPtrW(
             hwnd, GWLP_WNDPROC, (LONG_PTR)panel_wndproc);
         s->orig_proc = prev;
@@ -1480,9 +1488,10 @@ FORMS_DEFINE_CTOR("MonthCalendar",  KIND_MONTHCALENDAR,  native_calendar_create)
 FORMS_DEFINE_CTOR("StatusBar",   KIND_STATUSBAR,   native_statusbar_create)
 FORMS_DEFINE_CTOR("Spinner",     KIND_SPINNER,     native_spinner_create)
 /* Phase 2 container constructors. */
-FORMS_DEFINE_CTOR("ScrollPanel",     KIND_SCROLLPANEL, native_scrollpanel_create)
-FORMS_DEFINE_CTOR("TabControl",      KIND_TABCONTROL,  native_tabcontrol_create)
-FORMS_DEFINE_CTOR("FlowLayoutPanel", KIND_FLOWLAYOUT,  native_flowlayout_create)
+FORMS_DEFINE_CTOR("ScrollPanel",      KIND_SCROLLPANEL, native_scrollpanel_create)
+FORMS_DEFINE_CTOR("TabControl",       KIND_TABCONTROL,  native_tabcontrol_create)
+FORMS_DEFINE_CTOR("FlowLayoutPanel",  KIND_FLOWLAYOUT,  native_flowlayout_create)
+FORMS_DEFINE_CTOR("TableLayoutPanel", KIND_TABLELAYOUT, native_tablelayout_create)
 
 /* =========================================================================
  * Methods on every control instance.  Most setters cross threads via
@@ -2308,6 +2317,7 @@ static int native_get_font(CandoVM *vm, int argc, CandoValue *args)
 #include "src/controls/ctl_scrollpanel.h"
 #include "src/controls/ctl_tabcontrol.h"
 #include "src/controls/ctl_flowlayout.h"
+#include "src/controls/ctl_tablelayout.h"
 
 /* parse_border_style moved to src/core/layout.{c,h}. */
 
@@ -3669,7 +3679,16 @@ CandoValue cando_module_init(CandoVM *vm)
          * arrange function for KIND_FLOWLAYOUT slots. */
         forms_layout_register(KIND_FLOWLAYOUT, flowlayout_arrange);
     }
-    meta_inherit(cando_lib_meta_table(vm, "forms_tablelayout"),    base);
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_tablelayout");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "setColumns",        native_set_columns);
+        cando_lib_meta_define(vm, m, "setRows",           native_set_rows);
+        cando_lib_meta_define(vm, m, "setCellPadding",    native_set_cell_padding);
+        cando_lib_meta_define(vm, m, "add",               native_table_add);
+        /* Second consumer of the layout vtable. */
+        forms_layout_register(KIND_TABLELAYOUT, tablelayout_arrange);
+    }
 
     CandoValue tbl = cando_bridge_new_object(vm);
     CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
@@ -3705,9 +3724,10 @@ CandoValue cando_module_init(CandoVM *vm)
     libutil_set_method(vm, obj, "StatusBar",     native_statusbar_create);
     libutil_set_method(vm, obj, "Spinner",       native_spinner_create);
     /* Phase 2 containers. */
-    libutil_set_method(vm, obj, "ScrollPanel",     native_scrollpanel_create);
-    libutil_set_method(vm, obj, "TabControl",      native_tabcontrol_create);
-    libutil_set_method(vm, obj, "FlowLayoutPanel", native_flowlayout_create);
+    libutil_set_method(vm, obj, "ScrollPanel",      native_scrollpanel_create);
+    libutil_set_method(vm, obj, "TabControl",       native_tabcontrol_create);
+    libutil_set_method(vm, obj, "FlowLayoutPanel",  native_flowlayout_create);
+    libutil_set_method(vm, obj, "TableLayoutPanel", native_tablelayout_create);
 
     /* forms.Color -- a small palette of CSS-style named colours that
      * scripts can drop straight into setForeColor / setBackColor without

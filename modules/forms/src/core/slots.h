@@ -183,6 +183,19 @@ typedef struct FormsSlot {
      *   wrap_contents:  1 = wrap to next row/column at edge, 0 = single row */
     int          flow_direction;
     int          wrap_contents;
+    /* Table layout state (Phase 2.5 TableLayoutPanel).
+     *   On the container slot: table_cols / table_rows are the grid
+     *     dimensions; cell_padding is the gap between adjacent cells.
+     *   On each child: cell_col / cell_row are the (col, row) where
+     *     the child lives; cell_col_span / cell_row_span are the
+     *     extents.  cell_col == -1 means "not placed in a table".  */
+    int          table_cols;
+    int          table_rows;
+    int          cell_padding;
+    int          cell_col;
+    int          cell_row;
+    int          cell_col_span;
+    int          cell_row_span;
 #if FORMS_HAVE_WIN32
     HICON        hicon_small;
     HICON        hicon_big;
