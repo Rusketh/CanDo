@@ -41,7 +41,8 @@ CORE_C     = src/core/color.c        src/core/geom.c   src/core/events.c \
              src/controls/ctl_progress.c \
              src/controls/ctl_trackbar.c \
              src/controls/ctl_numeric.c \
-             src/controls/ctl_textbox.c
+             src/controls/ctl_textbox.c \
+             src/controls/ctl_listbox.c
 CORE_H     = src/core/color.h        src/core/geom.h   src/core/events.h \
              src/core/sync.h         src/core/cando_compat.h \
              src/core/slots.h        src/core/manager.h \
@@ -51,7 +52,8 @@ CORE_H     = src/core/color.h        src/core/geom.h   src/core/events.h \
              src/controls/ctl_progress.h \
              src/controls/ctl_trackbar.h \
              src/controls/ctl_numeric.h \
-             src/controls/ctl_textbox.h
+             src/controls/ctl_textbox.h \
+             src/controls/ctl_listbox.h
 
 ifeq ($(OS),Windows_NT)
     SHARED      = forms.dll
