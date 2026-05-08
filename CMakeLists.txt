@@ -70,6 +70,10 @@ set(VM_SRCS
     source/vm/debug.c
 )
 
+set(JIT_SRCS
+    source/jit/ir.c
+)
+
 set(LIB_SRCS
     source/lib/gc.c
     source/lib/jit.c
@@ -112,6 +116,7 @@ set(CANDO_LIB_SRCS
     ${OBJECT_SRCS}
     ${PARSER_SRCS}
     ${VM_SRCS}
+    ${JIT_SRCS}
     ${LIB_SRCS}
     source/natives.c
     source/cando_lib.c
@@ -135,6 +140,7 @@ if(NOT MSVC)
         "SHELL:-iquote ${CMAKE_SOURCE_DIR}/source/object"
         "SHELL:-iquote ${CMAKE_SOURCE_DIR}/source/parser"
         "SHELL:-iquote ${CMAKE_SOURCE_DIR}/source/vm"
+        "SHELL:-iquote ${CMAKE_SOURCE_DIR}/source/jit"
         "SHELL:-iquote ${CMAKE_SOURCE_DIR}/source/compat"
     )
 else()

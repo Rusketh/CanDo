@@ -39,6 +39,7 @@ CFLAGS_LIB = -std=c11 -Wall -Wextra -pthread -D_GNU_SOURCE \
              -DCANDO_BUILDING_LIB -fPIC \
              -iquote source -iquote source/core -iquote source/parser \
              -iquote source/vm -iquote source/object -iquote source/compat \
+             -iquote source/jit \
              -Iinclude
 
 # Flags for the cando executable (links against libcando.so)
@@ -87,6 +88,9 @@ VM_SRCS = \
     source/vm/vm.c      \
     source/vm/debug.c
 
+JIT_SRCS = \
+    source/jit/ir.c
+
 # All library sources — everything compiled into libcando.so / libcando.a
 CANDO_LIB_SRCS = \
     source/core/common.c          \
@@ -109,6 +113,7 @@ CANDO_LIB_SRCS = \
     source/vm/bridge.c            \
     source/vm/vm.c                \
     source/vm/debug.c             \
+    source/jit/ir.c               \
     source/natives.c              \
     source/lib/gc.c               \
     source/lib/jit.c              \
@@ -157,6 +162,7 @@ TEST_VM_BIN       = tests/test_vm
 TEST_THREAD_BIN   = tests/test_thread
 TEST_SOCKUTIL_BIN = tests/test_sockutil
 TEST_YAML_BIN     = tests/test_yaml
+TEST_JIT_IR_BIN   = tests/test_jit_ir
 
 TEST_CORE_SRCS     = $(CORE_SRCS)   tests/test_core.c
 TEST_OBJECT_SRCS   = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_object.c
@@ -164,6 +170,7 @@ TEST_LEXER_SRCS    = $(LEXER_SRCS)  tests/test_lexer.c
 TEST_PARSER_SRCS   = $(PARSER_SRCS) tests/test_parser.c
 TEST_THREAD_SRCS   = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_thread.c
 TEST_SOCKUTIL_SRCS = $(CORE_SRCS) source/lib/sockutil.c tests/test_sockutil.c
+TEST_JIT_IR_SRCS   = $(CORE_SRCS) $(JIT_SRCS) tests/test_jit_ir.c
 
 # ---------------------------------------------------------------------------
 # Default target
@@ -171,13 +178,13 @@ TEST_SOCKUTIL_SRCS = $(CORE_SRCS) source/lib/sockutil.c tests/test_sockutil.c
 
 .PHONY: all cando libcando.so libcando.a \
         test test_core test_object test_lexer test_parser test_vm test_thread \
-        test_sockutil test_yaml test_integration clean bench \
+        test_sockutil test_yaml test_jit_ir test_integration clean bench \
         modules modules-test modules-windows modules-clean
 
 all: libcando.so libcando.a $(CANDO_BIN) \
      $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) \
      $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN) \
-     $(TEST_SOCKUTIL_BIN) $(TEST_YAML_BIN)
+     $(TEST_SOCKUTIL_BIN) $(TEST_YAML_BIN) $(TEST_JIT_IR_BIN)
 
 # ---------------------------------------------------------------------------
 # Shared library: libcando.so
@@ -245,6 +252,11 @@ $(TEST_YAML_BIN): tests/test_yaml.c libcando.so
 	    -L. -lcando -Wl,-rpath,'$$ORIGIN/..' \
 	    -o $@ $(LDFLAGS)
 
+# test_jit_ir links the core layer + the JIT IR.  No VM dependency yet --
+# the IR is testable in isolation.
+$(TEST_JIT_IR_BIN): $(TEST_JIT_IR_SRCS)
+	$(CC) $(CFLAGS_CORE) -iquote source/jit $^ -o $@ $(LDFLAGS)
+
 test: all
 	./$(TEST_CORE_BIN)
 	./$(TEST_OBJECT_BIN)
@@ -254,6 +266,7 @@ test: all
 	./$(TEST_VM_BIN)
 	./$(TEST_SOCKUTIL_BIN)
 	./$(TEST_YAML_BIN)
+	./$(TEST_JIT_IR_BIN)
 	bash tests/integration/run_tests.sh
 
 test_integration: $(CANDO_BIN)
@@ -282,6 +295,9 @@ test_sockutil: $(TEST_SOCKUTIL_BIN)
 
 test_yaml: $(TEST_YAML_BIN)
 	./$(TEST_YAML_BIN)
+
+test_jit_ir: $(TEST_JIT_IR_BIN)
+	./$(TEST_JIT_IR_BIN)
 
 # ---------------------------------------------------------------------------
 # Benchmarks -- baseline numbers for the JIT effort (see docs/jit-plan.md).
@@ -392,7 +408,7 @@ modules-clean:
 clean: modules-clean
 	rm -f $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) \
 	      $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN) \
-	      $(TEST_SOCKUTIL_BIN) $(TEST_YAML_BIN) \
+	      $(TEST_SOCKUTIL_BIN) $(TEST_YAML_BIN) $(TEST_JIT_IR_BIN) \
 	      $(CANDO_BIN) cando.exe \
 	      libcando.so libcando.a libcando.dll libcando.lib icon.res
 	rm -rf $(LIBOBJS_DIR)
