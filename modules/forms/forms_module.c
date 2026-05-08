@@ -474,6 +474,115 @@ static LRESULT CALLBACK panel_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
     return DefWindowProcW(h, msg, w, l);
 }
 
+/* =========================================================================
+ * Splitter wndproc (Phase 2.3): tracks mouse drag and resizes a
+ * target sibling (default: the previous alive sibling in slot order).
+ * Vertical splitter (orientation == 0) is a thin vertical bar that
+ * drags horizontally and changes the target's width; horizontal
+ * splitter is the inverse.
+ * ===================================================================== */
+
+/* Find the alive sibling immediately preceding `splitter_slot` in
+ * slot order, or -1 if none.  Used as the implicit drag target when
+ * setTarget() hasn't been called. */
+static int splitter_default_target(int splitter_slot)
+{
+    FormsSlot *s = &g_slots[splitter_slot];
+    int parent = s->parent_slot;
+    int candidate = -1;
+    for (int i = 1; i < splitter_slot; i++) {
+        if (g_slots[i].alive && g_slots[i].parent_slot == parent &&
+            g_slots[i].kind != KIND_SPLITTER) {
+            candidate = i;
+        }
+    }
+    return candidate;
+}
+
+static LRESULT CALLBACK splitter_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l)
+{
+    int slot = slot_from_hwnd(h);
+    WNDPROC orig = (slot > 0 && slot < FORMS_MAX_SLOTS)
+                   ? g_slots[slot].orig_proc : NULL;
+
+    switch (msg) {
+    case WM_LBUTTONDOWN: {
+        if (slot <= 0 || slot >= FORMS_MAX_SLOTS) break;
+        FormsSlot *s = &g_slots[slot];
+        int target = (s->splitter_target_slot > 0)
+                     ? s->splitter_target_slot
+                     : splitter_default_target(slot);
+        if (target <= 0 || !g_slots[target].alive) break;
+        s->splitter_target_slot = target;
+        POINT p = { (SHORT)LOWORD(l), (SHORT)HIWORD(l) };
+        ClientToScreen(h, &p);
+        s->splitter_drag_start_x = p.x;
+        s->splitter_drag_start_y = p.y;
+        s->splitter_drag_start_w = g_slots[target].w;
+        s->splitter_drag_start_h = g_slots[target].h;
+        SetCapture(h);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        if (GetCapture() != h) break;
+        if (slot <= 0 || slot >= FORMS_MAX_SLOTS) break;
+        FormsSlot *s = &g_slots[slot];
+        int target = s->splitter_target_slot;
+        if (target <= 0 || !g_slots[target].alive) break;
+        POINT p = { (SHORT)LOWORD(l), (SHORT)HIWORD(l) };
+        ClientToScreen(h, &p);
+        int dx = p.x - s->splitter_drag_start_x;
+        int dy = p.y - s->splitter_drag_start_y;
+        int new_w = s->splitter_drag_start_w;
+        int new_h = s->splitter_drag_start_h;
+        if (s->splitter_orientation == 0) new_w += dx;
+        else                              new_h += dy;
+        if (new_w < 0) new_w = 0;
+        if (new_h < 0) new_h = 0;
+        FormsSlot *t = &g_slots[target];
+        t->w = new_w;
+        t->h = new_h;
+        if (t->hwnd) {
+            SetWindowPos(t->hwnd, NULL, t->x, t->y, new_w, new_h,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        /* Re-run the parent's layout so docked / anchored siblings
+         * (and the splitter itself) respect the new size. */
+        if (s->parent_slot > 0) {
+            int pp = s->parent_slot;
+            HWND ph = g_slots[pp].hwnd;
+            if (ph) {
+                RECT rc; GetClientRect(ph, &rc);
+                forms_arrange_fn arrange =
+                    forms_layout_for((int)g_slots[pp].kind);
+                if (arrange) {
+                    arrange(pp, rc.right - rc.left, rc.bottom - rc.top);
+                } else {
+                    layout_anchor_children(pp);
+                    layout_dock_children(pp);
+                }
+            }
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        if (GetCapture() == h) ReleaseCapture();
+        return 0;
+    }
+    case WM_SETCURSOR: {
+        if (slot > 0 && slot < FORMS_MAX_SLOTS) {
+            LPCWSTR idc = (g_slots[slot].splitter_orientation == 0)
+                          ? IDC_SIZEWE : IDC_SIZENS;
+            SetCursor(LoadCursorW(NULL, idc));
+            return TRUE;
+        }
+        break;
+    }
+    }
+    if (orig) return CallWindowProcW(orig, h, msg, w, l);
+    return DefWindowProcW(h, msg, w, l);
+}
+
 /* Create a child control parented to an existing form/panel slot. */
 static int do_create_control(FormsCommand *c)
 {
@@ -622,6 +731,14 @@ static int do_create_control(FormsCommand *c)
         style |= SS_NOTIFY;
         ex = WS_EX_CONTROLPARENT;
         break;
+    case KIND_SPLITTER:
+        /* Splitter: thin draggable bar that resizes a target sibling.
+         * Subclassed with splitter_wndproc which intercepts mouse
+         * down/move/up and SETCURSOR.  SS_NOTIFY ensures the static
+         * window receives mouse events. */
+        cls = L"STATIC";
+        style |= SS_NOTIFY;
+        break;
     default:
         snprintf(c->err, sizeof(c->err), "unsupported control kind %d",
                  (int)c->kind);
@@ -667,6 +784,10 @@ static int do_create_control(FormsCommand *c)
         c->kind == KIND_FLOWLAYOUT  || c->kind == KIND_TABLELAYOUT) {
         WNDPROC prev = (WNDPROC)SetWindowLongPtrW(
             hwnd, GWLP_WNDPROC, (LONG_PTR)panel_wndproc);
+        s->orig_proc = prev;
+    } else if (c->kind == KIND_SPLITTER) {
+        WNDPROC prev = (WNDPROC)SetWindowLongPtrW(
+            hwnd, GWLP_WNDPROC, (LONG_PTR)splitter_wndproc);
         s->orig_proc = prev;
     }
     return 1;
@@ -1513,6 +1634,7 @@ FORMS_DEFINE_CTOR("ScrollPanel",      KIND_SCROLLPANEL, native_scrollpanel_creat
 FORMS_DEFINE_CTOR("TabControl",       KIND_TABCONTROL,  native_tabcontrol_create)
 FORMS_DEFINE_CTOR("FlowLayoutPanel",  KIND_FLOWLAYOUT,  native_flowlayout_create)
 FORMS_DEFINE_CTOR("TableLayoutPanel", KIND_TABLELAYOUT, native_tablelayout_create)
+FORMS_DEFINE_CTOR("Splitter",         KIND_SPLITTER,    native_splitter_create)
 
 /* =========================================================================
  * Methods on every control instance.  Most setters cross threads via
@@ -2339,6 +2461,7 @@ static int native_get_font(CandoVM *vm, int argc, CandoValue *args)
 #include "src/controls/ctl_tabcontrol.h"
 #include "src/controls/ctl_flowlayout.h"
 #include "src/controls/ctl_tablelayout.h"
+#include "src/controls/ctl_splitter.h"
 
 /* parse_border_style moved to src/core/layout.{c,h}. */
 
@@ -3686,7 +3809,13 @@ CandoValue cando_module_init(CandoVM *vm)
     }
     meta_inherit(cando_lib_meta_table(vm, "forms_tabpage"),        base);
     meta_inherit(cando_lib_meta_table(vm, "forms_splitcontainer"), base);
-    meta_inherit(cando_lib_meta_table(vm, "forms_splitter"),       base);
+    {
+        CdoObject *m = cando_lib_meta_table(vm, "forms_splitter");
+        meta_inherit(m, base);
+        cando_lib_meta_define(vm, m, "setOrientation",  native_set_orientation);
+        cando_lib_meta_define(vm, m, "getOrientation",  native_get_orientation);
+        cando_lib_meta_define(vm, m, "setTarget",       native_set_splitter_target);
+    }
     {
         CdoObject *m = cando_lib_meta_table(vm, "forms_flowlayout");
         meta_inherit(m, base);
@@ -3749,6 +3878,7 @@ CandoValue cando_module_init(CandoVM *vm)
     libutil_set_method(vm, obj, "TabControl",       native_tabcontrol_create);
     libutil_set_method(vm, obj, "FlowLayoutPanel",  native_flowlayout_create);
     libutil_set_method(vm, obj, "TableLayoutPanel", native_tablelayout_create);
+    libutil_set_method(vm, obj, "Splitter",         native_splitter_create);
 
     /* forms.Color -- a small palette of CSS-style named colours that
      * scripts can drop straight into setForeColor / setBackColor without

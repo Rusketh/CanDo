@@ -196,6 +196,19 @@ typedef struct FormsSlot {
     int          cell_row;
     int          cell_col_span;
     int          cell_row_span;
+    /* Splitter state (Phase 2.3 Splitter).
+     *   splitter_orientation: 0 = vertical bar (drag horizontally),
+     *                         1 = horizontal bar (drag vertically)
+     *   splitter_target_slot: the slot whose w (or h) is adjusted on
+     *                         drag.  -1 = auto-pick the previous
+     *                         alive sibling at drag time.
+     *   splitter_drag_start_*  cached during an active drag. */
+    int          splitter_orientation;
+    int          splitter_target_slot;
+    int          splitter_drag_start_x;
+    int          splitter_drag_start_y;
+    int          splitter_drag_start_w;
+    int          splitter_drag_start_h;
 #if FORMS_HAVE_WIN32
     HICON        hicon_small;
     HICON        hicon_big;

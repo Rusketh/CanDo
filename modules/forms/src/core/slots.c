@@ -70,6 +70,12 @@ int slot_alloc_locked(ControlKind kind, int parent_slot)
             s->cell_row       = -1;
             s->cell_col_span  = 1;
             s->cell_row_span  = 1;
+            s->splitter_orientation = 0;
+            s->splitter_target_slot = -1;
+            s->splitter_drag_start_x = 0;
+            s->splitter_drag_start_y = 0;
+            s->splitter_drag_start_w = 0;
+            s->splitter_drag_start_h = 0;
 #if FORMS_HAVE_WIN32
             s->hwnd        = NULL;
             s->orig_proc   = NULL;

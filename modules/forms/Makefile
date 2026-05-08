@@ -47,7 +47,8 @@ CORE_C     = src/core/color.c        src/core/geom.c   src/core/events.c \
              src/controls/ctl_scrollpanel.c \
              src/controls/ctl_tabcontrol.c \
              src/controls/ctl_flowlayout.c \
-             src/controls/ctl_tablelayout.c
+             src/controls/ctl_tablelayout.c \
+             src/controls/ctl_splitter.c
 CORE_H     = src/core/color.h        src/core/geom.h   src/core/events.h \
              src/core/sync.h         src/core/cando_compat.h \
              src/core/slots.h        src/core/manager.h \
@@ -64,7 +65,8 @@ CORE_H     = src/core/color.h        src/core/geom.h   src/core/events.h \
              src/controls/ctl_scrollpanel.h \
              src/controls/ctl_tabcontrol.h \
              src/controls/ctl_flowlayout.h \
-             src/controls/ctl_tablelayout.h
+             src/controls/ctl_tablelayout.h \
+             src/controls/ctl_splitter.h
 
 ifeq ($(OS),Windows_NT)
     SHARED      = forms.dll
