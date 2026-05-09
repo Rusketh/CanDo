@@ -195,13 +195,14 @@ static void cando_recorder_finish(struct CandoVM *vm) {
         t->values_buf = NULL;   /* lazy-allocated by cando_trace_run */
         t->values_cap = 0;
         cando_trace_ir_init(&r->ir);
+        r->traces_compiled++;
+        r->active = false;
     } else {
-        /* Cache full -- drop the trace, but still count it. */
-        cando_trace_ir_reset(&r->ir);
+        /* Cache full -- the IR-interpreter would never see this
+         * trace, so logging it as compiled is misleading.  Treat
+         * as an abort with a distinct reason so users notice. */
+        cando_recorder_abort(vm, "trace cache full");
     }
-
-    r->traces_compiled++;
-    r->active = false;
 }
 
 /* ============================================================ */
@@ -288,51 +289,63 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
         }
 
         case OP_LOAD_LOCAL: {
+            /* Slot operand stored as FRAME-RELATIVE so the same trace
+             * works no matter where in vm->stack[] the recording
+             * frame's slots live on subsequent invocations.  The
+             * stack_map index is still ABSOLUTE so SSA-style operand
+             * resolution stays correct within a single trace. */
             u16 slot = read_op_arg(ip);
             u32 abs  = r->frame_base + slot;
             IRRef src = (abs < r->stack_map_cap) ? r->stack_map[abs] : IRREF_NIL;
             if (src == IRREF_NIL) {
-                src = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0, abs, 0);
+                src = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0, slot, 0);
                 if (abs < r->stack_map_cap) r->stack_map[abs] = src;
             }
             rec_push(r, src, sp);
             break;
         }
 
-        case OP_STORE_LOCAL: {
-            /* peek-and-store: top stays on stack. */
-            u16 slot = read_op_arg(ip);
-            u32 abs  = r->frame_base + slot;
-            IRRef top = (sp > 0) ? r->stack_map[sp - 1] : IRREF_NIL;
-            if (top == IRREF_NIL) {
-                cando_recorder_abort(vm, "OP_STORE_LOCAL with empty stack_map");
-                return;
-            }
-            if (abs < r->stack_map_cap) r->stack_map[abs] = top;
-            cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED, abs, top);
-            break;
-        }
-
+        case OP_STORE_LOCAL:
         case OP_DEF_LOCAL:
         case OP_DEF_CONST_LOCAL: {
-            /* pop-and-store. */
+            /* peek-and-store (STORE_LOCAL) or pop-and-store (DEF_LOCAL):
+             * mirror the stack effect on stack_map and emit IR_SSTORE.
+             *
+             * v1 only stores numeric values back to slots, because the
+             * IR-interpreter writes via cando_number(...) -- writing a
+             * bool result through that path would store the bool as a
+             * number and any subsequent IF or print would diverge from
+             * the bytecode behaviour.  Refuse to record stores whose
+             * source IR isn't IRT_NUM; bytecode handles those normally
+             * outside the trace.  Phase 3.4b will type-tag the SSTORE
+             * value and write the correct CandoValue type. */
             u16 slot = read_op_arg(ip);
             u32 abs  = r->frame_base + slot;
             IRRef top = (sp > 0) ? r->stack_map[sp - 1] : IRREF_NIL;
             if (top == IRREF_NIL) {
-                cando_recorder_abort(vm, "OP_DEF_LOCAL with empty stack_map");
+                cando_recorder_abort(vm, "store with empty stack_map");
+                return;
+            }
+            const IRIns *src = cando_ir_get_ins(&r->ir, top);
+            if (!src || src->type != IRT_NUM) {
+                cando_recorder_abort(vm, "store of non-numeric value (v1 limitation)");
                 return;
             }
             if (abs < r->stack_map_cap) r->stack_map[abs] = top;
-            cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED, abs, top);
+            cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED, slot, top);
             break;
         }
 
         case OP_ADD:
         case OP_SUB:
-        case OP_MUL:
-        case OP_DIV:
-        case OP_MOD: {
+        case OP_MUL: {
+            /* DIV / MOD are intentionally NOT recorded in v1 because
+             * they have side-effecting failure modes (OP_DIV raises
+             * a runtime error on b==0; OP_MOD returns NaN silently).
+             * The IR-interpreter would have to side-exit BEFORE any
+             * preceding SSTORE commits, which requires snapshots
+             * (Phase 3.4b).  Until then, abort traces that contain
+             * DIV/MOD; bytecode handles them normally. */
             if (sp < 2) {
                 cando_recorder_abort(vm, "arithmetic with too few operands");
                 return;
@@ -346,9 +359,7 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             a = ensure_num(&r->ir, a);
             b = ensure_num(&r->ir, b);
             IROp ir_op = (op == OP_ADD) ? IR_ADD :
-                         (op == OP_SUB) ? IR_SUB :
-                         (op == OP_MUL) ? IR_MUL :
-                         (op == OP_DIV) ? IR_DIV : IR_MOD;
+                         (op == OP_SUB) ? IR_SUB : IR_MUL;
             IRRef e = cando_ir_emit(&r->ir, ir_op, IRT_NUM, 0, a, b);
             rec_push(r, e, sp - 2);
             break;
@@ -492,12 +503,9 @@ void cando_jit_destroy(CandoJit *j) {
 /* Trace lookup + IR-interpreter (Phase 3.4)                      */
 /* ============================================================ */
 
-const CandoTrace *cando_jit_find_trace(struct CandoVM *vm, const u8 *pc) {
+CandoTrace *cando_jit_find_trace(struct CandoVM *vm, const u8 *pc) {
     CandoJit *j = jit_of(vm);
     if (!j || !pc) return NULL;
-    /* Linear scan -- the trace array is capped at
-     * CANDO_JIT_MAX_TRACES (64), well inside L1 even when full.
-     * A hash table would be premature. */
     for (u32 i = 0; i < j->trace_count; i++) {
         if (j->traces[i].start_pc == pc) return &j->traces[i];
     }
@@ -516,6 +524,14 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t) {
         t->values_cap = t->ir.ir_count;
     }
     f64 *vals = t->values_buf;
+
+    /* SLOAD / SSTORE slot operands are FRAME-RELATIVE -- the slot
+     * argument is offset from the current top frame's locals base.
+     * This lets the same trace fire correctly across calls where
+     * the absolute stack position of the frame may differ (different
+     * intermediate values pushed by the caller before the call). */
+    if (vm->frame_count == 0) return TRACE_RANGE_ERROR;
+    CandoValue *frame_slots = vm->frames[vm->frame_count - 1].slots;
 
     /* IR-interpreter.  All values are doubles in v1 (numeric
      * constants only, comparisons stored as 0.0/1.0).  Booleans
@@ -548,17 +564,17 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t) {
                 return TRACE_BAD_TYPE;
 
             case IR_SLOAD: {
-                /* op1 is the absolute slot index. */
+                /* op1 is the FRAME-RELATIVE slot index. */
                 u32 slot = in->op1;
-                CandoValue v = vm->stack[slot];
+                CandoValue v = frame_slots[slot];
                 if (!cando_is_number(v)) return TRACE_BAD_TYPE;
                 vals[i] = cando_as_number(v);
                 break;
             }
             case IR_SSTORE: {
-                /* op1 is slot, op2 is value-to-store IRRef. */
+                /* op1 is FRAME-RELATIVE slot, op2 is value IRRef. */
                 u32 slot = in->op1;
-                vm->stack[slot] = cando_number(vals[in->op2]);
+                frame_slots[slot] = cando_number(vals[in->op2]);
                 break;
             }
 

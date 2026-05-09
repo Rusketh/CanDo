@@ -62,4 +62,38 @@ VAR s3 = jit.stats();
 print(s3.traces_compiled);          // still 1 (the dirty loop aborted)
 print(s3.trace_aborts > 0);         // true
 
+/* Regression: bool stored to a local must not be downgraded to a
+ * number under JIT (early Phase 3.4a wrote vm->stack[slot] =
+ * cando_number(...) unconditionally, breaking IF on bool slots). */
+FUNCTION bool_store() {
+    VAR i = 0;
+    VAR last = FALSE;
+    WHILE i < 200 {
+        last = i < 100;
+        i = i + 1;
+    }
+    RETURN last;
+}
+print(bool_store());                // expect "false", not "0"
+
+/* Regression: a DIV that raises in bytecode must NOT be silently
+ * swallowed by the trace.  Phase 3.4a's DIV recording let prior
+ * SSTOREs commit before the failing op, then bytecode resumed at
+ * start_pc and skipped the error.  v1 fix: don't record DIV at all. */
+FUNCTION div_zero() {
+    VAR i = 0; VAR sum = 0; VAR d = 5;
+    WHILE i < 200 {
+        sum = sum + (10 / d);
+        i = i + 1;
+        IF i == 100 { d = 0; }
+    }
+    RETURN sum;
+}
+TRY {
+    div_zero();
+    print("no-error");              // wrong if reached
+} CATCH (e) {
+    print("caught");                // expected
+}
+
 print("DONE");

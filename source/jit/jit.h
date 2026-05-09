@@ -73,14 +73,15 @@ typedef enum {
  * matches `pc`.  Linear scan over CandoJit.traces[] (capped at
  * CANDO_JIT_MAX_TRACES = 64); cheap enough for the OP_LOOP hot path
  * when JIT is on, never called when JIT is off.  Returns NULL on
- * miss. */
-const CandoTrace *cando_jit_find_trace(struct CandoVM *vm, const u8 *pc);
+ * miss.  Returns a non-const pointer because cando_trace_run mutates
+ * the trace's lazy values_buf scratch on first invocation. */
+CandoTrace *cando_jit_find_trace(struct CandoVM *vm, const u8 *pc);
 
 /* cando_trace_run -- execute one iteration of `trace` against the
  * VM's current stack state.  Reads SLOAD slots, computes IR values
  * in a per-trace scratch table, writes SSTORE slots back, and
- * returns the exit status.  Updates vm->jit_stats.trace_iters on
- * a clean LOOP_DONE exit. */
+ * returns the exit status.  vm->jit_stats.trace_iters is incremented
+ * by the dispatch-loop caller (vm.c OP_LOOP), not by this function. */
 CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *trace);
 
 /* -----------------------------------------------------------------------

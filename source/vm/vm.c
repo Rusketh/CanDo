@@ -2797,7 +2797,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
                  * exit, the bytecode interpreter resumes at the same
                  * PC and re-evaluates whatever caused the guard to
                  * fail (typically the loop condition becoming false). */
-                CandoTrace *t = (CandoTrace *)cando_jit_find_trace(vm, ip);
+                CandoTrace *t = cando_jit_find_trace(vm, ip);
                 if (t) {
                     for (;;) {
                         CandoTraceStatus s = cando_trace_run(vm, t);
