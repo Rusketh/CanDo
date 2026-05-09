@@ -117,7 +117,7 @@ typedef enum {
     IR_GUARD_TRUE,         /* op1 must be a truthy bool/non-null            */
     IR_GUARD_FALSE,
 
-    /* ===== Band 5: Object / array access ================================ */
+    /* ===== Band 5: Object / array / global access ====================== */
     IR_HLOAD,              /* op1: handle IRRef -> raw CdoObject* (IRT_PTR) */
     IR_HREF,               /* op1: obj ptr, op2: key IRRef; CdoValue load   */
     IR_AREF,               /* op1: source slot (frame-relative, raw u32),
@@ -127,6 +127,15 @@ typedef enum {
                               Side-exits with TRACE_BAD_TYPE if the slot
                               doesn't hold an array, the index is out
                               of range, or the element is non-numeric. */
+    IR_GLOAD,              /* op1: constant-pool ref of the global name
+                              (a CandoString*); reads the named global
+                              from vm->globals and returns it as IRT_NUM.
+                              Side-exits with TRACE_BAD_TYPE if the
+                              global is missing or non-numeric. */
+    IR_GSTORE,             /* op1: constant-pool ref of name; op2: value
+                              IRRef (must be IRT_NUM in v1).  Writes the
+                              value to vm->globals.  Side-exits if the
+                              global is const-protected. */
 
     /* ===== Band 6: Trace control ======================================== */
     IR_LOOP,               /* head-of-loop marker; the trace closes here    */

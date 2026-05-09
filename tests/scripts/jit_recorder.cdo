@@ -104,6 +104,18 @@ FUNCTION sum_range() {
     RETURN sum;
 }
 print(sum_range());                 // expect 20100
-print(jit.stats().traces_compiled >= 2);  // run_clean's trace + sum_range's
+
+/* Phase 3.3d: top-level (global-variable) loops.  Hot enough to
+ * trigger; result must match bytecode.  This test deliberately uses
+ * the global slot (no FUNCTION wrapper) so the trace exercises
+ * IR_GLOAD / IR_GSTORE. */
+VAR g_i = 0;
+VAR g_sum = 0;
+WHILE g_i < 200 {
+    g_sum = g_sum + g_i;
+    g_i = g_i + 1;
+}
+print(g_sum);                       // 19900
+print(jit.stats().traces_compiled >= 3);
 
 print("DONE");

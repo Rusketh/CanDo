@@ -308,6 +308,74 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             break;
         }
 
+        case OP_LOAD_GLOBAL: {
+            /* op1: constant-pool index of the name string. */
+            const CandoChunk *chunk = current_chunk(vm);
+            u16 ci = read_op_arg(ip);
+            if (!chunk || ci >= chunk->const_count) {
+                cando_recorder_abort(vm, "OP_LOAD_GLOBAL out of range");
+                return;
+            }
+            CandoValue name_val = chunk->constants[ci];
+            if (!cando_is_string(name_val)) {
+                cando_recorder_abort(vm, "OP_LOAD_GLOBAL with non-string name");
+                return;
+            }
+            /* Probe the global at recording time -- if absent or
+             * non-numeric, the bytecode would error or push a non-num
+             * value the trace can't model.  Abort cleanly. */
+            CandoValue probe;
+            if (!cando_vm_get_global(vm, cando_as_string(name_val)->data,
+                                      &probe) ||
+                !cando_is_number(probe)) {
+                cando_recorder_abort(vm,
+                    "OP_LOAD_GLOBAL non-numeric or undefined (v1)");
+                return;
+            }
+            IRRef k = cando_ir_const(&r->ir, cando_value_copy(name_val));
+            IRRef e = cando_ir_emit(&r->ir, IR_GLOAD, IRT_NUM, 0, k, 0);
+            rec_push(r, e, sp);
+            break;
+        }
+
+        case OP_STORE_GLOBAL:
+        case OP_DEF_GLOBAL:
+        case OP_DEF_CONST_GLOBAL: {
+            /* OP_STORE_GLOBAL is peek-and-store; OP_DEF_GLOBAL[_CONST]
+             * is pop-and-store.  As with OP_STORE_LOCAL the recorder's
+             * stack effect mirrors via stack_map/sp -- the bytecode
+             * drives vm->stack_top either way.
+             *
+             * v1 records numeric stores only.  DEF_CONST_GLOBAL stores
+             * a const-protected global; if a future iteration of the
+             * trace tries to overwrite it the IR-interp side-exits.   */
+            const CandoChunk *chunk = current_chunk(vm);
+            u16 ci = read_op_arg(ip);
+            if (!chunk || ci >= chunk->const_count) {
+                cando_recorder_abort(vm, "OP_*_GLOBAL out of range");
+                return;
+            }
+            CandoValue name_val = chunk->constants[ci];
+            if (!cando_is_string(name_val)) {
+                cando_recorder_abort(vm, "OP_*_GLOBAL with non-string name");
+                return;
+            }
+            IRRef top = (sp > 0) ? r->stack_map[sp - 1] : IRREF_NIL;
+            if (top == IRREF_NIL) {
+                cando_recorder_abort(vm, "global store with empty stack_map");
+                return;
+            }
+            const IRIns *src = cando_ir_get_ins(&r->ir, top);
+            if (!src || src->type != IRT_NUM) {
+                cando_recorder_abort(vm,
+                    "global store of non-numeric value (v1 limitation)");
+                return;
+            }
+            IRRef k = cando_ir_const(&r->ir, cando_value_copy(name_val));
+            cando_ir_emit(&r->ir, IR_GSTORE, IRT_VOID, IRF_PINNED, k, top);
+            break;
+        }
+
         case OP_STORE_LOCAL:
         case OP_DEF_LOCAL:
         case OP_DEF_CONST_LOCAL: {
@@ -745,6 +813,29 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t) {
                  * with HLOAD/HREF.  v1 traces are numeric-only. */
                 return TRACE_RANGE_ERROR;
 
+            case IR_GLOAD: {
+                /* op1: const-pool ref of the name string. */
+                CandoValue name = cando_ir_get_const(&t->ir, in->op1);
+                if (!cando_is_string(name)) return TRACE_RANGE_ERROR;
+                CandoValue out;
+                if (!cando_vm_get_global(vm, cando_as_string(name)->data,
+                                          &out))
+                    return TRACE_BAD_TYPE;
+                if (!cando_is_number(out)) return TRACE_BAD_TYPE;
+                vals[i] = cando_as_number(out);
+                break;
+            }
+            case IR_GSTORE: {
+                /* op1: const-pool ref of name; op2: value IRRef. */
+                CandoValue name = cando_ir_get_const(&t->ir, in->op1);
+                if (!cando_is_string(name)) return TRACE_RANGE_ERROR;
+                if (!cando_vm_set_global(vm,
+                                          cando_as_string(name)->data,
+                                          cando_number(vals[in->op2]),
+                                          false))
+                    return TRACE_BAD_TYPE;  /* const-protected */
+                break;
+            }
             case IR_AREF: {
                 /* op1: source-array slot (frame-relative)
                  * op2: index IRRef (numeric)

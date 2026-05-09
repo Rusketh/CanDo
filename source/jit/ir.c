@@ -186,6 +186,8 @@ static const char *const s_op_names[IR__COUNT] = {
     [IR_HLOAD]       = "IR_HLOAD",
     [IR_HREF]        = "IR_HREF",
     [IR_AREF]        = "IR_AREF",
+    [IR_GLOAD]       = "IR_GLOAD",
+    [IR_GSTORE]      = "IR_GSTORE",
     [IR_LOOP]        = "IR_LOOP",
 };
 
