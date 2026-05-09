@@ -61,7 +61,10 @@ static int jit_is_available_native(CandoVM *vm, int argc, CandoValue *args)
     return 1;
 }
 
-/* jit.stats() -- returns an object {backedges, func_entries, iter_next}.
+/* jit.stats() -- returns an object whose keys mirror the C-side stats:
+ *   backedges, func_entries, iter_next         (aggregate hit counts)
+ *   trace_starts, trace_aborts                 (recorder bookkeeping)
+ *   hot_pcs, blacklisted_pcs                   (hot-table state)
  * Field names are stable; new counters can be appended without
  * breaking scripts that read individual keys. */
 static int jit_stats_native(CandoVM *vm, int argc, CandoValue *args)
@@ -72,20 +75,21 @@ static int jit_stats_native(CandoVM *vm, int argc, CandoValue *args)
     CandoValue    obj = cando_bridge_new_object(vm);
     CdoObject    *o   = cando_bridge_resolve(vm, cando_as_handle(obj));
 
-    CdoString *k_backedges    = cdo_string_intern("backedges",    9);
-    CdoString *k_func_entries = cdo_string_intern("func_entries", 12);
-    CdoString *k_iter_next    = cdo_string_intern("iter_next",    9);
+    struct { const char *name; u32 len; f64 value; } fields[] = {
+        { "backedges",       9, (f64)st.backedge_hits    },
+        { "func_entries",   12, (f64)st.func_entry_hits  },
+        { "iter_next",       9, (f64)st.iter_next_hits   },
+        { "trace_starts",   12, (f64)st.trace_starts     },
+        { "trace_aborts",   12, (f64)st.trace_aborts     },
+        { "hot_pcs",         7, (f64)st.hot_pcs          },
+        { "blacklisted_pcs",15, (f64)st.blacklisted_pcs  },
+    };
 
-    cdo_object_rawset(o, k_backedges,
-                      cdo_number((f64)st.backedge_hits),    FIELD_NONE);
-    cdo_object_rawset(o, k_func_entries,
-                      cdo_number((f64)st.func_entry_hits),  FIELD_NONE);
-    cdo_object_rawset(o, k_iter_next,
-                      cdo_number((f64)st.iter_next_hits),   FIELD_NONE);
-
-    cdo_string_release(k_backedges);
-    cdo_string_release(k_func_entries);
-    cdo_string_release(k_iter_next);
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        CdoString *k = cdo_string_intern(fields[i].name, fields[i].len);
+        cdo_object_rawset(o, k, cdo_number(fields[i].value), FIELD_NONE);
+        cdo_string_release(k);
+    }
 
     cando_vm_push(vm, obj);
     return 1;

@@ -72,6 +72,8 @@ set(VM_SRCS
 
 set(JIT_SRCS
     source/jit/ir.c
+    source/jit/hot.c
+    source/jit/jit.c
 )
 
 set(LIB_SRCS

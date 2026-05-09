@@ -14,6 +14,7 @@
 #include "../core/thread_platform.h"
 #include "../object/function.h"
 #include "../object/thread.h"
+#include "../jit/jit.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -222,7 +223,8 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     /* JIT profiling: off by default, counters zeroed.  --jit / CANDO_JIT
      * / jit.on() flip the flag at runtime. */
     vm->jit_enabled = false;
-    vm->jit_stats   = (CandoJitStats){ 0, 0, 0 };
+    vm->jit_stats   = (CandoJitStats){ 0, 0, 0, 0, 0, 0, 0 };
+    vm->jit         = NULL;   /* lazy-allocated by cando_jit_enable     */
 }
 
 void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
@@ -280,7 +282,10 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
      * Aggregating across child VMs is left for Phase 4 when traces are
      * cross-thread shareable.                                           */
     child->jit_enabled = parent->jit_enabled;
-    child->jit_stats   = (CandoJitStats){ 0, 0, 0 };
+    child->jit_stats   = (CandoJitStats){ 0, 0, 0, 0, 0, 0, 0 };
+    /* Child gets its own hot-counter / recorder state if the JIT is
+     * on; cross-thread sharing of trace metadata is a Phase 4 problem. */
+    child->jit         = parent->jit_enabled ? cando_jit_create() : NULL;
 
     /* Copy native function registry (read-only after init; child gets its
      * own buffer so subsequent registrations on either VM cannot disturb
@@ -399,6 +404,14 @@ void cando_vm_destroy(CandoVM *vm) {
         vm->thread_registry_owned = NULL;
     }
     vm->thread_registry = NULL;
+
+    /* Destroy the JIT state (per-VM hot table + recorder).  Always
+     * owned by this VM; child VMs allocate their own in
+     * cando_vm_init_child. */
+    if (vm->jit) {
+        cando_jit_destroy(vm->jit);
+        vm->jit = NULL;
+    }
 }
 
 /* =========================================================================
@@ -581,17 +594,23 @@ static void gc_free_handle(void *handle_user, void *obj) {
 /* =========================================================================
  * JIT profiling API -- see docs/jit-plan.md §5.
  *
- * The JIT itself does not exist yet.  These functions toggle and read
- * the per-VM counter state that the dispatch loop maintains while
- * jit_enabled is true.
+ * Phase 2 introduced jit_enabled + the aggregate counters; Phase 3.2
+ * lazy-allocates a CandoJit (per-PC hot table + recorder stub) on
+ * first enable and tears it down on disable.  Phase 3.3+ keeps the
+ * per-VM JIT state alive across enable/disable transitions.
  * ===================================================================== */
 
 void cando_jit_enable(CandoVM *vm) {
-    if (vm) vm->jit_enabled = true;
+    if (!vm) return;
+    if (!vm->jit) vm->jit = cando_jit_create();
+    vm->jit_enabled = true;
 }
 
 void cando_jit_disable(CandoVM *vm) {
-    if (vm) vm->jit_enabled = false;
+    if (!vm) return;
+    vm->jit_enabled = false;
+    /* Keep the CandoJit allocated; re-enabling shouldn't lose the
+     * accumulated hot counts.  vm_destroy frees it. */
 }
 
 bool cando_jit_is_enabled(const CandoVM *vm) {
@@ -599,12 +618,32 @@ bool cando_jit_is_enabled(const CandoVM *vm) {
 }
 
 CandoJitStats cando_jit_get_stats(const CandoVM *vm) {
-    if (!vm) return (CandoJitStats){ 0, 0, 0 };
-    return vm->jit_stats;
+    if (!vm) return (CandoJitStats){ 0, 0, 0, 0, 0, 0, 0 };
+    /* The aggregate counters live directly on CandoVM; the recorder /
+     * hot-table counters live inside the CandoJit object (which may
+     * not exist yet).  Snapshot both into the returned struct. */
+    CandoJitStats st = vm->jit_stats;
+    if (vm->jit) {
+        st.trace_starts    = vm->jit->recorder.trace_starts;
+        st.trace_aborts    = vm->jit->recorder.trace_aborts;
+        st.hot_pcs         = cando_hot_entry_count(&vm->jit->hot);
+        st.blacklisted_pcs = cando_hot_blacklist_count(&vm->jit->hot);
+    }
+    return st;
 }
 
 void cando_jit_reset_stats(CandoVM *vm) {
-    if (vm) vm->jit_stats = (CandoJitStats){ 0, 0, 0 };
+    if (!vm) return;
+    vm->jit_stats = (CandoJitStats){ 0, 0, 0, 0, 0, 0, 0 };
+    if (vm->jit) {
+        vm->jit->recorder.trace_starts = 0;
+        vm->jit->recorder.trace_aborts = 0;
+        vm->jit->recorder.last_abort[0] = '\0';
+        /* Hot-table state is intentionally NOT reset -- the per-PC
+         * counts accumulate across reset_stats so that the recorder
+         * trigger stays warm.  Use cando_hot_table_destroy/init via
+         * a future API to wipe completely. */
+    }
 }
 
 u32 cando_vm_gc_collect(CandoVM *vm) {
@@ -2709,8 +2748,15 @@ static CandoVMResult vm_run(CandoVM *vm) {
         OP_CASE(OP_LOOP): {
             u16 back = READ_U16();
             ip -= back;
-            if (CANDO_UNLIKELY(vm->jit_enabled))
+            if (CANDO_UNLIKELY(vm->jit_enabled)) {
                 vm->jit_stats.backedge_hits++;
+                /* Per-PC hot counter: when threshold trips for this
+                 * specific backedge, the recorder stub fires (Phase
+                 * 3.2 just blacklists; Phase 3.3 starts real
+                 * recording).  ip now points at the loop body, which
+                 * is the natural trace head. */
+                cando_jit_hot_hit(vm->jit, ip);
+            }
             DISPATCH();
         }
         OP_CASE(OP_BREAK): {

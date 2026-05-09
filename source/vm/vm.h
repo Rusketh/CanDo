@@ -219,13 +219,15 @@ typedef struct CandoThreadRegistry {
  * CandoJitStats -- profiling counters maintained while CandoVM.jit_enabled
  * is true.
  *
- * Phase 2 of docs/jit-plan.md (hot-path detection).  Phase 4+ will add a
- * per-(chunk, offset) hash table on top of these aggregate counters so
- * the recorder can pick a specific bytecode site to trace.
+ * Phase 2 introduced the aggregate hit counters; Phase 3.2 adds the
+ * trace-trigger bookkeeping that the per-PC hot table feeds.  Phase
+ * 4+ will add traces_compiled / side_exits / mcode_bytes_used.
  *
  * The script-level `jit.stats()` native (source/lib/jit.c) exposes these
  * with shorter keys: backedge_hits → "backedges", func_entry_hits →
- * "func_entries", iter_next_hits → "iter_next".
+ * "func_entries", iter_next_hits → "iter_next", trace_starts →
+ * "trace_starts", trace_aborts → "trace_aborts", hot_pcs → "hot_pcs",
+ * blacklisted_pcs → "blacklisted_pcs".
  * ===================================================================== */
 typedef struct CandoJitStats {
     u64 backedge_hits;    /* OP_LOOP fires                                  */
@@ -237,7 +239,18 @@ typedef struct CandoJitStats {
     u64 iter_next_hits;   /* OP_FOR_NEXT / OP_FOR_OVER_NEXT / OP_PIPE_NEXT
                              / OP_FILTER_NEXT advances by one element
                              (the loop-exhaustion exit does not count)      */
+
+    /* Phase 3.2 -- snapshotted from CandoJit at read time. */
+    u32 trace_starts;     /* hot-counter triggers that entered the recorder */
+    u32 trace_aborts;     /* of those, how many aborted (Phase 3.2: all)    */
+    u32 hot_pcs;          /* distinct PCs the hot table is tracking         */
+    u32 blacklisted_pcs;  /* of those, how many are blacklisted             */
 } CandoJitStats;
+
+/* Forward declaration -- the full type is defined in source/jit/jit.h.
+ * CandoVM stores a CandoJit* by pointer so this header doesn't need to
+ * pull in the JIT module's internals. */
+typedef struct CandoJit CandoJit;
 
 /* =========================================================================
  * CandoVM -- the interpreter state.
@@ -344,11 +357,14 @@ struct CandoVM {
     /* JIT profiling ---------------------------------------------------- */
     /* When jit_enabled is true the dispatch loop bumps the counters in
      * jit_stats on every loop backedge, function entry, and iterator
-     * NEXT.  No machine code is emitted yet -- counters are visible via
-     * `cando --jit-stats` and via the script-level `jit.stats()` native
-     * (source/lib/jit.c).  See docs/jit-plan.md §5.                      */
+     * NEXT, and consults vm->jit (lazy-allocated by cando_jit_enable)
+     * for per-PC hot-counter tracking.  No machine code is emitted yet
+     * -- counters are visible via `cando --jit-stats` and via the
+     * script-level `jit.stats()` native.  See docs/jit-plan.md §5.       */
     bool          jit_enabled;
     CandoJitStats jit_stats;
+    CandoJit     *jit;          /* NULL until first cando_jit_enable;
+                                   then owned by this VM's lifetime      */
 };
 
 /* =========================================================================

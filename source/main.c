@@ -157,10 +157,15 @@ int main(int argc, char *argv[])
          * (e.g. "did this run actually trigger anything?"). */
         CandoJitStats st = cando_jit_get_stats(vm);
         fprintf(stderr,
-            "jit: backedges=%llu func_entries=%llu iter_next=%llu\n",
+            "jit: backedges=%llu func_entries=%llu iter_next=%llu "
+            "trace_starts=%u trace_aborts=%u hot_pcs=%u blacklisted=%u\n",
             (unsigned long long)st.backedge_hits,
             (unsigned long long)st.func_entry_hits,
-            (unsigned long long)st.iter_next_hits);
+            (unsigned long long)st.iter_next_hits,
+            st.trace_starts,
+            st.trace_aborts,
+            st.hot_pcs,
+            st.blacklisted_pcs);
     }
 
     cando_close(vm);
