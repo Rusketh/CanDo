@@ -126,6 +126,8 @@ void cando_recorder_init(CandoRecorder *r) {
     r->staging_snap_entry_cap    = 0;
     r->frame_base           = 0;
     r->frame_count_at_start = 0;
+    r->outer_frame_base     = 0;
+    r->call_depth           = 0;
     r->trace_starts         = 0;
     r->trace_aborts         = 0;
     r->traces_compiled      = 0;
@@ -305,6 +307,8 @@ void cando_recorder_begin(struct CandoVM *vm, const u8 *pc) {
         r->frame_base           = 0;
         r->frame_count_at_start = 0;
     }
+    r->outer_frame_base = r->frame_base;
+    r->call_depth       = 0;
 
     /* Lazy-allocate stack_map sized to the VM's stack capacity;
      * subsequent traces reuse the same buffer. */
@@ -544,10 +548,12 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
     if (!j || !j->recorder.active || !ip) return;
     CandoRecorder *r = &j->recorder;
 
-    /* Bail if we've left the recording frame (function call/return
-     * during recording).  Call inlining is a future phase; for now
-     * any frame change aborts the trace. */
-    if (vm->frame_count != r->frame_count_at_start) {
+    /* Frame check: vm->frame_count must equal the recording-start
+     * count plus however many CALLC inlines we've absorbed
+     * (Phase 4.3).  Anything else means the dispatch loop took an
+     * unexpected detour (a metamethod call, throw unwind, etc.)
+     * and we abort. */
+    if (vm->frame_count != r->frame_count_at_start + r->call_depth) {
         cando_recorder_abort(vm, "recording crossed a frame boundary");
         return;
     }
@@ -605,16 +611,22 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
         }
 
         case OP_LOAD_LOCAL: {
-            /* Slot operand stored as FRAME-RELATIVE so the same trace
-             * works no matter where in vm->stack[] the recording
+            /* Slot operand stored as OUTER-FRAME-RELATIVE so the same
+             * trace works no matter where in vm->stack[] the recording
              * frame's slots live on subsequent invocations.  The
-             * stack_map index is still ABSOLUTE so SSA-style operand
-             * resolution stays correct within a single trace. */
-            u16 slot = read_op_arg(ip);
-            u32 abs  = r->frame_base + slot;
+             * stack_map index is ABSOLUTE so SSA-style operand
+             * resolution stays correct within a single trace.
+             *
+             * Phase 4.3: when call_depth > 0 we're inside an inlined
+             * CALLC.  bytecode_slot is relative to the inlined
+             * function's frame; translate to outer-frame-relative by
+             * adding (frame_base - outer_frame_base). */
+            u16 slot     = read_op_arg(ip);
+            u32 abs      = r->frame_base + slot;
+            u32 ir_slot  = (r->frame_base - r->outer_frame_base) + slot;
             IRRef src = (abs < r->stack_map_cap) ? r->stack_map[abs] : IRREF_NIL;
             if (src == IRREF_NIL) {
-                src = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0, slot, 0);
+                src = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0, ir_slot, 0);
                 if (abs < r->stack_map_cap) {
                     r->stack_map[abs] = src;
                     /* Phase 4: capture the FIRST SLOAD for this slot
@@ -744,8 +756,9 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
              * source IR isn't IRT_NUM; bytecode handles those normally
              * outside the trace.  Phase 3.4b will type-tag the SSTORE
              * value and write the correct CandoValue type. */
-            u16 slot = read_op_arg(ip);
-            u32 abs  = r->frame_base + slot;
+            u16 slot     = read_op_arg(ip);
+            u32 abs      = r->frame_base + slot;
+            u32 ir_slot  = (r->frame_base - r->outer_frame_base) + slot;
             IRRef top = (sp > 0) ? r->stack_map[sp - 1] : IRREF_NIL;
             if (top == IRREF_NIL) {
                 cando_recorder_abort(vm, "store with empty stack_map");
@@ -763,11 +776,11 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
              * are bytecode-overwriteable and don't need rollback. */
             if (abs < r->stack_map_cap) {
                 if (r->first_load[abs] != IRREF_NIL)
-                    rec_pending_snap_add(r, SNAP_SLOT, slot,
+                    rec_pending_snap_add(r, SNAP_SLOT, ir_slot,
                                          r->first_load[abs]);
                 r->stack_map[abs] = top;
             }
-            cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED, slot, top);
+            cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED, ir_slot, top);
             break;
         }
 
@@ -965,9 +978,14 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             u32 abs_src      = sp - 3;
             u32 abs_len_slot = sp - 2;
             u32 abs_idx      = sp - 1;
-            u32 rel_src      = abs_src - r->frame_base;
-            u32 rel_len      = abs_len_slot - r->frame_base;
-            u32 rel_idx      = abs_idx - r->frame_base;
+            /* Outer-frame-relative slot indices.  FOR state lives in
+             * the current frame's stack; with Phase 4.3 inlining the
+             * "current frame" might be an inlined CALLC, so encode
+             * relative to the outer recording frame so trace_run reads
+             * the right memory regardless. */
+            u32 rel_src      = abs_src      - r->outer_frame_base;
+            u32 rel_len      = abs_len_slot - r->outer_frame_base;
+            u32 rel_idx      = abs_idx      - r->outer_frame_base;
 
             /* SLOAD the index slot.  Reuse the cached IRRef from a
              * previous iteration's SLOAD if present (same SSA pattern
@@ -1133,43 +1151,177 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
         }
 
         case OP_CALL: {
-            /* Phase 4.2: only the fast-native single-arg pattern is
-             * supported.  Bytecode reads u16 static_argc and applies
-             * spread_extra; for traced calls we require static_argc=1
-             * and spread_extra=0 so we don't have to model multi-
-             * return spreads inside the trace. */
+            /* Two flavours are recorded:
+             *   (a) Phase 4.2 fast-native call: single numeric arg,
+             *       callee at sp-2 is AUX_FAST_NATIVE.  Emit IR_CALL_F1.
+             *   (b) Phase 4.3 same-chunk user-fn inline: callee at
+             *       sp-argc-1 holds a positive-number PC offset.
+             *       Push an inline-call frame and continue recording
+             *       at the callee's first opcode -- no IR emitted for
+             *       the call itself.
+             * Anything else aborts (multi-return spreads, nested call
+             * during inlining beyond the depth cap, etc.). */
             u16 static_argc = read_op_arg(ip);
-            if (static_argc != 1 || vm->spread_extra != 0) {
+            if (vm->spread_extra != 0) {
                 cando_recorder_abort(vm,
-                    "OP_CALL: only static argc=1 fast natives traced");
+                    "OP_CALL: spread_extra != 0 not traced");
                 return;
             }
-            if (sp < 2) {
+            u32 argc = static_argc;
+            if (sp < argc + 1u) {
                 cando_recorder_abort(vm, "OP_CALL with too few stack slots");
                 return;
             }
-            u32 callee_pos = sp - 2;     /* below the single arg slot */
-            u32 arg_pos    = sp - 1;
+            u32 callee_pos = sp - argc - 1;
+
+            /* Branch (a): fast-native single-arg call. */
             u32 ax = r->stack_aux[callee_pos];
-            if (CANDO_AUX_KIND(ax) != AUX_FAST_NATIVE) {
+            if (CANDO_AUX_KIND(ax) == AUX_FAST_NATIVE) {
+                if (argc != 1) {
+                    cando_recorder_abort(vm,
+                        "OP_CALL: fast-native v1 requires argc=1");
+                    return;
+                }
+                u32 arg_pos    = sp - 1;
+                u32 native_idx = CANDO_AUX_DATA(ax);
+                IRRef arg_ref  = r->stack_map[arg_pos];
+                if (arg_ref == IRREF_NIL) {
+                    cando_recorder_abort(vm,
+                        "OP_CALL: fast-native arg not in stack_map");
+                    return;
+                }
+                arg_ref = ensure_num(&r->ir, arg_ref);
+                IRRef result = cando_ir_emit(&r->ir, IR_CALL_F1, IRT_NUM, 0,
+                                             (IRRef)native_idx, arg_ref);
+                rec_push(r, result, callee_pos);
+                break;
+            }
+
+            /* Branch (b): same-chunk user-fn inline.  The bytecode
+             * interpreter is about to push a new frame and dispatch
+             * to the callee; we pre-emptively shift our recording
+             * frame so the next observe sees the callee's first
+             * opcode at the right outer-frame-relative slot offset.
+             *
+             * Two callee shapes are recognized:
+             *   - positive-number sentinel (legacy script-fn encoding)
+             *   - OBJ_FUNCTION closure object (modern OP_CLOSURE form)
+             * In both cases we extract the same-chunk PC offset and
+             * verify the closure has no upvalues (we don't model
+             * OP_LOAD_UPVALUE inside the trace yet). */
+            if (r->call_depth >= CANDO_JIT_MAX_INLINE_DEPTH) {
                 cando_recorder_abort(vm,
-                    "OP_CALL: callee is not a recorded fast native");
+                    "OP_CALL: inline depth cap reached");
                 return;
             }
-            u32 native_idx = CANDO_AUX_DATA(ax);
-            IRRef arg_ref = r->stack_map[arg_pos];
-            if (arg_ref == IRREF_NIL) {
-                cando_recorder_abort(vm,
-                    "OP_CALL: arg not in stack_map");
+            const CandoChunk *cur_chunk = current_chunk(vm);
+            if (!cur_chunk) {
+                cando_recorder_abort(vm, "OP_CALL: no current chunk");
                 return;
             }
-            arg_ref = ensure_num(&r->ir, arg_ref);
-            IRRef result = cando_ir_emit(&r->ir, IR_CALL_F1, IRT_NUM, 0,
-                                         (IRRef)native_idx, arg_ref);
-            /* Stack effect: callee + arg consumed, result pushed at
-             * callee_pos.  Bytecode does this via callee_slot[0]
-             * write + stack_top adjust; we mirror via rec_push. */
-            rec_push(r, result, callee_pos);
+            CandoValue callee_val = vm->stack_top[-(int)argc - 1];
+            u32 callee_pc = 0;
+            if (cando_is_number(callee_val) &&
+                cando_as_number(callee_val) > 0.0) {
+                callee_pc = (u32)cando_as_number(callee_val);
+            } else if (cando_is_object(callee_val)) {
+                CdoObject *fn_obj = cando_bridge_resolve(vm,
+                                        cando_as_handle(callee_val));
+                if (!fn_obj || fn_obj->kind != OBJ_FUNCTION ||
+                    !fn_obj->fn.script.bytecode) {
+                    cando_recorder_abort(vm,
+                        "OP_CALL: callee is not a script function");
+                    return;
+                }
+                CandoClosure *cl = (CandoClosure *)fn_obj->fn.script.bytecode;
+                if (cl->chunk != cur_chunk) {
+                    cando_recorder_abort(vm,
+                        "OP_CALL: cross-chunk inline not supported (v1)");
+                    return;
+                }
+                if (cl->upvalue_count != 0) {
+                    cando_recorder_abort(vm,
+                        "OP_CALL: closure has upvalues (v1 limitation)");
+                    return;
+                }
+                callee_pc = fn_obj->fn.script.param_count;
+            } else {
+                cando_recorder_abort(vm,
+                    "OP_CALL: callee is not a recordable user fn");
+                return;
+            }
+            if (callee_pc == 0 || callee_pc >= cur_chunk->code_len) {
+                cando_recorder_abort(vm,
+                    "OP_CALL: callee PC out of range");
+                return;
+            }
+            /* Verify all args are numeric IRRefs; non-numeric inlining
+             * isn't supported in v1. */
+            for (u32 a = 0; a < argc; a++) {
+                IRRef ar = r->stack_map[callee_pos + 1 + a];
+                if (ar == IRREF_NIL) {
+                    cando_recorder_abort(vm,
+                        "OP_CALL: inline arg not in stack_map");
+                    return;
+                }
+                const IRIns *in_a = cando_ir_get_ins(&r->ir, ar);
+                if (in_a && in_a->type != IRT_NUM) {
+                    cando_recorder_abort(vm,
+                        "OP_CALL: inline arg non-numeric (v1)");
+                    return;
+                }
+            }
+            /* New frame's slots[0] = vm->stack_top - argc - 1 (= the
+             * callee value itself, conventionally local 0).  We keep
+             * stack_map[callee_pos] alone -- the bytecode will push a
+             * frame whose locals start at this absolute slot. */
+            r->call_saved_frame_base[r->call_depth] = r->frame_base;
+            r->call_callee_pos      [r->call_depth] = callee_pos;
+            r->call_depth++;
+            r->frame_base = callee_pos;
+            break;
+        }
+
+        case OP_RETURN: {
+            /* Inline-frame pop.  Only legal mid-trace when call_depth
+             * > 0 (the recording-start function returning is a trace
+             * boundary).  Bytecode places the return value at the
+             * caller's callee_pos and pops the frame; we mirror by
+             * stashing the return IRRef at stack_map[callee_pos].
+             *
+             * v1: only single-value returns supported. */
+            if (r->call_depth == 0) {
+                cando_recorder_abort(vm,
+                    "OP_RETURN at recording-frame boundary");
+                return;
+            }
+            u16 ret_count = read_op_arg(ip);
+            if (ret_count != 1) {
+                cando_recorder_abort(vm,
+                    "OP_RETURN: only single-value returns inlined");
+                return;
+            }
+            if (sp < 1) {
+                cando_recorder_abort(vm,
+                    "OP_RETURN with empty stack");
+                return;
+            }
+            IRRef ret_ref = r->stack_map[sp - 1];
+            if (ret_ref == IRREF_NIL) {
+                cando_recorder_abort(vm,
+                    "OP_RETURN value not in stack_map");
+                return;
+            }
+            const IRIns *src = cando_ir_get_ins(&r->ir, ret_ref);
+            if (src && src->type != IRT_NUM) {
+                cando_recorder_abort(vm,
+                    "OP_RETURN non-numeric value (v1)");
+                return;
+            }
+            r->call_depth--;
+            r->frame_base = r->call_saved_frame_base[r->call_depth];
+            u32 callee_pos = r->call_callee_pos[r->call_depth];
+            rec_push(r, ret_ref, callee_pos);
             break;
         }
 

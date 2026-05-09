@@ -44,8 +44,9 @@ struct CandoChunk;
 /* -----------------------------------------------------------------------
  * Tunables
  * --------------------------------------------------------------------- */
-#define CANDO_JIT_MAX_IR_INS     4096u   /* trace length cap */
-#define CANDO_JIT_MAX_TRACES     64u     /* completed traces stored per VM */
+#define CANDO_JIT_MAX_IR_INS      4096u  /* trace length cap */
+#define CANDO_JIT_MAX_TRACES      64u    /* completed traces stored per VM */
+#define CANDO_JIT_MAX_INLINE_DEPTH 4u    /* nested inlined CALLC depth cap */
 
 /* -----------------------------------------------------------------------
  * CandoSnapshot -- captured state at a guard's bytecode position.
@@ -243,6 +244,21 @@ typedef struct CandoRecorder {
     u32                   staging_snap_entry_cap;
     u32                   frame_base;     /* slot index, not pointer */
     u32                   frame_count_at_start;
+    /* Phase 4.3: outer (recording-start) frame anchor.  All IR slot
+     * operands are encoded relative to this so trace_run can read
+     * them via vm->frames[top].slots[slot] regardless of whether the
+     * trace inlined further calls.  outer_frame_base is set on
+     * cando_recorder_begin and never changes during recording. */
+    u32                   outer_frame_base;
+    /* Inlined-call stack -- one entry per active CALLC inline.  v1
+     * caps depth at CANDO_JIT_MAX_INLINE_DEPTH; deeper calls abort.
+     * Each entry remembers the caller's frame_base so OP_RETURN can
+     * restore it, and the absolute slot (callee_pos) where the call
+     * happened so the return value lands at the right place in
+     * stack_map. */
+    u32                   call_depth;
+    u32                   call_saved_frame_base[CANDO_JIT_MAX_INLINE_DEPTH];
+    u32                   call_callee_pos      [CANDO_JIT_MAX_INLINE_DEPTH];
     /* Stats (snapshotted into CandoJitStats at read time). */
     u32                   trace_starts;
     u32                   trace_aborts;
