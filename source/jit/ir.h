@@ -130,13 +130,22 @@ typedef enum {
 
     /* ===== Band 5: Object / array / global access ====================== */
     IR_HLOAD,              /* op1: handle IRRef -> raw CdoObject* (IRT_PTR) */
+    IR_HLOAD_SLOT,         /* op1: source slot (frame-relative, raw u32);
+                              reads vm->frames[top].slots[op1] as a
+                              boxed object and resolves its handle to a
+                              raw CdoObject*.  Returns IRT_PTR (stored
+                              in TraceVal.p).  Side-exits with
+                              TRACE_BAD_TYPE if the slot doesn't hold
+                              an object.  This op is loop-invariant
+                              when the source slot has no SSTORE in
+                              the trace, so LICM hoists the expensive
+                              cando_bridge_resolve out of the loop. */
     IR_HREF,               /* op1: obj ptr, op2: key IRRef; CdoValue load   */
-    IR_AREF,               /* op1: source slot (frame-relative, raw u32),
-                              op2: index IRRef (IRT_NUM); reads
-                              vm->frames[top].slots[op1] as an array
-                              and returns array[op2] as IRT_NUM.
-                              Side-exits with TRACE_BAD_TYPE if the slot
-                              doesn't hold an array, the index is out
+    IR_AREF,               /* op1: resolved CdoObject* IRRef (IRT_PTR
+                              from IR_HLOAD_SLOT), op2: index IRRef
+                              (IRT_NUM).  Reads array[index] as IRT_NUM.
+                              Side-exits with TRACE_BAD_TYPE if the
+                              source isn't an array, the index is out
                               of range, or the element is non-numeric. */
     IR_GLOAD,              /* op1: constant-pool ref of the global name
                               (a CandoString*); reads the named global

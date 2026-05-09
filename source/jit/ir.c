@@ -184,6 +184,7 @@ static const char *const s_op_names[IR__COUNT] = {
     [IR_GUARD_TRUE]  = "IR_GUARD_TRUE",
     [IR_GUARD_FALSE] = "IR_GUARD_FALSE",
     [IR_HLOAD]       = "IR_HLOAD",
+    [IR_HLOAD_SLOT]  = "IR_HLOAD_SLOT",
     [IR_HREF]        = "IR_HREF",
     [IR_AREF]        = "IR_AREF",
     [IR_GLOAD]       = "IR_GLOAD",
@@ -252,11 +253,13 @@ void cando_ir_dump(const CandoTraceIR *t, FILE *out) {
     for (u32 i = 1; i < t->ir_count; i++) {
         const IRIns *in = &t->ir[i];
         char b1[16], b2[16];
-        /* SLOAD / SSTORE / AREF encode op1 as a raw slot number (not
-         * an IRRef); render as "sN" to avoid confusion with IRRefs.
-         * SSTORE's op2 IS an IRRef.  AREF's op2 is also an IRRef
-         * (the index). */
-        if (in->op == IR_SLOAD || in->op == IR_SSTORE || in->op == IR_AREF)
+        /* SLOAD / SSTORE / HLOAD_SLOT encode op1 as a raw slot number
+         * (not an IRRef); render as "sN" to avoid confusion with
+         * IRRefs.  IR_AREF's op1 was a slot in earlier phases but is
+         * now an IRRef (Phase 5b: HLOAD_SLOT does the resolution and
+         * AREF takes the resolved pointer ref). */
+        if (in->op == IR_SLOAD || in->op == IR_SSTORE ||
+            in->op == IR_HLOAD_SLOT)
             format_slot(in->op1, b1, sizeof(b1));
         else
             format_ref(in->op1, b1, sizeof(b1));

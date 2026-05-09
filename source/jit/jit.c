@@ -240,6 +240,12 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
                 inv = true;
                 break;
             case IR_SLOAD:
+            case IR_HLOAD_SLOT:
+                /* Both ops read the FRAME-RELATIVE source slot in
+                 * op1.  Loop-invariant iff that slot has no SSTORE
+                 * anywhere in the trace.  HLOAD_SLOT carries the
+                 * expensive bridge_resolve call -- making it
+                 * invariant is the whole point of Phase 5b. */
                 inv = !(stored_slot && in->op1 < max_slot
                         && stored_slot[in->op1]);
                 break;
@@ -746,13 +752,20 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
 
             /* Compute the value to push:
              *   keys mode    -> the index itself (idx_ir)
-             *   values mode  -> source[index] via IR_AREF                  */
+             *   values mode  -> source[index] via IR_HLOAD_SLOT + IR_AREF
+             *
+             * IR_HLOAD_SLOT resolves the source slot's array handle
+             * once; LICM marks it invariant (the source slot has no
+             * SSTORE in the trace) so the per-iteration cost drops to
+             * just IR_AREF's bounds check + element fetch. */
             IRRef pushed_ir;
             if (keys) {
                 pushed_ir = idx_ir;
             } else {
+                IRRef src_ptr = cando_ir_emit(&r->ir, IR_HLOAD_SLOT,
+                                              IRT_PTR, 0, rel_src, 0);
                 pushed_ir = cando_ir_emit(&r->ir, IR_AREF, IRT_NUM, 0,
-                                          rel_src, idx_ir);
+                                          src_ptr, idx_ir);
             }
             /* The pushed value lands at the new top of stack (slot sp).
              * The subsequent OP_DEF_LOCAL pulls it from stack_map[sp]
@@ -830,10 +843,10 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
      * iterations. */
     if (t->values_cap < t->ir.ir_count) {
         t->values_buf = cando_realloc(t->values_buf,
-                                      sizeof(f64) * t->ir.ir_count);
+                                      sizeof(TraceVal) * t->ir.ir_count);
         t->values_cap = t->ir.ir_count;
     }
-    f64 *vals = t->values_buf;
+    TraceVal *vals = t->values_buf;
 
     /* SLOAD / SSTORE slot operands are FRAME-RELATIVE -- the slot
      * argument is offset from the current top frame's locals base.
@@ -868,11 +881,11 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
             case IR_KNUM: {
                 /* op1 is a constant-pool ref. */
                 CandoValue cv = cando_ir_get_const(&t->ir, in->op1);
-                vals[i] = cando_as_number(cv);
+                vals[i].d = cando_as_number(cv);
                 break;
             }
             case IR_KBOOL:
-                vals[i] = (in->op1 != 0) ? 1.0 : 0.0;
+                vals[i].d = (in->op1 != 0) ? 1.0 : 0.0;
                 break;
 
             case IR_KNULL:
@@ -885,47 +898,47 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                 u32 slot = in->op1;
                 CandoValue v = frame_slots[slot];
                 if (!cando_is_number(v)) return TRACE_BAD_TYPE;
-                vals[i] = cando_as_number(v);
+                vals[i].d = cando_as_number(v);
                 break;
             }
             case IR_SSTORE: {
                 /* op1 is FRAME-RELATIVE slot, op2 is value IRRef. */
                 u32 slot = in->op1;
-                frame_slots[slot] = cando_number(vals[in->op2]);
+                frame_slots[slot] = cando_number(vals[in->op2].d);
                 break;
             }
 
-            case IR_ADD:  vals[i] = vals[in->op1] + vals[in->op2]; break;
-            case IR_SUB:  vals[i] = vals[in->op1] - vals[in->op2]; break;
-            case IR_MUL:  vals[i] = vals[in->op1] * vals[in->op2]; break;
+            case IR_ADD:  vals[i].d = vals[in->op1].d + vals[in->op2].d; break;
+            case IR_SUB:  vals[i].d = vals[in->op1].d - vals[in->op2].d; break;
+            case IR_MUL:  vals[i].d = vals[in->op1].d * vals[in->op2].d; break;
             case IR_DIV: {
-                f64 d = vals[in->op2];
+                f64 d = vals[in->op2].d;
                 if (d == 0.0) return TRACE_GUARD_FAILED;  /* matches OP_DIV */
-                vals[i] = vals[in->op1] / d;
+                vals[i].d = vals[in->op1].d / d;
                 break;
             }
             case IR_MOD:
                 /* Mirror libcando's OP_MOD semantics via fmod. */
-                vals[i] = fmod(vals[in->op1], vals[in->op2]);
+                vals[i].d = fmod(vals[in->op1].d, vals[in->op2].d);
                 break;
-            case IR_NEG:  vals[i] = -vals[in->op1]; break;
+            case IR_NEG:  vals[i].d = -vals[in->op1].d; break;
 
-            case IR_EQ:  vals[i] = (vals[in->op1] == vals[in->op2]) ? 1.0 : 0.0; break;
-            case IR_NEQ: vals[i] = (vals[in->op1] != vals[in->op2]) ? 1.0 : 0.0; break;
-            case IR_LT:  vals[i] = (vals[in->op1] <  vals[in->op2]) ? 1.0 : 0.0; break;
-            case IR_LE:  vals[i] = (vals[in->op1] <= vals[in->op2]) ? 1.0 : 0.0; break;
-            case IR_GT:  vals[i] = (vals[in->op1] >  vals[in->op2]) ? 1.0 : 0.0; break;
-            case IR_GE:  vals[i] = (vals[in->op1] >= vals[in->op2]) ? 1.0 : 0.0; break;
+            case IR_EQ:  vals[i].d = (vals[in->op1].d == vals[in->op2].d) ? 1.0 : 0.0; break;
+            case IR_NEQ: vals[i].d = (vals[in->op1].d != vals[in->op2].d) ? 1.0 : 0.0; break;
+            case IR_LT:  vals[i].d = (vals[in->op1].d <  vals[in->op2].d) ? 1.0 : 0.0; break;
+            case IR_LE:  vals[i].d = (vals[in->op1].d <= vals[in->op2].d) ? 1.0 : 0.0; break;
+            case IR_GT:  vals[i].d = (vals[in->op1].d >  vals[in->op2].d) ? 1.0 : 0.0; break;
+            case IR_GE:  vals[i].d = (vals[in->op1].d >= vals[in->op2].d) ? 1.0 : 0.0; break;
 
             case IR_GUARD_NUM:
                 /* SLOAD already type-checks; an op feeding a guard is
                  * always numeric inside the trace by construction. */
                 break;
             case IR_GUARD_TRUE:
-                if (vals[in->op1] == 0.0) return TRACE_GUARD_FAILED;
+                if (vals[in->op1].d == 0.0) return TRACE_GUARD_FAILED;
                 break;
             case IR_GUARD_FALSE:
-                if (vals[in->op1] != 0.0) return TRACE_GUARD_FAILED;
+                if (vals[in->op1].d != 0.0) return TRACE_GUARD_FAILED;
                 break;
             case IR_GUARD_OBJ:
             case IR_GUARD_STR:
@@ -942,7 +955,7 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                                           &out))
                     return TRACE_BAD_TYPE;
                 if (!cando_is_number(out)) return TRACE_BAD_TYPE;
-                vals[i] = cando_as_number(out);
+                vals[i].d = cando_as_number(out);
                 break;
             }
             case IR_GSTORE: {
@@ -951,35 +964,46 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                 if (!cando_is_string(name)) return TRACE_RANGE_ERROR;
                 if (!cando_vm_set_global(vm,
                                           cando_as_string(name)->data,
-                                          cando_number(vals[in->op2]),
+                                          cando_number(vals[in->op2].d),
                                           false))
                     return TRACE_BAD_TYPE;  /* const-protected */
                 break;
             }
-            case IR_AREF: {
-                /* op1: source-array slot (frame-relative)
-                 * op2: index IRRef (numeric)
-                 * Returns array[index] as f64.
-                 *
-                 * The bounds check below (idx >= cdo_array_len) is
-                 * defensive in v1.  The recorder always emits an
-                 * IR_LT(idx, len) IR_GUARD_TRUE pair before the
-                 * AREF, so the index is provably in range under the
-                 * trace's invariants.  Keep the check as belt-and-
-                 * braces: once Phase 3.3d records calls (which can
-                 * mutate the source array between LT and AREF), the
-                 * bounds check stops being redundant. */
+            case IR_HLOAD_SLOT: {
+                /* op1: frame-relative source slot.  Reads the slot,
+                 * type-checks for an OBJECT, and resolves the handle
+                 * to a raw CdoObject*.  Stored in vals[i].p so a
+                 * later IR_AREF can dereference without the
+                 * (expensive) bridge_resolve call.  This op is loop-
+                 * invariant when the source slot has no SSTORE in
+                 * the trace -- LICM hoists the resolution. */
                 u32 slot = in->op1;
                 CandoValue src = frame_slots[slot];
                 if (!cando_is_object(src)) return TRACE_BAD_TYPE;
                 CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(src));
                 if (!arr || arr->kind != OBJ_ARRAY) return TRACE_BAD_TYPE;
-                u32 idx = (u32)vals[in->op2];
+                vals[i].p = arr;
+                break;
+            }
+            case IR_AREF: {
+                /* op1: IRRef of resolved CdoObject* (from IR_HLOAD_SLOT)
+                 * op2: index IRRef (numeric)
+                 * Returns array[index] as f64.
+                 *
+                 * The bounds check below is defensive: the recorder
+                 * always emits IR_LT(idx, len) IR_GUARD_TRUE before
+                 * the AREF, so the index is provably in range under
+                 * the trace's invariants.  The check stops being
+                 * redundant once Phase 3.3e records calls that can
+                 * mutate the source array between LT and AREF. */
+                CdoObject *arr = (CdoObject *)vals[in->op1].p;
+                if (!arr || arr->kind != OBJ_ARRAY) return TRACE_BAD_TYPE;
+                u32 idx = (u32)vals[in->op2].d;
                 if (idx >= cdo_array_len(arr)) return TRACE_BAD_TYPE;
                 CdoValue cv = cdo_null();
                 cdo_array_rawget_idx(arr, idx, &cv);
                 if (!cdo_is_number(cv)) return TRACE_BAD_TYPE;
-                vals[i] = cv.as.number;
+                vals[i].d = cv.as.number;
                 break;
             }
 

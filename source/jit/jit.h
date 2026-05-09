@@ -44,6 +44,19 @@ struct CandoChunk;
 #define CANDO_JIT_MAX_TRACES     64u     /* completed traces stored per VM */
 
 /* -----------------------------------------------------------------------
+ * TraceVal -- the IR-interpreter's per-IRRef scratch slot.
+ *
+ * 8 bytes wide.  Holds f64 for numeric IR ops, raw pointers for
+ * IRT_PTR ops (e.g. IR_HLOAD_SLOT which caches a resolved
+ * CdoObject*).  Unions cleanly type-pun in C11 -- no UB.
+ * --------------------------------------------------------------------- */
+typedef union TraceVal {
+    f64       d;
+    void     *p;
+    uintptr_t u;
+} TraceVal;
+
+/* -----------------------------------------------------------------------
  * CandoTrace -- a finalised IR sequence the IR-interpreter executes
  * (Phase 3.4) and the future codegen compiles to mcode (Phase 6+).
  *
@@ -55,7 +68,7 @@ typedef struct CandoTrace {
     CandoTraceIR ir;          /* SSA instructions + constant pool */
     const u8    *start_pc;    /* head of the recorded loop */
     u32          id;          /* monotonic per-VM trace id */
-    f64         *values_buf;  /* scratch table for cando_trace_run */
+    TraceVal    *values_buf;  /* scratch table for cando_trace_run */
     u32          values_cap;
 } CandoTrace;
 
