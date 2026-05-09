@@ -172,6 +172,114 @@ void cando_recorder_begin(struct CandoVM *vm, const u8 *pc) {
 
 /* Finish a successfully closed trace: emit IR_LOOP, copy the IR into
  * the trace cache, deactivate.  Caller has confirmed ip == start_pc. */
+/* Mark loop-invariant IR ops with IRF_INVARIANT.
+ *
+ * An op is loop-invariant iff every input it depends on is also
+ * invariant.  A SLOAD becomes invariant iff its slot has no SSTORE
+ * anywhere in the trace; same for GLOAD vs GSTORE.  Constant-load
+ * ops (KNUM, KBOOL, KNULL) are always invariant.  All other ops
+ * propagate invariance from their operands.  Guards, stores, and
+ * IR_LOOP / IR_AREF / IR_GLOAD with stored-name are NEVER marked
+ * invariant: guards must fire each iteration (they're side-exit
+ * anchors); stores write each iteration; IR_AREF reads array
+ * elements that depend on the loop-variant index; IR_GLOAD reads
+ * an external table that may have changed even if no GSTORE in
+ * THIS trace touched it.
+ *
+ * Forward pass over the IR.  The recorder emits in topological
+ * order (def before use within a trace), so a single pass is
+ * sufficient.
+ */
+static void mark_loop_invariants(CandoTraceIR *ir) {
+    /* Pass 1: collect the set of slots written by IR_SSTORE and the
+     * set of names written by IR_GSTORE.  Slot indices are u32 so we
+     * keep two small bit arrays sized to the trace's actual extent
+     * (heap-allocated, freed at end of pass). */
+    u32 max_slot = 0;
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        const IRIns *in = &ir->ir[i];
+        if (in->op == IR_SSTORE && in->op1 + 1 > max_slot)
+            max_slot = in->op1 + 1;
+    }
+    u8 *stored_slot = max_slot
+        ? cando_alloc(sizeof(u8) * max_slot) : NULL;
+    if (stored_slot) memset(stored_slot, 0, sizeof(u8) * max_slot);
+    /* Globals: collect const-pool indices that are GSTORE targets. */
+    u8 *stored_name = ir->const_count
+        ? cando_alloc(sizeof(u8) * ir->const_count) : NULL;
+    if (stored_name) memset(stored_name, 0, sizeof(u8) * ir->const_count);
+
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        const IRIns *in = &ir->ir[i];
+        if (in->op == IR_SSTORE && stored_slot)
+            stored_slot[in->op1] = 1;
+        if (in->op == IR_GSTORE && stored_name)
+            stored_name[IRREF_KIDX(in->op1)] = 1;
+    }
+
+    /* Pass 2: forward-propagate invariance.  Operand IRRefs are
+     * always smaller than the current op's index (SSA), so we can
+     * read the flag directly from a previously-processed entry. */
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        IRIns *in = &ir->ir[i];
+
+        /* Anchor ops never invariant: stores, guards, the LOOP
+         * marker, the IR_NOP sentinel. */
+        if (in->op == IR_SSTORE || in->op == IR_GSTORE ||
+            in->op == IR_LOOP   || in->op == IR_NOP   ||
+            (in->flags & IRF_GUARD))
+            continue;
+
+        bool inv = false;
+        switch (in->op) {
+            case IR_KNUM:
+            case IR_KBOOL:
+            case IR_KNULL:
+            case IR_KSTR:
+            case IR_KOBJ:
+                inv = true;
+                break;
+            case IR_SLOAD:
+                inv = !(stored_slot && in->op1 < max_slot
+                        && stored_slot[in->op1]);
+                break;
+            case IR_GLOAD: {
+                u32 ki = IRREF_KIDX(in->op1);
+                inv = !(stored_name && ki < ir->const_count
+                        && stored_name[ki]);
+                break;
+            }
+            case IR_AREF:
+                /* op2 is the loop-variant index in v1 traces. */
+                inv = false;
+                break;
+            default: {
+                /* Pure op: invariant iff every operand IRRef points
+                 * to an invariant op.  Constant-pool refs (high bit)
+                 * are always invariant; instruction refs propagate. */
+                bool ok = true;
+                IRRef ops[2] = { in->op1, in->op2 };
+                for (int k = 0; k < 2 && ok; k++) {
+                    IRRef r = ops[k];
+                    if (r == IRREF_NIL) continue;
+                    if (IRREF_IS_K(r)) continue;
+                    if (r >= i)        { ok = false; break; }
+                    if (!(ir->ir[r].flags & IRF_INVARIANT)) {
+                        ok = false;
+                        break;
+                    }
+                }
+                inv = ok;
+                break;
+            }
+        }
+        if (inv) in->flags |= IRF_INVARIANT;
+    }
+
+    cando_free(stored_slot);
+    cando_free(stored_name);
+}
+
 static void cando_recorder_finish(struct CandoVM *vm) {
     CandoJit *j = jit_of(vm);
     if (!j || !j->recorder.active) return;
@@ -184,6 +292,10 @@ static void cando_recorder_finish(struct CandoVM *vm) {
     }
 
     cando_ir_emit(&r->ir, IR_LOOP, IRT_VOID, 0, 0, 0);
+
+    /* Mark loop-invariant ops so cando_trace_run can skip them on
+     * iterations 2+ (Phase 5 LICM v1). */
+    mark_loop_invariants(&r->ir);
 
     /* Cache the trace.  Drop on overflow rather than evicting --
      * Phase 3.3 just demonstrates the pipeline; eviction is Phase 4. */
@@ -709,7 +821,8 @@ CandoTrace *cando_jit_find_trace(struct CandoVM *vm, const u8 *pc) {
     return NULL;
 }
 
-CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t) {
+CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
+                                 bool skip_invariant) {
     if (!vm || !t) return TRACE_RANGE_ERROR;
 
     /* Lazy-allocate the scratch values table; reused across every
@@ -740,6 +853,13 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t) {
      * from the trace's constants[] array. */
     for (u32 i = 1; i < t->ir.ir_count; i++) {
         const IRIns *in = &t->ir.ir[i];
+
+        /* LICM: on iterations 2+, skip ops whose result we already
+         * computed in iteration 1.  vals[i] is still valid from the
+         * first run because every iteration uses the same trace and
+         * shares the per-trace values_buf. */
+        if (skip_invariant && (in->flags & IRF_INVARIANT))
+            continue;
 
         switch (in->op) {
             case IR_NOP:

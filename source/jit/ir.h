@@ -70,6 +70,17 @@ typedef enum {
  * --------------------------------------------------------------------- */
 #define IRF_GUARD       0x01    /* this op is a guard / side-exit anchor   */
 #define IRF_PINNED      0x02    /* optimiser may not reorder past this op  */
+#define IRF_INVARIANT   0x04    /* loop-invariant: produces the same value
+                                   on every iteration of the recorded
+                                   loop.  Set at recording finish-time by
+                                   a forward-pass analysis (jit.c) so the
+                                   IR-interpreter can skip it on
+                                   iterations 2+.  An op is invariant iff
+                                   none of its inputs ever change inside
+                                   the trace -- SLOADs of slots that have
+                                   no SSTORE, GLOADs of names that have
+                                   no GSTORE, and pure ops whose operands
+                                   are themselves invariant. */
 
 /* -----------------------------------------------------------------------
  * IROp -- IR opcode set.

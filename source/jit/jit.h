@@ -81,8 +81,15 @@ CandoTrace *cando_jit_find_trace(struct CandoVM *vm, const u8 *pc);
  * VM's current stack state.  Reads SLOAD slots, computes IR values
  * in a per-trace scratch table, writes SSTORE slots back, and
  * returns the exit status.  vm->jit_stats.trace_iters is incremented
- * by the dispatch-loop caller (vm.c OP_LOOP), not by this function. */
-CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *trace);
+ * by the dispatch-loop caller (vm.c OP_LOOP), not by this function.
+ *
+ * skip_invariant: false on the first iteration of an OP_LOOP entry
+ * (computes everything, populating values_buf for both invariant and
+ * variant ops).  true on subsequent iterations: ops marked
+ * IRF_INVARIANT are skipped, reading their cached values from
+ * values_buf.  Phase 5 LICM. */
+CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *trace,
+                                 bool skip_invariant);
 
 /* -----------------------------------------------------------------------
  * CandoRecorder -- recording state.

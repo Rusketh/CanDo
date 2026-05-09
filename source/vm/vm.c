@@ -2799,10 +2799,17 @@ static CandoVMResult vm_run(CandoVM *vm) {
                  * fail (typically the loop condition becoming false). */
                 CandoTrace *t = cando_jit_find_trace(vm, ip);
                 if (t) {
+                    /* First iteration computes every IR op (incl.
+                     * invariants); subsequent iterations skip ops
+                     * marked IRF_INVARIANT, which already populated
+                     * values_buf on iter 1.  See Phase 5 LICM in
+                     * source/jit/jit.c. */
+                    bool skip_inv = false;
                     for (;;) {
-                        CandoTraceStatus s = cando_trace_run(vm, t);
+                        CandoTraceStatus s = cando_trace_run(vm, t, skip_inv);
                         if (s == TRACE_LOOP_DONE) {
                             vm->jit_stats.trace_iters++;
+                            skip_inv = true;
                             continue;
                         }
                         vm->jit_stats.trace_exits++;
