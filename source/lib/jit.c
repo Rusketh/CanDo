@@ -86,6 +86,7 @@ static int jit_stats_native(CandoVM *vm, int argc, CandoValue *args)
         { "trace_exits",     11, (f64)st.trace_exits      },
         { "hot_pcs",          7, (f64)st.hot_pcs          },
         { "blacklisted_pcs", 15, (f64)st.blacklisted_pcs  },
+        { "traces_evicted",  14, (f64)st.traces_evicted   },
     };
 
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {

@@ -1,25 +1,29 @@
 /*
  * jit/jit.h -- internal JIT module orchestrator.
  *
- * Phase 3.1: IR data plumbing (ir.h).
- * Phase 3.2: per-PC hot counter table (hot.h) + CandoJit wrapper.
- * Phase 3.3: real recorder body.  When the hot trigger fires, the
- *            dispatch loop's pre-execute hook (in vm.c's DISPATCH
- *            macro) calls cando_recorder_observe() on every opcode
- *            until the trace closes (back at start_pc) or aborts
- *            (unrecordable opcode, IR overflow, error).  The
- *            recorder shadows the interpreter's stack effects via
- *            its own SSA stack_map so it doesn't have to be hooked
- *            from inside every opcode handler.
+ * Pieces:
+ *   ir.h  -- linear SSA IR data structures + construction.
+ *   hot.h -- per-PC hot counter table.
+ *   here  -- CandoJit container, recorder, IR-interpreter, snapshots,
+ *            trace cache.
  *
- * Recordable opcodes in v1 of Phase 3.3: OP_CONST (numbers only),
- * OP_LOAD_LOCAL / OP_STORE_LOCAL / OP_DEF_LOCAL, OP_ADD / OP_SUB /
- * OP_MUL, OP_LOOP (close).  Anything else aborts the trace.  More
- * opcodes are added incrementally in Phase 3.3b/c.
+ * Recording flow: on OP_LOOP backedges the dispatch loop calls
+ * cando_jit_hot_hit; once the per-PC threshold trips, the recorder
+ * activates.  The dispatch macro's pre-execute hook then routes every
+ * subsequent opcode through cando_recorder_observe, which emits IR and
+ * mirrors the opcode's stack effect onto its SSA stack_map.  The trace
+ * closes when ip lands back at start_pc; aborts on unrecordable
+ * opcode, IR overflow, frame boundary, or trace-cache full.
  *
- * Public C API for embedders (cando_jit_enable, cando_jit_get_stats,
- * etc.) lives in source/vm/vm.h.  This header is for internal users
- * (the dispatch loop and the future codegen).
+ * Execution flow: cando_jit_find_trace looks up a compiled trace by
+ * start_pc on each OP_LOOP; cando_trace_run executes one iteration via
+ * the IR-interpreter and returns LOOP_DONE / GUARD_FAILED / BAD_TYPE.
+ * The dispatch loop chains LOOP_DONE -> next iteration in a tight
+ * inner loop.  See vm.c OP_LOOP.
+ *
+ * See docs/jit-plan.md for the recordable-opcode list and phased
+ * roadmap.  Public C API for embedders (cando_jit_enable,
+ * cando_jit_get_stats, etc.) lives in source/vm/vm.h.
  *
  * Must compile with gcc -std=c11.
  */
@@ -58,10 +62,22 @@ struct CandoChunk;
  * Snapshots are owned by CandoTrace.  Entries live in a shared
  * arena (snap_entries) so the per-snapshot header stays small.
  * --------------------------------------------------------------------- */
+/* Snapshot entry kind: SNAP_SLOT writes back to a frame slot;
+ * SNAP_GLOBAL writes back to vm->globals via the trace's interned
+ * name string.  Both restore numeric values; non-numeric stores
+ * aren't recorded today. */
+typedef enum {
+    SNAP_SLOT   = 0,
+    SNAP_GLOBAL = 1,
+} CandoSnapKind;
+
 typedef struct CandoSnapEntry {
-    u32   slot;        /* frame-relative slot to restore */
+    u8    kind;        /* CandoSnapKind */
+    u32   key;         /* SNAP_SLOT: frame-relative slot.
+                          SNAP_GLOBAL: trace IR const-pool index of
+                          the name string (cando_ir_get_const). */
     IRRef irref;       /* IRRef whose vals[irref].d holds the pre-iter
-                          value to write back into frame_slots[slot] */
+                          value to write back. */
 } CandoSnapEntry;
 
 typedef struct CandoSnapshot {
@@ -94,6 +110,10 @@ typedef struct CandoTrace {
     CandoTraceIR    ir;            /* SSA instructions + constant pool */
     const u8       *start_pc;      /* head of the recorded loop */
     u32             id;            /* monotonic per-VM trace id */
+    u64             last_used;     /* approximate-LRU tick: bumped on
+                                      every cando_jit_find_trace hit;
+                                      smallest value is evicted first
+                                      when the cache is full. */
     TraceVal       *values_buf;    /* scratch table for cando_trace_run */
     u32             values_cap;
     /* Snapshots (Phase 4) -- guards reference these by index via the
@@ -174,6 +194,12 @@ typedef struct CandoRecorder {
      * vals[first_load[slot]] inside cando_trace_run.
      * Shares stack_map_cap. */
     IRRef                *first_load;
+    /* Phase 4.1: per-trace-IR-constant-index tracking of the FIRST
+     * IR_GLOAD in the current iteration.  Parallels first_load[]
+     * but keyed on the trace's interned name index.  Lazy-grown
+     * alongside the IR's const_count. */
+    IRRef                *first_load_global;
+    u32                   first_load_global_cap;
     /* Pending snapshot entries -- accumulated as SSTOREs happen,
      * copied into the staging snapshot pool on each guard emit. */
     CandoSnapEntry       *pending_snap;
@@ -229,6 +255,8 @@ typedef struct CandoJit {
     CandoTrace    *traces;        /* heap array, capacity CANDO_JIT_MAX_TRACES */
     u32            trace_count;
     u32            next_trace_id;
+    u64            next_use_tick;  /* monotonic counter for trace LRU */
+    u32            traces_evicted; /* stat: how many times the cache evicted */
 } CandoJit;
 
 CandoJit *cando_jit_create (void);

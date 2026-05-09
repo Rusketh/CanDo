@@ -248,6 +248,8 @@ typedef struct CandoJitStats {
     u32 trace_exits;      /* guard exits / type bails returning to bytecode */
     u32 hot_pcs;          /* distinct PCs the hot table is tracking         */
     u32 blacklisted_pcs;  /* of those, how many are blacklisted             */
+    u32 traces_evicted;   /* approximate-LRU evictions when the trace cache
+                             reached CANDO_JIT_MAX_TRACES                  */
 } CandoJitStats;
 
 /* Forward declaration -- the full type is defined in source/jit/jit.h.

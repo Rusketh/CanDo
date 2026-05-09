@@ -145,6 +145,17 @@ void cando_hot_blacklist(CandoHotTable *t, const u8 *pc) {
     }
 }
 
+void cando_hot_unblacklist(CandoHotTable *t, const u8 *pc) {
+    if (!t || !pc) return;
+    CandoHotEntry *e = hot_find(t, pc, NULL);
+    if (!e) return;
+    if (e->blacklisted) {
+        e->blacklisted = 0;
+        if (t->blacklist_count > 0) t->blacklist_count--;
+    }
+    e->count = 0;
+}
+
 u32 cando_hot_count(const CandoHotTable *t, const u8 *pc) {
     if (!t || !pc) return 0;
     const CandoHotEntry *e = hot_find(t, pc, NULL);

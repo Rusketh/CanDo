@@ -223,7 +223,7 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     /* JIT profiling: off by default, counters zeroed.  --jit / CANDO_JIT
      * / jit.on() flip the flag at runtime. */
     vm->jit_enabled = false;
-    vm->jit_stats   = (CandoJitStats){ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    vm->jit_stats   = (CandoJitStats){ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     vm->jit         = NULL;   /* lazy-allocated by cando_jit_enable     */
 }
 
@@ -282,7 +282,7 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
      * Aggregating across child VMs is left for Phase 4 when traces are
      * cross-thread shareable.                                           */
     child->jit_enabled = parent->jit_enabled;
-    child->jit_stats   = (CandoJitStats){ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    child->jit_stats   = (CandoJitStats){ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     /* Child gets its own hot-counter / recorder state if the JIT is
      * on; cross-thread sharing of trace metadata is a Phase 4 problem. */
     child->jit         = parent->jit_enabled ? cando_jit_create() : NULL;
@@ -618,7 +618,7 @@ bool cando_jit_is_enabled(const CandoVM *vm) {
 }
 
 CandoJitStats cando_jit_get_stats(const CandoVM *vm) {
-    if (!vm) return (CandoJitStats){ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    if (!vm) return (CandoJitStats){ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     /* The aggregate counters live directly on CandoVM; the recorder /
      * hot-table counters live inside the CandoJit object (which may
      * not exist yet).  Snapshot both into the returned struct. */
@@ -629,6 +629,7 @@ CandoJitStats cando_jit_get_stats(const CandoVM *vm) {
         st.traces_compiled = vm->jit->recorder.traces_compiled;
         st.hot_pcs         = cando_hot_entry_count(&vm->jit->hot);
         st.blacklisted_pcs = cando_hot_blacklist_count(&vm->jit->hot);
+        st.traces_evicted  = vm->jit->traces_evicted;
         /* trace_iters / trace_exits live on vm->jit_stats already
          * (incremented from the dispatch loop), so they're carried
          * by the `st = vm->jit_stats` copy above. */
@@ -652,7 +653,7 @@ void cando_jit_dump_traces(const CandoVM *vm, FILE *out) {
 
 void cando_jit_reset_stats(CandoVM *vm) {
     if (!vm) return;
-    vm->jit_stats = (CandoJitStats){ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    vm->jit_stats = (CandoJitStats){ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     if (vm->jit) {
         vm->jit->recorder.trace_starts    = 0;
         vm->jit->recorder.trace_aborts    = 0;

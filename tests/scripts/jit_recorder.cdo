@@ -121,4 +121,33 @@ WHILE g_i < 200 {
 print(g_sum);                       // 19900
 print(jit.stats().traces_compiled >= 3);
 
+/* Phase 4.1: snapshot rollback on a div-by-zero where prior
+ * iteration writes to a global have committed.  Without GSTORE
+ * rollback the trace's mid-iter GSTORE leaks past the side-exit and
+ * bytecode then re-applies it, double-counting.  The catch block
+ * must observe `committed` at the right value. */
+VAR committed = 0;
+FUNCTION div_rollback() {
+    VAR i = 0;
+    VAR d = 5;
+    WHILE i < 200 {
+        committed = committed + 1;     // GSTORE before the DIV guard
+        i = i + 1;                     // SSTORE before the DIV guard
+        IF i == 100 { d = 0; }
+        VAR x = 10 / d;                // div-by-zero on the iter where d==0
+    }
+}
+TRY { div_rollback(); } CATCH (e) {}
+/* Bytecode-only result: the loop runs iters 1..100 (raising on
+ * iter 100 where d becomes 0), so committed == 100.  A buggy rollback
+ * that fails to restore the global on the trace's IF-guard side-exit
+ * would over-count: trace's GSTORE leaks past the exit, then bytecode
+ * re-runs the iter and increments again. */
+print(committed);                       // 100
+
+/* Phase 4.1: traces_evicted is a stat surfaced by jit.stats().  Just
+ * confirm it's reachable and zero in this test (we don't push enough
+ * distinct loops to trigger eviction). */
+print(jit.stats().traces_evicted);     // 0
+
 print("DONE");

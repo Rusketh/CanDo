@@ -91,6 +91,13 @@ CANDO_API bool cando_hot_hit(CandoHotTable *t, const u8 *pc);
  * aborts. */
 CANDO_API void cando_hot_blacklist(CandoHotTable *t, const u8 *pc);
 
+/* cando_hot_unblacklist -- clear the blacklist bit for `pc` and
+ * reset its counter so a subsequent run can re-trigger recording.
+ * No-op if `pc` is unknown.  Used by the trace cache when an LRU
+ * entry is evicted -- the slot is gone, but the loop may still be
+ * worth re-recording if it goes hot again. */
+CANDO_API void cando_hot_unblacklist(CandoHotTable *t, const u8 *pc);
+
 /* cando_hot_count -- read the current count for `pc` (0 if absent). */
 CANDO_API u32  cando_hot_count(const CandoHotTable *t, const u8 *pc);
 

@@ -1,7 +1,5 @@
 /*
- * jit/jit.c -- CandoJit lifecycle + recorder.
- *
- * Phase 3.3a recorder body.  See jit.h for the surface.
+ * jit/jit.c -- CandoJit lifecycle, recorder, and IR-interpreter.
  *
  * The recorder lives inside the dispatch loop: on every backedge
  * (OP_LOOP) the dispatch handler calls cando_jit_hot_hit; when the
@@ -11,12 +9,20 @@
  * opcode's stack effect on its shadow stack_map.  Recording closes
  * cleanly when ip lands back at start_pc; otherwise it aborts.
  *
- * Recordable opcodes in v1: OP_CONST (numbers only),
- * OP_LOAD_LOCAL / OP_STORE_LOCAL / OP_DEF_LOCAL, OP_ADD / OP_SUB /
- * OP_MUL, OP_LOOP (the close).  Anything else aborts.  Recording
- * across function boundaries is not supported yet -- if the recorded
- * code calls into another frame, the recorder aborts on the first
- * opcode in the callee.
+ * Recordable opcodes (numeric-typed v1):
+ *   - constants:  OP_NULL, OP_TRUE, OP_FALSE, OP_CONST (numbers)
+ *   - locals:     OP_LOAD_LOCAL, OP_STORE_LOCAL, OP_DEF[_CONST]_LOCAL
+ *   - globals:    OP_LOAD_GLOBAL, OP_STORE_GLOBAL, OP_DEF[_CONST]_GLOBAL
+ *   - arithmetic: OP_ADD, OP_SUB, OP_MUL, OP_DIV (snapshot-guarded), OP_NEG
+ *   - compares:   OP_EQ, OP_NEQ, OP_LT, OP_LEQ, OP_GT, OP_GEQ
+ *   - branches:   OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE (bool only)
+ *   - control:    OP_JUMP, OP_LOOP, OP_LOOP_MARK, OP_LOOP_END
+ *   - iteration:  OP_FOR_NEXT (keys + values modes)
+ *   - misc:       OP_POP
+ *
+ * Anything else aborts the trace.  Recording across function
+ * boundaries is not supported -- a frame change during recording
+ * triggers an abort.
  */
 
 #include "jit.h"
@@ -38,6 +44,10 @@
 /* The CandoJit pointer for `vm`.  All entry points take a CandoVM*
  * so that recorder code can introspect the VM state cheaply. */
 static CandoJit *jit_of(struct CandoVM *vm) { return vm ? vm->jit : NULL; }
+
+/* Release inline-trace storage; defined later but used by
+ * cando_recorder_finish for LRU eviction. */
+static void trace_release_storage(CandoTrace *t);
 
 /* Stack-slot index for a CandoValue pointer into vm->stack[]. */
 static u32 slot_index(const struct CandoVM *vm, const CandoValue *p) {
@@ -84,6 +94,8 @@ void cando_recorder_init(CandoRecorder *r) {
     r->stack_map            = NULL;
     r->stack_map_cap        = 0;
     r->first_load           = NULL;
+    r->first_load_global    = NULL;
+    r->first_load_global_cap = 0;
     r->pending_snap         = NULL;
     r->pending_snap_count   = 0;
     r->pending_snap_cap     = 0;
@@ -107,13 +119,16 @@ void cando_recorder_destroy(CandoRecorder *r) {
     cando_trace_ir_destroy(&r->ir);
     cando_free(r->stack_map);
     cando_free(r->first_load);
+    cando_free(r->first_load_global);
     cando_free(r->pending_snap);
     cando_free(r->staging_snapshots);
     cando_free(r->staging_snap_entries);
-    r->stack_map         = NULL;
-    r->stack_map_cap     = 0;
-    r->first_load        = NULL;
-    r->pending_snap      = NULL;
+    r->stack_map              = NULL;
+    r->stack_map_cap          = 0;
+    r->first_load             = NULL;
+    r->first_load_global      = NULL;
+    r->first_load_global_cap  = 0;
+    r->pending_snap           = NULL;
     r->pending_snap_cap  = 0;
     r->staging_snapshots = NULL;
     r->staging_snapshot_cap = 0;
@@ -140,12 +155,16 @@ static void rec_ensure_stack_map(CandoRecorder *r, u32 want) {
 }
 
 /* Append a snapshot entry to the recorder's pending list.  Skip if
- * the slot already has an entry (the FIRST SSTORE in this iteration
- * captured the right pre-iter value; subsequent SSTOREs to the same
- * slot are stale and shouldn't overwrite it). */
-static void rec_pending_snap_add(CandoRecorder *r, u32 slot, IRRef irref) {
+ * (kind, key) already has an entry: the FIRST store in this iter
+ * captured the right pre-iter value; subsequent stores are stale.
+ *
+ * `kind` is SNAP_SLOT (key = frame-relative slot) or SNAP_GLOBAL
+ * (key = trace IR const-pool index of the name string). */
+static void rec_pending_snap_add(CandoRecorder *r, CandoSnapKind kind,
+                                 u32 key, IRRef irref) {
     for (u32 i = 0; i < r->pending_snap_count; i++) {
-        if (r->pending_snap[i].slot == slot) return;
+        if (r->pending_snap[i].kind == kind &&
+            r->pending_snap[i].key  == key) return;
     }
     if (r->pending_snap_count >= r->pending_snap_cap) {
         u32 nc = r->pending_snap_cap ? r->pending_snap_cap * 2 : 8;
@@ -153,9 +172,24 @@ static void rec_pending_snap_add(CandoRecorder *r, u32 slot, IRRef irref) {
                                         sizeof(CandoSnapEntry) * nc);
         r->pending_snap_cap = nc;
     }
-    r->pending_snap[r->pending_snap_count].slot  = slot;
+    r->pending_snap[r->pending_snap_count].kind  = (u8)kind;
+    r->pending_snap[r->pending_snap_count].key   = key;
     r->pending_snap[r->pending_snap_count].irref = irref;
     r->pending_snap_count++;
+}
+
+/* Grow the recorder's first_load_global table to cover at least
+ * `want` const-pool entries.  New cells are zero-initialised so a
+ * never-loaded global reads as IRREF_NIL. */
+static void rec_ensure_first_load_global(CandoRecorder *r, u32 want) {
+    if (want <= r->first_load_global_cap) return;
+    u32 nc = r->first_load_global_cap ? r->first_load_global_cap * 2 : 8;
+    while (nc < want) nc *= 2;
+    r->first_load_global = cando_realloc(r->first_load_global,
+                                         sizeof(IRRef) * nc);
+    memset(r->first_load_global + r->first_load_global_cap, 0,
+           sizeof(IRRef) * (nc - r->first_load_global_cap));
+    r->first_load_global_cap = nc;
 }
 
 /* Build a CandoSnapshot from the current pending entries.  Stores
@@ -204,13 +238,13 @@ void cando_recorder_abort(struct CandoVM *vm, const char *reason) {
     CandoJit *j = jit_of(vm);
     if (!j) return;
     CandoRecorder *r = &j->recorder;
-    if (!r->active) {
-        /* Stub-style abort (Phase 3.2 leftover entry point) -- still
-         * record the reason so jit.stats() shows it. */
-    } else {
+    if (r->active) {
         r->active = false;
         cando_trace_ir_reset(&r->ir);
     }
+    /* Always bump trace_aborts and record `reason` so jit.stats()
+     * reflects the abort even if the recorder wasn't active (a
+     * spurious abort call from a malformed trigger path). */
     r->trace_aborts++;
     if (reason) {
         size_t n = strlen(reason);
@@ -254,6 +288,11 @@ void cando_recorder_begin(struct CandoVM *vm, const u8 *pc) {
     /* Zero the active prefix so SLOADs fire on first read. */
     memset(r->stack_map,  0, sizeof(IRRef) * r->stack_map_cap);
     memset(r->first_load, 0, sizeof(IRRef) * r->stack_map_cap);
+    /* Phase 4.1: drop the previous trace's first_load_global table
+     * (the IR const-pool indices are per-trace). */
+    if (r->first_load_global_cap > 0)
+        memset(r->first_load_global, 0,
+               sizeof(IRRef) * r->first_load_global_cap);
 
     /* Reset Phase 4 staging.  pending_snap regrows lazily; the
      * staging pools reset their counts so the next trace starts with
@@ -396,40 +435,48 @@ static void cando_recorder_finish(struct CandoVM *vm) {
      * iterations 2+ (Phase 5 LICM v1). */
     mark_loop_invariants(&r->ir);
 
-    /* Cache the trace.  Drop on overflow rather than evicting --
-     * Phase 3.3 just demonstrates the pipeline; eviction is Phase 4. */
+    /* Pick a slot to receive the new trace.  When the cache isn't
+     * full we just append; when full we evict the approximate-LRU
+     * entry (smallest last_used).  The evicted PC is unblacklisted
+     * so a subsequent hot run can re-record it -- otherwise the loop
+     * would silently never re-JIT after eviction. */
+    CandoTrace *t;
     if (j->trace_count < CANDO_JIT_MAX_TRACES) {
-        CandoTrace *t = &j->traces[j->trace_count++];
-        /* Move the IR (transfer ownership): copy the struct by
-         * value; the pointers inside (ir, constants) move with it.
-         * Re-init the recorder's IR so subsequent traces start fresh. */
-        t->ir         = r->ir;
-        t->start_pc   = r->start_pc;
-        t->id         = j->next_trace_id++;
-        t->values_buf = NULL;   /* lazy-allocated by cando_trace_run */
-        t->values_cap = 0;
-        /* Transfer Phase 4 staging snapshot pool. */
-        t->snapshots         = r->staging_snapshots;
-        t->snapshot_count    = r->staging_snapshot_count;
-        t->snapshot_cap      = r->staging_snapshot_cap;
-        t->snap_entries      = r->staging_snap_entries;
-        t->snap_entry_count  = r->staging_snap_entry_count;
-        t->snap_entry_cap    = r->staging_snap_entry_cap;
-        r->staging_snapshots         = NULL;
-        r->staging_snapshot_count    = 0;
-        r->staging_snapshot_cap      = 0;
-        r->staging_snap_entries      = NULL;
-        r->staging_snap_entry_count  = 0;
-        r->staging_snap_entry_cap    = 0;
-        cando_trace_ir_init(&r->ir);
-        r->traces_compiled++;
-        r->active = false;
+        t = &j->traces[j->trace_count++];
     } else {
-        /* Cache full -- the IR-interpreter would never see this
-         * trace, so logging it as compiled is misleading.  Treat
-         * as an abort with a distinct reason so users notice. */
-        cando_recorder_abort(vm, "trace cache full");
+        u32 lru = 0;
+        for (u32 i = 1; i < j->trace_count; i++)
+            if (j->traces[i].last_used < j->traces[lru].last_used) lru = i;
+        t = &j->traces[lru];
+        cando_hot_unblacklist(&j->hot, t->start_pc);
+        trace_release_storage(t);
+        j->traces_evicted++;
     }
+    /* Move the IR (transfer ownership): copy the struct by value;
+     * the pointers inside (ir, constants) move with it.  Re-init
+     * the recorder's IR so subsequent traces start fresh. */
+    t->ir         = r->ir;
+    t->start_pc   = r->start_pc;
+    t->id         = j->next_trace_id++;
+    t->last_used  = j->next_use_tick++;
+    t->values_buf = NULL;   /* lazy-allocated by cando_trace_run */
+    t->values_cap = 0;
+    /* Transfer Phase 4 staging snapshot pool. */
+    t->snapshots         = r->staging_snapshots;
+    t->snapshot_count    = r->staging_snapshot_count;
+    t->snapshot_cap      = r->staging_snapshot_cap;
+    t->snap_entries      = r->staging_snap_entries;
+    t->snap_entry_count  = r->staging_snap_entry_count;
+    t->snap_entry_cap    = r->staging_snap_entry_cap;
+    r->staging_snapshots         = NULL;
+    r->staging_snapshot_count    = 0;
+    r->staging_snapshot_cap      = 0;
+    r->staging_snap_entries      = NULL;
+    r->staging_snap_entry_count  = 0;
+    r->staging_snap_entry_cap    = 0;
+    cando_trace_ir_init(&r->ir);
+    r->traces_compiled++;
+    r->active = false;
 }
 
 /* ============================================================ */
@@ -457,7 +504,8 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
     CandoRecorder *r = &j->recorder;
 
     /* Bail if we've left the recording frame (function call/return
-     * during recording).  Phase 3.3b will inline calls. */
+     * during recording).  Call inlining is a future phase; for now
+     * any frame change aborts the trace. */
     if (vm->frame_count != r->frame_count_at_start) {
         cando_recorder_abort(vm, "recording crossed a frame boundary");
         return;
@@ -565,6 +613,12 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             }
             IRRef k = cando_ir_const(&r->ir, cando_value_copy(name_val));
             IRRef e = cando_ir_emit(&r->ir, IR_GLOAD, IRT_NUM, 0, k, 0);
+            /* Phase 4.1: capture the FIRST GLOAD per name in this iter
+             * so a subsequent GSTORE can snapshot the pre-iter value. */
+            u32 ki_load = IRREF_KIDX(k);
+            rec_ensure_first_load_global(r, ki_load + 1);
+            if (r->first_load_global[ki_load] == IRREF_NIL)
+                r->first_load_global[ki_load] = e;
             rec_push(r, e, sp);
             break;
         }
@@ -603,6 +657,17 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                 return;
             }
             IRRef k = cando_ir_const(&r->ir, cando_value_copy(name_val));
+            /* Phase 4.1: snapshot pre-iter global value if a GLOAD has
+             * already been recorded for this name in the current iter.
+             * Without a prior GLOAD the global is bytecode-overwriteable
+             * and doesn't need rollback (just like SSTORE without prior
+             * SLOAD). */
+            u32 ki_store = IRREF_KIDX(k);
+            if (ki_store < r->first_load_global_cap &&
+                r->first_load_global[ki_store] != IRREF_NIL) {
+                rec_pending_snap_add(r, SNAP_GLOBAL, ki_store,
+                                     r->first_load_global[ki_store]);
+            }
             cando_ir_emit(&r->ir, IR_GSTORE, IRT_VOID, IRF_PINNED, k, top);
             break;
         }
@@ -647,7 +712,8 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
              * are bytecode-overwriteable and don't need rollback. */
             if (abs < r->stack_map_cap) {
                 if (r->first_load[abs] != IRREF_NIL)
-                    rec_pending_snap_add(r, slot, r->first_load[abs]);
+                    rec_pending_snap_add(r, SNAP_SLOT, slot,
+                                         r->first_load[abs]);
                 r->stack_map[abs] = top;
             }
             cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED, slot, top);
@@ -935,7 +1001,8 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                 /* Phase 4: capture pre-iter idx for rollback.  See the
                  * note on OP_*_LOCAL above. */
                 if (r->first_load[abs_idx] != IRREF_NIL)
-                    rec_pending_snap_add(r, rel_idx, r->first_load[abs_idx]);
+                    rec_pending_snap_add(r, SNAP_SLOT, rel_idx,
+                                         r->first_load[abs_idx]);
                 r->stack_map[abs_idx] = next_ir;
             }
             break;
@@ -959,10 +1026,28 @@ CandoJit *cando_jit_create(void) {
     CandoJit *j = cando_alloc(sizeof(CandoJit));
     cando_hot_table_init(&j->hot, 0);
     cando_recorder_init(&j->recorder);
-    j->traces        = cando_alloc(sizeof(CandoTrace) * CANDO_JIT_MAX_TRACES);
-    j->trace_count   = 0;
-    j->next_trace_id = 1;
+    j->traces         = cando_alloc(sizeof(CandoTrace) * CANDO_JIT_MAX_TRACES);
+    j->trace_count    = 0;
+    j->next_trace_id  = 1;
+    j->next_use_tick  = 1;
+    j->traces_evicted = 0;
     return j;
+}
+
+static void trace_release_storage(CandoTrace *t) {
+    if (!t) return;
+    cando_trace_ir_destroy(&t->ir);
+    cando_free(t->values_buf);
+    cando_free(t->snapshots);
+    cando_free(t->snap_entries);
+    t->values_buf      = NULL;
+    t->values_cap      = 0;
+    t->snapshots       = NULL;
+    t->snapshot_count  = 0;
+    t->snapshot_cap    = 0;
+    t->snap_entries    = NULL;
+    t->snap_entry_count = 0;
+    t->snap_entry_cap   = 0;
 }
 
 void cando_jit_destroy(CandoJit *j) {
@@ -970,12 +1055,8 @@ void cando_jit_destroy(CandoJit *j) {
     cando_hot_table_destroy(&j->hot);
     cando_recorder_destroy(&j->recorder);
     if (j->traces) {
-        for (u32 i = 0; i < j->trace_count; i++) {
-            cando_trace_ir_destroy(&j->traces[i].ir);
-            cando_free(j->traces[i].values_buf);
-            cando_free(j->traces[i].snapshots);
-            cando_free(j->traces[i].snap_entries);
-        }
+        for (u32 i = 0; i < j->trace_count; i++)
+            trace_release_storage(&j->traces[i]);
         cando_free(j->traces);
     }
     cando_free(j);
@@ -989,9 +1070,40 @@ CandoTrace *cando_jit_find_trace(struct CandoVM *vm, const u8 *pc) {
     CandoJit *j = jit_of(vm);
     if (!j || !pc) return NULL;
     for (u32 i = 0; i < j->trace_count; i++) {
-        if (j->traces[i].start_pc == pc) return &j->traces[i];
+        if (j->traces[i].start_pc == pc) {
+            j->traces[i].last_used = j->next_use_tick++;
+            return &j->traces[i];
+        }
     }
     return NULL;
+}
+
+/* Walk a guard's snapshot and restore each captured slot/global to
+ * its pre-iter value.  No-op when snap_idx is 0 ("no rollback needed",
+ * e.g. a guard at the head of an iteration before any store). */
+static void trace_replay_snapshot(struct CandoVM *vm, CandoTrace *t,
+                                  TraceVal *vals, CandoValue *frame_slots,
+                                  u16 snap_idx) {
+    if (snap_idx == 0 || snap_idx > t->snapshot_count) return;
+    const CandoSnapshot *s = &t->snapshots[snap_idx - 1];
+    for (u32 e = 0; e < s->entry_count; e++) {
+        const CandoSnapEntry *en = &t->snap_entries[s->entry_offset + e];
+        CandoValue restored = cando_number(vals[en->irref].d);
+        if (en->kind == SNAP_SLOT) {
+            frame_slots[en->key] = restored;
+        } else {
+            /* SNAP_GLOBAL: en->key is a const-pool index naming the
+             * global.  Best-effort write back; const-protected globals
+             * silently skip (the guard fail will surface the error
+             * via the bytecode interpreter on the next iteration). */
+            CandoValue name = cando_ir_get_const(&t->ir,
+                                                 IRREF_K(en->key));
+            if (cando_is_string(name)) {
+                cando_vm_set_global(vm, cando_as_string(name)->data,
+                                    restored, false);
+            }
+        }
+    }
 }
 
 CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
@@ -1023,7 +1135,15 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
      *
      * IR refs are 1-based; ir[0] is the IR_NOP sentinel and is
      * skipped.  Constant-pool refs (high bit set) are read directly
-     * from the trace's constants[] array. */
+     * from the trace's constants[] array.
+     *
+     * `cur_snap` tracks the most recent guard's snapshot index.  Any
+     * side-exit (bad type, runtime check failure) replays this
+     * snapshot before returning, so iteration-local stores don't
+     * leak past the exit.  The recorder emits guards before any
+     * potentially-failing op, so cur_snap covers everything that
+     * runs between guards. */
+    u16 cur_snap = 0;
     for (u32 i = 1; i < t->ir.ir_count; i++) {
         const IRIns *in = &t->ir.ir[i];
 
@@ -1051,13 +1171,17 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
             case IR_KNULL:
                 /* No representable double for null; if the trace
                  * tries to use this, treat as bad type. */
+                trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
                 return TRACE_BAD_TYPE;
 
             case IR_SLOAD: {
                 /* op1 is the FRAME-RELATIVE slot index. */
                 u32 slot = in->op1;
                 CandoValue v = frame_slots[slot];
-                if (!cando_is_number(v)) return TRACE_BAD_TYPE;
+                if (!cando_is_number(v)) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
                 vals[i].d = cando_as_number(v);
                 break;
             }
@@ -1075,11 +1199,14 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                 /* The recorder always emits a snapshot-protected
                  * IR_GUARD_TRUE on (b != 0) immediately before this
                  * IR_DIV (see OP_DIV in cando_recorder_observe).  This
-                 * runtime check is a defensive backstop only; if it
-                 * ever fires, no rollback is performed, but in
-                 * practice it shouldn't be reachable. */
+                 * runtime check is a defensive backstop only; the
+                 * preceding guard sets cur_snap so a fall-through
+                 * here still rolls back cleanly. */
                 f64 d = vals[in->op2].d;
-                if (d == 0.0) return TRACE_GUARD_FAILED;
+                if (d == 0.0) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_GUARD_FAILED;
+                }
                 vals[i].d = vals[in->op1].d / d;
                 break;
             }
@@ -1101,63 +1228,62 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                  * always numeric inside the trace by construction. */
                 break;
             case IR_GUARD_TRUE:
+                /* Update cur_snap whether the guard fires or not, so
+                 * subsequent side-exits (e.g. AREF bad-type) replay
+                 * the snapshot captured at this guard. */
+                cur_snap = (u16)in->op2;
                 if (vals[in->op1].d == 0.0) {
-                    /* Phase 4: roll back any iteration-local SSTOREs
-                     * via the guard's snapshot (op2 is a 1-based
-                     * snapshot index; 0 means "no rollback needed"). */
-                    if (in->op2 != 0 && in->op2 <= t->snapshot_count) {
-                        const CandoSnapshot *s = &t->snapshots[in->op2 - 1];
-                        for (u32 e = 0; e < s->entry_count; e++) {
-                            const CandoSnapEntry *en =
-                                &t->snap_entries[s->entry_offset + e];
-                            frame_slots[en->slot] =
-                                cando_number(vals[en->irref].d);
-                        }
-                    }
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
                     return TRACE_GUARD_FAILED;
                 }
                 break;
             case IR_GUARD_FALSE:
+                cur_snap = (u16)in->op2;
                 if (vals[in->op1].d != 0.0) {
-                    if (in->op2 != 0 && in->op2 <= t->snapshot_count) {
-                        const CandoSnapshot *s = &t->snapshots[in->op2 - 1];
-                        for (u32 e = 0; e < s->entry_count; e++) {
-                            const CandoSnapEntry *en =
-                                &t->snap_entries[s->entry_offset + e];
-                            frame_slots[en->slot] =
-                                cando_number(vals[en->irref].d);
-                        }
-                    }
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
                     return TRACE_GUARD_FAILED;
                 }
                 break;
             case IR_GUARD_OBJ:
             case IR_GUARD_STR:
-                /* Object/string guards land in Phase 3.4b together
-                 * with HLOAD/HREF.  v1 traces are numeric-only. */
+                /* Object/string guards land in a future phase together
+                 * with full HLOAD/HREF support.  v1 traces are
+                 * numeric-only; reaching one is a malformed-IR bug. */
+                trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
                 return TRACE_RANGE_ERROR;
 
             case IR_GLOAD: {
                 /* op1: const-pool ref of the name string. */
                 CandoValue name = cando_ir_get_const(&t->ir, in->op1);
-                if (!cando_is_string(name)) return TRACE_RANGE_ERROR;
+                if (!cando_is_string(name)) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_RANGE_ERROR;
+                }
                 CandoValue out;
                 if (!cando_vm_get_global(vm, cando_as_string(name)->data,
-                                          &out))
+                                          &out) ||
+                    !cando_is_number(out)) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
                     return TRACE_BAD_TYPE;
-                if (!cando_is_number(out)) return TRACE_BAD_TYPE;
+                }
                 vals[i].d = cando_as_number(out);
                 break;
             }
             case IR_GSTORE: {
                 /* op1: const-pool ref of name; op2: value IRRef. */
                 CandoValue name = cando_ir_get_const(&t->ir, in->op1);
-                if (!cando_is_string(name)) return TRACE_RANGE_ERROR;
+                if (!cando_is_string(name)) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_RANGE_ERROR;
+                }
                 if (!cando_vm_set_global(vm,
                                           cando_as_string(name)->data,
                                           cando_number(vals[in->op2].d),
-                                          false))
-                    return TRACE_BAD_TYPE;  /* const-protected */
+                                          false)) {
+                    /* const-protected global -- side-exit. */
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
                 break;
             }
             case IR_HLOAD_SLOT: {
@@ -1170,9 +1296,15 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                  * the trace -- LICM hoists the resolution. */
                 u32 slot = in->op1;
                 CandoValue src = frame_slots[slot];
-                if (!cando_is_object(src)) return TRACE_BAD_TYPE;
+                if (!cando_is_object(src)) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
                 CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(src));
-                if (!arr || arr->kind != OBJ_ARRAY) return TRACE_BAD_TYPE;
+                if (!arr || arr->kind != OBJ_ARRAY) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
                 vals[i].p = arr;
                 break;
             }
@@ -1199,9 +1331,11 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                 CANDO_ASSERT(arr && arr->kind == OBJ_ARRAY);
                 u32 idx = (u32)vals[in->op2].d;
                 CdoValue cv = cdo_null();
-                if (!cdo_array_rawget_idx(arr, idx, &cv))
+                if (!cdo_array_rawget_idx(arr, idx, &cv) ||
+                    !cdo_is_number(cv)) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
                     return TRACE_BAD_TYPE;
-                if (!cdo_is_number(cv)) return TRACE_BAD_TYPE;
+                }
                 vals[i].d = cv.as.number;
                 break;
             }
@@ -1211,11 +1345,14 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                 return TRACE_LOOP_DONE;
 
             default:
+                trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
                 return TRACE_RANGE_ERROR;
         }
     }
 
-    /* Walked off the end without an IR_LOOP: malformed trace. */
+    /* Walked off the end without an IR_LOOP: malformed trace.  Roll
+     * back any partial stores so the VM stays coherent. */
+    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
     return TRACE_RANGE_ERROR;
 }
 
