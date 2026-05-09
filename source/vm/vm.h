@@ -99,6 +99,12 @@ typedef struct CandoVM CandoVM;
 
 typedef int (*CandoNativeFn)(CandoVM *vm, int argc, CandoValue *args);
 
+/* JIT fast-path signature for f64 -> f64 natives (math.sqrt, etc).
+ * Registered via cando_vm_register_fast_native_f1; if present, the JIT
+ * recorder emits IR_CALL_F1 instead of going through the slow native
+ * dispatch path. */
+typedef double (*CandoFastFn1)(double);
+
 /* IS_NATIVE_FN -- true when a value is a native-function sentinel.
  * NATIVE_INDEX -- extract 0-based index from a native-function sentinel.
  * Both forward to the accessors in value.h so the encoding stays
@@ -302,6 +308,14 @@ struct CandoVM {
     CandoNativeFn *native_fns;
     u32            native_count;
     u32            native_cap;
+
+    /* JIT fast-native registry: parallel to native_fns[].  When entry
+     * fast_natives_f1[i] is non-NULL, the JIT may emit IR_CALL_F1 for
+     * a recorded call to native i, invoking the f64 (*)(f64) directly
+     * instead of going through the VM-stack-passing convention.  Lazily
+     * grown by cando_vm_register_fast_native_f1. */
+    CandoFastFn1  *fast_natives_f1;
+    u32            fast_natives_f1_cap;
 
     /* Memory controller (may be NULL for unit tests) ------------------- */
     CandoMemCtrl  *mem;
@@ -579,6 +593,16 @@ CANDO_API u32 cando_vm_stack_depth(const CandoVM *vm);
  */
 CANDO_API bool cando_vm_register_native(CandoVM *vm, const char *name,
                                CandoNativeFn fn);
+
+/* cando_vm_register_fast_native_f1 -- register a JIT fast path for an
+ * already-registered f64->f64 native (math.sqrt etc).  Scans
+ * vm->native_fns to find `slow`; on hit, sets vm->fast_natives_f1[idx]
+ * = `fast` so a recorded call to that native compiles to IR_CALL_F1
+ * instead of the slow stack-passing dispatch.  No-op if `slow` isn't
+ * registered.  Safe to call before or after JIT enable. */
+CANDO_API void cando_vm_register_fast_native_f1(CandoVM *vm,
+                                                 CandoNativeFn slow,
+                                                 CandoFastFn1 fast);
 
 /*
  * cando_vm_add_native -- register a native without exposing it as a global.

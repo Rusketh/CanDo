@@ -166,6 +166,10 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     vm->native_fns     = NULL;
     vm->native_count   = 0;
     vm->native_cap     = 0;
+    /* JIT fast-native registry: lazily allocated on first
+     * cando_vm_register_fast_native_f1; safe to leave NULL. */
+    vm->fast_natives_f1     = NULL;
+    vm->fast_natives_f1_cap = 0;
     vm->mem            = mem;
     vm->has_error       = false;
     vm->error_val_count = 0;
@@ -301,6 +305,19 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
         child->native_fns = NULL;
     }
 
+    /* Mirror parent's fast-native registry into the child so threads
+     * see the same JIT fast paths.  Read-only after init like
+     * native_fns; child gets its own buffer for symmetry. */
+    child->fast_natives_f1_cap = parent->fast_natives_f1_cap;
+    if (parent->fast_natives_f1_cap > 0) {
+        child->fast_natives_f1 = (CandoFastFn1 *)cando_alloc(
+            parent->fast_natives_f1_cap * sizeof(CandoFastFn1));
+        for (u32 i = 0; i < parent->fast_natives_f1_cap; i++)
+            child->fast_natives_f1[i] = parent->fast_natives_f1[i];
+    } else {
+        child->fast_natives_f1 = NULL;
+    }
+
     /* NOTE: cdo_object_init() is intentionally NOT called here.
      * The parent VM's cando_vm_init() already initialized the global
      * object subsystem (intern table + meta-key globals) before any
@@ -355,6 +372,11 @@ void cando_vm_destroy(CandoVM *vm) {
     vm->native_fns   = NULL;
     vm->native_count = 0;
     vm->native_cap   = 0;
+
+    /* Free the JIT fast-native registry; each VM owns its own buffer. */
+    cando_free(vm->fast_natives_f1);
+    vm->fast_natives_f1     = NULL;
+    vm->fast_natives_f1_cap = 0;
 
     /* Release eval results. */
     for (u32 i = 0; i < vm->eval_result_count; i++) {
@@ -865,6 +887,29 @@ bool cando_vm_register_native(CandoVM *vm, const char *name,
     CandoValue sentinel = cando_number(-(f64)(idx + 1));
     cando_vm_set_global(vm, name, sentinel, true);
     return true;
+}
+
+void cando_vm_register_fast_native_f1(CandoVM *vm, CandoNativeFn slow,
+                                       CandoFastFn1 fast) {
+    if (!vm || !slow || !fast) return;
+    /* Find slow's index in vm->native_fns. */
+    u32 idx = vm->native_count;
+    for (u32 i = 0; i < vm->native_count; i++) {
+        if (vm->native_fns[i] == slow) { idx = i; break; }
+    }
+    if (idx == vm->native_count) return;  /* unknown native; silently skip */
+
+    /* Grow fast_natives_f1 to cover idx; new cells are NULL. */
+    if (idx >= vm->fast_natives_f1_cap) {
+        u32 nc = vm->fast_natives_f1_cap ? vm->fast_natives_f1_cap * 2 : 16;
+        while (idx >= nc) nc *= 2;
+        vm->fast_natives_f1 = (CandoFastFn1 *)cando_realloc(
+            vm->fast_natives_f1, nc * sizeof(CandoFastFn1));
+        for (u32 i = vm->fast_natives_f1_cap; i < nc; i++)
+            vm->fast_natives_f1[i] = NULL;
+        vm->fast_natives_f1_cap = nc;
+    }
+    vm->fast_natives_f1[idx] = fast;
 }
 
 CandoValue cando_vm_add_native(CandoVM *vm, CandoNativeFn fn) {

@@ -157,7 +157,16 @@ typedef enum {
                               value to vm->globals.  Side-exits if the
                               global is const-protected. */
 
-    /* ===== Band 6: Trace control ======================================== */
+    /* ===== Band 6: Native calls ========================================= */
+    IR_CALL_F1,            /* op1: u32 fast-native index (NOT an IRRef --
+                              direct lookup into vm->jit->fast_natives[]).
+                              op2: numeric IRRef (the single argument).
+                              Returns IRT_NUM.  At trace_run time invokes
+                              the registered f64 (*)(f64) function pointer
+                              directly -- no VM-stack-passing overhead.
+                              Loop-invariant when its argument is.       */
+
+    /* ===== Band 7: Trace control ======================================== */
     IR_LOOP,               /* head-of-loop marker; the trace closes here    */
 
     IR__COUNT

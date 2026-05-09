@@ -160,6 +160,24 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *trace,
                                  bool skip_invariant);
 
 /* -----------------------------------------------------------------------
+ * Phase 4.2 stack-aux packing: one u32 per stack slot tracks
+ * non-numeric values the recorder cares about.
+ * --------------------------------------------------------------------- */
+typedef enum {
+    AUX_NONE          = 0,   /* numeric / use stack_map[abs] as IRRef    */
+    AUX_OBJECT_GLOBAL = 1,   /* slot holds a global object; data = trace
+                                IR const-pool index of the global name
+                                (so we can re-look-it-up at trace-run
+                                time if needed)                         */
+    AUX_FAST_NATIVE   = 2,   /* slot holds a JIT fast-native function
+                                pointer; data = vm->native_fns index    */
+} CandoStackAuxKind;
+
+#define CANDO_AUX_KIND(a)        ((CandoStackAuxKind)((a) & 0xFu))
+#define CANDO_AUX_DATA(a)        ((u32)((a) >> 4))
+#define CANDO_AUX_PACK(k, d)     ((u32)((u32)(k) | ((u32)(d) << 4)))
+
+/* -----------------------------------------------------------------------
  * CandoRecorder -- recording state.
  *
  * `active` flips to true on cando_recorder_begin (called from
@@ -200,6 +218,16 @@ typedef struct CandoRecorder {
      * alongside the IR's const_count. */
     IRRef                *first_load_global;
     u32                   first_load_global_cap;
+
+    /* Phase 4.2: parallel-to-stack_map "aux" tag for slots holding
+     * non-numeric values the recorder tracks (object globals, fast
+     * native function pointers).  When aux[abs] is non-zero the
+     * recorder treats stack_map[abs] as IRREF_NIL.  Layout:
+     *   low 4 bits  = CandoStackAuxKind
+     *   high 28 bits = kind-specific payload (e.g. const-pool name
+     *   index for OBJECT_GLOBAL, native index for FAST_NATIVE).
+     * Shares stack_map_cap. */
+    u32                  *stack_aux;
     /* Pending snapshot entries -- accumulated as SSTOREs happen,
      * copied into the staging snapshot pool on each guard emit. */
     CandoSnapEntry       *pending_snap;

@@ -56,12 +56,30 @@ static u32 slot_index(const struct CandoVM *vm, const CandoValue *p) {
 
 /* Push an IRRef onto the recorder's shadow stack.  Asserts in debug
  * builds that the recorder's view stays consistent with vm->stack_top
- * after the next op executes; release builds let it slide. */
+ * after the next op executes; release builds let it slide.
+ *
+ * Clears stack_aux[sp_after] so any leftover Phase 4.2 aux tag from
+ * an earlier non-numeric value at this slot doesn't leak into a
+ * fresh numeric IRRef. */
 static void rec_push(CandoRecorder *r, IRRef ref, u32 sp_after) {
     /* sp_after is the slot that will hold the value once the
      * interpreter executes the op; rec is being called BEFORE the
      * op runs, so we write to sp_after directly. */
-    if (sp_after < CANDO_STACK_MAX) r->stack_map[sp_after] = ref;
+    if (sp_after < r->stack_map_cap) {
+        r->stack_map[sp_after] = ref;
+        r->stack_aux[sp_after] = 0;
+    }
+}
+
+/* Push a non-numeric "aux" tag at sp_after, marking the slot as
+ * recorder-tracked but not represented by any IR.  Subsequent ops
+ * that consume the slot consult stack_aux[sp_after] first. */
+static void rec_push_aux(CandoRecorder *r, u32 sp_after,
+                         CandoStackAuxKind kind, u32 data) {
+    if (sp_after < r->stack_map_cap) {
+        r->stack_map[sp_after] = IRREF_NIL;
+        r->stack_aux[sp_after] = CANDO_AUX_PACK(kind, data);
+    }
 }
 
 /* Helper: append IR_GUARD_NUM unless `ref` is already known IRT_NUM.
@@ -96,6 +114,7 @@ void cando_recorder_init(CandoRecorder *r) {
     r->first_load           = NULL;
     r->first_load_global    = NULL;
     r->first_load_global_cap = 0;
+    r->stack_aux            = NULL;
     r->pending_snap         = NULL;
     r->pending_snap_count   = 0;
     r->pending_snap_cap     = 0;
@@ -120,6 +139,7 @@ void cando_recorder_destroy(CandoRecorder *r) {
     cando_free(r->stack_map);
     cando_free(r->first_load);
     cando_free(r->first_load_global);
+    cando_free(r->stack_aux);
     cando_free(r->pending_snap);
     cando_free(r->staging_snapshots);
     cando_free(r->staging_snap_entries);
@@ -128,6 +148,7 @@ void cando_recorder_destroy(CandoRecorder *r) {
     r->first_load             = NULL;
     r->first_load_global      = NULL;
     r->first_load_global_cap  = 0;
+    r->stack_aux              = NULL;
     r->pending_snap           = NULL;
     r->pending_snap_cap  = 0;
     r->staging_snapshots = NULL;
@@ -147,10 +168,13 @@ static void rec_ensure_stack_map(CandoRecorder *r, u32 want) {
     while (nc < want) nc *= 2;
     r->stack_map  = cando_realloc(r->stack_map,  sizeof(IRRef) * nc);
     r->first_load = cando_realloc(r->first_load, sizeof(IRRef) * nc);
+    r->stack_aux  = cando_realloc(r->stack_aux,  sizeof(u32)   * nc);
     memset(r->stack_map  + r->stack_map_cap, 0,
            sizeof(IRRef) * (nc - r->stack_map_cap));
     memset(r->first_load + r->stack_map_cap, 0,
            sizeof(IRRef) * (nc - r->stack_map_cap));
+    memset(r->stack_aux  + r->stack_map_cap, 0,
+           sizeof(u32)   * (nc - r->stack_map_cap));
     r->stack_map_cap = nc;
 }
 
@@ -288,6 +312,7 @@ void cando_recorder_begin(struct CandoVM *vm, const u8 *pc) {
     /* Zero the active prefix so SLOADs fire on first read. */
     memset(r->stack_map,  0, sizeof(IRRef) * r->stack_map_cap);
     memset(r->first_load, 0, sizeof(IRRef) * r->stack_map_cap);
+    memset(r->stack_aux,  0, sizeof(u32)   * r->stack_map_cap);
     /* Phase 4.1: drop the previous trace's first_load_global table
      * (the IR const-pool indices are per-trace). */
     if (r->first_load_global_cap > 0)
@@ -391,6 +416,22 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
                 /* op2 is the loop-variant index in v1 traces. */
                 inv = false;
                 break;
+            case IR_CALL_F1: {
+                /* op1 is the native registry index (NOT an IRRef);
+                 * only op2 is an IRRef.  Invariant iff op2 is.
+                 * Registered fast natives (math.sqrt etc.) are pure
+                 * f64->f64 so hoisting is safe. */
+                IRRef arg = in->op2;
+                bool ok = true;
+                if (arg == IRREF_NIL || IRREF_IS_K(arg)) {
+                    /* arg literal -- treat as invariant. */
+                } else if (arg >= i ||
+                           !(ir->ir[arg].flags & IRF_INVARIANT)) {
+                    ok = false;
+                }
+                inv = ok;
+                break;
+            }
             default: {
                 /* Pure op: invariant iff every operand IRRef points
                  * to an invariant op.  Constant-pool refs (high bit)
@@ -600,13 +641,23 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                 cando_recorder_abort(vm, "OP_LOAD_GLOBAL with non-string name");
                 return;
             }
-            /* Probe the global at recording time -- if absent or
-             * non-numeric, the bytecode would error or push a non-num
-             * value the trace can't model.  Abort cleanly. */
+            /* Probe the global at recording time. */
             CandoValue probe;
             if (!cando_vm_get_global(vm, cando_as_string(name_val)->data,
-                                      &probe) ||
-                !cando_is_number(probe)) {
+                                      &probe)) {
+                cando_recorder_abort(vm, "OP_LOAD_GLOBAL undefined (v1)");
+                return;
+            }
+            /* Phase 4.2: object globals are allowed -- we shadow them
+             * via stack_aux so a follow-up OP_GET_FIELD can resolve
+             * a fast-native sentinel without emitting IR. */
+            if (cando_is_object(probe)) {
+                IRRef k_obj = cando_ir_const(&r->ir,
+                                              cando_value_copy(name_val));
+                rec_push_aux(r, sp, AUX_OBJECT_GLOBAL, IRREF_KIDX(k_obj));
+                break;
+            }
+            if (!cando_is_number(probe)) {
                 cando_recorder_abort(vm,
                     "OP_LOAD_GLOBAL non-numeric or undefined (v1)");
                 return;
@@ -1008,6 +1059,127 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             break;
         }
 
+        case OP_GET_FIELD: {
+            /* Phase 4.2: only trace property access on a recorder-
+             * tracked OBJECT_GLOBAL slot whose field resolves to a
+             * registered fast-native function.  Anything else aborts.
+             *
+             * The bytecode pops obj and pushes obj.field at the same
+             * sp position, so the recorder's stack effect is
+             * "consume sp-1, write to sp-1". */
+            if (sp < 1) {
+                cando_recorder_abort(vm, "OP_GET_FIELD with empty stack");
+                return;
+            }
+            u32 callee_pos = sp - 1;
+            u32 ax = r->stack_aux[callee_pos];
+            if (CANDO_AUX_KIND(ax) != AUX_OBJECT_GLOBAL) {
+                cando_recorder_abort(vm,
+                    "OP_GET_FIELD on non-tracked object (v1: globals only)");
+                return;
+            }
+            const CandoChunk *chunk = current_chunk(vm);
+            u16 ci = read_op_arg(ip);
+            if (!chunk || ci >= chunk->const_count) {
+                cando_recorder_abort(vm, "OP_GET_FIELD out of range");
+                return;
+            }
+            CandoValue field_val = chunk->constants[ci];
+            if (!cando_is_string(field_val)) {
+                cando_recorder_abort(vm, "OP_GET_FIELD with non-string field");
+                return;
+            }
+            /* Resolve obj.field at record time via the actual VM stack
+             * value -- the bytecode hasn't run yet, so vm->stack_top[-1]
+             * still holds the object the recorder shadowed. */
+            CandoValue obj_val = vm->stack_top[-1];
+            if (!cando_is_object(obj_val)) {
+                cando_recorder_abort(vm,
+                    "OP_GET_FIELD: shadowed slot is not an object");
+                return;
+            }
+            CdoObject *obj = cando_bridge_resolve(vm,
+                                                   cando_as_handle(obj_val));
+            CdoString *key = cando_bridge_intern_key(
+                                cando_as_string(field_val));
+            CdoValue raw;
+            bool got = cdo_object_get(obj, key, &raw);
+            cdo_string_release(key);
+            if (!got) {
+                cando_recorder_abort(vm,
+                    "OP_GET_FIELD: field not present at record time");
+                return;
+            }
+            CandoValue resolved = cando_bridge_to_cando(vm, raw);
+            if (!cando_is_native_fn(resolved)) {
+                cando_value_release(resolved);
+                cando_recorder_abort(vm,
+                    "OP_GET_FIELD: field is not a native function (v1)");
+                return;
+            }
+            u32 native_idx = cando_native_index(resolved);
+            cando_value_release(resolved);
+            if (native_idx >= vm->fast_natives_f1_cap ||
+                vm->fast_natives_f1[native_idx] == NULL) {
+                cando_recorder_abort(vm,
+                    "OP_GET_FIELD: native has no JIT fast path");
+                return;
+            }
+            /* Replace the OBJECT_GLOBAL aux with FAST_NATIVE.  The
+             * bytecode will pop obj and push the native sentinel at
+             * the same slot, mirrored here. */
+            rec_push_aux(r, callee_pos, AUX_FAST_NATIVE, native_idx);
+            break;
+        }
+
+        case OP_CALL: {
+            /* Phase 4.2: only the fast-native single-arg pattern is
+             * supported.  Bytecode reads u16 static_argc and applies
+             * spread_extra; for traced calls we require static_argc=1
+             * and spread_extra=0 so we don't have to model multi-
+             * return spreads inside the trace. */
+            u16 static_argc = read_op_arg(ip);
+            if (static_argc != 1 || vm->spread_extra != 0) {
+                cando_recorder_abort(vm,
+                    "OP_CALL: only static argc=1 fast natives traced");
+                return;
+            }
+            if (sp < 2) {
+                cando_recorder_abort(vm, "OP_CALL with too few stack slots");
+                return;
+            }
+            u32 callee_pos = sp - 2;     /* below the single arg slot */
+            u32 arg_pos    = sp - 1;
+            u32 ax = r->stack_aux[callee_pos];
+            if (CANDO_AUX_KIND(ax) != AUX_FAST_NATIVE) {
+                cando_recorder_abort(vm,
+                    "OP_CALL: callee is not a recorded fast native");
+                return;
+            }
+            u32 native_idx = CANDO_AUX_DATA(ax);
+            IRRef arg_ref = r->stack_map[arg_pos];
+            if (arg_ref == IRREF_NIL) {
+                cando_recorder_abort(vm,
+                    "OP_CALL: arg not in stack_map");
+                return;
+            }
+            arg_ref = ensure_num(&r->ir, arg_ref);
+            IRRef result = cando_ir_emit(&r->ir, IR_CALL_F1, IRT_NUM, 0,
+                                         (IRRef)native_idx, arg_ref);
+            /* Stack effect: callee + arg consumed, result pushed at
+             * callee_pos.  Bytecode does this via callee_slot[0]
+             * write + stack_top adjust; we mirror via rec_push. */
+            rec_push(r, result, callee_pos);
+            break;
+        }
+
+        case OP_SPREAD_RET: {
+            /* For the single-return fast-native call we trace, this
+             * adjusts spread_extra by (last_ret_count - 1) which is
+             * always 0.  No stack effect, no IR. */
+            break;
+        }
+
         default: {
             char buf[64];
             snprintf(buf, sizeof(buf), "unrecordable opcode %s",
@@ -1337,6 +1509,22 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                     return TRACE_BAD_TYPE;
                 }
                 vals[i].d = cv.as.number;
+                break;
+            }
+
+            case IR_CALL_F1: {
+                /* Fast-path single-arg native call.  op1 is the
+                 * vm->native_fns index (NOT an IRRef).  Look up the
+                 * registered f64-fast-fn pointer and invoke directly. */
+                u32 ni = in->op1;
+                if (ni >= vm->fast_natives_f1_cap ||
+                    vm->fast_natives_f1[ni] == NULL) {
+                    /* Fast-path went away (shouldn't happen at runtime;
+                     * registrations are write-once at startup) -- bail. */
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
+                vals[i].d = vm->fast_natives_f1[ni](vals[in->op2].d);
                 break;
             }
 

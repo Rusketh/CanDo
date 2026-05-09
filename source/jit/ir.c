@@ -189,6 +189,7 @@ static const char *const s_op_names[IR__COUNT] = {
     [IR_AREF]        = "IR_AREF",
     [IR_GLOAD]       = "IR_GLOAD",
     [IR_GSTORE]      = "IR_GSTORE",
+    [IR_CALL_F1]     = "IR_CALL_F1",
     [IR_LOOP]        = "IR_LOOP",
 };
 
@@ -261,6 +262,10 @@ void cando_ir_dump(const CandoTraceIR *t, FILE *out) {
         if (in->op == IR_SLOAD || in->op == IR_SSTORE ||
             in->op == IR_HLOAD_SLOT)
             format_slot(in->op1, b1, sizeof(b1));
+        else if (in->op == IR_CALL_F1)
+            /* op1 is the fast-native registry index (a raw u32),
+             * not an IRRef.  Render as nN to set it apart. */
+            snprintf(b1, sizeof(b1), "n%u", (u32)in->op1);
         else
             format_ref(in->op1, b1, sizeof(b1));
         format_ref(in->op2, b2, sizeof(b2));

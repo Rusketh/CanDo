@@ -150,4 +150,19 @@ print(committed);                       // 100
  * distinct loops to trigger eviction). */
 print(jit.stats().traces_evicted);     // 0
 
+/* Phase 4.2: tight loops calling a registered fast-native (math.sqrt)
+ * compile a trace that emits IR_CALL_F1, dispatching to libm sqrt
+ * directly without the VM-stack-passing convention.  The recorder
+ * shadows OP_LOAD_GLOBAL of the math object via stack_aux, then
+ * OP_GET_FIELD resolves "sqrt" to a fast-native at record time. */
+FUNCTION sqrt_sum() {
+    VAR s = 0;
+    FOR i IN 1 -> 200 {
+        s = s + math.sqrt(i);
+    }
+    RETURN s;
+}
+print(sqrt_sum() > 1892);              // true (sum ≈ 1892.48)
+print(sqrt_sum() < 1893);              // true
+
 print("DONE");

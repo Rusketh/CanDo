@@ -331,4 +331,18 @@ void cando_lib_math_register(CandoVM *vm)
     set_const(math_obj, "huge", HUGE_VAL);
 
     cando_vm_set_global(vm, "math", math_val, true);
+
+    /* Phase 4.2: register f64->f64 fast paths so the JIT can compile
+     * `math.sqrt(x)` and friends to a direct function-pointer call.
+     * Order doesn't matter -- the registry looks up natives by their
+     * slow C function pointer. */
+    cando_vm_register_fast_native_f1(vm, math_sqrt,  sqrt);
+    cando_vm_register_fast_native_f1(vm, math_abs,   fabs);
+    cando_vm_register_fast_native_f1(vm, math_floor, floor);
+    cando_vm_register_fast_native_f1(vm, math_ceil,  ceil);
+    cando_vm_register_fast_native_f1(vm, math_log,   log);
+    cando_vm_register_fast_native_f1(vm, math_log10, log10);
+    cando_vm_register_fast_native_f1(vm, math_exp,   exp);
+    cando_vm_register_fast_native_f1(vm, math_sinh,  sinh);
+    cando_vm_register_fast_native_f1(vm, math_cosh,  cosh);
 }
