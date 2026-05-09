@@ -44,6 +44,32 @@ struct CandoChunk;
 #define CANDO_JIT_MAX_TRACES     64u     /* completed traces stored per VM */
 
 /* -----------------------------------------------------------------------
+ * CandoSnapshot -- captured state at a guard's bytecode position.
+ *
+ * Phase 4 of docs/jit-plan.md.  Each guard records the list of slots
+ * the trace has SSTORE'd up to that point in the current iteration,
+ * along with the IRRef of each slot's first SLOAD in this iteration.
+ * On guard failure, cando_trace_run walks the snapshot, reads
+ * vals[irref].d for each entry, and writes it back to the
+ * frame slot -- effectively un-doing the trace's mid-iteration
+ * SSTOREs so the bytecode interpreter can resume from start_pc with
+ * a coherent VM state.
+ *
+ * Snapshots are owned by CandoTrace.  Entries live in a shared
+ * arena (snap_entries) so the per-snapshot header stays small.
+ * --------------------------------------------------------------------- */
+typedef struct CandoSnapEntry {
+    u32   slot;        /* frame-relative slot to restore */
+    IRRef irref;       /* IRRef whose vals[irref].d holds the pre-iter
+                          value to write back into frame_slots[slot] */
+} CandoSnapEntry;
+
+typedef struct CandoSnapshot {
+    u32 entry_offset;  /* index into CandoTrace.snap_entries[]   */
+    u32 entry_count;   /* how many entries belong to this snap   */
+} CandoSnapshot;
+
+/* -----------------------------------------------------------------------
  * TraceVal -- the IR-interpreter's per-IRRef scratch slot.
  *
  * 8 bytes wide.  Holds f64 for numeric IR ops, raw pointers for
@@ -65,11 +91,20 @@ typedef union TraceVal {
  * buffer across runs avoids per-iteration alloca/malloc overhead.
  * --------------------------------------------------------------------- */
 typedef struct CandoTrace {
-    CandoTraceIR ir;          /* SSA instructions + constant pool */
-    const u8    *start_pc;    /* head of the recorded loop */
-    u32          id;          /* monotonic per-VM trace id */
-    TraceVal    *values_buf;  /* scratch table for cando_trace_run */
-    u32          values_cap;
+    CandoTraceIR    ir;            /* SSA instructions + constant pool */
+    const u8       *start_pc;      /* head of the recorded loop */
+    u32             id;            /* monotonic per-VM trace id */
+    TraceVal       *values_buf;    /* scratch table for cando_trace_run */
+    u32             values_cap;
+    /* Snapshots (Phase 4) -- guards reference these by index via the
+     * GUARD IR op's op2 field.  An op2 of 0 means "no snapshot" (the
+     * guard predates Phase 4 or didn't need one). */
+    CandoSnapshot  *snapshots;
+    u32             snapshot_count;
+    u32             snapshot_cap;
+    CandoSnapEntry *snap_entries;
+    u32             snap_entry_count;
+    u32             snap_entry_cap;
 } CandoTrace;
 
 /* -----------------------------------------------------------------------
@@ -133,6 +168,25 @@ typedef struct CandoRecorder {
      * match CANDO_STACK_MAX at allocation time. */
     IRRef                *stack_map;
     u32                   stack_map_cap;
+    /* Phase 4: per-slot tracking of the FIRST IR_SLOAD in the current
+     * iteration.  Used by snapshot construction at guard emit time:
+     * an SSTORE'd slot's pre-iter value is recoverable from
+     * vals[first_load[slot]] inside cando_trace_run.
+     * Shares stack_map_cap. */
+    IRRef                *first_load;
+    /* Pending snapshot entries -- accumulated as SSTOREs happen,
+     * copied into the staging snapshot pool on each guard emit. */
+    CandoSnapEntry       *pending_snap;
+    u32                   pending_snap_count;
+    u32                   pending_snap_cap;
+    /* Staging snapshot pool -- grows as guards emit; transferred to
+     * the new CandoTrace in cando_recorder_finish. */
+    CandoSnapshot        *staging_snapshots;
+    u32                   staging_snapshot_count;
+    u32                   staging_snapshot_cap;
+    CandoSnapEntry       *staging_snap_entries;
+    u32                   staging_snap_entry_count;
+    u32                   staging_snap_entry_cap;
     u32                   frame_base;     /* slot index, not pointer */
     u32                   frame_count_at_start;
     /* Stats (snapshotted into CandoJitStats at read time). */

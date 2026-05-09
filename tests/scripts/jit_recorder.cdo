@@ -79,7 +79,10 @@ print(bool_store());                // expect "false", not "0"
 /* Regression: a DIV that raises in bytecode must NOT be silently
  * swallowed by the trace.  Phase 3.4a's DIV recording let prior
  * SSTOREs commit before the failing op, then bytecode resumed at
- * start_pc and skipped the error.  v1 fix: don't record DIV at all. */
+ * start_pc and skipped the error.  Phase 4 fix: emit IR_NEQ + a
+ * snapshot-protected IR_GUARD_TRUE before IR_DIV; on guard fail,
+ * iteration-local SSTOREs are rolled back and bytecode resumes
+ * cleanly so the runtime error surfaces normally. */
 FUNCTION div_zero() {
     VAR i = 0; VAR sum = 0; VAR d = 5;
     WHILE i < 200 {
