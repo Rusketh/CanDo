@@ -301,7 +301,12 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             u16 slot = read_op_arg(ip);
             u32 abs  = r->frame_base + slot;
             IRRef top = (sp > 0) ? r->stack_map[sp - 1] : IRREF_NIL;
+            if (top == IRREF_NIL) {
+                cando_recorder_abort(vm, "OP_STORE_LOCAL with empty stack_map");
+                return;
+            }
             if (abs < r->stack_map_cap) r->stack_map[abs] = top;
+            cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED, abs, top);
             break;
         }
 
@@ -311,7 +316,12 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             u16 slot = read_op_arg(ip);
             u32 abs  = r->frame_base + slot;
             IRRef top = (sp > 0) ? r->stack_map[sp - 1] : IRREF_NIL;
+            if (top == IRREF_NIL) {
+                cando_recorder_abort(vm, "OP_DEF_LOCAL with empty stack_map");
+                return;
+            }
             if (abs < r->stack_map_cap) r->stack_map[abs] = top;
+            cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED, abs, top);
             break;
         }
 

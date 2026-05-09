@@ -227,6 +227,13 @@ static void format_ref(IRRef ref, char *buf, size_t len) {
     }
 }
 
+/* Format a stack-slot operand (used by SLOAD / SSTORE for op1).
+ * Slot operands are stored as raw u32 values, not IRRefs, so they
+ * never have the IRREF_KFLAG bit set. */
+static void format_slot(IRRef raw, char *buf, size_t len) {
+    snprintf(buf, len, "s%u", (u32)raw);
+}
+
 void cando_ir_dump(const CandoTraceIR *t, FILE *out) {
     if (!t || !out) return;
 
@@ -243,7 +250,13 @@ void cando_ir_dump(const CandoTraceIR *t, FILE *out) {
     for (u32 i = 1; i < t->ir_count; i++) {
         const IRIns *in = &t->ir[i];
         char b1[16], b2[16];
-        format_ref(in->op1, b1, sizeof(b1));
+        /* SLOAD / SSTORE encode op1 as a raw slot number (not an
+         * IRRef); render as "sN" to avoid confusion with IRRefs.
+         * SSTORE's op2 IS an IRRef. */
+        if (in->op == IR_SLOAD || in->op == IR_SSTORE)
+            format_slot(in->op1, b1, sizeof(b1));
+        else
+            format_ref(in->op1, b1, sizeof(b1));
         format_ref(in->op2, b2, sizeof(b2));
         fprintf(out, "  %04u  %-4s  %-16s %-6s %-6s%s\n",
                 i,
