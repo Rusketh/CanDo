@@ -96,4 +96,14 @@ TRY {
     print("caught");                // expected
 }
 
+/* Phase 3.3c: FOR-IN over a range traces via OP_FOR_NEXT (values
+ * mode + IR_AREF).  Result must match bytecode. */
+FUNCTION sum_range() {
+    VAR sum = 0;
+    FOR i IN 1 -> 200 { sum = sum + i; }
+    RETURN sum;
+}
+print(sum_range());                 // expect 20100
+print(jit.stats().traces_compiled >= 2);  // run_clean's trace + sum_range's
+
 print("DONE");

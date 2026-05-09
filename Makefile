@@ -175,7 +175,7 @@ TEST_LEXER_SRCS    = $(LEXER_SRCS)  tests/test_lexer.c
 TEST_PARSER_SRCS   = $(PARSER_SRCS) tests/test_parser.c
 TEST_THREAD_SRCS   = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_thread.c
 TEST_SOCKUTIL_SRCS = $(CORE_SRCS) source/lib/sockutil.c tests/test_sockutil.c
-TEST_JIT_IR_SRCS   = $(CORE_SRCS) $(JIT_SRCS) source/vm/opcodes.c tests/test_jit_ir.c
+TEST_JIT_IR_SRCS   = $(CORE_SRCS) $(OBJECT_SRCS) $(VM_SRCS) $(JIT_SRCS) tests/test_jit_ir.c
 TEST_JIT_HOT_SRCS  = $(CORE_SRCS) source/jit/hot.c tests/test_jit_hot.c
 
 # ---------------------------------------------------------------------------
@@ -260,10 +260,12 @@ $(TEST_YAML_BIN): tests/test_yaml.c libcando.so
 	    -L. -lcando -Wl,-rpath,'$$ORIGIN/..' \
 	    -o $@ $(LDFLAGS)
 
-# test_jit_ir links the core layer + the JIT IR.  No VM dependency yet --
-# the IR is testable in isolation.
+# test_jit_ir now links the full VM stack because the IR-interpreter
+# (Phase 3.4a+) calls into the bridge/array layer.  Use CFLAGS_VM (no
+# -Wpedantic) to avoid spurious computed-goto warnings.
 $(TEST_JIT_IR_BIN): $(TEST_JIT_IR_SRCS)
-	$(CC) $(CFLAGS_CORE) -iquote source/jit $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS_VM) -iquote source/jit -iquote source/parser \
+	    $^ -o $@ $(LDFLAGS)
 
 # test_jit_hot only links hot.c and the core layer.  Hot-counter table
 # is intentionally orthogonal to the IR and the VM dispatch loop.

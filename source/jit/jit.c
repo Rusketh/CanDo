@@ -21,8 +21,11 @@
 
 #include "jit.h"
 #include "../vm/vm.h"
+#include "../vm/bridge.h"
 #include "../vm/opcodes.h"
 #include "../vm/chunk.h"
+#include "../object/array.h"
+#include "../object/object.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -461,6 +464,120 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             break;
         }
 
+        case OP_FOR_NEXT: {
+            /* FOR-IN / FOR-OF iterator advance.  Stack at entry:
+             *   [..., source_array, len_signed, index]
+             * with the three FOR-state values living at frame slots
+             * (sp - 3, sp - 2, sp - 1) -- always above the function's
+             * regular locals.
+             *
+             * Keys mode (len_signed < 0, FOR i IN range/array): push
+             * `index`, increment slot.  Values mode requires reading
+             * source_array[index] which needs IR_HLOAD/AREF -- the
+             * IR-interpreter doesn't support those yet so values mode
+             * aborts. */
+            if (sp < 3) {
+                cando_recorder_abort(vm, "OP_FOR_NEXT with too few state slots");
+                return;
+            }
+
+            CandoValue idx_v = vm->stack_top[-1];
+            CandoValue len_v = vm->stack_top[-2];
+            if (!cando_is_number(idx_v) || !cando_is_number(len_v)) {
+                cando_recorder_abort(vm, "OP_FOR_NEXT state non-numeric");
+                return;
+            }
+            f64 len_f  = cando_as_number(len_v);
+            bool keys  = len_f < 0.0;
+            f64 abs_len = keys ? -len_f : len_f;
+            f64 idx_f  = cando_as_number(idx_v);
+
+            /* If the runtime says this iteration is the loop-exit, the
+             * recorded trace would only contain the exit path -- no
+             * point.  Abort so the recorder can re-trigger from a
+             * later (non-exit) iteration. */
+            if (idx_f >= abs_len) {
+                cando_recorder_abort(vm, "OP_FOR_NEXT recorded at exit iter");
+                return;
+            }
+
+            /* Frame-relative slot indices for the FOR state.  sp is
+             * the number of values currently on vm->stack; the FOR
+             * state occupies the top three slots, all of which lie
+             * inside the current frame (above the function's locals). */
+            u32 abs_src      = sp - 3;
+            u32 abs_len_slot = sp - 2;
+            u32 abs_idx      = sp - 1;
+            u32 rel_src      = abs_src - r->frame_base;
+            u32 rel_len      = abs_len_slot - r->frame_base;
+            u32 rel_idx      = abs_idx - r->frame_base;
+
+            /* SLOAD the index slot.  Reuse the cached IRRef from a
+             * previous iteration's SLOAD if present (same SSA pattern
+             * as OP_LOAD_LOCAL). */
+            IRRef idx_ir = (abs_idx < r->stack_map_cap)
+                           ? r->stack_map[abs_idx] : IRREF_NIL;
+            if (idx_ir == IRREF_NIL) {
+                idx_ir = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0,
+                                       rel_idx, 0);
+                if (abs_idx < r->stack_map_cap)
+                    r->stack_map[abs_idx] = idx_ir;
+            }
+
+            /* Compute abs(len_signed).  In keys mode len_signed is
+             * always negative, so abs is -len.  We emit IR_NEG so a
+             * future optimiser can constant-fold if len is a known
+             * KNUM. */
+            IRRef len_ir = (abs_len_slot < r->stack_map_cap)
+                           ? r->stack_map[abs_len_slot] : IRREF_NIL;
+            if (len_ir == IRREF_NIL) {
+                len_ir = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0,
+                                       rel_len, 0);
+                if (abs_len_slot < r->stack_map_cap)
+                    r->stack_map[abs_len_slot] = len_ir;
+            }
+            /* Guard: this iteration must continue.  In keys mode the
+             * length is stored as -len, so the comparison threshold
+             * is -len_ir (computed via IR_NEG so a future optimiser
+             * can fold if len is a known constant).  In values mode
+             * the threshold is len_ir directly. */
+            IRRef threshold_ir = keys
+                ? cando_ir_emit(&r->ir, IR_NEG, IRT_NUM, 0, len_ir, 0)
+                : len_ir;
+            IRRef cmp_ir = cando_ir_emit(&r->ir, IR_LT, IRT_BOOL, 0,
+                                         idx_ir, threshold_ir);
+            cando_ir_emit(&r->ir, IR_GUARD_TRUE, IRT_BOOL, IRF_GUARD,
+                          cmp_ir, 0);
+
+            /* Compute the value to push:
+             *   keys mode    -> the index itself (idx_ir)
+             *   values mode  -> source[index] via IR_AREF                  */
+            IRRef pushed_ir;
+            if (keys) {
+                pushed_ir = idx_ir;
+            } else {
+                pushed_ir = cando_ir_emit(&r->ir, IR_AREF, IRT_NUM, 0,
+                                          rel_src, idx_ir);
+            }
+            /* The pushed value lands at the new top of stack (slot sp).
+             * The subsequent OP_DEF_LOCAL pulls it from stack_map[sp]
+             * and stores to the loop-variable's frame slot. */
+            rec_push(r, pushed_ir, sp);
+
+            /* Update the index slot with idx + 1. */
+            IRRef one_ir  = cando_ir_emit_knum(&r->ir, 1.0);
+            IRRef next_ir = cando_ir_emit(&r->ir, IR_ADD, IRT_NUM, 0,
+                                          idx_ir, one_ir);
+            cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED,
+                          rel_idx, next_ir);
+            if (abs_idx < r->stack_map_cap)
+                r->stack_map[abs_idx] = next_ir;
+
+            (void)abs_src; /* silence unused-warning if values-mode path
+                              doesn't need it */
+            break;
+        }
+
         default: {
             char buf[64];
             snprintf(buf, sizeof(buf), "unrecordable opcode %s",
@@ -615,6 +732,24 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t) {
                 /* Object/string guards land in Phase 3.4b together
                  * with HLOAD/HREF.  v1 traces are numeric-only. */
                 return TRACE_RANGE_ERROR;
+
+            case IR_AREF: {
+                /* op1: source-array slot (frame-relative)
+                 * op2: index IRRef (numeric)
+                 * Returns array[index] as f64. */
+                u32 slot = in->op1;
+                CandoValue src = frame_slots[slot];
+                if (!cando_is_object(src)) return TRACE_BAD_TYPE;
+                CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(src));
+                if (!arr || arr->kind != OBJ_ARRAY) return TRACE_BAD_TYPE;
+                u32 idx = (u32)vals[in->op2];
+                if (idx >= cdo_array_len(arr)) return TRACE_BAD_TYPE;
+                CdoValue cv = cdo_null();
+                cdo_array_rawget_idx(arr, idx, &cv);
+                if (!cdo_is_number(cv)) return TRACE_BAD_TYPE;
+                vals[i] = cv.as.number;
+                break;
+            }
 
             case IR_LOOP:
                 /* Successful close -- one iteration done. */
