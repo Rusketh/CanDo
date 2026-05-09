@@ -214,4 +214,29 @@ FUNCTION early_return() {
 print(early_return());                 // 1+2+...+50 = 1275
 print(jit.stats().trace_aborts >= aborts_before);  // true (>=, not strict)
 
+/* Phase 4.3 review-fix: recursion gets a dedicated abort reason
+ * rather than bouncing against the depth cap. */
+FUNCTION fib(n) {
+    IF n < 2 { RETURN n; }
+    RETURN fib(n - 1) + fib(n - 2);
+}
+VAR rec_sum = 0;
+FOR i IN 1 -> 200 { rec_sum = rec_sum + fib(5); }
+print(rec_sum);                        // 200 * 5 = 1000
+print(jit.stats().last_abort);         // "OP_CALL: recursion detected"
+
+/* Phase 4.3 review-fix: a loop inside an inlined call fast-fails
+ * with a clear abort reason instead of bouncing against the trace
+ * length cap. */
+FUNCTION inner_loop(n) {
+    VAR s = 0;
+    VAR k = 0;
+    WHILE k < n { s = s + k; k = k + 1; }
+    RETURN s;
+}
+VAR loop_sum = 0;
+FOR i IN 1 -> 200 { loop_sum = loop_sum + inner_loop(3); }
+print(loop_sum);                       // 200 * (0+1+2) = 600
+print(jit.stats().last_abort);         // "loop inside inlined call (v1 limitation)"
+
 print("DONE");

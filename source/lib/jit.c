@@ -95,6 +95,21 @@ static int jit_stats_native(CandoVM *vm, int argc, CandoValue *args)
         cdo_string_release(k);
     }
 
+    /* Phase 4.3: surface the most-recent recorder abort reason as a
+     * string field so scripts can introspect why a hot loop didn't
+     * trace.  Empty when nothing has aborted yet. */
+    {
+        const char *reason = cando_jit_last_abort(vm);
+        if (!reason) reason = "";
+        CdoString  *kk = cdo_string_intern("last_abort", 10);
+        CandoString *vs = cando_string_new(reason, (u32)strlen(reason));
+        CandoValue   vv = cando_string_value(vs);
+        CdoValue     bv = cando_bridge_to_cdo(vm, vv);
+        cdo_object_rawset(o, kk, bv, FIELD_NONE);
+        cando_value_release(vv);
+        cdo_string_release(kk);
+    }
+
     cando_vm_push(vm, obj);
     return 1;
 }

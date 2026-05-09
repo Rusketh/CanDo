@@ -259,6 +259,11 @@ typedef struct CandoRecorder {
     u32                   call_depth;
     u32                   call_saved_frame_base[CANDO_JIT_MAX_INLINE_DEPTH];
     u32                   call_callee_pos      [CANDO_JIT_MAX_INLINE_DEPTH];
+    /* PC offset of each currently-inlined callee.  Used by OP_CALL
+     * to detect direct or indirect recursion (callee_pc already on
+     * the inline stack) and abort with a recursion-specific reason
+     * before bouncing against the depth cap. */
+    u32                   call_callee_pc       [CANDO_JIT_MAX_INLINE_DEPTH];
     /* Stats (snapshotted into CandoJitStats at read time). */
     u32                   trace_starts;
     u32                   trace_aborts;
