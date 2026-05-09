@@ -76,13 +76,14 @@ static int jit_stats_native(CandoVM *vm, int argc, CandoValue *args)
     CdoObject    *o   = cando_bridge_resolve(vm, cando_as_handle(obj));
 
     struct { const char *name; u32 len; f64 value; } fields[] = {
-        { "backedges",       9, (f64)st.backedge_hits    },
-        { "func_entries",   12, (f64)st.func_entry_hits  },
-        { "iter_next",       9, (f64)st.iter_next_hits   },
-        { "trace_starts",   12, (f64)st.trace_starts     },
-        { "trace_aborts",   12, (f64)st.trace_aborts     },
-        { "hot_pcs",         7, (f64)st.hot_pcs          },
-        { "blacklisted_pcs",15, (f64)st.blacklisted_pcs  },
+        { "backedges",        9, (f64)st.backedge_hits    },
+        { "func_entries",    12, (f64)st.func_entry_hits  },
+        { "iter_next",        9, (f64)st.iter_next_hits   },
+        { "trace_starts",    12, (f64)st.trace_starts     },
+        { "trace_aborts",    12, (f64)st.trace_aborts     },
+        { "traces_compiled", 15, (f64)st.traces_compiled  },
+        { "hot_pcs",          7, (f64)st.hot_pcs          },
+        { "blacklisted_pcs", 15, (f64)st.blacklisted_pcs  },
     };
 
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {

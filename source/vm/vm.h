@@ -240,9 +240,10 @@ typedef struct CandoJitStats {
                              / OP_FILTER_NEXT advances by one element
                              (the loop-exhaustion exit does not count)      */
 
-    /* Phase 3.2 -- snapshotted from CandoJit at read time. */
+    /* Phase 3.2/3.3 -- snapshotted from CandoJit at read time. */
     u32 trace_starts;     /* hot-counter triggers that entered the recorder */
-    u32 trace_aborts;     /* of those, how many aborted (Phase 3.2: all)    */
+    u32 trace_aborts;     /* of those, how many aborted before close        */
+    u32 traces_compiled;  /* of those, how many closed successfully         */
     u32 hot_pcs;          /* distinct PCs the hot table is tracking         */
     u32 blacklisted_pcs;  /* of those, how many are blacklisted             */
 } CandoJitStats;
@@ -404,6 +405,18 @@ CANDO_API void          cando_jit_disable(CandoVM *vm);
 CANDO_API bool          cando_jit_is_enabled(const CandoVM *vm);
 CANDO_API CandoJitStats cando_jit_get_stats(const CandoVM *vm);
 CANDO_API void          cando_jit_reset_stats(CandoVM *vm);
+
+/* cando_jit_last_abort -- the most recent recorder abort reason, or
+ * NULL if the recorder has never aborted (or the JIT has never been
+ * enabled).  Pointer is owned by the VM and stays valid until the
+ * next abort. */
+CANDO_API const char *  cando_jit_last_abort(const CandoVM *vm);
+
+/* cando_jit_dump_traces -- write a human-readable listing of every
+ * compiled trace to `out`.  No-op when JIT is unavailable or no
+ * traces have been compiled.  Format is the same as cando_ir_dump
+ * (one block per trace). */
+CANDO_API void          cando_jit_dump_traces(const CandoVM *vm, FILE *out);
 
 /* =========================================================================
  * Closure helpers

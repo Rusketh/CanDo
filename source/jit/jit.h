@@ -1,18 +1,25 @@
 /*
  * jit/jit.h -- internal JIT module orchestrator.
  *
- * Phase 3.1 published the IR data plumbing (ir.h).
- * Phase 3.2 adds:
- *   - per-PC hot counter table (hot.h),
- *   - the CandoJit wrapper that owns the table + recorder state,
- *   - a recorder stub: when the trigger fires the stub logs the PC
- *     (visible via --jit-stats counters) and immediately auto-
- *     blacklists.  Real recording arrives in Phase 3.3.
+ * Phase 3.1: IR data plumbing (ir.h).
+ * Phase 3.2: per-PC hot counter table (hot.h) + CandoJit wrapper.
+ * Phase 3.3: real recorder body.  When the hot trigger fires, the
+ *            dispatch loop's pre-execute hook (in vm.c's DISPATCH
+ *            macro) calls cando_recorder_observe() on every opcode
+ *            until the trace closes (back at start_pc) or aborts
+ *            (unrecordable opcode, IR overflow, error).  The
+ *            recorder shadows the interpreter's stack effects via
+ *            its own SSA stack_map so it doesn't have to be hooked
+ *            from inside every opcode handler.
+ *
+ * Recordable opcodes in v1 of Phase 3.3: OP_CONST (numbers only),
+ * OP_LOAD_LOCAL / OP_STORE_LOCAL / OP_DEF_LOCAL, OP_ADD / OP_SUB /
+ * OP_MUL, OP_LOOP (close).  Anything else aborts the trace.  More
+ * opcodes are added incrementally in Phase 3.3b/c.
  *
  * Public C API for embedders (cando_jit_enable, cando_jit_get_stats,
- * etc.) lives in source/vm/vm.h alongside the rest of the embedding
- * surface.  This header is for internal users (the dispatch loop and
- * the future recorder/optimiser/codegen modules).
+ * etc.) lives in source/vm/vm.h.  This header is for internal users
+ * (the dispatch loop and the future codegen).
  *
  * Must compile with gcc -std=c11.
  */
@@ -23,53 +30,111 @@
 #include "ir.h"
 #include "hot.h"
 
+/* Forward declarations: the recorder reads from CandoVM during
+ * observe (frame depth, stack pointer, current chunk's constants).
+ * Defining the full interaction here would create a circular include
+ * with vm.h; observe takes (CandoVM*, ip) by pointer. */
+struct CandoVM;
+struct CandoChunk;
+
 /* -----------------------------------------------------------------------
- * Recorder stub (Phase 3.2).
+ * Tunables
+ * --------------------------------------------------------------------- */
+#define CANDO_JIT_MAX_IR_INS     4096u   /* trace length cap */
+#define CANDO_JIT_MAX_TRACES     64u     /* completed traces stored per VM */
+
+/* -----------------------------------------------------------------------
+ * CandoTrace -- a finalised IR sequence that the (future) backend
+ * compiles.  Phase 3.3 stores them in CandoJit.traces[] for
+ * inspection; Phase 4+ runs them via the IR-interpreter; Phase 6+
+ * compiles them to mcode.
+ * --------------------------------------------------------------------- */
+typedef struct CandoTrace {
+    CandoTraceIR ir;        /* SSA instructions + constant pool */
+    const u8    *start_pc;  /* head of the recorded loop */
+    u32          id;        /* monotonic per-VM trace id */
+} CandoTrace;
+
+/* -----------------------------------------------------------------------
+ * CandoRecorder -- recording state.
  *
- * Tracks how many times the trigger has fired and how many traces
- * aborted (both numbers are equal in Phase 3.2 because every trigger
- * aborts; they will diverge in Phase 3.3+).  No recording state is
- * carried between events yet -- the begin/abort pair is synchronous.
+ * `active` flips to true on cando_recorder_begin (called from
+ * cando_jit_hot_hit when the per-PC threshold trips) and back to
+ * false on either cando_recorder_finish (loop closed cleanly) or
+ * cando_recorder_abort (unrecordable opcode / overflow / error).
+ *
+ * `stack_map` is the recorder's shadow of the VM's value stack: each
+ * slot holds the IRRef whose evaluation produces the current value
+ * at that VM stack slot.  The recorder mirrors every recorded
+ * opcode's stack effect on stack_map so subsequent opcodes can pull
+ * operand IRRefs without re-emitting loads.
+ *
+ * `frame_base` is the starting slot of the recording frame, used to
+ * resolve OP_LOAD_LOCAL / OP_DEF_LOCAL slot indices to absolute
+ * stack positions.  If the recorded code calls into another
+ * function, the recorder aborts (Phase 3.3b will add inlining).
  * --------------------------------------------------------------------- */
 typedef struct CandoRecorder {
-    u32  trace_starts;       /* triggers that entered cando_recorder_begin */
-    u32  trace_aborts;       /* of those, how many aborted (Phase 3.2: all)*/
-    char last_abort[128];    /* most recent abort reason for diagnostics    */
+    bool                  active;
+    const u8             *start_pc;
+    CandoTraceIR          ir;
+    /* stack_map[slot] = IRRef producing the value at vm->stack[slot].
+     * Heap-allocated lazily on first cando_recorder_begin so jit.h
+     * doesn't need to know CANDO_STACK_MAX from vm.h.  Sized to
+     * match CANDO_STACK_MAX at allocation time. */
+    IRRef                *stack_map;
+    u32                   stack_map_cap;
+    u32                   frame_base;     /* slot index, not pointer */
+    u32                   frame_count_at_start;
+    /* Stats (snapshotted into CandoJitStats at read time). */
+    u32                   trace_starts;
+    u32                   trace_aborts;
+    u32                   traces_compiled;
+    char                  last_abort[128];
 } CandoRecorder;
 
 void cando_recorder_init   (CandoRecorder *r);
 void cando_recorder_destroy(CandoRecorder *r);
 
-/* cando_recorder_begin -- invoked when cando_hot_hit returns true.
- * Phase 3.2 implementation: increments trace_starts, calls
- * cando_recorder_abort with reason "phase 3.3 unimplemented", returns.
- * Phase 3.3 will hold this open across many opcodes.                  */
-void cando_recorder_begin  (CandoRecorder *r, const u8 *pc);
+/* cando_recorder_begin -- arm the recorder rooted at `pc`.  No-op if
+ * already active (nested triggers can't happen in single-threaded
+ * recording -- the hot table auto-blacklists the trigger PC). */
+void cando_recorder_begin  (struct CandoVM *vm, const u8 *pc);
 
-/* cando_recorder_abort -- record the abort and bump trace_aborts.
- * Caller is expected to have ensured the start PC is blacklisted
- * (cando_hot_hit auto-blacklists).                                    */
-void cando_recorder_abort  (CandoRecorder *r, const char *reason);
+/* cando_recorder_observe -- pre-execute hook called from the
+ * dispatch loop's DISPATCH macro on every opcode while the recorder
+ * is active.  `ip` points at the opcode byte about to execute.
+ * Either records the opcode's IR + mirrors its stack effect, or
+ * aborts the trace.  Detects loop-close (ip == start_pc with
+ * non-empty IR) and finalises. */
+void cando_recorder_observe(struct CandoVM *vm, const u8 *ip);
+
+/* cando_recorder_abort -- record the abort reason and tear down
+ * recording state.  Idempotent. */
+void cando_recorder_abort  (struct CandoVM *vm, const char *reason);
 
 /* -----------------------------------------------------------------------
- * CandoJit -- owns the per-PC hot table and the recorder state.
+ * CandoJit -- owns the hot table, the recorder, and the cache of
+ * completed traces.
  *
- * Lives at CandoVM.jit (see vm.h).  Allocated lazily on the first
- * cando_jit_enable() so a process that never enables the JIT pays
- * nothing.
+ * Allocated lazily by cando_jit_enable so a process that never
+ * enables the JIT pays nothing.
  * --------------------------------------------------------------------- */
 typedef struct CandoJit {
     CandoHotTable  hot;
     CandoRecorder  recorder;
+    CandoTrace    *traces;        /* heap array, capacity CANDO_JIT_MAX_TRACES */
+    u32            trace_count;
+    u32            next_trace_id;
 } CandoJit;
 
 CandoJit *cando_jit_create (void);
 void      cando_jit_destroy(CandoJit *j);
 
-/* cando_jit_hot_hit -- single entry point from the dispatch loop.
- * Bumps the hot counter for `pc` and, when the threshold trips,
- * invokes the recorder.  Returns true if a trace was started (always
- * false in Phase 3.2 because the recorder aborts synchronously). */
-bool cando_jit_hot_hit(CandoJit *j, const u8 *pc);
+/* cando_jit_hot_hit -- single entry point from the dispatch loop's
+ * OP_LOOP handler.  Bumps the per-PC counter; on threshold,
+ * activates the recorder (which the next DISPATCH iteration will
+ * pick up via cando_recorder_observe). */
+bool cando_jit_hot_hit(struct CandoVM *vm, const u8 *pc);
 
 #endif /* CANDO_JIT_JIT_H */

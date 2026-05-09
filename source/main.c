@@ -10,16 +10,18 @@
  *
  * Interpreter flags (consumed here, not forwarded to the script):
  *   --disasm        disassemble the chunk before execution
- *   --jit           enable JIT profiling counters (Phase 2 of
- *                   docs/jit-plan.md -- the JIT itself does not exist
- *                   yet, but counters become readable via --jit-stats
- *                   and via the script-level jit.stats() native).
+ *   --jit           enable JIT profiling counters + recorder (no
+ *                   machine code yet -- traces are constructed in
+ *                   IR and stored for inspection; see Phase 4+ of
+ *                   docs/jit-plan.md for codegen).
  *   --no-jit        force-disable the JIT.  Wins over --jit,
- *                   --jit-stats, and CANDO_JIT.
+ *                   --jit-stats, --jit-dump, and CANDO_JIT.
  *   --jit-stats     print a one-line summary of profiling counters at
  *                   exit.  Always implies --jit (otherwise the output
  *                   is meaningless); use --no-jit if you want to
  *                   suppress the print without disabling globally.
+ *   --jit-dump      after stats, print the IR of every compiled
+ *                   trace.  Implies --jit.
  *
  * Environment variables:
  *   CANDO_JIT=1     equivalent to --jit when no CLI flag overrides.
@@ -53,6 +55,7 @@ int main(int argc, char *argv[])
     bool        jit_stats   = false;
     bool        jit_request = false;
     bool        jit_disable = false;
+    bool        jit_dump    = false;
 
     /* Collect script args: everything after argv[1] that isn't an
      * interpreter flag. */
@@ -73,6 +76,8 @@ int main(int argc, char *argv[])
                 jit_disable = true;
             } else if (strcmp(argv[i], "--jit-stats") == 0) {
                 jit_stats = true;
+            } else if (strcmp(argv[i], "--jit-dump") == 0) {
+                jit_dump = true;
             } else {
                 script_argv[script_argc++] = argv[i];
             }
@@ -96,7 +101,7 @@ int main(int argc, char *argv[])
      *   4. Default: off. */
     if (jit_disable) {
         cando_jit_disable(vm);
-    } else if (jit_request || jit_stats) {
+    } else if (jit_request || jit_stats || jit_dump) {
         cando_jit_enable(vm);
     } else {
         const char *env = getenv("CANDO_JIT");
@@ -158,14 +163,26 @@ int main(int argc, char *argv[])
         CandoJitStats st = cando_jit_get_stats(vm);
         fprintf(stderr,
             "jit: backedges=%llu func_entries=%llu iter_next=%llu "
-            "trace_starts=%u trace_aborts=%u hot_pcs=%u blacklisted=%u\n",
+            "trace_starts=%u traces_compiled=%u trace_aborts=%u "
+            "hot_pcs=%u blacklisted=%u",
             (unsigned long long)st.backedge_hits,
             (unsigned long long)st.func_entry_hits,
             (unsigned long long)st.iter_next_hits,
             st.trace_starts,
+            st.traces_compiled,
             st.trace_aborts,
             st.hot_pcs,
             st.blacklisted_pcs);
+        if (st.trace_aborts > 0 && cando_jit_is_enabled(vm)) {
+            const char *reason = cando_jit_last_abort(vm);
+            if (reason && reason[0])
+                fprintf(stderr, " last_abort=\"%s\"", reason);
+        }
+        fputc('\n', stderr);
+    }
+
+    if (jit_dump) {
+        cando_jit_dump_traces(vm, stderr);
     }
 
     cando_close(vm);

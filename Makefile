@@ -175,7 +175,7 @@ TEST_LEXER_SRCS    = $(LEXER_SRCS)  tests/test_lexer.c
 TEST_PARSER_SRCS   = $(PARSER_SRCS) tests/test_parser.c
 TEST_THREAD_SRCS   = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_thread.c
 TEST_SOCKUTIL_SRCS = $(CORE_SRCS) source/lib/sockutil.c tests/test_sockutil.c
-TEST_JIT_IR_SRCS   = $(CORE_SRCS) $(JIT_SRCS) tests/test_jit_ir.c
+TEST_JIT_IR_SRCS   = $(CORE_SRCS) $(JIT_SRCS) source/vm/opcodes.c tests/test_jit_ir.c
 TEST_JIT_HOT_SRCS  = $(CORE_SRCS) source/jit/hot.c tests/test_jit_hot.c
 
 # ---------------------------------------------------------------------------

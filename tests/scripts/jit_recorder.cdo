@@ -1,0 +1,60 @@
+/* jit_recorder.cdo -- end-to-end test of the Phase 3.3a recorder.
+ *
+ * Verifies:
+ *   1. A WHILE loop in a function with only recordable opcodes
+ *      (load_local, const, lt, jump_if_false, add, def_local, loop)
+ *      compiles exactly one trace.
+ *   2. trace_aborts stays at zero on the recordable path.
+ *   3. The hot PC is auto-blacklisted so subsequent calls don't
+ *      re-trigger.
+ *   4. A loop containing an unrecordable op (string concat) aborts.
+ *
+ * The recorder doesn't execute traces yet (Phase 3.4) so behaviour
+ * is unchanged whether the trace compiled or not -- the script's
+ * outputs are produced by the interpreter as usual.
+ */
+
+jit.on();
+
+FUNCTION run_clean() {
+    VAR i = 0;
+    VAR sum = 0;
+    WHILE i < 200 {
+        sum = sum + i;
+        i = i + 1;
+    }
+    RETURN sum;
+}
+print(run_clean());                 // 19900
+
+VAR s1 = jit.stats();
+print(s1.traces_compiled);          // 1
+print(s1.trace_aborts);             // 0
+print(s1.hot_pcs);                  // 1
+print(s1.blacklisted_pcs);          // 1
+
+/* Calling run_clean again does NOT trigger another trace -- the PC is
+ * already blacklisted from the first call. */
+run_clean();
+VAR s2 = jit.stats();
+print(s2.traces_compiled);          // still 1
+print(s2.trace_starts);             // still 1
+
+/* A separate function with a loop containing an unrecordable op
+ * (string operations are not yet recordable -- Phase 3.3b). */
+FUNCTION run_dirty() {
+    VAR i = 0;
+    VAR s = "";
+    WHILE i < 200 {
+        s = s + "x";   /* string concat -> string-typed OP_ADD; recorder aborts */
+        i = i + 1;
+    }
+    RETURN i;
+}
+print(run_dirty());                 // 200
+
+VAR s3 = jit.stats();
+print(s3.traces_compiled);          // still 1 (the dirty loop aborted)
+print(s3.trace_aborts > 0);         // true
+
+print("DONE");
