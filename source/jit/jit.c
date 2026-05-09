@@ -311,8 +311,15 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
         case OP_STORE_LOCAL:
         case OP_DEF_LOCAL:
         case OP_DEF_CONST_LOCAL: {
-            /* peek-and-store (STORE_LOCAL) or pop-and-store (DEF_LOCAL):
-             * mirror the stack effect on stack_map and emit IR_SSTORE.
+            /* OP_STORE_LOCAL is peek-and-store (top stays on the value
+             * stack); OP_DEF_LOCAL[_CONST] is pop-and-store (top
+             * consumed).  We do NOT call rec_push for the peek case
+             * because the bytecode interpreter is what actually drives
+             * vm->stack_top -- the recorder's `sp` for the next observe
+             * is recomputed from vm->stack_top, so consistency holds
+             * regardless of which one we're recording.  The single
+             * stack_map[abs] update below covers both: the slot now
+             * tracks the stored IRRef.
              *
              * v1 only stores numeric values back to slots, because the
              * IR-interpreter writes via cando_number(...) -- writing a
@@ -471,15 +478,23 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
              * (sp - 3, sp - 2, sp - 1) -- always above the function's
              * regular locals.
              *
-             * Keys mode (len_signed < 0, FOR i IN range/array): push
-             * `index`, increment slot.  Values mode requires reading
-             * source_array[index] which needs IR_HLOAD/AREF -- the
-             * IR-interpreter doesn't support those yet so values mode
-             * aborts. */
+             * Keys mode (len_signed < 0): push the index itself.
+             * Values mode (len_signed >= 0): push source[index] via
+             * IR_AREF.
+             *
+             * Invariant: vm->stack_top[-3] is always an OBJ_ARRAY at
+             * runtime, because OP_FOR_INIT (vm.c) snapshots plain
+             * objects and scalars into a heap array before installing
+             * the FOR state.  We don't validate this here; IR_AREF's
+             * runtime check (cando_is_object + arr->kind == OBJ_ARRAY)
+             * is the safety net if a future FOR_INIT refactor breaks
+             * the invariant. */
             if (sp < 3) {
                 cando_recorder_abort(vm, "OP_FOR_NEXT with too few state slots");
                 return;
             }
+            CANDO_ASSERT_MSG(sp - 3 >= r->frame_base,
+                             "FOR state below frame_base");
 
             CandoValue idx_v = vm->stack_top[-1];
             CandoValue len_v = vm->stack_top[-2];
@@ -572,9 +587,6 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                           rel_idx, next_ir);
             if (abs_idx < r->stack_map_cap)
                 r->stack_map[abs_idx] = next_ir;
-
-            (void)abs_src; /* silence unused-warning if values-mode path
-                              doesn't need it */
             break;
         }
 
@@ -736,7 +748,16 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t) {
             case IR_AREF: {
                 /* op1: source-array slot (frame-relative)
                  * op2: index IRRef (numeric)
-                 * Returns array[index] as f64. */
+                 * Returns array[index] as f64.
+                 *
+                 * The bounds check below (idx >= cdo_array_len) is
+                 * defensive in v1.  The recorder always emits an
+                 * IR_LT(idx, len) IR_GUARD_TRUE pair before the
+                 * AREF, so the index is provably in range under the
+                 * trace's invariants.  Keep the check as belt-and-
+                 * braces: once Phase 3.3d records calls (which can
+                 * mutate the source array between LT and AREF), the
+                 * bounds check stops being redundant. */
                 u32 slot = in->op1;
                 CandoValue src = frame_slots[slot];
                 if (!cando_is_object(src)) return TRACE_BAD_TYPE;

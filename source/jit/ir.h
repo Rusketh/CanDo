@@ -122,11 +122,11 @@ typedef enum {
     IR_HREF,               /* op1: obj ptr, op2: key IRRef; CdoValue load   */
     IR_AREF,               /* op1: source slot (frame-relative, raw u32),
                               op2: index IRRef (IRT_NUM); reads
-                              vm->stack[frame_base+op1] as an array and
-                              returns array[op2] as IRT_NUM.  Side-exits
-                              with TRACE_BAD_TYPE if the slot doesn't
-                              hold an array, the index is out of range,
-                              or the element is non-numeric. */
+                              vm->frames[top].slots[op1] as an array
+                              and returns array[op2] as IRT_NUM.
+                              Side-exits with TRACE_BAD_TYPE if the slot
+                              doesn't hold an array, the index is out
+                              of range, or the element is non-numeric. */
 
     /* ===== Band 6: Trace control ======================================== */
     IR_LOOP,               /* head-of-loop marker; the trace closes here    */
