@@ -164,6 +164,7 @@ int main(int argc, char *argv[])
         fprintf(stderr,
             "jit: backedges=%llu func_entries=%llu iter_next=%llu "
             "trace_starts=%u traces_compiled=%u trace_aborts=%u "
+            "trace_iters=%llu trace_exits=%u "
             "hot_pcs=%u blacklisted=%u",
             (unsigned long long)st.backedge_hits,
             (unsigned long long)st.func_entry_hits,
@@ -171,6 +172,8 @@ int main(int argc, char *argv[])
             st.trace_starts,
             st.traces_compiled,
             st.trace_aborts,
+            (unsigned long long)st.trace_iters,
+            st.trace_exits,
             st.hot_pcs,
             st.blacklisted_pcs);
         if (st.trace_aborts > 0 && cando_jit_is_enabled(vm)) {

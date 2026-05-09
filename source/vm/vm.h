@@ -240,10 +240,12 @@ typedef struct CandoJitStats {
                              / OP_FILTER_NEXT advances by one element
                              (the loop-exhaustion exit does not count)      */
 
-    /* Phase 3.2/3.3 -- snapshotted from CandoJit at read time. */
+    /* Phase 3.2/3.3/3.4 -- snapshotted from CandoJit at read time. */
     u32 trace_starts;     /* hot-counter triggers that entered the recorder */
     u32 trace_aborts;     /* of those, how many aborted before close        */
     u32 traces_compiled;  /* of those, how many closed successfully         */
+    u64 trace_iters;      /* iterations the IR-interpreter executed cleanly */
+    u32 trace_exits;      /* guard exits / type bails returning to bytecode */
     u32 hot_pcs;          /* distinct PCs the hot table is tracking         */
     u32 blacklisted_pcs;  /* of those, how many are blacklisted             */
 } CandoJitStats;

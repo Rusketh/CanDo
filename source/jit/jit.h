@@ -44,16 +44,44 @@ struct CandoChunk;
 #define CANDO_JIT_MAX_TRACES     64u     /* completed traces stored per VM */
 
 /* -----------------------------------------------------------------------
- * CandoTrace -- a finalised IR sequence that the (future) backend
- * compiles.  Phase 3.3 stores them in CandoJit.traces[] for
- * inspection; Phase 4+ runs them via the IR-interpreter; Phase 6+
- * compiles them to mcode.
+ * CandoTrace -- a finalised IR sequence the IR-interpreter executes
+ * (Phase 3.4) and the future codegen compiles to mcode (Phase 6+).
+ *
+ * `values_buf` is a per-trace scratch array sized to ir.ir_count,
+ * lazy-allocated by cando_trace_run on first execution.  Reusing the
+ * buffer across runs avoids per-iteration alloca/malloc overhead.
  * --------------------------------------------------------------------- */
 typedef struct CandoTrace {
-    CandoTraceIR ir;        /* SSA instructions + constant pool */
-    const u8    *start_pc;  /* head of the recorded loop */
-    u32          id;        /* monotonic per-VM trace id */
+    CandoTraceIR ir;          /* SSA instructions + constant pool */
+    const u8    *start_pc;    /* head of the recorded loop */
+    u32          id;          /* monotonic per-VM trace id */
+    f64         *values_buf;  /* scratch table for cando_trace_run */
+    u32          values_cap;
 } CandoTrace;
+
+/* -----------------------------------------------------------------------
+ * Trace execution status (Phase 3.4).
+ * --------------------------------------------------------------------- */
+typedef enum {
+    TRACE_LOOP_DONE     = 0,  /* hit IR_LOOP cleanly; caller may iterate */
+    TRACE_GUARD_FAILED  = 1,  /* guard fired; bytecode resumes at start_pc */
+    TRACE_BAD_TYPE      = 2,  /* SLOAD found a non-numeric value           */
+    TRACE_RANGE_ERROR   = 3,  /* malformed IR -- should not happen         */
+} CandoTraceStatus;
+
+/* cando_jit_find_trace -- look up a compiled trace whose start_pc
+ * matches `pc`.  Linear scan over CandoJit.traces[] (capped at
+ * CANDO_JIT_MAX_TRACES = 64); cheap enough for the OP_LOOP hot path
+ * when JIT is on, never called when JIT is off.  Returns NULL on
+ * miss. */
+const CandoTrace *cando_jit_find_trace(struct CandoVM *vm, const u8 *pc);
+
+/* cando_trace_run -- execute one iteration of `trace` against the
+ * VM's current stack state.  Reads SLOAD slots, computes IR values
+ * in a per-trace scratch table, writes SSTORE slots back, and
+ * returns the exit status.  Updates vm->jit_stats.trace_iters on
+ * a clean LOOP_DONE exit. */
+CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *trace);
 
 /* -----------------------------------------------------------------------
  * CandoRecorder -- recording state.

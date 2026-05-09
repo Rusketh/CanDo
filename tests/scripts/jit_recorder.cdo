@@ -34,11 +34,16 @@ print(s1.hot_pcs);                  // 1
 print(s1.blacklisted_pcs);          // 1
 
 /* Calling run_clean again does NOT trigger another trace -- the PC is
- * already blacklisted from the first call. */
+ * already blacklisted from the first call.  But the SECOND call's
+ * iterations all flow through the cached trace via the IR-interpreter,
+ * so trace_iters jumps. */
+VAR iters_before = jit.stats().trace_iters;
 run_clean();
 VAR s2 = jit.stats();
 print(s2.traces_compiled);          // still 1
 print(s2.trace_starts);             // still 1
+print(s2.trace_iters > iters_before);   // true: second call ran via IR
+print(s2.trace_iters >= 200);           // true: at least 200 trace iters
 
 /* A separate function with a loop containing an unrecordable op
  * (string operations are not yet recordable -- Phase 3.3b). */

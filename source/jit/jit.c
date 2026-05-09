@@ -24,6 +24,7 @@
 #include "../vm/opcodes.h"
 #include "../vm/chunk.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -188,9 +189,11 @@ static void cando_recorder_finish(struct CandoVM *vm) {
         /* Move the IR (transfer ownership): copy the struct by
          * value; the pointers inside (ir, constants) move with it.
          * Re-init the recorder's IR so subsequent traces start fresh. */
-        t->ir       = r->ir;
-        t->start_pc = r->start_pc;
-        t->id       = j->next_trace_id++;
+        t->ir         = r->ir;
+        t->start_pc   = r->start_pc;
+        t->id         = j->next_trace_id++;
+        t->values_buf = NULL;   /* lazy-allocated by cando_trace_run */
+        t->values_cap = 0;
         cando_trace_ir_init(&r->ir);
     } else {
         /* Cache full -- drop the trace, but still count it. */
@@ -476,11 +479,138 @@ void cando_jit_destroy(CandoJit *j) {
     cando_hot_table_destroy(&j->hot);
     cando_recorder_destroy(&j->recorder);
     if (j->traces) {
-        for (u32 i = 0; i < j->trace_count; i++)
+        for (u32 i = 0; i < j->trace_count; i++) {
             cando_trace_ir_destroy(&j->traces[i].ir);
+            cando_free(j->traces[i].values_buf);
+        }
         cando_free(j->traces);
     }
     cando_free(j);
+}
+
+/* ============================================================ */
+/* Trace lookup + IR-interpreter (Phase 3.4)                      */
+/* ============================================================ */
+
+const CandoTrace *cando_jit_find_trace(struct CandoVM *vm, const u8 *pc) {
+    CandoJit *j = jit_of(vm);
+    if (!j || !pc) return NULL;
+    /* Linear scan -- the trace array is capped at
+     * CANDO_JIT_MAX_TRACES (64), well inside L1 even when full.
+     * A hash table would be premature. */
+    for (u32 i = 0; i < j->trace_count; i++) {
+        if (j->traces[i].start_pc == pc) return &j->traces[i];
+    }
+    return NULL;
+}
+
+CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t) {
+    if (!vm || !t) return TRACE_RANGE_ERROR;
+
+    /* Lazy-allocate the scratch values table; reused across every
+     * trace_run for this trace, so cost amortises over many
+     * iterations. */
+    if (t->values_cap < t->ir.ir_count) {
+        t->values_buf = cando_realloc(t->values_buf,
+                                      sizeof(f64) * t->ir.ir_count);
+        t->values_cap = t->ir.ir_count;
+    }
+    f64 *vals = t->values_buf;
+
+    /* IR-interpreter.  All values are doubles in v1 (numeric
+     * constants only, comparisons stored as 0.0/1.0).  Booleans
+     * round-trip through the f64 lane via 0/1 encoding -- guards
+     * just check != 0.0.
+     *
+     * IR refs are 1-based; ir[0] is the IR_NOP sentinel and is
+     * skipped.  Constant-pool refs (high bit set) are read directly
+     * from the trace's constants[] array. */
+    for (u32 i = 1; i < t->ir.ir_count; i++) {
+        const IRIns *in = &t->ir.ir[i];
+
+        switch (in->op) {
+            case IR_NOP:
+                break;
+
+            case IR_KNUM: {
+                /* op1 is a constant-pool ref. */
+                CandoValue cv = cando_ir_get_const(&t->ir, in->op1);
+                vals[i] = cando_as_number(cv);
+                break;
+            }
+            case IR_KBOOL:
+                vals[i] = (in->op1 != 0) ? 1.0 : 0.0;
+                break;
+
+            case IR_KNULL:
+                /* No representable double for null; if the trace
+                 * tries to use this, treat as bad type. */
+                return TRACE_BAD_TYPE;
+
+            case IR_SLOAD: {
+                /* op1 is the absolute slot index. */
+                u32 slot = in->op1;
+                CandoValue v = vm->stack[slot];
+                if (!cando_is_number(v)) return TRACE_BAD_TYPE;
+                vals[i] = cando_as_number(v);
+                break;
+            }
+            case IR_SSTORE: {
+                /* op1 is slot, op2 is value-to-store IRRef. */
+                u32 slot = in->op1;
+                vm->stack[slot] = cando_number(vals[in->op2]);
+                break;
+            }
+
+            case IR_ADD:  vals[i] = vals[in->op1] + vals[in->op2]; break;
+            case IR_SUB:  vals[i] = vals[in->op1] - vals[in->op2]; break;
+            case IR_MUL:  vals[i] = vals[in->op1] * vals[in->op2]; break;
+            case IR_DIV: {
+                f64 d = vals[in->op2];
+                if (d == 0.0) return TRACE_GUARD_FAILED;  /* matches OP_DIV */
+                vals[i] = vals[in->op1] / d;
+                break;
+            }
+            case IR_MOD:
+                /* Mirror libcando's OP_MOD semantics via fmod. */
+                vals[i] = fmod(vals[in->op1], vals[in->op2]);
+                break;
+            case IR_NEG:  vals[i] = -vals[in->op1]; break;
+
+            case IR_EQ:  vals[i] = (vals[in->op1] == vals[in->op2]) ? 1.0 : 0.0; break;
+            case IR_NEQ: vals[i] = (vals[in->op1] != vals[in->op2]) ? 1.0 : 0.0; break;
+            case IR_LT:  vals[i] = (vals[in->op1] <  vals[in->op2]) ? 1.0 : 0.0; break;
+            case IR_LE:  vals[i] = (vals[in->op1] <= vals[in->op2]) ? 1.0 : 0.0; break;
+            case IR_GT:  vals[i] = (vals[in->op1] >  vals[in->op2]) ? 1.0 : 0.0; break;
+            case IR_GE:  vals[i] = (vals[in->op1] >= vals[in->op2]) ? 1.0 : 0.0; break;
+
+            case IR_GUARD_NUM:
+                /* SLOAD already type-checks; an op feeding a guard is
+                 * always numeric inside the trace by construction. */
+                break;
+            case IR_GUARD_TRUE:
+                if (vals[in->op1] == 0.0) return TRACE_GUARD_FAILED;
+                break;
+            case IR_GUARD_FALSE:
+                if (vals[in->op1] != 0.0) return TRACE_GUARD_FAILED;
+                break;
+            case IR_GUARD_OBJ:
+            case IR_GUARD_STR:
+                /* Object/string guards land in Phase 3.4b together
+                 * with HLOAD/HREF.  v1 traces are numeric-only. */
+                return TRACE_RANGE_ERROR;
+
+            case IR_LOOP:
+                /* Successful close -- one iteration done. */
+                return TRACE_LOOP_DONE;
+
+            default:
+                return TRACE_RANGE_ERROR;
+        }
+    }
+
+    /* Walked off the end without an IR_LOOP: malformed trace. */
+    return TRACE_RANGE_ERROR;
 }
 
 bool cando_jit_hot_hit(struct CandoVM *vm, const u8 *pc) {
