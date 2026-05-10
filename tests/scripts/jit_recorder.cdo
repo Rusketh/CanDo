@@ -254,4 +254,31 @@ FUNCTION fold_cse() {
 }
 print(fold_cse());                     // (1+...+200) + 4*(1+...+200) = 5*20100 = 100500
 
+/* Phase 5g: GLOAD store-to-load forwarding.  Within one trace iter
+ * a store to a global makes the next IR_GLOAD of the same name
+ * forward to the stored IRRef instead of emitting a fresh load.
+ * Result must still match the bytecode-only path. */
+VAR fwd_g = 0;
+VAR fwd_sum = 0;
+WHILE fwd_g < 200 {
+    fwd_g = fwd_g + 1;       /* GSTORE; updates cur_global_value[fwd_g] */
+    fwd_sum = fwd_sum + fwd_g;
+}
+print(fwd_sum);                        // 1+2+...+200 = 20100
+
+/* Phase 5h: DSE.  An SSTORE/GSTORE that is overwritten by a later
+ * store to the same slot/global with no intervening read is dead
+ * and gets NOP'd in-place.  The trace must still produce the right
+ * answer. */
+FUNCTION dse_check() {
+    VAR s = 0;
+    FOR i IN 1 -> 200 {
+        VAR t = i + 1;       /* dead: overwritten next line */
+        t = i * 2;           /* live: feeds s */
+        s = s + t;
+    }
+    RETURN s;
+}
+print(dse_check());                    // 2*(1+...+200) = 40200
+
 print("DONE");

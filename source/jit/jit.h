@@ -219,6 +219,12 @@ typedef struct CandoRecorder {
      * alongside the IR's const_count. */
     IRRef                *first_load_global;
     u32                   first_load_global_cap;
+    /* Phase 5g: per-name "current value" for store-to-load forwarding.
+     * Updated on every IR_GLOAD (= the load's result) and on every
+     * IR_GSTORE (= the stored value's IRRef).  A subsequent IR_GLOAD
+     * of the same name returns this IRRef instead of emitting a fresh
+     * load.  Shares first_load_global_cap. */
+    IRRef                *cur_global_value;
 
     /* Phase 4.2: parallel-to-stack_map "aux" tag for slots holding
      * non-numeric values the recorder tracks (object globals, fast

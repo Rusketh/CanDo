@@ -114,6 +114,7 @@ void cando_recorder_init(CandoRecorder *r) {
     r->first_load           = NULL;
     r->first_load_global    = NULL;
     r->first_load_global_cap = 0;
+    r->cur_global_value     = NULL;
     r->stack_aux            = NULL;
     r->pending_snap         = NULL;
     r->pending_snap_count   = 0;
@@ -141,6 +142,7 @@ void cando_recorder_destroy(CandoRecorder *r) {
     cando_free(r->stack_map);
     cando_free(r->first_load);
     cando_free(r->first_load_global);
+    cando_free(r->cur_global_value);
     cando_free(r->stack_aux);
     cando_free(r->pending_snap);
     cando_free(r->staging_snapshots);
@@ -150,6 +152,7 @@ void cando_recorder_destroy(CandoRecorder *r) {
     r->first_load             = NULL;
     r->first_load_global      = NULL;
     r->first_load_global_cap  = 0;
+    r->cur_global_value       = NULL;
     r->stack_aux              = NULL;
     r->pending_snap           = NULL;
     r->pending_snap_cap  = 0;
@@ -204,16 +207,20 @@ static void rec_pending_snap_add(CandoRecorder *r, CandoSnapKind kind,
     r->pending_snap_count++;
 }
 
-/* Grow the recorder's first_load_global table to cover at least
- * `want` const-pool entries.  New cells are zero-initialised so a
- * never-loaded global reads as IRREF_NIL. */
+/* Grow the recorder's first_load_global + cur_global_value tables
+ * to cover at least `want` const-pool entries.  New cells are zero-
+ * initialised so a never-loaded global reads as IRREF_NIL. */
 static void rec_ensure_first_load_global(CandoRecorder *r, u32 want) {
     if (want <= r->first_load_global_cap) return;
     u32 nc = r->first_load_global_cap ? r->first_load_global_cap * 2 : 8;
     while (nc < want) nc *= 2;
-    r->first_load_global = cando_realloc(r->first_load_global,
-                                         sizeof(IRRef) * nc);
+    r->first_load_global  = cando_realloc(r->first_load_global,
+                                          sizeof(IRRef) * nc);
+    r->cur_global_value   = cando_realloc(r->cur_global_value,
+                                          sizeof(IRRef) * nc);
     memset(r->first_load_global + r->first_load_global_cap, 0,
+           sizeof(IRRef) * (nc - r->first_load_global_cap));
+    memset(r->cur_global_value  + r->first_load_global_cap, 0,
            sizeof(IRRef) * (nc - r->first_load_global_cap));
     r->first_load_global_cap = nc;
 }
@@ -319,9 +326,12 @@ void cando_recorder_begin(struct CandoVM *vm, const u8 *pc) {
     memset(r->stack_aux,  0, sizeof(u32)   * r->stack_map_cap);
     /* Phase 4.1: drop the previous trace's first_load_global table
      * (the IR const-pool indices are per-trace). */
-    if (r->first_load_global_cap > 0)
+    if (r->first_load_global_cap > 0) {
         memset(r->first_load_global, 0,
                sizeof(IRRef) * r->first_load_global_cap);
+        memset(r->cur_global_value, 0,
+               sizeof(IRRef) * r->first_load_global_cap);
+    }
 
     /* Reset Phase 4 staging.  pending_snap regrows lazily; the
      * staging pools reset their counts so the next trace starts with
@@ -351,6 +361,81 @@ void cando_recorder_begin(struct CandoVM *vm, const u8 *pc) {
  * order (def before use within a trace), so a single pass is
  * sufficient.
  */
+
+/* Phase 5h: dead-store elimination.  Within a single trace iteration
+ * any SSTORE/GSTORE that is overwritten by a later store to the same
+ * slot/global, with no intervening load that would have observed it,
+ * is dead -- the bytecode interpreter never sees the discarded value
+ * and snapshots reference first_load IRRefs (the pre-iter value),
+ * not the SSTORE itself, so dropping it doesn't break rollback.
+ *
+ * Killed stores are replaced with IR_NOP in-place; trace_run already
+ * treats IR_NOP as a no-op so no other code needs to change.  The
+ * value-IR feeding the dead store stays in the trace -- it might be
+ * referenced elsewhere; if not, a future DCE pass can clean it up.
+ *
+ * Forward pass over the IR.  Slot keys are in `ir_slot` (= the
+ * outer-frame-relative slot used by SLOAD/SSTORE op1).  Global keys
+ * are constant-pool indices (= IRREF_KIDX of GLOAD/GSTORE op1). */
+static void eliminate_dead_stores(CandoTraceIR *ir) {
+    if (ir->ir_count <= 1) return;
+
+    /* Tables map slot/name-key -> IR position of the most-recent
+     * unconsumed SSTORE/GSTORE.  0 means "no live store pending". */
+    u32 max_slot = 0;
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        const IRIns *in = &ir->ir[i];
+        if ((in->op == IR_SSTORE || in->op == IR_SLOAD) &&
+            in->op1 + 1 > max_slot)
+            max_slot = in->op1 + 1;
+    }
+    u32 *last_sstore = max_slot
+        ? cando_alloc(sizeof(u32) * max_slot) : NULL;
+    if (last_sstore) memset(last_sstore, 0, sizeof(u32) * max_slot);
+
+    u32 *last_gstore = ir->const_count
+        ? cando_alloc(sizeof(u32) * ir->const_count) : NULL;
+    if (last_gstore) memset(last_gstore, 0, sizeof(u32) * ir->const_count);
+
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        IRIns *in = &ir->ir[i];
+        if (in->op == IR_SLOAD && last_sstore && in->op1 < max_slot) {
+            /* Load consumes any pending store at this slot. */
+            last_sstore[in->op1] = 0;
+        } else if (in->op == IR_SSTORE && last_sstore && in->op1 < max_slot) {
+            u32 prev = last_sstore[in->op1];
+            if (prev) {
+                /* Earlier store had no consumer -- kill it. */
+                ir->ir[prev].op    = IR_NOP;
+                ir->ir[prev].type  = IRT_VOID;
+                ir->ir[prev].flags = 0;
+                ir->ir[prev].op1   = 0;
+                ir->ir[prev].op2   = 0;
+            }
+            last_sstore[in->op1] = i;
+        } else if (in->op == IR_GLOAD && last_gstore) {
+            u32 ki = IRREF_KIDX(in->op1);
+            if (ki < ir->const_count) last_gstore[ki] = 0;
+        } else if (in->op == IR_GSTORE && last_gstore) {
+            u32 ki = IRREF_KIDX(in->op1);
+            if (ki < ir->const_count) {
+                u32 prev = last_gstore[ki];
+                if (prev) {
+                    ir->ir[prev].op    = IR_NOP;
+                    ir->ir[prev].type  = IRT_VOID;
+                    ir->ir[prev].flags = 0;
+                    ir->ir[prev].op1   = 0;
+                    ir->ir[prev].op2   = 0;
+                }
+                last_gstore[ki] = i;
+            }
+        }
+    }
+
+    cando_free(last_sstore);
+    cando_free(last_gstore);
+}
+
 static void mark_loop_invariants(CandoTraceIR *ir) {
     /* Pass 1: collect the set of slots written by IR_SSTORE and the
      * set of names written by IR_GSTORE.  Slot indices are u32 so we
@@ -476,8 +561,13 @@ static void cando_recorder_finish(struct CandoVM *vm) {
 
     cando_ir_emit(&r->ir, IR_LOOP, IRT_VOID, 0, 0, 0);
 
-    /* Mark loop-invariant ops so cando_trace_run can skip them on
-     * iterations 2+ (Phase 5 LICM v1). */
+    /* Optimisation passes, in order:
+     *   1. Phase 5h DSE -- drop SSTORE/GSTOREs overwritten before
+     *      any read.  Run before LICM so LICM doesn't waste cycles
+     *      classifying dead ops.
+     *   2. Phase 5  LICM -- mark loop-invariant ops; trace_run
+     *      skips them on iterations 2+. */
+    eliminate_dead_stores(&r->ir);
     mark_loop_invariants(&r->ir);
 
     /* Pick a slot to receive the new trace.  When the cache isn't
@@ -940,11 +1030,21 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                 return;
             }
             IRRef k = cando_ir_const(&r->ir, cando_value_copy(name_val));
-            IRRef e = cando_ir_emit(&r->ir, IR_GLOAD, IRT_NUM, 0, k, 0);
-            /* Phase 4.1: capture the FIRST GLOAD per name in this iter
-             * so a subsequent GSTORE can snapshot the pre-iter value. */
             u32 ki_load = IRREF_KIDX(k);
             rec_ensure_first_load_global(r, ki_load + 1);
+            /* Phase 5g: store-to-load forwarding.  If we've already
+             * loaded or stored this global in the current iter,
+             * reuse that IRRef directly -- the global hasn't changed
+             * out from under us in the trace. */
+            IRRef e;
+            if (r->cur_global_value[ki_load] != IRREF_NIL) {
+                e = r->cur_global_value[ki_load];
+            } else {
+                e = cando_ir_emit(&r->ir, IR_GLOAD, IRT_NUM, 0, k, 0);
+                r->cur_global_value[ki_load] = e;
+            }
+            /* Phase 4.1: capture the FIRST GLOAD per name in this iter
+             * so a subsequent GSTORE can snapshot the pre-iter value. */
             if (r->first_load_global[ki_load] == IRREF_NIL)
                 r->first_load_global[ki_load] = e;
             rec_push(r, e, sp);
@@ -997,6 +1097,11 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                                      r->first_load_global[ki_store]);
             }
             cando_ir_emit(&r->ir, IR_GSTORE, IRT_VOID, IRF_PINNED, k, top);
+            /* Phase 5g: this global now holds `top`; subsequent
+             * IR_GLOAD of the same name forwards to that IRRef
+             * instead of emitting a fresh load. */
+            rec_ensure_first_load_global(r, ki_store + 1);
+            r->cur_global_value[ki_store] = top;
             break;
         }
 
