@@ -840,11 +840,22 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             emit_kbool(&cg, in->op1, i);
             break;
         case IR_SLOAD:
+            /* Phase 4.4b: codegen v1 only handles IRT_NUM SLOADs.
+             * IRT_OBJ slots need a different type-check encoding
+             * (cando_is_object instead of cando_is_number); land
+             * that with Phase 4.4g.  For now bail and let the
+             * IR-interp run the trace. */
+            if (in->type != IRT_NUM) { cg.failed = true; break; }
             emit_sload(&cg, in->op1, i);
             break;
-        case IR_SSTORE:
+        case IR_SSTORE: {
+            /* Same as SLOAD: codegen only handles numeric stores in
+             * v1.  Object-typed stores bail to the IR-interp. */
+            const IRIns *src = cando_ir_get_ins(&t->ir, in->op2);
+            if (src && src->type != IRT_NUM) { cg.failed = true; break; }
             emit_sstore(&cg, in->op1, in->op2);
             break;
+        }
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
             emit_arith(&cg, (IROp)in->op, in->op1, in->op2, i);
             break;

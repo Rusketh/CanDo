@@ -1109,7 +1109,23 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             u32 ir_slot  = (r->frame_base - r->outer_frame_base) + slot;
             IRRef src = (abs < r->stack_map_cap) ? r->stack_map[abs] : IRREF_NIL;
             if (src == IRREF_NIL) {
-                src = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0, ir_slot, 0);
+                /* Phase 4.4b: peek the slot's runtime value to decide
+                 * IR_SLOAD's type tag.  IRT_NUM is the common case;
+                 * IRT_OBJ is allowed for slots holding object handles
+                 * (e.g. an array literal SSTORE'd in 4.4a's flow).
+                 * Other types still abort. */
+                IRType ld_type = IRT_NUM;
+                CandoValue actual = vm->frames[vm->frame_count - 1].slots[slot];
+                if (cando_is_number(actual)) {
+                    ld_type = IRT_NUM;
+                } else if (cando_is_object(actual)) {
+                    ld_type = IRT_OBJ;
+                } else {
+                    cando_recorder_abort(vm,
+                        "OP_LOAD_LOCAL: slot type not supported (v1)");
+                    return;
+                }
+                src = cando_ir_emit(&r->ir, IR_SLOAD, ld_type, 0, ir_slot, 0);
                 if (abs < r->stack_map_cap) {
                     r->stack_map[abs] = src;
                     /* Phase 4: capture the FIRST SLOAD for this slot
@@ -1263,8 +1279,12 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                 return;
             }
             const IRIns *src = cando_ir_get_ins(&r->ir, top);
-            if (!src || src->type != IRT_NUM) {
-                cando_recorder_abort(vm, "store of non-numeric value (v1 limitation)");
+            if (!src ||
+                (src->type != IRT_NUM && src->type != IRT_OBJ)) {
+                /* Phase 4.4b: IRT_NUM (numeric) and IRT_OBJ (handle
+                 * to a script object) are storable.  Other types
+                 * (IRT_STR, IRT_PTR resolved object) still abort. */
+                cando_recorder_abort(vm, "store of non-numeric/non-object value (v1)");
                 return;
             }
             /* Phase 4: snapshot the pre-iter value if this slot has
@@ -1969,20 +1989,44 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                 return TRACE_BAD_TYPE;
 
             case IR_SLOAD: {
-                /* op1 is the FRAME-RELATIVE slot index. */
+                /* op1 is the FRAME-RELATIVE slot index.  Phase 4.4b:
+                 * the type tag set at recording time picks the
+                 * runtime check.  IRT_NUM expects a number; IRT_OBJ
+                 * expects an object handle.  Mismatch is a side-exit. */
                 u32 slot = in->op1;
                 CandoValue v = frame_slots[slot];
-                if (!cando_is_number(v)) {
-                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
-                    return TRACE_BAD_TYPE;
+                if (in->type == IRT_OBJ) {
+                    if (!cando_is_object(v)) {
+                        trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                        return TRACE_BAD_TYPE;
+                    }
+                    vals[i].u = v.u;        /* preserve handle bits  */
+                } else {
+                    if (!cando_is_number(v)) {
+                        trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                        return TRACE_BAD_TYPE;
+                    }
+                    vals[i].d = cando_as_number(v);
                 }
-                vals[i].d = cando_as_number(v);
                 break;
             }
             case IR_SSTORE: {
-                /* op1 is FRAME-RELATIVE slot, op2 is value IRRef. */
+                /* op1 is FRAME-RELATIVE slot, op2 is value IRRef.
+                 * Phase 4.4b: dispatch on the source IR's type so
+                 * object handles round-trip via raw u64 bits while
+                 * numbers go through cando_number canonicalisation
+                 * (NaN-fixup). */
                 u32 slot = in->op1;
-                frame_slots[slot] = cando_number(vals[in->op2].d);
+                const IRIns *src = cando_ir_get_ins(&t->ir, in->op2);
+                if (src && src->type == IRT_OBJ) {
+                    CandoValue v; v.u = vals[in->op2].u;
+                    frame_slots[slot] = v;
+                } else {
+                    frame_slots[slot] = cando_number(vals[in->op2].d);
+                }
+                /* Restore the IR-interp's original numeric path for
+                 * the unmoved code below (a no-op since we already
+                 * wrote frame_slots).  Keep break here. */
                 break;
             }
 
