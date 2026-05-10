@@ -631,12 +631,50 @@ it.
 - ✅ `--jit-dump` IR dumper for debugging (per-trace IR + per-op
   flags incl. [INV] [GUARD] [SUNK]).  mcode dumper deferred --
   use objdump on the trace body if needed.
-- ✅ Stress tests: all 56 integration tests + 1029 JIT unit
+- ✅ Stress tests: all 56 integration tests + 2149 JIT unit
   tests pass with `CANDO_JIT=1`.  4/4 benchmarks produce
   byte-identical output between JIT and bytecode modes.
+  Valgrind clean (0 errors, 0 leaks) on case2 / sink_alias /
+  jit_recorder / mandelbrot / loops.
+- ✅ `--jit-dump` IR dumper extended with mcode hexdump and
+  sink_recs listing.  Per-op flags now include `[GUARD] [INV]
+  [PIN] [SUNK]`.
 - Documentation: `docs/jit-plan.md` (this file) covers v1 design
   + decisions + deferred work.  User-facing `docs/jit.md` and
   contributor-facing `docs/jit-internals.md` deferred.
+
+### Phase 8.1 — Outstanding optimisations (DEFERRED)
+
+Items investigated and intentionally deferred during the post-v1
+audit pass:
+
+  - **OP_BREAK recorder support.**  Mandelbrot already gets ~8.6x
+    so the remaining trace_aborts are low-value (the resulting
+    traces would be one-shot, exiting at the BREAK guard).
+    Skipped.
+  - **OP_FOR_INIT recorder support.**  Required to JIT nbody's
+    nested FOR loops.  Needs new IR ops to model the FOR-state
+    initialisation (3-slot push + length compute) plus a runtime
+    type guard on the iterable.  ~200-300 LOC; low ROI for v1
+    workload mix.  Deferred.
+  - **Global scalar promotion** (skip GLOAD's hash-lookup C call
+    on iter 2+).  Implemented but reverted: the GLOAD's IRRef is
+    captured by snapshots as the "pre-iter" value to restore on
+    side-exit.  IRF_INVARIANT-skipping the GLOAD plus a GSTORE-
+    side fixup leaves vals[gload_ref] holding the POST-GSTORE
+    value at side-exit, defeating rollback semantics
+    (Phase 4.1 div_rollback regression: iter-100 catch saw
+    `committed=101` instead of 100).  A correct version needs
+    a separate snapshot capture path for promoted GLOADs --
+    deferred to a future pass.
+  - **Phase 4.4 v1b range sinking.**  Would require IR_RANGE_*
+    handling in `cg_assign_sunk_offsets`, but the dominant range
+    use-case is `FOR x IN 1->N` which goes through OP_FOR_INIT
+    (not yet recorded).  Standalone `VAR r = 1->10; r[5]` is
+    rare.  Deferred.
+  - **Audit LOW #5 / #8 / #10** (IRT_PTR consistency, const-cast
+    on sunk-overflow, cur_snap=0 for early-trace side-exits).
+    Stylistic / matches IR-interp behaviour; documented in code.
 
 ### Phase 9 — AArch64 backend (3 weeks, post-v1)
 

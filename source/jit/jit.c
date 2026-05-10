@@ -853,6 +853,17 @@ static void cando_recorder_finish(struct CandoVM *vm) {
      * counts as an escape, so escape analysis can mark allocations
      * sinkable that DSE has unhooked from a dead SSTORE. */
     escape_analysis(&r->ir);
+    /* Phase 8.1 (REVERTED): mark_promoted_globals broke the Phase
+     * 4.1 div_rollback snapshot semantics.  Snapshots record the
+     * GLOAD's IRRef as the "pre-iter" value to restore on side-
+     * exit; if the GLOAD is IRF_INVARIANT-skipped on iter 2+ AND
+     * its vals[ref] is overwritten by the GSTORE fixup, the
+     * snapshot reads the POST-GSTORE value at side-exit and
+     * writes that back to the global -- defeating rollback (the
+     * trace's effects on iter K leak past the side-exit at iter
+     * K, double-counting on bytecode replay).  A correct version
+     * would need a separate snapshot capture for promoted globals.
+     * Deferred. */
 
     /* Pick a slot to receive the new trace.  When the cache isn't
      * full we just append; when full we evict the approximate-LRU
