@@ -283,3 +283,9 @@ IF box_empty { print("empty truthy"); } ELSE { print("empty falsy"); }
 IF box_full  { print("full truthy");  } ELSE { print("full falsy");  }
 print(!box_empty);           // true
 print(!box_full);            // false
+
+/* __is as a literal bool -- pinned truthy / falsy */
+VAR pinT = { __is: TRUE };
+VAR pinF = { __is: FALSE };
+IF pinT { print("pinT truthy"); } ELSE { print("FAIL"); }
+IF pinF { print("FAIL"); } ELSE { print("pinF falsy"); }

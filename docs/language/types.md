@@ -43,9 +43,10 @@ IF NULL  { /* skipped */ }
 IF FALSE { /* skipped */ }
 ```
 
-Objects can override their own truthiness with the `__is` metamethod;
-when the object appears in a boolean context, `__is(self)` is called and
-its return value is itself tested for truthiness:
+Objects can override their own truthiness with the `__is` metamethod.
+`__is` may be a literal `TRUE` / `FALSE` (used directly) or a callable
+that receives the object and whose return value is tested for
+truthiness:
 
 ```cdo
 CLASS Box = (self, n) { self.n = n; }
@@ -53,6 +54,9 @@ Box.__is = FUNCTION(self) { RETURN self.n > 0; };
 
 IF Box(0) { print("non-empty"); } ELSE { print("empty"); }   // empty
 IF Box(5) { print("non-empty"); } ELSE { print("empty"); }   // non-empty
+
+VAR alwaysFalsy = { __is: FALSE };
+IF alwaysFalsy { /* skipped */ }
 ```
 
 ## `null`

@@ -1271,6 +1271,15 @@ static bool vm_is_truthy_meta(CandoVM *vm, CandoValue v, bool *ok) {
         if (obj) {
             CdoValue raw;
             if (cdo_object_get(obj, g_meta_is, &raw)) {
+                /* __is may be a literal TRUE/FALSE (used directly) or a
+                 * callable (invoked as __is(self); its return value is
+                 * tested for truthiness).  Numbers can't be used as a
+                 * literal here -- they share the CDO_NUMBER tag with
+                 * inline-function PC offsets and so are always treated
+                 * as callable. */
+                if (raw.tag == CDO_BOOL) {
+                    return raw.as.boolean;
+                }
                 CandoValue arg = v;
                 if (cando_vm_dispatch_callable(vm, &raw, &arg, 1)) {
                     CandoValue r = cando_vm_pop(vm);
