@@ -34,13 +34,13 @@ canonical CanDo style is **all-uppercase** for keywords; the all-lowercase
 form is supported for users coming from other languages.
 
 ```
-IF   ELSE   WHILE   FOR   IN   OF   OVER
+IF   ELSE   ALSO   WHILE   FOR   IN   OF   OVER
 FUNCTION   RETURN   CLASS   EXTENDS
 TRY   CATCH   FINALY   THROW
 VAR   CONST   GLOBAL   STATIC   PRIVATE
 THREAD   ASYNC   AWAIT
 TRUE   FALSE   NULL
-BREAK   CONTINUE
+BREAK   CONTINUE   SETTLE
 pipe
 ```
 
@@ -241,7 +241,7 @@ A range used in a value context expands to a stack of numbers.
 
 ## Control flow
 
-### `IF` / `ELSE`
+### `IF` / `ELSE` / `ALSO`
 
 ```cando
 IF x > 0 {
@@ -269,6 +269,62 @@ IF grade > 50, 60, 70 {
 `== …` and `!= …` use *any* / *none* semantics; the ordering operators
 (`<`, `<=`, `>`, `>=`) require the relation against *all* right-hand
 values.
+
+#### `ALSO` — inclusive branches
+
+`ALSO` makes a branch *inclusive*: it fires when the immediately-preceding
+branch in the chain ran (in addition to the standard `else`-style
+fallback).  This turns an `IF` chain into a switch/case-style construct
+where multiple cases can fire.
+
+```cando
+IF true { print("A"); }
+ALSO IF false { print("B"); }
+ALSO         { print("C"); }
+//  → A, B, C all run
+```
+
+`ALSO` and `ELSE` may be mixed in the same chain.  Each branch in a chain
+sees two runtime flags:
+
+- **`matched`** — true once any branch has fired in this chain.
+- **`prev_ran`** — true iff the immediately-preceding branch fired.
+
+| Branch | Fires when |
+|---|---|
+| `IF C` | `C` |
+| `ELSE IF C` | `!matched && C` |
+| `ELSE` | `!matched` |
+| `ALSO IF C` | `prev_ran` **OR** `(!matched && C)` &nbsp; *(when `prev_ran`, the body runs unconditionally and `C` is ignored)* |
+| `ALSO` | `prev_ran` **OR** `!matched` |
+
+Worked examples:
+
+```cando
+// Switch-style fall-through:
+IF n > 0   { print("positive"); }
+ALSO IF n > 5  { print(">5");  }   // fires if `positive` ran
+ALSO IF n > 10 { print(">10"); }   // fires if previous ran
+ELSE       { print("non-positive"); }
+
+describe(20);   //  positive  >5  >10
+describe(3);    //  positive  >5  >10   (also-if cond ignored when prev ran)
+describe(-1);   //  non-positive
+
+// Mixed else / also:
+IF false      { /* skip */ }
+ELSE IF true  { print("B"); }   //   matched := true
+ALSO IF false { print("C"); }   //   prev_ran true → fires (cond ignored)
+ELSE          { /* skip */ }    //   matched still true
+//  → B, C
+```
+
+Constraints:
+
+- `ALSO` may only follow `IF`, `ELSE IF`, `ELSE`, `ALSO IF`, or `ALSO`.
+  A bare `ALSO { … }` at the start of a statement is a parse error.
+- `ELSE` / `ELSE IF` after an `ALSO` is still legal and is gated against
+  the `matched` flag exactly as before.
 
 ### `WHILE`
 
@@ -309,16 +365,44 @@ FOR k, v OVER my_pairs([10, 20, 30]) {
 }
 ```
 
-### `BREAK`, `CONTINUE`
+### `BREAK`, `CONTINUE`, `SETTLE`
 
 ```cando
 BREAK;                // exit the innermost loop
 BREAK 2;              // exit two levels of nesting
 CONTINUE;             // next iteration of the innermost loop
+CONTINUE 1;           // skip to the next iteration of the loop one level out
+
+SETTLE;               // exit the innermost IF chain
+SETTLE 1;             // exit two nested IF chains
 ```
 
-The optional numeric argument is the loop depth to skip (0 =
-innermost).
+The optional numeric argument is the depth to skip (0 = innermost).
+
+`BREAK` / `CONTINUE` count enclosing **loops** only; `SETTLE` counts
+enclosing **`IF` chains** only.  The two are independent: a loop inside
+an `IF` chain is transparent to `SETTLE`, and an `IF` chain inside a
+loop is transparent to `BREAK`.
+
+```cando
+IF condition {
+    WHILE active {
+        IF should_stop { SETTLE; }   // exits the OUTER `IF` chain;
+                                      // the WHILE is skipped over.
+        IF want_break  { BREAK; }    // exits the WHILE; the outer
+                                      // `IF` chain continues.
+        do_work();
+    }
+    cleanup();                        // skipped by SETTLE, reached by BREAK.
+}
+```
+
+Errors:
+
+- `BREAK outside loop` / `CONTINUE outside loop` — `BREAK n` / `CONTINUE n`
+  used where there is no loop at depth `n`.
+- `SETTLE outside IF` — `SETTLE n` used where there is no `IF` chain at
+  depth `n`.
 
 ### `TRY` / `CATCH` / `FINALY` / `THROW`
 
@@ -624,6 +708,7 @@ message; the `cando` CLI prints it to stderr and exits with code 1.
 | `cannot assign to constant '<name>'`     | Reassigning a `CONST` binding.                      |
 | `BREAK outside loop`                     | `BREAK` (or `BREAK n`) used where no loop is active. |
 | `CONTINUE outside loop`                  | `CONTINUE` used where no loop is active.            |
+| `SETTLE outside IF`                      | `SETTLE` (or `SETTLE n`) used outside an `IF` chain. |
 | `RERAISE outside of catch block`         | `RERAISE` used outside a `CATCH` body.              |
 
 ### Threads and concurrency

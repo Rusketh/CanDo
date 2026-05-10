@@ -139,6 +139,7 @@ static const DisasmKind DISASM_KIND[OP_COUNT] = {
     [OP_RANGE_CHECK]      = DK_U16,
     [OP_BREAK]            = DK_U16,
     [OP_CONTINUE]         = DK_U16,
+    [OP_SETTLE]           = DK_U16,
 
     /* Two-operand instructions. */
     [OP_LOOP_MARK]        = DK_U16_U16,
@@ -159,6 +160,7 @@ static const DisasmKind DISASM_KIND[OP_COUNT] = {
     [OP_FOR_OVER_NEXT]    = DK_JUMP_FWD,
     [OP_PIPE_NEXT]        = DK_JUMP_FWD,
     [OP_FILTER_NEXT]      = DK_JUMP_FWD,
+    [OP_IF_MARK]          = DK_JUMP_FWD,
 
     /* Backward jumps. */
     [OP_LOOP]             = DK_JUMP_BACK,

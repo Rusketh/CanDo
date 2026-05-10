@@ -1,0 +1,82 @@
+/* settle.cdo -- SETTLE keyword for IF chains.
+ *
+ * SETTLE exits the innermost enclosing IF chain.  SETTLE N exits N
+ * nested IF chains.  Loops are transparent to SETTLE (a loop inside an
+ * IF chain does not count toward depth); BREAK is symmetrically
+ * transparent to IF chains.
+ */
+
+print("--- T1: settle exits the chain ---");
+IF 1 < 2 {
+    print("before");
+    SETTLE;
+    print("never");
+} ALSO {
+    print("never-also");
+}
+print("after-T1");
+/* expected: before, after-T1 */
+
+print("--- T2: settle 1 exits two nested chains ---");
+IF 1 < 2 {
+    IF 1 < 2 {
+        print("inner-before");
+        SETTLE 1;
+        print("never-inner");
+    }
+    print("never-outer");
+} ALSO {
+    print("never-also");
+}
+print("after-T2");
+/* expected: inner-before, after-T2 */
+
+print("--- T3: settle inside a loop is transparent (exits IF, not loop) ---");
+VAR k = 0;
+IF 1 < 2 {
+    WHILE k < 5 {
+        IF k == 2 { SETTLE 1; }   /* depth 1 -> exits OUTER IF, not loop's IF */
+        print(k);
+        k = k + 1;
+    }
+    print("never-after-while");
+} ALSO {
+    print("never-outer-also");
+}
+print("after-T3");
+/* expected: 0, 1, after-T3
+ * (k==2 fires SETTLE 1, which counts only IF chains:
+ *  innermost is `IF k==2`, depth 1 is the outer `IF 1 < 2`.) */
+
+print("--- T4: BREAK ignores IF chains ---");
+VAR j = 0;
+WHILE j < 5 {
+    IF j == 2 { BREAK; }    /* BREAK depth 0 = innermost loop */
+    print(j);
+    j = j + 1;
+}
+print("after-T4");
+/* expected: 0, 1, after-T4 */
+
+print("--- T5: BREAK 0 inside an IF inside a loop -- still loop, not IF ---");
+VAR i = 0;
+WHILE i < 3 {
+    IF i == 1 {
+        BREAK;            /* BREAK is loop-only -- exits the WHILE */
+        print("never");
+    }
+    print("loop", i);
+    i = i + 1;
+}
+print("after-T5");
+/* expected: loop 0, after-T5 */
+
+print("--- T6: settle without depth == settle 0 ---");
+IF 1 < 2 {
+    SETTLE;
+    print("never");
+}
+print("after-T6");
+/* expected: after-T6 */
+
+print("done");

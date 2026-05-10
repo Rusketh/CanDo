@@ -61,6 +61,8 @@ static const char *const TOKEN_TYPE_NAMES[TOK_COUNT] = {
     [TOK_OVER]           = "OVER",
     [TOK_CONTINUE]       = "CONTINUE",
     [TOK_BREAK]          = "BREAK",
+    [TOK_ALSO]           = "ALSO",
+    [TOK_SETTLE]         = "SETTLE",
     [TOK_PIPE_KW]        = "pipe",
 
     [TOK_PIPE_OP]        = "~>",
@@ -168,6 +170,8 @@ static const KeywordEntry KEYWORDS[] = {
     { "OVER",     4,  TOK_OVER     },
     { "CONTINUE", 8,  TOK_CONTINUE },
     { "BREAK",    5,  TOK_BREAK    },
+    { "ALSO",     4,  TOK_ALSO     },
+    { "SETTLE",   6,  TOK_SETTLE   },
     { "pipe",     4,  TOK_PIPE_KW  },  /* lower-case: implicit loop var */
 };
 

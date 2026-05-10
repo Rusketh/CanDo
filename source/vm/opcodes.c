@@ -89,6 +89,13 @@ static const char *const s_opcode_names[OP_COUNT] = {
     [OP_CONTINUE]         = "OP_CONTINUE",
     [OP_LOOP_MARK]        = "OP_LOOP_MARK",
     [OP_LOOP_END]         = "OP_LOOP_END",
+    [OP_IF_MARK]          = "OP_IF_MARK",
+    [OP_IF_END]           = "OP_IF_END",
+    [OP_SETTLE]           = "OP_SETTLE",
+    [OP_IF_TEST_MATCHED]  = "OP_IF_TEST_MATCHED",
+    [OP_IF_TEST_PREV]     = "OP_IF_TEST_PREV",
+    [OP_IF_SET_RAN]       = "OP_IF_SET_RAN",
+    [OP_IF_CLEAR_PREV]    = "OP_IF_CLEAR_PREV",
     /* Band 11: functions */
     [OP_CLOSURE]          = "OP_CLOSURE",
     [OP_CALL]             = "OP_CALL",
@@ -234,6 +241,13 @@ static const CandoOpFmt s_opcode_fmts[OP_COUNT] = {
     [OP_CONTINUE]         = OPFMT_A,
     [OP_LOOP_MARK]        = OPFMT_A_B,
     [OP_LOOP_END]         = OPFMT_NONE,
+    [OP_IF_MARK]          = OPFMT_A,
+    [OP_IF_END]           = OPFMT_NONE,
+    [OP_SETTLE]           = OPFMT_A,
+    [OP_IF_TEST_MATCHED]  = OPFMT_NONE,
+    [OP_IF_TEST_PREV]     = OPFMT_NONE,
+    [OP_IF_SET_RAN]       = OPFMT_NONE,
+    [OP_IF_CLEAR_PREV]    = OPFMT_NONE,
     /* Band 11: functions */
     [OP_CLOSURE]          = OPFMT_A,
     [OP_CALL]             = OPFMT_A,
@@ -408,6 +422,13 @@ static const CandoOpInfo s_opcode_info[OP_COUNT] = {
     [OP_CONTINUE]            = _OP(0, 0, EFFECT_CONTROL, 0, 0),
     [OP_LOOP_MARK]           = _OP(0, 0, EFFECT_CONTROL, 0, 0),
     [OP_LOOP_END]            = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_IF_MARK]             = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_IF_END]              = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_SETTLE]              = _OP(0, 0, EFFECT_CONTROL, 0, 0),
+    [OP_IF_TEST_MATCHED]     = _OP(0, 1, EFFECT_LOAD,    0, 0),
+    [OP_IF_TEST_PREV]        = _OP(0, 1, EFFECT_LOAD,    0, 0),
+    [OP_IF_SET_RAN]          = _OP(0, 0, EFFECT_STORE,   0, 0),
+    [OP_IF_CLEAR_PREV]       = _OP(0, 0, EFFECT_STORE,   0, 0),
 
     /* Band 11: functions and calls -- all may_recurse */
     [OP_CLOSURE]             = _OP(0, 1, EFFECT_LOAD,    0, 0), /* var tail */

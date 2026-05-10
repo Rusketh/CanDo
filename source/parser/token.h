@@ -59,6 +59,8 @@ typedef enum {
     TOK_OVER,
     TOK_CONTINUE,
     TOK_BREAK,
+    TOK_ALSO,            /* ALSO -- inclusive sibling of ELSE in IF chain   */
+    TOK_SETTLE,          /* SETTLE -- BREAK-equivalent for IF chains        */
     TOK_PIPE_KW,         /* 'pipe' -- implicit iteration variable in ~>/~!> */
 
     /* --- Multi-character operators --------------------------------------- */
