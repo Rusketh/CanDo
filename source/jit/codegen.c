@@ -49,6 +49,13 @@ void cando_jit_replay_snapshot_for_mcode(struct CandoVM *vm,
                                           TraceVal *vals,
                                           CandoValue *frame_slots,
                                           u32 snap_idx);
+/* Phase 4.4 v1c: side-exit materialisation helper (jit.c).  Walks
+ * t->sink_recs and writes a freshly-allocated heap object/array to
+ * each recorded slot so post-trace bytecode reads the right value. */
+void cando_jit_materialize_sunk_for_mcode(struct CandoVM *vm,
+                                           CandoTrace *t,
+                                           char *rbp_base,
+                                           CandoValue *frame_slots);
 
 #define CG_MAX_GUARDS     128
 #define CG_MAX_SUNK       16
@@ -73,6 +80,17 @@ typedef struct {
     u32 field_kref[CG_MAX_OBJ_FIELDS];
 } CGSunk;
 
+/* Phase 4.4 v1c: side-exit materialisation record.  Mirrors
+ * CandoSinkRec (jit.h) -- copied to t->sink_recs after codegen
+ * succeeds. */
+typedef struct {
+    u32 slot;
+    i32 stack_off;
+    u32 capacity;
+    u8  is_array;
+    u32 field_kref[CG_MAX_OBJ_FIELDS];
+} CGSinkRec;
+
 typedef struct {
     u8  *base;          /* start of mcode buffer */
     u8  *cur;           /* current write pointer */
@@ -88,6 +106,11 @@ typedef struct {
     CGSunk sunk[CG_MAX_SUNK];
     u32    sunk_count;
     u32    sunk_total_bytes;   /* total stack to reserve, 16-aligned   */
+    /* Phase 4.4 v1c: per-trace side-exit materialisation list,
+     * built as IR_SSTORE marked IRF_SUNK is processed.  Copied
+     * to t->sink_recs after codegen finishes. */
+    CGSinkRec sink_recs[CG_MAX_SUNK];
+    u32       sink_count;
 
     u32 xmm0_holds;     /* Phase 6.8: IRRef whose vals[] value is
                            currently in xmm0 (0 = unknown).  Lets
@@ -581,6 +604,24 @@ static void emit_mov_rcx_r15(CG *cg) {
 }
 static void emit_mov_r8_r9(CG *cg) {
     static const u8 b[] = { 0x4D, 0x89, 0xC8 }; cg_emit_bytes(cg, b, 3);
+}
+/* mov rdx, rbp   ; 48 89 EA  -- Phase 4.4 v1c: rbp_base arg for
+ * the side-exit materialisation helper. */
+static void emit_mov_rdx_rbp(CG *cg) {
+    static const u8 b[] = { 0x48, 0x89, 0xEA }; cg_emit_bytes(cg, b, 3);
+}
+/* mov r13, r9    ; 4D 89 CD  -- stash snap_idx across the
+ * materialise C call (r9 is caller-saved; r13 is callee-saved
+ * AND free at the side-exit since LICM skip_invariant is no
+ * longer needed once we're side-exiting). */
+static void emit_mov_r13_r9(CG *cg) {
+    static const u8 b[] = { 0x4D, 0x89, 0xCD }; cg_emit_bytes(cg, b, 3);
+}
+/* mov r9, r13    ; 4D 89 E9  -- restore snap_idx after the
+ * materialise call so the replay helper sees it in r8 via
+ * emit_mov_r8_r9. */
+static void emit_mov_r9_r13(CG *cg) {
+    static const u8 b[] = { 0x4D, 0x89, 0xE9 }; cg_emit_bytes(cg, b, 3);
 }
 
 /* call rax           -- FF D0. */
@@ -1194,7 +1235,28 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             /* Phase 4.4g: raw u64 copy works for both IRT_NUM and
              * IRT_OBJ source -- emit_sstore is just mov rax mem.
              * NaN canonicalization (cando_number) was a pre-existing
-             * gap on the codegen path; not regressed here. */
+             * gap on the codegen path; not regressed here.
+             *
+             * Phase 4.4 v1c: IRF_SUNK on the SSTORE means escape
+             * analysis decided this store is dead within the trace.
+             * Skip the emit AND record a sink_rec so the side-exit
+             * stub materialises a real heap object before bytecode
+             * resumes. */
+            if (in->flags & IRF_SUNK) {
+                CGSunk *s = cg_find_sunk(&cg, in->op2);
+                if (s && cg.sink_count < CG_MAX_SUNK) {
+                    CGSinkRec *r = &cg.sink_recs[cg.sink_count++];
+                    r->slot       = in->op1;
+                    r->stack_off  = s->stack_off;
+                    r->capacity   = (s->is_array ? s->cursor : s->capacity);
+                    r->is_array   = s->is_array;
+                    if (!s->is_array) {
+                        for (u32 f = 0; f < s->capacity; f++)
+                            r->field_kref[f] = s->field_kref[f];
+                    }
+                }
+                break;
+            }
             emit_sstore(&cg, in->op1, in->op2);
             break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
@@ -1412,17 +1474,46 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
     }
 
     /* side_exit_common:
+     *   ; Phase 4.4 v1c: stash snap_idx in r9 (callee-saved across
+     *   ; the materialise call -- it's preserved on entry by us
+     *   ; because we don't touch r9 in the helper, but to be safe
+     *   ; the materialise helper's ABI doesn't take r9 anyway).
+     *
+     *   ; Phase 4.4 v1c materialise call (only emitted when there
+     *   ; are actually sink_recs to process):
+     *   mov rdi, rbx          -- vm
+     *   mov rsi, r12          -- t
+     *   mov rdx, rbp          -- rbp_base
+     *   mov rcx, r15          -- frame_slots
+     *   movabs rax, materialize_helper
+     *   call rax
+     *
+     *   ; Snapshot replay (always):
      *   mov rdi, rbx          -- vm
      *   mov rsi, r12          -- t
      *   mov rdx, r14          -- vals
      *   mov rcx, r15          -- frame_slots
      *   mov r8,  r9           -- snap_idx
-     *   movabs rax, helper
+     *   movabs rax, replay_helper
      *   call rax
      *   mov eax, 1            -- TRACE_GUARD_FAILED
      *   epilogue
      */
     u32 common_off = cg_off(&cg);
+    if (cg.sink_count > 0) {
+        /* r9 carries snap_idx for the replay helper; the
+         * materialise call would clobber it.  Stash in r13
+         * (callee-saved). */
+        emit_mov_r13_r9(&cg);
+        emit_mov_rdi_rbx(&cg);
+        emit_mov_rsi_r12(&cg);
+        emit_mov_rdx_rbp(&cg);
+        emit_mov_rcx_r15(&cg);
+        emit_movabs_rax(&cg,
+            (u64)(uintptr_t)&cando_jit_materialize_sunk_for_mcode);
+        emit_call_rax(&cg);
+        emit_mov_r9_r13(&cg);
+    }
     emit_mov_rdi_rbx(&cg);
     emit_mov_rsi_r12(&cg);
     emit_mov_rdx_r14(&cg);
@@ -1444,9 +1535,38 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
         cg_patch_rel32(&cg, stub_jmp_offs[g], common_off);
     }
 
+    /* Phase 4.4 v1c: transfer sink_recs to the trace so the
+     * side-exit materialise helper can iterate them.  Allocated
+     * lazily; trace_release_storage frees it. */
+    if (cg.sink_count > 0) {
+        size_t bytes = sizeof(CandoSinkRec) * cg.sink_count;
+        t->sink_recs = (CandoSinkRec *)cando_alloc(bytes);
+        if (!t->sink_recs) {
+            cando_mcode_free(&t->mcode);
+            return false;
+        }
+        for (u32 i = 0; i < cg.sink_count; i++) {
+            CandoSinkRec *dst = &t->sink_recs[i];
+            const CGSinkRec *src = &cg.sink_recs[i];
+            dst->slot      = src->slot;
+            dst->stack_off = src->stack_off;
+            dst->capacity  = src->capacity;
+            dst->is_array  = src->is_array;
+            for (u32 f = 0; f < CANDO_SINK_MAX_FIELDS &&
+                            f < CG_MAX_OBJ_FIELDS; f++)
+                dst->field_kref[f] = src->field_kref[f];
+        }
+        t->sink_rec_count = cg.sink_count;
+        t->sink_rec_cap   = cg.sink_count;
+    }
+
     t->mcode.written = (u32)(cg.cur - cg.base);
     if (!cando_mcode_finalize(&t->mcode)) {
         cando_mcode_free(&t->mcode);
+        cando_free(t->sink_recs);
+        t->sink_recs = NULL;
+        t->sink_rec_count = 0;
+        t->sink_rec_cap = 0;
         return false;
     }
     t->mcode_fn = (CandoTraceStatus (*)(struct CandoVM *, CandoTrace *,

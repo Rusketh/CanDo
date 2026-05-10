@@ -120,6 +120,24 @@ typedef enum {
  * lazy-allocated by cando_trace_run on first execution.  Reusing the
  * buffer across runs avoids per-iteration alloca/malloc overhead.
  * --------------------------------------------------------------------- */
+/* Phase 4.4 v1c: per-trace materialisation record for sunk
+ * allocations.  When codegen sinks an IR_NEW_ARRAY/IR_NEW_OBJECT
+ * AND its corresponding IR_SSTORE was killed by escape analysis,
+ * we still need to write SOMETHING into the slot if bytecode
+ * resumes after a side-exit.  Each side-exit walks sink_recs and
+ * allocates a real heap object/array, fills it from the stack
+ * buffer, and writes the handle to frame_slots[slot]. */
+#define CANDO_SINK_MAX_FIELDS 8
+typedef struct CandoSinkRec {
+    u32  slot;          /* frame-relative slot to write into        */
+    i32  stack_off;     /* JIT function's rbp-relative offset of    */
+                        /* slot 0 of the stack buffer.              */
+    u32  capacity;      /* how many slots in the buffer             */
+    u8   is_array;      /* 1 = array, 0 = object                    */
+    /* Object only: KIDX of each known field name in slot order.    */
+    u32  field_kref[CANDO_SINK_MAX_FIELDS];
+} CandoSinkRec;
+
 typedef struct CandoTrace {
     CandoTraceIR    ir;            /* SSA instructions + constant pool */
     const u8       *start_pc;      /* head of the recorded loop */
@@ -130,6 +148,13 @@ typedef struct CandoTrace {
                                       when the cache is full. */
     TraceVal       *values_buf;    /* scratch table for cando_trace_run */
     u32             values_cap;
+    /* Phase 4.4 v1c: side-exit materialisation list.  See
+     * CandoSinkRec.  Side-exit stub iterates this list and writes
+     * a freshly-allocated heap object/array to each slot so post-
+     * trace bytecode reads the right value. */
+    CandoSinkRec   *sink_recs;
+    u32             sink_rec_count;
+    u32             sink_rec_cap;
     /* Phase 6: optional native machine-code body.  If mcode.base is
      * non-NULL AND mcode.finalized, cando_trace_run dispatches into
      * the compiled function instead of walking the IR.  When codegen

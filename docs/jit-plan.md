@@ -533,12 +533,31 @@ Phase 4 is now closed.  Headline result: arrays-in-loop benchmark
 went from ~1.9x JIT speedup (codegen with helper calls) to ~10.7x
 (sinking with stack buffers).  Existing benches unchanged.
 
-v1 follow-ups still open:
-  - Sinking for IR_NEW_OBJECT (needs name->slot mapping).
-  - Sinking for IR_RANGE_* (size known only at runtime).
-  - Materialize-on-side-exit for pre-loop VARs (currently sinking
-    is unsafe if post-trace bytecode reads the slot).
-  - Smarter escape analysis (alias-aware across SSTORE/SLOAD chains).
+v1 follow-ups:
+  - **v1a (DONE)** Sinking for IR_NEW_OBJECT.  Codegen tracks
+    field name -> stack slot index in `CGSunk.field_kref[]`;
+    `IR_FIELD_SET` writes to `[rbp + base - 8*field_idx]`,
+    `IR_FIELD_GET` reads symmetrically.  Bail if a field name
+    isn't a constant string KIDX.  Object literal allocation
+    benchmark now ~9x faster.
+  - **v1c (DONE)** Materialise-on-side-exit.  Escape analysis
+    no longer NOPs the dead SSTORE; it marks it `IRF_SUNK`.
+    Codegen records each sunk SSTORE in `cg.sink_recs[]`
+    (slot, stack offset, capacity, is_array, field names).
+    The side-exit common stub now calls
+    `cando_jit_materialize_sunk_for_mcode` BEFORE the snapshot
+    replay helper.  That helper allocates a real heap
+    array/object from the stack buffer and writes it to
+    `frame_slots[slot]`.  Fixes the inline-fn bug where a local
+    declared outside the loop and read after the loop saw
+    stale data after a side-exit (e.g. `FUNCTION foo() { VAR a
+    = [0]; FOR k IN 1->200 { a = [k]; } RETURN a[0]; }` now
+    returns 200 with JIT, matching bytecode).
+  - **v1b (open)** Sinking for IR_RANGE_* (size known only at
+    runtime; deferred -- low value without OP_FOR_INIT
+    recording).
+  - **(open)** Smarter escape analysis (alias-aware across
+    SSTORE/SLOAD chains).
 
 | step | scope | recorder | IR-interp | codegen | sinking | bench impact |
 |------|-------|----------|-----------|---------|---------|--------------|

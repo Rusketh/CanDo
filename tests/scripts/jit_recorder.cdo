@@ -431,4 +431,19 @@ FOR k IN 1 -> 200 {
 }
 print(snk_sum);                         /* sum(6k for k=1..200) = 120600 */
 
+/* Phase 4.4 v1c: side-exit materialisation.  Locally-scoped 'a' is
+ * read AFTER the loop, so the sunk allocation must be materialised
+ * to a real heap array on side-exit so post-trace bytecode sees the
+ * right value.  Without the materialise call the read would return
+ * stale data (pre-trace value or whatever was in frame_slots when
+ * the trace took over).  Expect a[0] = 200 (last loop iteration). */
+FUNCTION snk_materialise() {
+    VAR a = [0];
+    FOR k IN 1 -> 200 {
+        a = [k];
+    }
+    RETURN a[0];
+}
+print(snk_materialise());               /* expect 200 */
+
 print("DONE");

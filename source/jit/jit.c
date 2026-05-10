@@ -666,13 +666,14 @@ static void escape_analysis(CandoTraceIR *ir) {
                 if (has_later_load) {
                     sinkable = false;
                 } else {
-                    /* NOP the dead SSTORE in place. */
+                    /* Phase 4.4 v1c: don't NOP the SSTORE outright
+                     * (it's needed for side-exit materialisation
+                     * bookkeeping).  Mark it IRF_SUNK -- codegen
+                     * will skip the write AND record a sink_rec
+                     * so the side-exit stub materialises a real
+                     * heap object before bytecode resumes. */
                     IRIns *st = (IRIns *)u;
-                    st->op    = IR_NOP;
-                    st->type  = IRT_VOID;
-                    st->flags = 0;
-                    st->op1   = 0;
-                    st->op2   = 0;
+                    st->flags |= IRF_SUNK;
                 }
                 break;
             }
@@ -878,6 +879,10 @@ static void cando_recorder_finish(struct CandoVM *vm) {
      * then, mcode_fn = NULL routes execution through the IR-interp. */
     memset(&t->mcode, 0, sizeof(t->mcode));
     t->mcode_fn   = NULL;
+    /* Phase 4.4 v1c: codegen populates sink_recs lazily. */
+    t->sink_recs       = NULL;
+    t->sink_rec_count  = 0;
+    t->sink_rec_cap    = 0;
     /* Transfer Phase 4 staging snapshot pool. */
     t->snapshots         = r->staging_snapshots;
     t->snapshot_count    = r->staging_snapshot_count;
@@ -2217,6 +2222,7 @@ static void trace_release_storage(CandoTrace *t) {
     cando_free(t->values_buf);
     cando_free(t->snapshots);
     cando_free(t->snap_entries);
+    cando_free(t->sink_recs);
     /* Phase 6: release the executable mapping if codegen produced one. */
     cando_mcode_free(&t->mcode);
     t->mcode_fn         = NULL;
@@ -2228,6 +2234,9 @@ static void trace_release_storage(CandoTrace *t) {
     t->snap_entries     = NULL;
     t->snap_entry_count = 0;
     t->snap_entry_cap   = 0;
+    t->sink_recs        = NULL;
+    t->sink_rec_count   = 0;
+    t->sink_rec_cap     = 0;
 }
 
 void cando_jit_destroy(CandoJit *j) {
@@ -2957,4 +2966,50 @@ u64 cando_jit_range_desc_for_mcode(struct CandoVM *vm, double from_d,
     for (i64 v = from; v >= to; v--)
         cdo_array_push(arr, cdo_number((f64)v));
     return arr_val.u;
+}
+
+/* ============================================================ */
+/* Phase 4.4 v1c: side-exit materialisation                      */
+/* ============================================================ */
+
+/* Walk the trace's sink_recs and allocate a real heap object/array
+ * for each one, filled from its stack buffer (rbp_base + stack_off
+ * points at slot 0; element K is at stack_off - 8*K, growing down).
+ * Writes the resulting handle to frame_slots[rec.slot] so post-
+ * trace bytecode reads the right value.
+ *
+ * Called from the JIT-emitted side-exit common stub before the
+ * snapshot replay helper runs. */
+void cando_jit_materialize_sunk_for_mcode(struct CandoVM *vm,
+                                           CandoTrace *t,
+                                           char *rbp_base,
+                                           CandoValue *frame_slots) {
+    for (u32 i = 0; i < t->sink_rec_count; i++) {
+        const CandoSinkRec *r = &t->sink_recs[i];
+        char *slot0 = rbp_base + r->stack_off;
+        if (r->is_array) {
+            CandoValue arr_val = cando_bridge_new_array(vm);
+            CdoObject *arr = cando_bridge_resolve(vm,
+                                                  cando_as_handle(arr_val));
+            for (u32 k = 0; k < r->capacity; k++) {
+                f64 v = *(f64 *)(slot0 - (i32)(8 * k));
+                cdo_array_push(arr, cdo_number(v));
+            }
+            frame_slots[r->slot] = arr_val;
+        } else {
+            CandoValue obj_val = cando_bridge_new_object(vm);
+            CdoObject *obj = cando_bridge_resolve(vm,
+                                                  cando_as_handle(obj_val));
+            for (u32 k = 0; k < r->capacity; k++) {
+                CandoValue name = cando_ir_get_const(&t->ir,
+                                                      IRREF_K(r->field_kref[k]));
+                if (!cando_is_string(name)) continue;
+                CdoString *key = cando_bridge_intern_key(cando_as_string(name));
+                f64 v = *(f64 *)(slot0 - (i32)(8 * k));
+                cdo_object_rawset(obj, key, cdo_number(v), FIELD_NONE);
+                cdo_string_release(key);
+            }
+            frame_slots[r->slot] = obj_val;
+        }
+    }
 }
