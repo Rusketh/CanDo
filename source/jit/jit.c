@@ -637,12 +637,14 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
             case IR_INDEX_GET:
             case IR_INDEX_SET:
             case IR_INDEX_SET_VAL:
-                /* Phase 4.4a-d: allocations and array reads/writes
-                 * are NEVER invariant.  IR_NEW_ARRAY produces a
-                 * fresh handle each time; hoisting it would alias
-                 * iterations to the same array.  APPEND/SET mutate;
-                 * GET reads possibly-mutated state.  SET_VAL is the
-                 * pinned-pair partner of SET. */
+            case IR_NEW_OBJECT:
+            case IR_FIELD_GET:
+            case IR_FIELD_SET:
+            case IR_FIELD_SET_VAL:
+                /* Phase 4.4a-e: allocations and array/object reads
+                 * /writes are NEVER invariant.  Allocations produce
+                 * fresh handles; mutations don't commute with reads.
+                 * SET_VAL ops are pinned pair-prefixes. */
                 inv = false;
                 break;
             case IR_CALL_F1: {
@@ -1636,24 +1638,20 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
         }
 
         case OP_GET_FIELD: {
-            /* Phase 4.2: only trace property access on a recorder-
-             * tracked OBJECT_GLOBAL slot whose field resolves to a
-             * registered fast-native function.  Anything else aborts.
-             *
-             * The bytecode pops obj and pushes obj.field at the same
-             * sp position, so the recorder's stack effect is
-             * "consume sp-1, write to sp-1". */
+            /* Phase 4.2 + 4.4e: two paths.
+             *   (a) Source is an AUX_OBJECT_GLOBAL marker AND the
+             *       field resolves to a registered fast-native fn:
+             *       replace the aux with AUX_FAST_NATIVE so a
+             *       follow-up OP_CALL emits IR_CALL_F1.  No IR.
+             *   (b) Source is an IRT_OBJ IRRef on stack_map (e.g.
+             *       a freshly-allocated object from IR_NEW_OBJECT
+             *       or an SLOAD'd handle): emit IR_FIELD_GET to
+             *       read the named field as IRT_NUM. */
             if (sp < 1) {
                 cando_recorder_abort(vm, "OP_GET_FIELD with empty stack");
                 return;
             }
             u32 callee_pos = sp - 1;
-            u32 ax = r->stack_aux[callee_pos];
-            if (CANDO_AUX_KIND(ax) != AUX_OBJECT_GLOBAL) {
-                cando_recorder_abort(vm,
-                    "OP_GET_FIELD on non-tracked object (v1: globals only)");
-                return;
-            }
             const CandoChunk *chunk = current_chunk(vm);
             u16 ci = read_op_arg(ip);
             if (!chunk || ci >= chunk->const_count) {
@@ -1665,46 +1663,63 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                 cando_recorder_abort(vm, "OP_GET_FIELD with non-string field");
                 return;
             }
-            /* Resolve obj.field at record time via the actual VM stack
-             * value -- the bytecode hasn't run yet, so vm->stack_top[-1]
-             * still holds the object the recorder shadowed. */
-            CandoValue obj_val = vm->stack_top[-1];
-            if (!cando_is_object(obj_val)) {
+            u32 ax = r->stack_aux[callee_pos];
+
+            /* Branch (a): aux'd global object + fast-native field. */
+            if (CANDO_AUX_KIND(ax) == AUX_OBJECT_GLOBAL) {
+                /* Resolve obj.field at record time via the actual VM stack
+                 * value -- the bytecode hasn't run yet, so vm->stack_top[-1]
+                 * still holds the object the recorder shadowed. */
+                CandoValue obj_val = vm->stack_top[-1];
+                if (cando_is_object(obj_val)) {
+                    CdoObject *obj = cando_bridge_resolve(vm,
+                                                          cando_as_handle(obj_val));
+                    CdoString *key = cando_bridge_intern_key(
+                                        cando_as_string(field_val));
+                    CdoValue raw;
+                    bool got = cdo_object_get(obj, key, &raw);
+                    cdo_string_release(key);
+                    if (got) {
+                        CandoValue resolved = cando_bridge_to_cando(vm, raw);
+                        if (cando_is_native_fn(resolved)) {
+                            u32 native_idx = cando_native_index(resolved);
+                            cando_value_release(resolved);
+                            if (native_idx < vm->fast_natives_f1_cap &&
+                                vm->fast_natives_f1[native_idx] != NULL) {
+                                rec_push_aux(r, callee_pos, AUX_FAST_NATIVE,
+                                             native_idx);
+                                break;
+                            }
+                        } else {
+                            cando_value_release(resolved);
+                        }
+                    }
+                }
+                /* Fast-native lookup didn't apply.  Fall through to
+                 * branch (b) -- materialise the global into an
+                 * IRT_OBJ IRRef and emit IR_FIELD_GET. */
+            }
+
+            /* Branch (b): IR_FIELD_GET on an IRT_OBJ IRRef. */
+            IRRef obj_ref = r->stack_map[callee_pos];
+            if (obj_ref == IRREF_NIL) {
+                obj_ref = rec_materialize_obj_irref(r, callee_pos);
+            }
+            if (obj_ref == IRREF_NIL) {
                 cando_recorder_abort(vm,
-                    "OP_GET_FIELD: shadowed slot is not an object");
+                    "OP_GET_FIELD: source isn't a recorded object");
                 return;
             }
-            CdoObject *obj = cando_bridge_resolve(vm,
-                                                   cando_as_handle(obj_val));
-            CdoString *key = cando_bridge_intern_key(
-                                cando_as_string(field_val));
-            CdoValue raw;
-            bool got = cdo_object_get(obj, key, &raw);
-            cdo_string_release(key);
-            if (!got) {
+            const IRIns *obj_in = cando_ir_get_ins(&r->ir, obj_ref);
+            if (!obj_in || obj_in->type != IRT_OBJ) {
                 cando_recorder_abort(vm,
-                    "OP_GET_FIELD: field not present at record time");
+                    "OP_GET_FIELD: source IRRef is not IRT_OBJ");
                 return;
             }
-            CandoValue resolved = cando_bridge_to_cando(vm, raw);
-            if (!cando_is_native_fn(resolved)) {
-                cando_value_release(resolved);
-                cando_recorder_abort(vm,
-                    "OP_GET_FIELD: field is not a native function (v1)");
-                return;
-            }
-            u32 native_idx = cando_native_index(resolved);
-            cando_value_release(resolved);
-            if (native_idx >= vm->fast_natives_f1_cap ||
-                vm->fast_natives_f1[native_idx] == NULL) {
-                cando_recorder_abort(vm,
-                    "OP_GET_FIELD: native has no JIT fast path");
-                return;
-            }
-            /* Replace the OBJECT_GLOBAL aux with FAST_NATIVE.  The
-             * bytecode will pop obj and push the native sentinel at
-             * the same slot, mirrored here. */
-            rec_push_aux(r, callee_pos, AUX_FAST_NATIVE, native_idx);
+            IRRef k = cando_ir_const(&r->ir, cando_value_copy(field_val));
+            IRRef e = cando_ir_emit(&r->ir, IR_FIELD_GET, IRT_NUM, 0,
+                                    obj_ref, k);
+            rec_push(r, e, callee_pos);
             break;
         }
 
@@ -1788,6 +1803,75 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             /* For the single-return fast-native call we trace, this
              * adjusts spread_extra by (last_ret_count - 1) which is
              * always 0.  No stack effect, no IR. */
+            break;
+        }
+
+        case OP_NEW_OBJECT: {
+            /* Phase 4.4e: allocate a fresh empty object.  No
+             * operands; result lives in stack_map as IRT_OBJ.
+             * Subsequent OP_SET_FIELD ops typically follow for
+             * literal initialisers. */
+            IRRef obj_ref = cando_ir_emit(&r->ir, IR_NEW_OBJECT, IRT_OBJ,
+                                          IRF_PINNED, 0, 0);
+            rec_push(r, obj_ref, sp);
+            break;
+        }
+
+        case OP_SET_FIELD: {
+            /* Phase 4.4e: object.field = value.  Stack: [..., obj, val].
+             * obj stays (PEEKed); val popped.  The field name is in
+             * the chunk constant pool at index ci.
+             *
+             * v1 ignores __newindex semantics -- if the script
+             * relies on a metamethod for field-set, the trace would
+             * give wrong behaviour.  Recommended use is on freshly-
+             * allocated objects (no metamethods possible) or known-
+             * meta-free script objects. */
+            const CandoChunk *chunk = current_chunk(vm);
+            u16 ci = read_op_arg(ip);
+            if (!chunk || ci >= chunk->const_count) {
+                cando_recorder_abort(vm, "OP_SET_FIELD out of range");
+                return;
+            }
+            CandoValue name_val = chunk->constants[ci];
+            if (!cando_is_string(name_val)) {
+                cando_recorder_abort(vm,
+                    "OP_SET_FIELD with non-string name");
+                return;
+            }
+            if (sp < 2) {
+                cando_recorder_abort(vm,
+                    "OP_SET_FIELD with too few stack slots");
+                return;
+            }
+            IRRef val_ref = r->stack_map[sp - 1];
+            IRRef obj_ref = r->stack_map[sp - 2];
+            if (obj_ref == IRREF_NIL) {
+                obj_ref = rec_materialize_obj_irref(r, sp - 2);
+            }
+            if (val_ref == IRREF_NIL || obj_ref == IRREF_NIL) {
+                cando_recorder_abort(vm,
+                    "OP_SET_FIELD: operand not in stack_map");
+                return;
+            }
+            const IRIns *obj_in = cando_ir_get_ins(&r->ir, obj_ref);
+            if (!obj_in || obj_in->type != IRT_OBJ) {
+                cando_recorder_abort(vm,
+                    "OP_SET_FIELD: container is not a recorded object");
+                return;
+            }
+            const IRIns *val_in = cando_ir_get_ins(&r->ir, val_ref);
+            if (val_in && val_in->type != IRT_NUM) {
+                cando_recorder_abort(vm,
+                    "OP_SET_FIELD: value is non-numeric (v1)");
+                return;
+            }
+            IRRef k = cando_ir_const(&r->ir, cando_value_copy(name_val));
+            cando_ir_emit(&r->ir, IR_FIELD_SET_VAL, IRT_VOID,
+                          IRF_PINNED, val_ref, 0);
+            cando_ir_emit(&r->ir, IR_FIELD_SET, IRT_VOID,
+                          IRF_PINNED, obj_ref, k);
+            /* Stack effect: pop val (obj stays).  No push. */
             break;
         }
 
@@ -2365,9 +2449,9 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                 break;
             }
             case IR_INDEX_SET_VAL:
-                /* Phase 4.4d: no-op.  The value lives in vals[op1].d
-                 * already; the immediately-following IR_INDEX_SET
-                 * picks it up via the i-1 convention. */
+            case IR_FIELD_SET_VAL:
+                /* Phase 4.4d-e: no-op pair-prefix carrying the value
+                 * IRRef into the immediately-following SET op via i-1. */
                 break;
             case IR_INDEX_SET: {
                 /* Phase 4.4d: array[idx] = value.  Reads value from
@@ -2388,6 +2472,69 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                 }
                 u32 idx = (u32)vals[in->op2].d;
                 cdo_array_rawset_idx(arr, idx, cdo_number(vals[val_ref].d));
+                break;
+            }
+
+            case IR_NEW_OBJECT: {
+                /* Phase 4.4e: allocate a fresh empty object. */
+                CandoValue obj = cando_bridge_new_object(vm);
+                vals[i].u = obj.u;
+                break;
+            }
+            case IR_FIELD_SET: {
+                /* Phase 4.4e: object.field = value.  Read value from
+                 * preceding IR_FIELD_SET_VAL; resolve obj from
+                 * vals[op1].u; intern the name string from op2's
+                 * const-pool entry; cdo_object_rawset.  v1 ignores
+                 * __newindex semantics. */
+                if (i == 0 || t->ir.ir[i - 1].op != IR_FIELD_SET_VAL) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_RANGE_ERROR;
+                }
+                IRRef val_ref = t->ir.ir[i - 1].op1;
+                CandoValue obj_val; obj_val.u = vals[in->op1].u;
+                if (!cando_is_object(obj_val)) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
+                CdoObject *obj = cando_bridge_resolve(vm,
+                                                      cando_as_handle(obj_val));
+                CandoValue name = cando_ir_get_const(&t->ir, in->op2);
+                if (!obj || !cando_is_string(name)) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
+                CdoString *key = cando_bridge_intern_key(cando_as_string(name));
+                cdo_object_rawset(obj, key, cdo_number(vals[val_ref].d),
+                                  FIELD_NONE);
+                cdo_string_release(key);
+                break;
+            }
+            case IR_FIELD_GET: {
+                /* Phase 4.4e: object.field.  Resolve obj, intern
+                 * name, cdo_object_rawget.  Side-exit on missing or
+                 * non-numeric. */
+                CandoValue obj_val; obj_val.u = vals[in->op1].u;
+                if (!cando_is_object(obj_val)) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
+                CdoObject *obj = cando_bridge_resolve(vm,
+                                                      cando_as_handle(obj_val));
+                CandoValue name = cando_ir_get_const(&t->ir, in->op2);
+                if (!obj || !cando_is_string(name)) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
+                CdoString *key = cando_bridge_intern_key(cando_as_string(name));
+                CdoValue cv;
+                bool got = cdo_object_rawget(obj, key, &cv);
+                cdo_string_release(key);
+                if (!got || !cdo_is_number(cv)) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
+                vals[i].d = cv.as.number;
                 break;
             }
             case IR_ARRAY_APPEND: {

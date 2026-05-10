@@ -195,6 +195,10 @@ static const char *const s_op_names[IR__COUNT] = {
     [IR_INDEX_GET]   = "IR_INDEX_GET",
     [IR_INDEX_SET_VAL]= "IR_INDEX_SET_VAL",
     [IR_INDEX_SET]   = "IR_INDEX_SET",
+    [IR_NEW_OBJECT]  = "IR_NEW_OBJECT",
+    [IR_FIELD_SET_VAL]= "IR_FIELD_SET_VAL",
+    [IR_FIELD_SET]   = "IR_FIELD_SET",
+    [IR_FIELD_GET]   = "IR_FIELD_GET",
     [IR_LOOP]        = "IR_LOOP",
 };
 

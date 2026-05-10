@@ -204,6 +204,29 @@ typedef enum {
                               cdo_array_rawset_idx with the value as
                               a CdoValue number.  Side-exits on
                               non-array via cur_snap. */
+    IR_NEW_OBJECT,         /* No operands.  Returns IRT_OBJ; vals[i].u
+                              is the freshly-allocated empty object's
+                              CandoValue u64 bits.  IR-interp calls
+                              cando_bridge_new_object. */
+    IR_FIELD_SET_VAL,      /* Same shape as IR_INDEX_SET_VAL: PINNED
+                              no-op carrying the value into the
+                              following IR_FIELD_SET. */
+    IR_FIELD_SET,          /* op1: object IRRef (IRT_OBJ).  op2:
+                              name const-pool ref (the IRREF_KFLAG
+                              bit is set; KIDX into trace constants
+                              gives a CandoString*).  Reads value
+                              from the preceding IR_FIELD_SET_VAL.
+                              IR-interp resolves obj, interns key,
+                              calls cdo_object_rawset.  v1 ignores
+                              __newindex -- objects with metamethods
+                              get wrong behaviour but the recorder
+                              restricts the entry shape via the
+                              fresh-object check upstream. */
+    IR_FIELD_GET,          /* op1: object IRRef (IRT_OBJ).  op2:
+                              name const-pool ref.  Returns IRT_NUM.
+                              IR-interp resolves obj + interns key +
+                              cdo_object_rawget, requires numeric.
+                              Side-exits on missing/non-numeric. */
 
     /* ===== Band 7: Trace control ======================================== */
     IR_LOOP,               /* head-of-loop marker; the trace closes here    */

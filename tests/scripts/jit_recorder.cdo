@@ -391,4 +391,16 @@ FOR k IN 1 -> 200 {
 print(ix_sum);                          /* sum(3k for k=1..200) = 60300 */
 print(ix_a[0]);                         /* last write was k=200 */
 
+/* Phase 4.4e: object literal + field access inside a hot loop.
+ * Trace records IR_NEW_OBJECT + IR_FIELD_SET_VAL/IR_FIELD_SET pairs
+ * for each field, then IR_FIELD_GET on the SLOAD'd handle.  v1
+ * ignores __newindex semantics; this script doesn't use any
+ * metamethods so behaviour matches bytecode. */
+VAR obj_sum = 0;
+FOR k IN 1 -> 200 {
+    VAR p = {x: k, y: k * 2};
+    obj_sum = obj_sum + p.x + p.y;
+}
+print(obj_sum);                         /* same as ix_sum: 60300 */
+
 print("DONE");
