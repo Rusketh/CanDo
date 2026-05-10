@@ -20,6 +20,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #if !defined(_WIN32) && !defined(_WIN64)
 #  include <dlfcn.h>   /* dlclose() for binary module cleanup */
 #endif
@@ -1248,18 +1249,48 @@ bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
 }
 
 /* =========================================================================
- * Truthiness (NULL and FALSE are falsy; everything else is truthy)
+ * Truthiness
+ *
+ * Falsy values: NULL, FALSE, and the number 0 (zero).
+ * Objects may override truthiness via the __is metamethod, which receives
+ * the object as its single argument and whose return value is itself
+ * tested for truthiness via the rules above.
  * ===================================================================== */
 
 static bool vm_is_truthy(CandoValue v) {
-    if (cando_is_null(v))  return false;
-    if (cando_is_bool(v))  return cando_as_bool(v);
+    if (cando_is_null(v))   return false;
+    if (cando_is_bool(v))   return cando_as_bool(v);
+    if (cando_is_number(v)) return cando_as_number(v) != 0.0;
     return true;
 }
 
 static bool vm_is_truthy_meta(CandoVM *vm, CandoValue v, bool *ok) {
-    CANDO_UNUSED(vm);
     *ok = true;
+    if (cando_is_object(v) && g_meta_is) {
+        CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
+        if (obj) {
+            CdoValue raw;
+            if (cdo_object_get(obj, g_meta_is, &raw)) {
+                /* __is may be a literal TRUE/FALSE (used directly) or a
+                 * callable (invoked as __is(self); its return value is
+                 * tested for truthiness).  Numbers can't be used as a
+                 * literal here -- they share the CDO_NUMBER tag with
+                 * inline-function PC offsets and so are always treated
+                 * as callable. */
+                if (raw.tag == CDO_BOOL) {
+                    return raw.as.boolean;
+                }
+                CandoValue arg = v;
+                if (cando_vm_dispatch_callable(vm, &raw, &arg, 1)) {
+                    CandoValue r = cando_vm_pop(vm);
+                    bool t = vm_is_truthy(r);
+                    cando_value_release(r);
+                    return t;
+                }
+                if (vm->has_error) { *ok = false; return false; }
+            }
+        }
+    }
     return vm_is_truthy(v);
 }
 
@@ -2142,11 +2173,32 @@ static CandoVMResult vm_run(CandoVM *vm) {
     }
 
         OP_CASE(OP_ADD): {
-            /* String concatenation or numeric addition. */
+            /* String concatenation or numeric addition.  If either operand
+             * is a string, the other is coerced via cando_value_tostring and
+             * the two are concatenated. */
             CandoValue b = PEEK(0), a = PEEK(1);
-            if (cando_is_string(a) && cando_is_string(b)) {
-                u32 la = cando_as_string(a)->length, lb = cando_as_string(b)->length;
+            if (cando_is_string(a) || cando_is_string(b)) {
+                char *sa_buf = NULL, *sb_buf = NULL;
+                const char *sa_data; u32 la;
+                const char *sb_data; u32 lb;
+                if (cando_is_string(a)) {
+                    sa_data = cando_as_string(a)->data;
+                    la = cando_as_string(a)->length;
+                } else {
+                    sa_buf = cando_value_tostring(a);
+                    sa_data = sa_buf;
+                    la = (u32)strlen(sa_buf);
+                }
+                if (cando_is_string(b)) {
+                    sb_data = cando_as_string(b)->data;
+                    lb = cando_as_string(b)->length;
+                } else {
+                    sb_buf = cando_value_tostring(b);
+                    sb_data = sb_buf;
+                    lb = (u32)strlen(sb_buf);
+                }
                 if (la > UINT32_MAX - lb - 1) {
+                    free(sa_buf); free(sb_buf);
                     vm_runtime_error(vm,
                         "string concatenation length overflow");
                     goto handle_error;
@@ -2154,11 +2206,13 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 DROP(); DROP();
                 u32 total = la + lb;
                 char *buf = cando_alloc(total + 1);
-                memcpy(buf,      cando_as_string(a)->data, la);
-                memcpy(buf + la, cando_as_string(b)->data, lb);
+                memcpy(buf,      sa_data, la);
+                memcpy(buf + la, sb_data, lb);
                 buf[total] = '\0';
                 CandoString *s = cando_string_new(buf, total);
                 cando_free(buf);
+                free(sa_buf);
+                free(sb_buf);
                 cando_value_release(a);
                 cando_value_release(b);
                 PUSH(cando_string_value(s));

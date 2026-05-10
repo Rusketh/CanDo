@@ -44,3 +44,11 @@ print(parts[2]);
 /* Concatenation with toString */
 VAR msg = "count: " + toString(99);
 print(msg);
+
+/* Implicit tostring concatenation -- adding anything to a string
+ * converts the other operand via tostring. */
+print("count: " + 99);
+print(99 + " items");
+print("flag: " + TRUE);
+print("missing: " + NULL);
+print("a" + 1 + "b");

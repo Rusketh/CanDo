@@ -56,7 +56,24 @@ held to the same correctness bar as a hand-written language.
 
 ## Quick start
 
-### Build
+### Download a prebuilt binary
+
+Every green push to the trunk publishes rolling-release zips on
+GitHub.  Pick your platform and unzip:
+
+| Platform           | Release tag       | Asset                       |
+|--------------------|-------------------|-----------------------------|
+| Linux (x86_64)     | `linux-latest`    | `cando-linux-x86_64.zip`    |
+| Windows (x86_64)   | `windows-latest`  | `cando-windows-x86_64.zip`  |
+| VS Code extension  | `vscode-latest`   | `vscode-cando.vsix`         |
+
+The latest builds are always linked from the
+[Releases](https://github.com/Rusketh/CanDo/releases) page.  Each zip
+extracts to the `cando` interpreter, `libcando.{so,a}` /
+`libcando.{dll,lib}` for embedding, the public headers under
+`include/`, and one `.so`/`.dll` per binary module under `modules/`.
+
+### Build from source
 
 CMake is the supported build system; a GNU `Makefile` is provided as a
 fallback.  OpenSSL and pthreads are required.

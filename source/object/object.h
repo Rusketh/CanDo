@@ -52,6 +52,7 @@
 #define META_LEN       "__len"
 #define META_NEWINDEX  "__newindex"
 #define META_CONSTRUCTOR "__constructor"
+#define META_IS        "__is"
 
 /* -----------------------------------------------------------------------
  * Native function signature
@@ -286,5 +287,6 @@ extern CdoString *g_meta_idiv;
 extern CdoString *g_meta_len;
 extern CdoString *g_meta_newindex;
 extern CdoString *g_meta_constructor;
+extern CdoString *g_meta_is;
 
 #endif /* CDO_OBJECT_H */

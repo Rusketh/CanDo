@@ -31,20 +31,33 @@ print(type(Foo()));           // Foo  -- via __type
 
 ## Truthiness
 
-Only `NULL` and `FALSE` are falsy.  Every other value — including `0`,
-`""`, the empty array `[]`, and the empty object `{}` — is truthy.
+`NULL`, `FALSE`, and the number `0` are falsy.  Every other value —
+including `""`, the empty array `[]`, and the empty object `{}` — is
+truthy.
 
 ```cdo
-IF 0   { print("yes"); }      // prints "yes"
-IF ""  { print("yes"); }      // prints "yes"
-IF []  { print("yes"); }      // prints "yes"
+IF 0   { /* skipped */ }
+IF ""  { print("yes"); }      // prints "yes"  (empty string is truthy)
+IF []  { print("yes"); }      // prints "yes"  (empty array is truthy)
 IF NULL  { /* skipped */ }
 IF FALSE { /* skipped */ }
 ```
 
-In particular this is **not** C's truthiness rule; in CanDo a
-zero-valued number, an empty string, and an empty container are all
-truthy.
+Objects can override their own truthiness with the `__is` metamethod.
+`__is` may be a literal `TRUE` / `FALSE` (used directly) or a callable
+that receives the object and whose return value is tested for
+truthiness:
+
+```cdo
+CLASS Box = (self, n) { self.n = n; }
+Box.__is = FUNCTION(self) { RETURN self.n > 0; };
+
+IF Box(0) { print("non-empty"); } ELSE { print("empty"); }   // empty
+IF Box(5) { print("non-empty"); } ELSE { print("empty"); }   // non-empty
+
+VAR alwaysFalsy = { __is: FALSE };
+IF alwaysFalsy { /* skipped */ }
+```
 
 ## `null`
 
@@ -67,7 +80,7 @@ boolean — they return one of the operands verbatim:
 
 ```cdo
 print(NULL || "fallback");     // fallback
-print(0    || "fallback");     // 0  (because 0 is truthy)
+print(0    || "fallback");     // fallback   (0 is falsy)
 print("a"  && "b");            // b
 print(!NULL);                  // true
 ```

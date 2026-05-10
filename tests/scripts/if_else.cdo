@@ -36,3 +36,10 @@ IF TRUE {
     VAR msg = "scoped";
     print(msg);
 }
+
+/* Falsy values: NULL, FALSE, and 0 are falsy.  Strings (even empty) are
+ * truthy. */
+IF 0 { print("FAIL"); } ELSE { print("zero_falsy"); }
+IF 1 { print("one_truthy"); }
+IF "" { print("empty_str_truthy"); }
+IF NULL { print("FAIL"); } ELSE { print("null_falsy"); }
