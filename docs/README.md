@@ -1,137 +1,95 @@
 # CanDo Documentation
 
-CanDo is a small C11 scripting language designed to be embedded in host
-applications — games, tools, platform frameworks, CLIs — in the same way
-Lua is.  Scripts are plain UTF-8 text with the extension `.cdo` and are
-compiled to bytecode for a stack-based VM.
+Welcome to the CanDo documentation.  This index is the entry point — every
+other doc in the tree is reachable from one of the sections below.
 
-## For script authors
+CanDo is a small embeddable scripting language.  Source files use the
+`.cdo` extension and are compiled to bytecode for a stack-based virtual
+machine.  Scripts are UTF-8 plain text; the runtime is C11.  See the
+project [Readme.md](../Readme.md) for the high-level pitch and design
+goals.
 
-**Start here:**
+---
 
-| Document | What's in it |
-|---|---|
-| [getting-started.md](getting-started.md) | Build the interpreter and run your first script |
-| [user-guide.md](user-guide.md) | Hands-on tutorial: learn CanDo by example |
-| [language-reference.md](language-reference.md) | Complete syntax: types, expressions, statements, functions, classes |
-| [standard-library.md](standard-library.md) | Every built-in library module, function-by-function |
-| [patterns.md](patterns.md) | Common idioms — error handling, FP style, classes, modules, threads |
-| [cli.md](cli.md) | The `cando` executable: flags, `args[]`, exit codes, environment |
-
-**Concurrency:**
+## Start here
 
 | Document | What's in it |
 |---|---|
-| [threading.md](threading.md) | `thread` / `await`, the `thread` library, shared state |
-| [streaming.md](streaming.md) | Unified `stream` API: pipe between files, sockets, HTTP, processes, threads |
+| [getting-started.md](getting-started.md) | Build the interpreter, run your first script, set up your editor. |
+| [cli.md](cli.md) | The `cando` executable: flags, arguments, exit codes, environment variables. |
+| [AI-GUIDE.md](AI-GUIDE.md) | Orientation for AI assistants editing this codebase efficiently. |
 
-**Networking:**
+## Language reference
 
-| Document | What's in it |
-|---|---|
-| [socket.md](socket.md) | Long-form guide to the `socket` and `secure_socket` libraries |
-
-**Data formats:**
+The language reference lives in [`language/`](language/README.md) and is
+split into focused files:
 
 | Document | What's in it |
 |---|---|
-| [yaml.md](yaml.md) | YAML parse / stringify and `include()`-time loading |
-| [sql.md](sql.md) | SQLite-backed `sql` module: queries, parameter binding, transactions |
+| [language/syntax.md](language/syntax.md) | Lexical structure, keywords, operators, literals. |
+| [language/types.md](language/types.md) | The five value types: `null`, `bool`, `number`, `string`, `object`. |
+| [language/expressions.md](language/expressions.md) | Operators, precedence, evaluation order, special forms. |
+| [language/statements.md](language/statements.md) | `IF`, `WHILE`, `FOR`, `BREAK`, `CONTINUE`, blocks, scoping. |
+| [language/functions.md](language/functions.md) | Definition forms, multi-return, varargs, masks, closures. |
+| [language/classes.md](language/classes.md) | `CLASS`, `EXTENDS`, metamethods, prototype chains. |
+| [language/error-handling.md](language/error-handling.md) | `TRY` / `CATCH` / `FINALY` / `THROW`, runtime error messages. |
+| [language/threading.md](language/threading.md) | `thread { … }`, `await`, the `thread` library. |
+| [language/pipes.md](language/pipes.md) | `~>` map, `~!>` filter+map, `~&>` predicate filter. |
+| [language/modules.md](language/modules.md) | `include()` semantics, module caching, file extensions. |
 
-**Graphics & UI** (require platform binary modules):
+## Library reference
+
+Per-library documentation, function-by-function, with examples, lives in
+[`libraries/`](libraries/README.md).  Every standard-library namespace
+has a dedicated file.
+
+## Embedding and the C API
+
+For embedders and extension authors:
 
 | Document | What's in it |
 |---|---|
-| [window.md](window.md) | Window creation and event loop |
-| [draw.md](draw.md) | 2D drawing primitives, sprites, text |
-| [forms.md](forms.md) | Declarative widget tree for in-window UI |
-
-## For C embedders
-
-| Document | What's in it |
-|---|---|
-| [embedding.md](embedding.md) | Lifecycle, running scripts, exchanging values, error handling |
-| [c-api.md](c-api.md) | Reference for every public symbol in `cando.h` |
-| [writing-extensions.md](writing-extensions.md) | Native functions and in-process library modules |
-| [creating-platforms.md](creating-platforms.md) | Building a love2d-style framework on top of CanDo |
+| [api/README.md](api/README.md) | Index of embedder docs. |
+| [api/embedding.md](api/embedding.md) | Lifecycle, running scripts, exchanging values, error handling. |
+| [api/reference.md](api/reference.md) | Reference for every public symbol in `cando.h`. |
+| [api/extensions.md](api/extensions.md) | Native functions and binary modules. |
 
 ## Internals (contributors)
 
 | Document | What's in it |
 |---|---|
-| [architecture.md](architecture.md) | End-to-end pipeline and module layout |
-| [value-types.md](value-types.md) | `CandoValue`, `CdoValue`, handles, the bridge layer |
-| [object-system.md](object-system.md) | `CdoObject`, prototype chains, meta-methods, arrays |
-| [metamethods.md](metamethods.md) | All meta-keys, `CLASS`, prototype-based inheritance, operator overloading |
-| [parser-compiler.md](parser-compiler.md) | Lexer, Pratt parser, scope system, bytecode emission |
-| [vm-internals.md](vm-internals.md) | Dispatch loop, call frames, upvalues, opcode reference |
+| [internals/README.md](internals/README.md) | Index of internals docs. |
+| [internals/architecture.md](internals/architecture.md) | End-to-end pipeline. |
+| [internals/value-system.md](internals/value-system.md) | `CandoValue`, `CdoValue`, handles, the bridge layer. |
+| [internals/parser.md](internals/parser.md) | Lexer, Pratt parser, scope system, bytecode emission. |
+| [internals/vm.md](internals/vm.md) | Dispatch loop, call frames, upvalues, opcode reference. |
+| [internals/jit.md](internals/jit.md) | Tracing JIT: hot-path detection, IR, native codegen. |
+
+## Binary modules
+
+The native extension modules live in [`../modules/`](../modules/README.md)
+with their own documentation alongside their source.  Per-module
+descriptions are in [modules/README.md](../modules/README.md).
 
 ---
 
-## Build
+## Cross-cutting topics
 
-CMake is the supported build system.  A GNU `Makefile` is provided as a
-fallback.
+A few topics span more than one of the categories above.  Quick links:
 
-```bash
-cmake -B build && cmake --build build
-./build/cando tests/scripts/hello.cdo
-```
-
-Outputs:
-
-- `libcando.so` / `libcando.dll` — shared library for embedding
-- `libcando.a` / `libcando_static.lib` — static library
-- `cando` / `cando.exe` — standalone interpreter
-
-OpenSSL and pthreads are required (used by the `http`/`https` and
-`thread` libraries).
-
-## Hello world — embedding
-
-```c
-#include <cando.h>
-#include <stdio.h>
-
-int main(void) {
-    CandoVM *vm = cando_open();
-    cando_openlibs(vm);
-
-    if (cando_dofile(vm, "game/main.cdo") != CANDO_OK)
-        fprintf(stderr, "%s\n", cando_errmsg(vm));
-
-    cando_close(vm);
-    return 0;
-}
-```
-
-```
-gcc myapp.c -lcando -Iinclude -o myapp
-```
-
-See [embedding.md](embedding.md) for a complete walk-through.
-
-## Repository layout
-
-```
-include/cando.h      single public header for embedders
-source/
-  core/              value, memory, handle table, lock primitives
-  object/            heap objects: CdoObject, array, function, thread
-  parser/            lexer + Pratt parser → bytecode
-  vm/                bytecode, dispatch loop, bridge layer, disassembler
-  lib/               19 standard library modules
-  natives.c          core natives: print, type, toString
-  cando_lib.c        public embedding API (cando_open, cando_dofile, …)
-  main.c             `cando` CLI entry point
-tests/
-  scripts/           .cdo scripts run by the integration suite
-  integration/       shell runner that executes every script
-  test_*.c           unit tests for core, object, lexer, parser, vm, thread
-```
+- **Concurrency** — [language/threading.md](language/threading.md) (the
+  language form), [libraries/thread.md](libraries/thread.md) (the
+  library), [libraries/stream.md](libraries/stream.md) (channels and
+  pipes).
+- **Networking** — [libraries/socket.md](libraries/socket.md),
+  [libraries/secure_socket.md](libraries/secure_socket.md),
+  [libraries/http.md](libraries/http.md),
+  [libraries/https.md](libraries/https.md).
+- **Data formats** — [libraries/json.md](libraries/json.md),
+  [libraries/yaml.md](libraries/yaml.md),
+  [libraries/csv.md](libraries/csv.md).
 
 ## Version
 
-This documentation tracks CanDo 1.0.0 — the version defined in
-`include/cando.h` (`CANDO_VERSION`).  The numeric form `CANDO_VERSION_NUM`
-is `10000` (major × 10000 + minor × 100 + patch).
+These docs track CanDo `1.0.0` — the version constant defined in
+[`include/cando.h`](../include/cando.h).

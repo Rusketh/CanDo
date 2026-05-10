@@ -1,155 +1,127 @@
-# Window Module
+# `window` module
 
-A binary extension that opens OS windows from Cando scripts and runs
-LÖVE2D-style callbacks (`update`, `draw`, `keypressed`, `mousepressed`,
-…) on each open window.  Pair it with the [`draw`](../draw/README.md)
-module to render anything you like inside.
+A cross-platform OS window with an OpenGL context.  Built on GLFW; runs
+on Linux, macOS, and Windows.
 
-The module **statically links the vendored GLFW 3.4** -- no runtime
-dependency on `libglfw` is needed.  Linux end-user systems still need
-the standard X11 + OpenGL libraries (`libX11.so.6`, `libGL.so.1`,
-`libxkbcommon.so.0`) preinstalled on every mainstream desktop distro.
-On Windows nothing extra is required.
-
-It ships as `window.so` / `window.dll` in the same CI artefact bundle
-as `cando` itself.
-
-## Building
-
-```bash
-make modules                                    # Linux / macOS host
-make -C modules/window                          # build only this module
-make -C modules/window test                     # run the C unit tests
-./cando modules/window/test_window_smoke.cdo   # script-side load smoke
-```
-
-Linux build dependencies (provided on every CI runner; install on a
-fresh dev box with `apt`):
-
-```bash
-sudo apt-get install -y \
-  libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
-  libgl1-mesa-dev libxkbcommon-dev libxext-dev
-```
-
-Windows cross-compile from Linux:
-
-```bash
-make -C modules/window window.dll MINGW_CC=x86_64-w64-mingw32-gcc
-```
+The `window` module gives you a window and an event loop.  For drawing
+inside the window, see [`draw/`](../draw/README.md).
 
 ## Loading
 
-```cando
-VAR window = include("./window.so");           # or "./window.dll" on Windows
-print(window.glfwVersion);                     # e.g. "3.4.0 X11 GLX ..."
+```cdo
+VAR window = include("./modules/window/window");
 ```
 
-## Hello, world
+## Creating a window
 
-The script does **not** need to call `await` or run an event loop.
-Each open window holds a *lifeline* on the VM, so the process stays
-alive until the user closes the window (or the script calls
-`w:close()` explicitly, or anyone calls `app.quit()`).
+### `window.create(opts*) → win`
 
-```cando
-VAR window = include("./window.so");
+`opts`:
 
-VAR w = window.create("Hello", 400, 300);
-w.draw = FUNCTION(self) {
-    # When the draw module is also loaded, this is where you put
-    # `draw.clear(...)`, `draw.rectangle(...)`, etc.
-};
-w.keypressed = FUNCTION(self, key) {
-    IF key == window.keys.escape { self:close(); }
-};
-# script ends here -- the window keeps running until closed.
+| Field        | Type   | Default       | Description |
+|--------------|--------|---------------|-------------|
+| `title`      | string | `"CanDo"`     | Window title. |
+| `width`      | number | `800`         | Initial width in points. |
+| `height`     | number | `600`         | Initial height. |
+| `resizable`  | bool   | `TRUE`        | |
+| `vsync`      | bool   | `TRUE`        | Vertical sync. |
+| `glVersion`  | string | `"3.3"`       | Requested OpenGL core profile. |
+
+```cdo
+VAR win = window.create({ title: "Demo", width: 1024, height: 768 });
 ```
 
-## Public API
+The window is shown immediately.  The current GL context is made
+active; a draw library can take over from here.
 
-### `window` namespace
+## Window methods
 
-| Field                             | Description                                      |
-|-----------------------------------|--------------------------------------------------|
-| `window.create(title, w, h)`      | Open a window; positional args optional.         |
-| `window.create({title=, width=, height=})` | Same, options-table form.               |
-| `window.VERSION`                  | Module version string.                           |
-| `window.glfwVersion`              | Linked GLFW build string.                        |
-| `window.keys.<name>`              | Key constants: `escape`, `a`..`z`, `_0`..`_9`, `f1`..`f12`, `space`, `return`, `tab`, arrows, modifiers, punctuation. |
-| `window.mouse.left/middle/right`  | Mouse button constants.                          |
+| Method                              | Description |
+|-------------------------------------|-------------|
+| `win:close()`                       | Close the window. |
+| `win:isOpen() → bool`               | `FALSE` after the OS has closed it. |
+| `win:swap()`                        | Swap front and back buffers (call once per frame). |
+| `win:pollEvents()`                  | Pump OS events.  Sets `win:keyDown(k)`, etc. |
+| `win:waitEvents(timeoutMs*)`        | Block until an event arrives or the timeout expires. |
+| `win:size() → number, number`       | Width, height in points. |
+| `win:framebufferSize() → number, number` | Width, height in pixels (for HiDPI). |
+| `win:contentScale() → number, number` | DPI scale factors. |
+| `win:setSize(w, h)`                 | Resize. |
+| `win:setTitle(title)`               | Update the title. |
+| `win:keyDown(key) → bool`           | Is `key` currently held? |
+| `win:mouseButton(b) → bool`         | Is mouse button `b` currently held? |
+| `win:mouse() → number, number`      | Current mouse position. |
+| `win:onKey(fn)`                     | Register `fn(key, action)` for key events. |
+| `win:onResize(fn)`                  | Register `fn(width, height)`. |
+| `win:onClose(fn)`                   | Register `fn()` when the user requests close. |
 
-### `_meta.window` instance methods
+## Event loop
 
-Every window instance chains `__index` to `_meta.window`, so all of
-these are available as colon methods:
+```cdo
+VAR window = include("./modules/window/window");
 
-| Method                            | Description                                      |
-|-----------------------------------|--------------------------------------------------|
-| `w:close()`                       | Tear the window down.                            |
-| `w:isOpen()`                      | `TRUE` until the slot has been recycled.         |
-| `w:setTitle(str)` / `w:getTitle()` | Title.                                          |
-| `w:setSize(width, height)` / `w:getSize()` | Client size; `getSize` multi-returns.   |
-| `w:setPosition(x, y)` / `w:getPosition()` | Position.                                |
-| `w:setVisible(bool)` / `w:isVisible()` | Show / hide.                                |
-| `w:focus()` / `w:hasFocus()`      | Request / query input focus.                     |
-| `w:setVSync(bool)`                | Enable / disable vsync (off by default).         |
-| `w:getMouse()`                    | Mouse position relative to client area (multi-return). |
-| `w:getDPIScale()`                 | Hi-DPI scale factor (multi-return sx, sy).       |
-| `w:getFramebufferSize()`          | DPI-aware pixel framebuffer size (multi-return). |
+VAR win = window.create({ title: "demo" });
 
-### LÖVE-style callbacks
-
-Assign as plain fields on each window instance.  Names and signatures
-match `love.*` exactly:
-
-```cando
-w.update       = FUNCTION(self, dt) { ... };           // every frame
-w.draw         = FUNCTION(self) { ... };               // every frame
-w.keypressed   = FUNCTION(self, key, isrepeat) { ... };
-w.keyreleased  = FUNCTION(self, key) { ... };
-w.textinput    = FUNCTION(self, text) { ... };         // UTF-8 string
-w.mousepressed  = FUNCTION(self, x, y, button) { ... };
-w.mousereleased = FUNCTION(self, x, y, button) { ... };
-w.mousemoved    = FUNCTION(self, x, y) { ... };
-w.wheelmoved    = FUNCTION(self, dx, dy) { ... };
-w.resize       = FUNCTION(self, width, height) { ... };
-w.focus        = FUNCTION(self, focused) { ... };
-w.onClose      = FUNCTION(self) { ... };               // close button / X
+WHILE win:isOpen() {
+    win:pollEvents();
+    /* ... draw ... */
+    win:swap();
+}
 ```
 
-`onClose` fires once when the window's close button is pressed (or the
-underlying GLFW window is otherwise asked to close), just before the
-slot is torn down.  `quit` is kept as a back-compat alias and fires
-alongside `onClose`.
+For an event-driven loop with no polling overhead:
 
-Default handlers may be installed once on the prototype:
-
-```cando
-_meta.window.keypressed = FUNCTION(self, key) {
-    IF key == window.keys.f10 { app.quit(); }
-};
+```cdo
+WHILE win:isOpen() {
+    win:waitEvents();
+    redraw_dirty_regions();
+    win:swap();
+}
 ```
 
-## Threading model
+## Examples
 
-The module owns one **GLFW manager thread** (because GLFW window /
-event functions must run on a single, stable thread on Linux + Windows)
-that handles `glfwInit`, `glfwCreateWindow`, `glfwDestroyWindow`, and
-`glfwPollEvents`.  All `_meta.window` accessors post commands to this
-thread and wait for the result.
+### Minimal interactive window
 
-User callbacks (`w.update`, `w.draw`, `w.keypressed`, ...) fire on the
-same manager thread, dispatched through a single child VM created via
-`cando_vm_init_child` -- so anything visible from the script's main
-flow (globals, includes, classes) is also visible from inside a
-callback.
+```cdo
+VAR window = include("./modules/window/window");
 
-## Process lifetime
+VAR win = window.create({ title: "hello", width: 640, height: 480 });
 
-Each open window holds a VM lifeline (see
-[`include/cando.h`](../../include/cando.h) `cando_vm_lifeline_*`).  The
-existing `cando_vm_wait_all_lifelines` call inside `cando_close` blocks
-process teardown until the count drops to zero, so a script that opens
-a window can simply return -- the process keeps running until the user
-closes the window or calls `app.quit()`.
+win:onKey(FUNCTION(key, action) {
+    IF key == "escape" AND action == "press" { win:close(); }
+});
+
+WHILE win:isOpen() {
+    win:pollEvents();
+    win:swap();
+}
+```
+
+### Combined with `draw`
+
+```cdo
+VAR window = include("./modules/window/window");
+VAR draw   = include("./modules/draw/draw");
+
+VAR win = window.create({ title: "boxes" });
+
+WHILE win:isOpen() {
+    win:pollEvents();
+    draw.clear(0.1, 0.1, 0.1, 1);
+    draw.setColor(1, 0, 0, 1);
+    draw.rectangle(50, 50, 200, 100);
+    win:swap();
+}
+```
+
+## Notes
+
+- The module integrates with the runtime's `app.holds()` counter so
+  embedders can detect when the script is "still doing something" vs
+  waiting on a closed event loop.
+- `window.create()` may only be called from the main thread on macOS
+  due to AppKit constraints.  Spawn worker threads for everything that
+  isn't event handling.
+- The OpenGL context must be **current** to draw.  By default the
+  context becomes current on `create()` and stays current.
