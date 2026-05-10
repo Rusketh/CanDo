@@ -1901,6 +1901,30 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             break;
         }
 
+        case OP_BREAK: {
+            /* Phase 8.8: OP_BREAK recorder support.
+             *
+             * Mandelbrot-style: a `WHILE iter < MAX { ... IF cond { BREAK; } }`.
+             * If recording happens to fire on a pixel that escapes
+             * within MAX_ITER, the recorder hits OP_BREAK and would
+             * abort.  Treat it as a SIDE-EXIT instead: emit a
+             * snapshot + IR_GUARD_TRUE on a constant FALSE so that
+             * any future replay fires this guard first thing on the
+             * matching code path and bytecode handles the BREAK
+             * (stack unwinding, loop_depth decrement, jump to
+             * break_ip).  Then close the trace cleanly.
+             *
+             * The trace is effectively one-shot for THIS pixel's
+             * escape path -- not a perf win, but avoids the abort
+             * + blacklist that previously happened. */
+            IRRef false_ir = rec_emit_const_bool(&r->ir, false);
+            u16 snap = rec_build_snapshot(r);
+            cando_ir_emit(&r->ir, IR_GUARD_TRUE, IRT_BOOL, IRF_GUARD,
+                          false_ir, snap);
+            cando_recorder_finish(vm);
+            return;
+        }
+
         case OP_FOR_INIT: {
             /* Phase 8.3: OP_FOR_INIT recorder support, array case.
              *

@@ -2901,7 +2901,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
                  * once; otherwise side-exit + try the next.  After
                  * all siblings fail, fall through to bytecode. */
                 if (vm->jit && !vm->jit->recorder.active) {
-                    CandoTrace *traces[8];
+                    /* Cap siblings tried at 3 to bound dispatch
+                     * overhead.  cando_jit_find_traces returns by
+                     * last_used DESC, so older one-shot specialisations
+                     * (e.g. OP_BREAK paths in mandelbrot) sort to the
+                     * tail and aren't tried at every backedge. */
+                    CandoTrace *traces[3];
                     u32 ntr = cando_jit_find_traces(vm, ip, traces,
                                                       sizeof(traces) /
                                                       sizeof(traces[0]));
