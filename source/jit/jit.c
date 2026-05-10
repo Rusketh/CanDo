@@ -2709,3 +2709,61 @@ int cando_jit_aref_for_mcode(void *arr_ptr, u32 idx, double *out) {
     *out = cv.as.number;
     return 0;
 }
+
+/* ============================================================ */
+/* Phase 4.4g: array allocation / index helpers                  */
+/* ============================================================ */
+
+/* IR_NEW_ARRAY helper: allocate empty array; return CandoValue.u
+ * raw u64 bits in rax (the codegen stores it into vals[i].u). */
+u64 cando_jit_new_array_for_mcode(struct CandoVM *vm) {
+    return cando_bridge_new_array(vm).u;
+}
+
+/* IR_ARRAY_APPEND helper: push f64 value onto the array.
+ * Returns 0 on success, 1 on bad-array. */
+int cando_jit_array_append_for_mcode(struct CandoVM *vm, u64 arr_u, double val) {
+    CandoValue arr_val; arr_val.u = arr_u;
+    if (!cando_is_object(arr_val)) return 1;
+    CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(arr_val));
+    if (!arr || arr->kind != OBJ_ARRAY) return 1;
+    cdo_array_push(arr, cdo_number(val));
+    return 0;
+}
+
+/* IR_INDEX_GET helper: read array[idx] as f64.  Returns 0 on
+ * success (writes to *out), 1 on bad-array / out-of-range / non-num. */
+int cando_jit_index_get_for_mcode(struct CandoVM *vm, u64 arr_u, u32 idx,
+                                   double *out) {
+    CandoValue arr_val; arr_val.u = arr_u;
+    if (!cando_is_object(arr_val)) return 1;
+    CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(arr_val));
+    if (!arr || arr->kind != OBJ_ARRAY) return 1;
+    CdoValue cv;
+    if (!cdo_array_rawget_idx(arr, idx, &cv) || !cdo_is_number(cv)) return 1;
+    *out = cv.as.number;
+    return 0;
+}
+
+/* IR_INDEX_SET helper: write array[idx] = val.  Returns 0/1. */
+int cando_jit_index_set_for_mcode(struct CandoVM *vm, u64 arr_u, u32 idx,
+                                   double val) {
+    CandoValue arr_val; arr_val.u = arr_u;
+    if (!cando_is_object(arr_val)) return 1;
+    CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(arr_val));
+    if (!arr || arr->kind != OBJ_ARRAY) return 1;
+    cdo_array_rawset_idx(arr, idx, cdo_number(val));
+    return 0;
+}
+
+/* IR_GLOAD helper for IRT_OBJ globals: returns the CandoValue.u
+ * raw bits (an object handle) on success.  Returns 0 in *out_ok
+ * for missing/non-object globals so the caller side-exits. */
+u64 cando_jit_gload_obj_for_mcode(struct CandoVM *vm, struct CandoString *name,
+                                   int *out_ok) {
+    CandoValue v;
+    if (!cando_vm_get_global(vm, ((CandoString *)name)->data, &v) ||
+        !cando_is_object(v)) { *out_ok = 0; return 0; }
+    *out_ok = 1;
+    return v.u;
+}

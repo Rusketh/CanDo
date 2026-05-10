@@ -250,6 +250,36 @@ static void emit_cvttsd2si_esi_xmm0(CG *cg) {
     static const u8 b[] = { 0xF2, 0x0F, 0x2C, 0xF0 };
     cg_emit_bytes(cg, b, 4);
 }
+/* cvttsd2si edx, xmm0        -- F2 0F 2C D0. */
+static void emit_cvttsd2si_edx_xmm0(CG *cg) {
+    static const u8 b[] = { 0xF2, 0x0F, 0x2C, 0xD0 };
+    cg_emit_bytes(cg, b, 4);
+}
+/* cvttsd2si edx, xmm1        -- F2 0F 2C D1.  Used by IR_INDEX_SET
+ * codegen which loads idx into xmm1 (xmm0 is reserved for the
+ * value f64 arg). */
+static void emit_cvttsd2si_edx_xmm1(CG *cg) {
+    static const u8 b[] = { 0xF2, 0x0F, 0x2C, 0xD1 };
+    cg_emit_bytes(cg, b, 4);
+}
+/* movsd xmm1, [r14 + 8*idx]  -- 4.4g IR_INDEX_SET needs idx in xmm1. */
+static void emit_movsd_xmm1_vals(CG *cg, u32 idx) {
+    cg_emit_u8(cg, 0xF2); cg_emit_u8(cg, 0x41); cg_emit_u8(cg, 0x0F);
+    cg_emit_u8(cg, 0x10); cg_emit_u8(cg, 0x8E);
+    cg_emit_u32(cg, idx * 8);
+}
+/* mov rsi, [r14 + 8*idx]     -- load array u64 handle into rsi. */
+static void emit_mov_rsi_vals(CG *cg, u32 idx) {
+    static const u8 prefix[] = { 0x49, 0x8B, 0xB6 };
+    cg_emit_bytes(cg, prefix, 3);
+    cg_emit_u32(cg, idx * 8);
+}
+/* lea rcx, [r14 + 8*idx]     -- compute &vals[idx] into rcx. */
+static void emit_lea_rcx_vals(CG *cg, u32 idx) {
+    static const u8 prefix[] = { 0x49, 0x8D, 0x8E };
+    cg_emit_bytes(cg, prefix, 3);
+    cg_emit_u32(cg, idx * 8);
+}
 /* je rel32 to a per-guard stub (mirror of emit_jne_to_stub). */
 static void emit_je_to_stub(CG *cg, u16 snap_idx);
 
@@ -508,26 +538,39 @@ static void emit_epilogue(CG *cg) {
     cg_emit_bytes(cg, b, sizeof(b));
 }
 
-/* IR_SLOAD slot: load frame_slots[slot] into rax, type-check that
- * (rax & NB_MASK) != NB_MASK, side-exit (no snapshot rollback --
- * SLOAD bad-type returns TRACE_BAD_TYPE in IR-interp; for v1 we
- * treat it as TRACE_GUARD_FAILED with snap=0).  Then store the
- * 8-byte u64 to vals[i] (same bit pattern; works because cando_is_
- * number numbers are stored as raw f64 bits and that's what vals[]
- * .d wants too -- the IR-interp treats vals[i].d as f64 directly
- * via the union). */
-static void emit_sload(CG *cg, u32 slot, u32 i) {
+/* IR_SLOAD slot: load frame_slots[slot] into rax, type-check, store
+ * to vals[i].  IRT_NUM checks (rax & NB_MASK) != NB_MASK; IRT_OBJ
+ * checks (rax & NB_TAG_BITS_MASK) == NB_TAG_OBJECT.  Side-exits
+ * (snap=0) on type mismatch. */
+static void emit_sload(CG *cg, u32 slot, u32 i, IRType slot_type) {
     emit_mov_rax_slot(cg, slot);
-    emit_movabs_rcx(cg, 0xFFF8000000000000ULL);   /* NB_MASK */
-    emit_mov_rdx_rax(cg);
-    emit_and_rax_rcx(cg);                         /* rax = v.u & MASK */
-    emit_cmp_rax_rcx(cg);
-    /* je side_exit (boxed value) */
-    if (cg->guard_count >= CG_MAX_GUARDS) { cg->failed = true; return; }
-    cg->guards[cg->guard_count].je_disp_off = emit_je_rel32_placeholder(cg);
-    cg->guards[cg->guard_count].snap_idx    = 0;  /* SLOAD bail has no snap */
-    cg->guards[cg->guard_count].stub_off    = 0;
-    cg->guard_count++;
+    if (slot_type == IRT_OBJ) {
+        emit_movabs_rcx(cg, 0xFFFF000000000000ULL);   /* NB_TAG_BITS_MASK */
+        emit_mov_rdx_rax(cg);
+        emit_and_rax_rcx(cg);
+        emit_movabs_rcx(cg, 0xFFFC000000000000ULL);   /* NB_TAG_OBJECT   */
+        emit_cmp_rax_rcx(cg);
+        /* JNE side_exit on (high16 & MASK) != OBJECT_TAG */
+        if (cg->guard_count >= CG_MAX_GUARDS) { cg->failed = true; return; }
+        cg_emit_u8(cg, 0x0F); cg_emit_u8(cg, 0x85);   /* JNE rel32 */
+        u32 disp_off = cg_off(cg);
+        cg_emit_u32(cg, 0);
+        cg->guards[cg->guard_count].je_disp_off = disp_off;
+        cg->guards[cg->guard_count].snap_idx    = 0;
+        cg->guards[cg->guard_count].stub_off    = 0;
+        cg->guard_count++;
+    } else {
+        emit_movabs_rcx(cg, 0xFFF8000000000000ULL);   /* NB_MASK */
+        emit_mov_rdx_rax(cg);
+        emit_and_rax_rcx(cg);                         /* rax = v.u & MASK */
+        emit_cmp_rax_rcx(cg);
+        /* je side_exit (boxed value) */
+        if (cg->guard_count >= CG_MAX_GUARDS) { cg->failed = true; return; }
+        cg->guards[cg->guard_count].je_disp_off = emit_je_rel32_placeholder(cg);
+        cg->guards[cg->guard_count].snap_idx    = 0;
+        cg->guards[cg->guard_count].stub_off    = 0;
+        cg->guard_count++;
+    }
     /* Restore raw bits into rax (we clobbered it with AND), then store. */
     static const u8 mov_rax_rdx[] = { 0x48, 0x89, 0xD0 };  /* mov rax, rdx */
     cg_emit_bytes(cg, mov_rax_rdx, 3);
@@ -588,6 +631,77 @@ static void emit_arith(CG *cg, IROp op, u32 a, u32 b, u32 i) {
     }
     emit_movsd_vals_xmm(cg, i, 0);
     cg->xmm0_holds = i;
+}
+
+/* ============================================================ */
+/* Phase 4.4g: array allocation + index access codegen           */
+/* ============================================================ */
+
+static void emit_jne_to_stub(CG *cg, u16 snap_idx);   /* fwd decl */
+
+extern u64 cando_jit_new_array_for_mcode(struct CandoVM *vm);
+extern int cando_jit_array_append_for_mcode(struct CandoVM *vm, u64 arr_u,
+                                             double val);
+extern int cando_jit_index_get_for_mcode(struct CandoVM *vm, u64 arr_u, u32 idx,
+                                          double *out);
+extern int cando_jit_index_set_for_mcode(struct CandoVM *vm, u64 arr_u, u32 idx,
+                                          double val);
+
+/* IR_NEW_ARRAY: vals[i].u = cando_jit_new_array(vm).  Single-arg
+ * (vm in rdi); no failure path -- the helper always returns a
+ * fresh handle. */
+static void emit_new_array(CG *cg, u32 i) {
+    emit_mov_rdi_rbx(cg);                         /* arg1: vm        */
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_new_array_for_mcode);
+    emit_call_rax(cg);
+    emit_mov_vals_rax(cg, i);                     /* vals[i].u = rax */
+    cg_invalidate_xmm0(cg);
+}
+
+/* IR_ARRAY_APPEND: cando_jit_array_append(vm, vals[op1].u, vals[op2].d).
+ * SysV: vm in rdi, arr in rsi, val in xmm0.  Returns int 0/1. */
+static void emit_array_append(CG *cg, u32 op1, u32 op2) {
+    emit_mov_rdi_rbx(cg);
+    emit_mov_rsi_vals(cg, op1);                   /* arg2: arr u64   */
+    emit_load_xmm0(cg, op2);                      /* arg3: val f64   */
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_array_append_for_mcode);
+    emit_call_rax(cg);
+    emit_test_eax_eax(cg);
+    emit_jne_to_stub(cg, cg->cur_snap);
+    cg_invalidate_xmm0(cg);
+}
+
+/* IR_INDEX_GET: cando_jit_index_get(vm, vals[op1].u, (u32)vals[op2].d, &vals[i]).
+ * Returns 0/1; on 1 we side-exit. */
+static void emit_index_get(CG *cg, u32 op1, u32 op2, u32 i) {
+    emit_mov_rdi_rbx(cg);
+    emit_mov_rsi_vals(cg, op1);                   /* arg2: arr u64   */
+    emit_load_xmm0(cg, op2);                      /* xmm0 = idx f64  */
+    emit_cvttsd2si_edx_xmm0(cg);                  /* arg3: u32 idx   */
+    emit_lea_rcx_vals(cg, i);                     /* arg4: &vals[i]  */
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_index_get_for_mcode);
+    emit_call_rax(cg);
+    emit_test_eax_eax(cg);
+    emit_jne_to_stub(cg, cg->cur_snap);
+    cg_invalidate_xmm0(cg);
+}
+
+/* IR_INDEX_SET: cando_jit_index_set(vm, vals[op1].u, idx, val).  The
+ * value comes from the preceding IR_INDEX_SET_VAL (i-1 convention).
+ * Args: vm/rdi, arr/rsi, idx/edx, val/xmm0. */
+static void emit_index_set(CG *cg, u32 op1, u32 op2, u32 val_ref) {
+    emit_mov_rdi_rbx(cg);
+    emit_mov_rsi_vals(cg, op1);
+    emit_movsd_xmm1_vals(cg, op2);                /* xmm1 = idx f64  */
+    emit_cvttsd2si_edx_xmm1(cg);                  /* arg3: u32 idx   */
+    /* Load val LAST so xmm0 holds it at call time. */
+    cg_invalidate_xmm0(cg);                       /* xmm1-load + cvt may have shifted state */
+    emit_load_xmm0(cg, val_ref);
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_index_set_for_mcode);
+    emit_call_rax(cg);
+    emit_test_eax_eax(cg);
+    emit_jne_to_stub(cg, cg->cur_snap);
+    cg_invalidate_xmm0(cg);
 }
 
 /* IR_NEG: vals[i] = -vals[op1].  Computed as 0 - vals[op1] using the
@@ -840,22 +954,20 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             emit_kbool(&cg, in->op1, i);
             break;
         case IR_SLOAD:
-            /* Phase 4.4b: codegen v1 only handles IRT_NUM SLOADs.
-             * IRT_OBJ slots need a different type-check encoding
-             * (cando_is_object instead of cando_is_number); land
-             * that with Phase 4.4g.  For now bail and let the
-             * IR-interp run the trace. */
-            if (in->type != IRT_NUM) { cg.failed = true; break; }
-            emit_sload(&cg, in->op1, i);
+            /* Phase 4.4g: handle both IRT_NUM and IRT_OBJ.  Other
+             * types (IRT_STR, IRT_PTR resolved object) still bail. */
+            if (in->type != IRT_NUM && in->type != IRT_OBJ) {
+                cg.failed = true; break;
+            }
+            emit_sload(&cg, in->op1, i, (IRType)in->type);
             break;
-        case IR_SSTORE: {
-            /* Same as SLOAD: codegen only handles numeric stores in
-             * v1.  Object-typed stores bail to the IR-interp. */
-            const IRIns *src = cando_ir_get_ins(&t->ir, in->op2);
-            if (src && src->type != IRT_NUM) { cg.failed = true; break; }
+        case IR_SSTORE:
+            /* Phase 4.4g: raw u64 copy works for both IRT_NUM and
+             * IRT_OBJ source -- emit_sstore is just mov rax mem.
+             * NaN canonicalization (cando_number) was a pre-existing
+             * gap on the codegen path; not regressed here. */
             emit_sstore(&cg, in->op1, in->op2);
             break;
-        }
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
             emit_arith(&cg, (IROp)in->op, in->op1, in->op2, i);
             break;
@@ -895,6 +1007,28 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
         case IR_AREF:
             emit_aref(&cg, in->op1, in->op2, i);
             break;
+        case IR_NEW_ARRAY:
+            emit_new_array(&cg, i);
+            break;
+        case IR_ARRAY_APPEND:
+            emit_array_append(&cg, in->op1, in->op2);
+            break;
+        case IR_INDEX_GET:
+            emit_index_get(&cg, in->op1, in->op2, i);
+            break;
+        case IR_INDEX_SET_VAL:
+            /* No-op at runtime; the value IRRef is consumed by the
+             * IR_INDEX_SET that immediately follows via i-1. */
+            break;
+        case IR_INDEX_SET: {
+            /* Read the value IRRef from the preceding IR_INDEX_SET_VAL. */
+            if (i == 0 || t->ir.ir[i - 1].op != IR_INDEX_SET_VAL) {
+                cg.failed = true; break;
+            }
+            u32 val_ref = t->ir.ir[i - 1].op1;
+            emit_index_set(&cg, in->op1, in->op2, val_ref);
+            break;
+        }
         case IR_LOOP:
             /* Trace-close marker; we'll emit the LOOP_DONE epilogue
              * right after the body loop exits. */
