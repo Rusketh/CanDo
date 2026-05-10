@@ -1797,9 +1797,11 @@ static void udf_agg_step(sqlite3_context *ctx,
         sqlite3_result_error_nomem(ctx);
         return;
     }
-    /* SQLite zero-fills the buffer on first allocation; tag 0 is
-     * TYPE_NULL so an uninitialised acc reads as null. */
-    if (cando_is_null(*acc)) {
+    /* SQLite zero-fills the buffer on first allocation.  Old API:
+     * `tag == 0` was TYPE_NULL.  Post-NaN-box flip a zero-initialised
+     * CandoValue has `.u == 0` (which is NOT the canonical null tag),
+     * so detect first-call via the raw bit pattern instead. */
+    if (acc->u == 0) {
         *acc = cando_value_copy(u->start);
     }
 
@@ -1852,7 +1854,10 @@ static void udf_agg_final(sqlite3_context *ctx)
         return;
     }
     CandoValue *acc = (CandoValue *)sqlite3_aggregate_context(ctx, 0);
-    CandoValue value = (acc && !cando_is_null(*acc))
+    /* Same zero-init quirk as udf_agg_step: post-NaN-box, an unused
+     * accumulator buffer has .u == 0 (raw zero-fill), not the
+     * canonical NB_TAG_NULL.  Treat both as "no rows seen". */
+    CandoValue value = (acc && acc->u != 0 && !cando_is_null(*acc))
                        ? cando_value_copy(*acc)
                        : cando_value_copy(u->start);
 
