@@ -166,6 +166,23 @@ typedef enum {
                               directly -- no VM-stack-passing overhead.
                               Loop-invariant when its argument is.       */
 
+    /* ===== Band 6b: Allocation (Phase 4.4a+) ============================ */
+    IR_NEW_ARRAY,          /* op1: u32 expected element count (literal,
+                              for capacity reservation).  No IRRef
+                              operands.  Returns IRT_OBJ -- vals[i].u
+                              holds the resulting CandoValue's u64 bits
+                              (a NaN-boxed object handle).  IR-interp
+                              calls cando_bridge_new_array.  Codegen
+                              v0 bails on this op so traces fall back
+                              to the IR-interpreter; codegen lands in
+                              Phase 4.4g.                                 */
+    IR_ARRAY_APPEND,       /* op1: array IRRef (IRT_OBJ).  op2: value
+                              IRRef (IRT_NUM in v1).  Returns IRT_VOID.
+                              IR-interp resolves the handle and calls
+                              cdo_array_push.  Always emitted in
+                              groups immediately after IR_NEW_ARRAY by
+                              the recorder.                                */
+
     /* ===== Band 7: Trace control ======================================== */
     IR_LOOP,               /* head-of-loop marker; the trace closes here    */
 

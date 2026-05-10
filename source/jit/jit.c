@@ -1741,6 +1741,56 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             break;
         }
 
+        case OP_NEW_ARRAY: {
+            /* Phase 4.4a: pop `count` numeric IRRefs, emit IR_NEW_ARRAY
+             * + count IR_ARRAY_APPENDs.  The result is an OBJ-typed
+             * IRRef that lives on stack_map but currently has no path
+             * out: storing it to a slot needs Phase 4.4b's OBJ-typed
+             * SSTORE; reading via [] needs Phase 4.4c's IR_INDEX_GET.
+             * Until those land, the trace will abort on whatever
+             * follows OP_NEW_ARRAY.  This commit lays down the IR
+             * shape only. */
+            u16 static_n = read_op_arg(ip);
+            if (vm->array_extra != 0) {
+                cando_recorder_abort(vm,
+                    "OP_NEW_ARRAY: spread/multi-return literals not traced");
+                return;
+            }
+            u32 n = static_n;
+            if (sp < n) {
+                cando_recorder_abort(vm,
+                    "OP_NEW_ARRAY with too few stack slots");
+                return;
+            }
+            /* Verify all elements are numeric IRRefs in stack_map.
+             * Non-numeric array literals are a follow-up step. */
+            for (u32 j = 0; j < n; j++) {
+                IRRef ar = r->stack_map[sp - n + j];
+                if (ar == IRREF_NIL) {
+                    cando_recorder_abort(vm,
+                        "OP_NEW_ARRAY: element not in stack_map");
+                    return;
+                }
+                const IRIns *src = cando_ir_get_ins(&r->ir, ar);
+                if (src && src->type != IRT_NUM) {
+                    cando_recorder_abort(vm,
+                        "OP_NEW_ARRAY: non-numeric element (v1)");
+                    return;
+                }
+            }
+            IRRef arr_ref = cando_ir_emit(&r->ir, IR_NEW_ARRAY, IRT_OBJ,
+                                          IRF_PINNED, n, 0);
+            for (u32 j = 0; j < n; j++) {
+                IRRef ar = r->stack_map[sp - n + j];
+                cando_ir_emit(&r->ir, IR_ARRAY_APPEND, IRT_VOID,
+                              IRF_PINNED, arr_ref, ar);
+            }
+            /* Stack effect: pop n, push 1 (the array).  rec_push lands
+             * the IRRef at sp-n which is the new top after the pops. */
+            rec_push(r, arr_ref, sp - n);
+            break;
+        }
+
         default: {
             char buf[64];
             snprintf(buf, sizeof(buf), "unrecordable opcode %s",
@@ -2097,6 +2147,31 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                     return TRACE_BAD_TYPE;
                 }
                 vals[i].d = vm->fast_natives_f1[ni](vals[in->op2].d);
+                break;
+            }
+
+            case IR_NEW_ARRAY: {
+                /* Phase 4.4a: allocate a fresh array, store the
+                 * resulting CandoValue's u64 bits in vals[i].u so
+                 * downstream IR_ARRAY_APPEND can recover it.  op1 is
+                 * the literal element count (capacity hint we
+                 * currently ignore). */
+                CandoValue arr = cando_bridge_new_array(vm);
+                vals[i].u = arr.u;
+                break;
+            }
+            case IR_ARRAY_APPEND: {
+                /* Phase 4.4a: push vals[op2].d onto the array whose
+                 * handle bits are in vals[op1].u.  v1 only handles
+                 * numeric values. */
+                CandoValue arr; arr.u = vals[in->op1].u;
+                CdoObject *obj = cando_bridge_resolve(vm,
+                                                      cando_as_handle(arr));
+                if (!obj || obj->kind != OBJ_ARRAY) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
+                cdo_array_push(obj, cdo_number(vals[in->op2].d));
                 break;
             }
 

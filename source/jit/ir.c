@@ -190,6 +190,8 @@ static const char *const s_op_names[IR__COUNT] = {
     [IR_GLOAD]       = "IR_GLOAD",
     [IR_GSTORE]      = "IR_GSTORE",
     [IR_CALL_F1]     = "IR_CALL_F1",
+    [IR_NEW_ARRAY]   = "IR_NEW_ARRAY",
+    [IR_ARRAY_APPEND]= "IR_ARRAY_APPEND",
     [IR_LOOP]        = "IR_LOOP",
 };
 
@@ -266,6 +268,9 @@ void cando_ir_dump(const CandoTraceIR *t, FILE *out) {
             /* op1 is the fast-native registry index (a raw u32),
              * not an IRRef.  Render as nN to set it apart. */
             snprintf(b1, sizeof(b1), "n%u", (u32)in->op1);
+        else if (in->op == IR_NEW_ARRAY)
+            /* op1 is the literal capacity hint, not an IRRef. */
+            snprintf(b1, sizeof(b1), "=%u", (u32)in->op1);
         else
             format_ref(in->op1, b1, sizeof(b1));
         format_ref(in->op2, b2, sizeof(b2));
