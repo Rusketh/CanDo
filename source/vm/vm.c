@@ -2076,15 +2076,68 @@ static CandoVMResult vm_run(CandoVM *vm) {
 
         /* ── Band 3: Globals ────────────────────────────────────────── */
         OP_CASE(OP_LOAD_GLOBAL): {
+            /* Inline cache: look up the entry pointer once per (chunk,
+             * const-index) pair and reuse it on subsequent hits.  The
+             * environment's `version` counter bumps on rehash, which is
+             * the only event that can invalidate a cached pointer.
+             *
+             * We still take the read lock around the actual value read
+             * so concurrent writers don't tear or free under us.  All
+             * the lock now protects is a couple of pointer/int reads --
+             * the hash + memcmp is gone, and that was the dominant
+             * per-call cost in recursive scripts (e.g. fib's 5.2M
+             * lookups of the global `fib`). */
             u16 ci = READ_U16();
-            CandoValue name_val = frame->closure->chunk->constants[ci];
-            CANDO_ASSERT(cando_is_string(name_val));
-            CandoValue out;
+            CandoChunk *chunk = frame->closure->chunk;
+            CandoValue out_copy;
+            bool found;
             cando_lock_read_acquire(&vm->globals->lock);
-            bool found = vm_get_global_str(vm, cando_as_string(name_val), &out);
-            CandoValue out_copy = found ? cando_value_copy(out) : cando_null();
+            CandoGlobalEntry *e = NULL;
+            u32 cur_ver = vm->globals->version;
+            if (ci < chunk->inline_cache_cap &&
+                chunk->globals_version_seen == cur_ver) {
+                e = chunk->inline_cache[ci];
+            }
+            if (CANDO_UNLIKELY(!e)) {
+                CandoValue name_val = chunk->constants[ci];
+                CANDO_ASSERT(cando_is_string(name_val));
+                e = cando_vm_get_global_entry(vm,
+                        cando_as_string(name_val)->data);
+                if (e) {
+                    /* Grow + populate cache, refreshing the version
+                     * stamp if we noticed a rehash since last update. */
+                    if (ci >= chunk->inline_cache_cap) {
+                        u32 nc = chunk->inline_cache_cap
+                                 ? chunk->inline_cache_cap * 2 : 8;
+                        while (nc <= ci) nc *= 2;
+                        chunk->inline_cache = (CandoGlobalEntry **)
+                            cando_realloc(chunk->inline_cache,
+                                          nc * sizeof(*chunk->inline_cache));
+                        memset(chunk->inline_cache + chunk->inline_cache_cap,
+                               0,
+                               (nc - chunk->inline_cache_cap)
+                                  * sizeof(*chunk->inline_cache));
+                        chunk->inline_cache_cap = nc;
+                    }
+                    if (chunk->globals_version_seen != cur_ver) {
+                        memset(chunk->inline_cache, 0,
+                               chunk->inline_cache_cap
+                                  * sizeof(*chunk->inline_cache));
+                        chunk->globals_version_seen = cur_ver;
+                    }
+                    chunk->inline_cache[ci] = e;
+                }
+            }
+            if (e) {
+                out_copy = cando_value_copy(e->value);
+                found = true;
+            } else {
+                out_copy = cando_null();
+                found = false;
+            }
             cando_lock_read_release(&vm->globals->lock);
             if (!found) {
+                CandoValue name_val = chunk->constants[ci];
                 vm_runtime_error(vm, "undefined variable '%s'",
                                  cando_as_string(name_val)->data);
                 goto handle_error;
@@ -2093,15 +2146,68 @@ static CandoVMResult vm_run(CandoVM *vm) {
             DISPATCH();
         }
         OP_CASE(OP_STORE_GLOBAL): {
+            /* Same cache as OP_LOAD_GLOBAL.  Only fall back to the
+             * hash-table path on cache miss / version mismatch / when
+             * cando_vm_set_global needs to allocate a new entry (which
+             * also bumps version, invalidating the cache for next
+             * load). */
             u16 ci = READ_U16();
-            CandoValue name_val = frame->closure->chunk->constants[ci];
-            CANDO_ASSERT(cando_is_string(name_val));
+            CandoChunk *chunk = frame->closure->chunk;
             CandoValue val = PEEK(0);
+            bool ok;
+            bool need_slow = true;
             cando_lock_write_acquire(&vm->globals->lock);
-            bool ok = vm_set_global_str(vm, cando_as_string(name_val),
-                                        cando_value_copy(val), false);
+            u32 cur_ver = vm->globals->version;
+            if (ci < chunk->inline_cache_cap &&
+                chunk->globals_version_seen == cur_ver) {
+                CandoGlobalEntry *e = chunk->inline_cache[ci];
+                if (e && !e->is_const) {
+                    cando_value_release(e->value);
+                    e->value = cando_value_copy(val);
+                    ok = true;
+                    need_slow = false;
+                } else if (e && e->is_const) {
+                    ok = false;
+                    need_slow = false;
+                }
+            }
+            if (need_slow) {
+                CandoValue name_val = chunk->constants[ci];
+                CANDO_ASSERT(cando_is_string(name_val));
+                ok = vm_set_global_str(vm, cando_as_string(name_val),
+                                       cando_value_copy(val), false);
+                /* Refresh cache for next load if the entry now exists. */
+                if (ok) {
+                    CandoGlobalEntry *e = cando_vm_get_global_entry(vm,
+                            cando_as_string(name_val)->data);
+                    if (e) {
+                        u32 v = vm->globals->version;
+                        if (ci >= chunk->inline_cache_cap) {
+                            u32 nc = chunk->inline_cache_cap
+                                     ? chunk->inline_cache_cap * 2 : 8;
+                            while (nc <= ci) nc *= 2;
+                            chunk->inline_cache = (CandoGlobalEntry **)
+                                cando_realloc(chunk->inline_cache,
+                                              nc * sizeof(*chunk->inline_cache));
+                            memset(chunk->inline_cache + chunk->inline_cache_cap,
+                                   0,
+                                   (nc - chunk->inline_cache_cap)
+                                      * sizeof(*chunk->inline_cache));
+                            chunk->inline_cache_cap = nc;
+                        }
+                        if (chunk->globals_version_seen != v) {
+                            memset(chunk->inline_cache, 0,
+                                   chunk->inline_cache_cap
+                                      * sizeof(*chunk->inline_cache));
+                            chunk->globals_version_seen = v;
+                        }
+                        chunk->inline_cache[ci] = e;
+                    }
+                }
+            }
             cando_lock_write_release(&vm->globals->lock);
             if (!ok) {
+                CandoValue name_val = chunk->constants[ci];
                 vm_runtime_error(vm, "cannot assign to constant '%s'",
                                  cando_as_string(name_val)->data);
                 goto handle_error;

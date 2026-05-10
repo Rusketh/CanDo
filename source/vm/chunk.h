@@ -22,6 +22,9 @@
 #include "../core/value.h"
 #include "opcodes.h"
 
+/* Forward declaration; the actual struct lives in vm.h. */
+struct CandoGlobalEntry;
+
 /* -------------------------------------------------------------------------
  * CandoChunk
  * ---------------------------------------------------------------------- */
@@ -45,6 +48,21 @@ typedef struct CandoChunk {
     u32  local_count;   /* total local variable slots (incl. parameters)  */
     u32  upval_count;   /* number of captured upvalues                    */
     bool has_vararg;    /* true if the function accepts ...               */
+
+    /* Inline cache for OP_LOAD_GLOBAL / OP_STORE_GLOBAL ----------------
+     * Indexed by the same constant-pool index used as the global name.
+     * Each slot holds a resolved CandoGlobalEntry* from the live globals
+     * table.  Validity is tied to globals_version_seen: when the
+     * environment rehashes (vm->globals->version++), the cached entry
+     * pointers may dangle.  The dispatch loop checks the version under
+     * the read lock before trusting an entry.
+     *
+     * Cache is grown lazily on miss.  inline_cache_cap may be < the
+     * full constant pool size if not all string constants have been
+     * looked up as globals yet.                                          */
+    struct CandoGlobalEntry **inline_cache;
+    u32  inline_cache_cap;
+    u32  globals_version_seen;
 } CandoChunk;
 
 /* -------------------------------------------------------------------------
