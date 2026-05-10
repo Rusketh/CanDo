@@ -436,6 +436,115 @@ static void eliminate_dead_stores(CandoTraceIR *ir) {
     cando_free(last_gstore);
 }
 
+/* Phase 5i: dead-code elimination.  After DSE has NOPped redundant
+ * SSTORE/GSTOREs, any pure value-IR whose only consumer was a now-
+ * killed store is unreachable.  This pass walks the IR backward
+ * (topological order, so a single pass suffices), seeds a `live`
+ * bitmap with side-effecting/observable ops, propagates liveness
+ * through operand IRRefs, then NOPs anything not reached.
+ *
+ * Treated as live (always observable):
+ *   guards (IRF_GUARD)             - pinned side-exit anchors
+ *   pinned ops (IRF_PINNED)        - SSTORE / GSTORE that survived DSE
+ *   IR_LOOP                        - trace-close marker
+ *   loads (SLOAD/GLOAD/HLOAD_SLOT/AREF) - emit type-bail side-exits
+ *   IR_DIV / IR_MOD                - retain the runtime divisor check
+ *
+ * Treated as pure (killable if dead):
+ *   KNUM, KBOOL, KNULL, NEG, ADD, SUB, MUL, EQ, NEQ, LT, LE, GT, GE,
+ *   CALL_F1.
+ *
+ * Operand classification: most ops have IRRef op1/op2, but a few
+ * carry raw integers in op1 (slot indices, constant-pool indices via
+ * the IRREF_KFLAG bit, native indices).  ir_op_uses_irref tells us
+ * which slots are real IRRefs to follow. */
+static void ir_op_uses_irref(IROp op, bool *uses1, bool *uses2) {
+    *uses1 = true; *uses2 = true;
+    switch (op) {
+    case IR_KNUM:  case IR_KSTR: case IR_KOBJ:
+    case IR_KBOOL: case IR_KNULL:
+        /* All-literal: op1/op2 are raw values or const-pool indices. */
+        *uses1 = false; *uses2 = false; break;
+    case IR_SLOAD: case IR_HLOAD_SLOT:
+        /* op1 is a slot, op2 unused. */
+        *uses1 = false; *uses2 = false; break;
+    case IR_SSTORE:
+        /* op1 is a slot; op2 is the stored value IRRef. */
+        *uses1 = false; break;
+    case IR_GLOAD:
+        /* op1 is a const-pool ref (auto-live); op2 unused. */
+        *uses2 = false; break;
+    case IR_GSTORE:
+        /* op1 is a const-pool ref (auto-live); op2 is value IRRef. */
+        break;
+    case IR_CALL_F1:
+        /* op1 is the native idx (raw u32); op2 is arg IRRef. */
+        *uses1 = false; break;
+    default:
+        break;
+    }
+}
+
+static void eliminate_dead_code(CandoTraceIR *ir) {
+    if (ir->ir_count <= 1) return;
+
+    u8 *live = cando_alloc(sizeof(u8) * ir->ir_count);
+    memset(live, 0, sizeof(u8) * ir->ir_count);
+
+    /* Seed: ops with side effects or observable runtime behavior. */
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        const IRIns *in = &ir->ir[i];
+        if (in->op == IR_NOP) continue;
+        if ((in->flags & IRF_GUARD) || (in->flags & IRF_PINNED)) {
+            live[i] = 1; continue;
+        }
+        switch (in->op) {
+        case IR_LOOP:
+        case IR_SLOAD:
+        case IR_GLOAD:
+        case IR_HLOAD_SLOT:
+        case IR_AREF:
+        case IR_DIV:
+        case IR_MOD:
+            live[i] = 1; break;
+        default: break;
+        }
+    }
+
+    /* Backward propagate liveness through IRRef operands.  IR is in
+     * topological order (def before use), so a single backward pass
+     * suffices: by the time we reach op i, every later op that uses
+     * i has already had a chance to mark i live. */
+    for (u32 i = ir->ir_count; i-- > 1; ) {
+        if (!live[i]) continue;
+        const IRIns *in = &ir->ir[i];
+        bool uses1, uses2;
+        ir_op_uses_irref((IROp)in->op, &uses1, &uses2);
+        IRRef ops[2] = { in->op1, in->op2 };
+        bool  use[2] = { uses1, uses2 };
+        for (int k = 0; k < 2; k++) {
+            if (!use[k]) continue;
+            IRRef r = ops[k];
+            if (r == IRREF_NIL) continue;
+            if (IRREF_IS_K(r)) continue;     /* const-pool refs auto-live */
+            if (r >= ir->ir_count) continue;
+            live[r] = 1;
+        }
+    }
+
+    /* Replace non-live pure ops with IR_NOP. */
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        if (live[i] || ir->ir[i].op == IR_NOP) continue;
+        ir->ir[i].op    = IR_NOP;
+        ir->ir[i].type  = IRT_VOID;
+        ir->ir[i].flags = 0;
+        ir->ir[i].op1   = 0;
+        ir->ir[i].op2   = 0;
+    }
+
+    cando_free(live);
+}
+
 static void mark_loop_invariants(CandoTraceIR *ir) {
     /* Pass 1: collect the set of slots written by IR_SSTORE and the
      * set of names written by IR_GSTORE.  Slot indices are u32 so we
@@ -563,11 +672,16 @@ static void cando_recorder_finish(struct CandoVM *vm) {
 
     /* Optimisation passes, in order:
      *   1. Phase 5h DSE -- drop SSTORE/GSTOREs overwritten before
-     *      any read.  Run before LICM so LICM doesn't waste cycles
-     *      classifying dead ops.
-     *   2. Phase 5  LICM -- mark loop-invariant ops; trace_run
-     *      skips them on iterations 2+. */
+     *      any read.
+     *   2. Phase 5i DCE -- after DSE, the value-IR feeding a NOPped
+     *      store may be unreachable; backward-propagate liveness
+     *      from observable ops (guards, surviving stores, loads,
+     *      IR_LOOP) and NOP everything else.
+     *   3. Phase 5  LICM -- mark loop-invariant ops; trace_run
+     *      skips them on iterations 2+.  Runs last so the
+     *      invariance flag isn't applied to about-to-be-killed ops. */
     eliminate_dead_stores(&r->ir);
+    eliminate_dead_code(&r->ir);
     mark_loop_invariants(&r->ir);
 
     /* Pick a slot to receive the new trace.  When the cache isn't

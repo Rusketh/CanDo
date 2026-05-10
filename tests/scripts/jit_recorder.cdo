@@ -281,4 +281,19 @@ FUNCTION dse_check() {
 }
 print(dse_check());                    // 2*(1+...+200) = 40200
 
+/* Phase 5i: DCE.  After DSE NOPs the redundant store, the value-IR
+ * that fed it (an IR_ADD here) becomes unreachable and gets NOPped
+ * in turn.  This case has TWO layers of dead computation -- a chain
+ * of arithmetic that's all rooted at the dead store. */
+FUNCTION dce_check() {
+    VAR s = 0;
+    FOR i IN 1 -> 200 {
+        VAR t = (i + 1) * (i - 1);   /* whole expression dead */
+        t = i;                        /* live */
+        s = s + t;
+    }
+    RETURN s;
+}
+print(dce_check());                    // 1+2+...+200 = 20100
+
 print("DONE");
