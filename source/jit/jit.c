@@ -931,6 +931,147 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
     cando_free(stored_name);
 }
 
+/* Phase 8.5: common subexpression elimination.
+ *
+ * Walks the IR and dedups PURE ops -- those whose result is fully
+ * determined by their operands and which have no side effects.
+ * Pure: KNUM/KBOOL/KSTR/KOBJ/KNULL (already deduped via const
+ * pool but cheap to check), arithmetic (ADD/SUB/MUL/DIV/NEG),
+ * comparisons (EQ/NEQ/LT/LE/GT/GE).
+ *
+ * Slightly-impure: SLOAD/GLOAD/HLOAD_SLOT/AREF/INDEX_GET/HLEN
+ * are pure ONLY when no intervening write invalidates them.
+ * For now we dedup these only if NO write to the matching kind
+ * happens anywhere in the trace -- conservative but safe.
+ *
+ * Algorithm: linear scan, rewrite[] table mapping each IRRef to
+ * its canonical predecessor.  At each op, look for a prior op
+ * with the same (op, type, op1-after-rewrite, op2-after-rewrite)
+ * AND matching IRF_INVARIANT (ops with different invariance can't
+ * be merged -- the LICM-skip prefix would diverge).  When a match
+ * is found, NOP the duplicate and update rewrite[].  After the
+ * pass, rewrite all surviving ops' IRRef operands. */
+static bool ir_op_is_pure_for_cse(IROp op) {
+    switch (op) {
+    case IR_KNUM: case IR_KBOOL: case IR_KSTR:
+    case IR_KOBJ: case IR_KNULL:
+    case IR_NEG:
+    case IR_ADD: case IR_SUB: case IR_MUL:
+    case IR_EQ:  case IR_NEQ:
+    case IR_LT:  case IR_LE: case IR_GT: case IR_GE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* Returns true if the trace performs ANY op that could mutate
+ * `kind`-keyed state.  Used to gate dedup of slightly-impure
+ * loads (SLOAD/GLOAD/INDEX_GET/etc). */
+static bool ir_has_any_op(const CandoTraceIR *ir, IROp op) {
+    for (u32 i = 1; i < ir->ir_count; i++)
+        if (ir->ir[i].op == op) return true;
+    return false;
+}
+
+static void common_subexpression_elimination(CandoTraceIR *ir) {
+    if (ir->ir_count <= 2) return;
+
+    /* Conservative invalidation gates for not-quite-pure loads. */
+    bool has_sstore = ir_has_any_op(ir, IR_SSTORE);
+    bool has_gstore = ir_has_any_op(ir, IR_GSTORE);
+    bool has_index_set = ir_has_any_op(ir, IR_INDEX_SET);
+    bool has_field_set = ir_has_any_op(ir, IR_FIELD_SET);
+    bool has_array_append = ir_has_any_op(ir, IR_ARRAY_APPEND);
+
+    IRRef *rewrite = cando_alloc(sizeof(IRRef) * ir->ir_count);
+    for (u32 i = 0; i < ir->ir_count; i++) rewrite[i] = i;
+
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        IRIns *in = &ir->ir[i];
+        if (in->op == IR_NOP) continue;
+
+        /* Map operands through rewrite[] for compare keying.  Const-
+         * pool refs (IRREF_KFLAG) and out-of-range indices stay
+         * verbatim -- they're not IR-op indices. */
+        bool uses1, uses2;
+        ir_op_uses_irref((IROp)in->op, &uses1, &uses2);
+        bool real1 = uses1 && !IRREF_IS_K(in->op1) && in->op1 < ir->ir_count;
+        bool real2 = uses2 && !IRREF_IS_K(in->op2) && in->op2 < ir->ir_count;
+        u32 key1 = real1 ? rewrite[in->op1] : in->op1;
+        u32 key2 = real2 ? rewrite[in->op2] : in->op2;
+
+        /* Decide if we can dedup this op kind in this trace. */
+        bool dedupable;
+        if (ir_op_is_pure_for_cse((IROp)in->op)) {
+            dedupable = true;
+        } else {
+            switch (in->op) {
+            case IR_SLOAD:        dedupable = !has_sstore;  break;
+            case IR_GLOAD:        dedupable = !has_gstore;  break;
+            case IR_HLOAD_SLOT:   dedupable = !has_sstore;  break;
+            case IR_HLEN:         dedupable = !has_array_append; break;
+            case IR_AREF:
+            case IR_INDEX_GET:    dedupable = !has_index_set; break;
+            case IR_FIELD_GET:    dedupable = !has_field_set; break;
+            default: dedupable = false; break;
+            }
+        }
+        if (!dedupable) {
+            /* Still rewrite real-IRRef operands so later ops see
+             * canonical predecessors.  Don't touch const-pool refs. */
+            if (real1) in->op1 = rewrite[in->op1];
+            if (real2) in->op2 = rewrite[in->op2];
+            continue;
+        }
+
+        /* Search backwards for a matching prior op.  Trace-local
+         * O(N^2); traces fit in a few hundred ops. */
+        IRRef match = 0;
+        for (u32 j = 1; j < i; j++) {
+            const IRIns *jn = &ir->ir[j];
+            if (jn->op != in->op) continue;
+            if (jn->type != in->type) continue;
+            if ((jn->flags & IRF_INVARIANT) != (in->flags & IRF_INVARIANT))
+                continue;
+            /* Get jn's already-rewritten operands. */
+            bool ju1, ju2;
+            ir_op_uses_irref((IROp)jn->op, &ju1, &ju2);
+            bool jreal1 = ju1 && !IRREF_IS_K(jn->op1) && jn->op1 < ir->ir_count;
+            bool jreal2 = ju2 && !IRREF_IS_K(jn->op2) && jn->op2 < ir->ir_count;
+            u32 jkey1 = jreal1 ? rewrite[jn->op1] : jn->op1;
+            u32 jkey2 = jreal2 ? rewrite[jn->op2] : jn->op2;
+            if (jkey1 == key1 && jkey2 == key2) { match = j; break; }
+        }
+        if (match) {
+            /* Redirect i to its canonical predecessor.  Don't NOP
+             * yet -- IRF_PINNED ops need to stay in the IR for
+             * codegen even though we've found a duplicate (their
+             * position matters for snap entries / pair prefixes).
+             * Plain pure ops can be NOP'd via DCE on a later pass.
+             * For simplicity we just rewrite operands. */
+            rewrite[i] = match;
+            if (!(in->flags & IRF_PINNED) && !(in->flags & IRF_GUARD)) {
+                in->op    = IR_NOP;
+                in->type  = IRT_VOID;
+                in->flags = 0;
+                in->op1   = 0;
+                in->op2   = 0;
+            } else {
+                if (real1) in->op1 = rewrite[in->op1];
+                if (real2) in->op2 = rewrite[in->op2];
+            }
+        } else {
+            /* No match -- rewrite this op's own real-IRRef operands
+             * so later compares see canonical predecessors. */
+            if (real1) in->op1 = rewrite[in->op1];
+            if (real2) in->op2 = rewrite[in->op2];
+        }
+    }
+
+    cando_free(rewrite);
+}
+
 static void cando_recorder_finish(struct CandoVM *vm) {
     CandoJit *j = jit_of(vm);
     if (!j || !j->recorder.active) return;
@@ -955,6 +1096,12 @@ static void cando_recorder_finish(struct CandoVM *vm) {
      *      skips them on iterations 2+.  Runs last so the
      *      invariance flag isn't applied to about-to-be-killed ops. */
     eliminate_dead_stores(&r->ir);
+    eliminate_dead_code(&r->ir);
+    /* Phase 8.5: CSE.  Runs AFTER DSE/DCE so we don't waste work
+     * on already-NOPped ops, and BEFORE LICM so the invariance
+     * pass sees the deduped IR (no need to re-mark merged ops). */
+    common_subexpression_elimination(&r->ir);
+    /* Re-DCE after CSE to clean up any newly-dead ops. */
     eliminate_dead_code(&r->ir);
     mark_loop_invariants(&r->ir);
     /* Phase 4.4j: must run AFTER DSE -- a NOPped store no longer
