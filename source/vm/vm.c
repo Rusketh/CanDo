@@ -1249,18 +1249,39 @@ bool cando_vm_call_meta(CandoVM *vm, HandleIndex h,
 }
 
 /* =========================================================================
- * Truthiness (NULL and FALSE are falsy; everything else is truthy)
+ * Truthiness
+ *
+ * Falsy values: NULL, FALSE, and the number 0 (zero).
+ * Objects may override truthiness via the __is metamethod, which receives
+ * the object as its single argument and whose return value is itself
+ * tested for truthiness via the rules above.
  * ===================================================================== */
 
 static bool vm_is_truthy(CandoValue v) {
-    if (cando_is_null(v))  return false;
-    if (cando_is_bool(v))  return cando_as_bool(v);
+    if (cando_is_null(v))   return false;
+    if (cando_is_bool(v))   return cando_as_bool(v);
+    if (cando_is_number(v)) return cando_as_number(v) != 0.0;
     return true;
 }
 
 static bool vm_is_truthy_meta(CandoVM *vm, CandoValue v, bool *ok) {
-    CANDO_UNUSED(vm);
     *ok = true;
+    if (cando_is_object(v) && g_meta_is) {
+        CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
+        if (obj) {
+            CdoValue raw;
+            if (cdo_object_get(obj, g_meta_is, &raw)) {
+                CandoValue arg = v;
+                if (cando_vm_dispatch_callable(vm, &raw, &arg, 1)) {
+                    CandoValue r = cando_vm_pop(vm);
+                    bool t = vm_is_truthy(r);
+                    cando_value_release(r);
+                    return t;
+                }
+                if (vm->has_error) { *ok = false; return false; }
+            }
+        }
+    }
     return vm_is_truthy(v);
 }
 

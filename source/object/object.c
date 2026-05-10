@@ -51,6 +51,7 @@ CdoString *g_meta_idiv     = NULL;
 CdoString *g_meta_len      = NULL;
 CdoString *g_meta_newindex = NULL;
 CdoString *g_meta_constructor = NULL;
+CdoString *g_meta_is       = NULL;
 
 /* -----------------------------------------------------------------------
  * Global initialisation
@@ -87,6 +88,7 @@ static const MetaKeyEntry META_KEYS[] = {
     META_ENTRY(g_meta_len,         META_LEN),
     META_ENTRY(g_meta_newindex,    META_NEWINDEX),
     META_ENTRY(g_meta_constructor, META_CONSTRUCTOR),
+    META_ENTRY(g_meta_is,          META_IS),
 };
 
 #undef META_ENTRY

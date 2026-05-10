@@ -273,3 +273,13 @@ print(type(typed_fn));       // DynamicType
 /* ----- __tostring as a literal string ------------------------------------ */
 VAR ts_str = { __tostring: "literal-form" };
 print(toString(ts_str));     // literal-form
+
+/* ----- __is (truthiness override) ----------------------------------------- */
+CLASS Box = (self, n) { self.n = n; }
+Box.__is = FUNCTION(self) { RETURN self.n > 0; };
+VAR box_empty = Box(0);
+VAR box_full  = Box(5);
+IF box_empty { print("empty truthy"); } ELSE { print("empty falsy"); }
+IF box_full  { print("full truthy");  } ELSE { print("full falsy");  }
+print(!box_empty);           // true
+print(!box_full);            // false

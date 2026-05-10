@@ -65,7 +65,7 @@ run_test "comparison" "$SCRIPTS/comparison.cdo" \
     "$(printf 'true\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\ngt_multi_pass\ngt_multi_fail\nlt_multi_pass\neq_multi_pass\neq_multi_fail\nfirst_only_pass\nspread_all_fail\nspread_gt_pass\nspread_lt_fail\nspread_eq_pass\nspread_neq_fail\nspread_geq_pass\nspread_leq_fail\nmask_gt_pass\nmask_lt_fail\nmask_all_fail\nlist_call_pass\nlist_call_fail')"
 
 run_test "if_else" "$SCRIPTS/if_else.cdo" \
-    "$(printf 'if_true\nelse_branch\nA\nB\nC\nF\nfirst\nsecond\nbig_positive\nscoped')"
+    "$(printf 'if_true\nelse_branch\nA\nB\nC\nF\nfirst\nsecond\nbig_positive\nscoped\nzero_falsy\none_truthy\nempty_str_truthy\nnull_falsy')"
 
 run_test "also" "$SCRIPTS/also.cdo" \
     "$(printf -- '--- T1: if true, also if false, also ---\nA\nB\nC\n--- T2: if false, else if true, also if false, else ---\nB\nC\n--- T3: if true, else if true, also (matched + prev=false) ---\nA\n--- T4: if false, also (else-style fallback) ---\nB\n--- T5: nested chains ---\ninner-A\ninner-B\nouter-also\n--- T6: also-if when prev did not run, cond true ---\nB\n--- T7: switch-style fall-through chain ---\npositive\n>5\n>10\npositive\n>5\n>10\nzero\nnegative\ndone')"
@@ -161,7 +161,7 @@ run_test "lib_array" "$SCRIPTS/lib_array.cdo" \
     "$(printf '3\n4\n4\n3\n2\n4\n6\n4\n6\n6')"
 
 run_test "metamethods" "$SCRIPTS/metamethods.cdo" \
-    "$(printf '10\n20\nhello\n99\n10\nfrom_a\nproto\nVec3\nnumber\nstring\nnull\nbool\n3\n4\nstring\nAnimal\nRex says hello\nRex\nPoint\n5\n7\n49\n27\n3\n11\n3\noverridden\nbase greet\n4\n6\n7\n15\n6\n20\n5\n5\n1\n1\n8\n9\n-5\n3\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\n35\nVec(7,8)\nDog\nRex says hello\nRex says hello (woof, labrador)\nset:foo\nlooked_up:anything\nlooked_up:other\nbase_value\nfallback:unknown\nDynamicType\nliteral-form')"
+    "$(printf '10\n20\nhello\n99\n10\nfrom_a\nproto\nVec3\nnumber\nstring\nnull\nbool\n3\n4\nstring\nAnimal\nRex says hello\nRex\nPoint\n5\n7\n49\n27\n3\n11\n3\noverridden\nbase greet\n4\n6\n7\n15\n6\n20\n5\n5\n1\n1\n8\n9\n-5\n3\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\n35\nVec(7,8)\nDog\nRex says hello\nRex says hello (woof, labrador)\nset:foo\nlooked_up:anything\nlooked_up:other\nbase_value\nfallback:unknown\nDynamicType\nliteral-form\nempty falsy\nfull truthy\ntrue\nfalse')"
 
 run_test "meta_call" "$SCRIPTS/meta_call.cdo" \
     "$(printf '15\n42\nT:6\nping\n14\n1\n2\n3\n3\nwrap:99')"

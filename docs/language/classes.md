@@ -169,6 +169,25 @@ Money.__tostring = FUNCTION(self) {
 print(Money(1234));          // $12.34
 ```
 
+### Truthiness metamethod
+
+| Metamethod | Used by                                                       |
+|------------|---------------------------------------------------------------|
+| `__is`     | `IF`, `ELSE IF`, `&&`, `\|\|`, `!`, and any boolean context.  |
+
+`__is(self)` is invoked whenever the object appears in a boolean
+context.  Its return value is itself tested for truthiness using the
+default rules (`NULL`, `FALSE`, and `0` are falsy; everything else is
+truthy).
+
+```cdo
+CLASS Box = (self, n) { self.n = n; }
+Box.__is = FUNCTION(self) { RETURN self.n > 0; };
+
+IF Box(0) { /* skipped */ }
+IF Box(5) { print("non-empty"); }    // non-empty
+```
+
 ### Field flags (advanced)
 
 Fields can carry flags that change how they behave under writes and

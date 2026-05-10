@@ -56,10 +56,11 @@ coerced to a boolean**.
 - `a || b` returns `a` if `a` is truthy, otherwise `b`.
 - `a && b` returns `a` if `a` is falsy, otherwise `b`.
 
-Only `NULL` and `FALSE` are falsy (see [types.md](types.md)).
+`NULL`, `FALSE`, and `0` are falsy (see [types.md](types.md)).  Objects
+may override their truthiness via the `__is` metamethod.
 
 ```cdo
-print(FALSE || 0);            // 0
+print(FALSE || 0);            // 0          (both falsy; returns last)
 print(NULL  || "default");    // default
 print("a"   || "b");          // a
 print(0     && "won't print");// 0
