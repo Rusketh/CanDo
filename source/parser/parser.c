@@ -1878,36 +1878,201 @@ static void parse_var_decl(CandoParser *p, bool is_const)
 #undef MAX_MULTI_VARS
 }
 
-/* --- IF statement -------------------------------------------------------
- * Syntax:  IF expr { block } [ ELSE { block } ]
- */
-static void parse_if(CandoParser *p)
+/* --- IF / ELSE / ALSO chain --------------------------------------------
+ *
+ * Syntax:
+ *   IF expr { block }
+ *     [ ELSE IF expr { block } | ELSE { block }
+ *       | ALSO IF expr { block } | ALSO { block } ]*
+ *
+ * Each chain has a runtime IF frame (pushed by OP_IF_MARK, popped by
+ * OP_IF_END) that holds two flags:
+ *
+ *   matched  -- true once any branch has fired in this chain
+ *   prev_ran -- true iff the immediately-preceding branch fired
+ *
+ * Branch firing rules:
+ *
+ *   IF C        -- fires when C is truthy.
+ *   ELSE IF C   -- fires when (!matched && C).
+ *   ELSE        -- fires when !matched.
+ *   ALSO IF C   -- fires when prev_ran || (!matched && C); in the
+ *                  prev_ran case the condition is not evaluated.
+ *   ALSO        -- fires when prev_ran || !matched.
+ *
+ * A branch that fires emits OP_IF_SET_RAN (matched=true, prev_ran=true)
+ * and jumps to the chain end.  A branch that does not fire emits
+ * OP_IF_CLEAR_PREV (prev_ran=false, matched untouched) and falls through.
+ *
+ * SETTLE inside any branch body jumps to the chain end via OP_SETTLE,
+ * unwinding the if-frame stack.                                          */
+
+/* Parse the body block of an IF/ELSE/ALSO branch (the curly block). */
+static void parse_if_branch_body(CandoParser *p, const char *open_msg)
 {
-    parse_expression(p);
-    consume(p, TOK_LBRACE, "expected '{' after IF condition");
-
-    u32 then_jump = emit_jump(p, OP_JUMP_IF_FALSE);
-    emit_op(p, OP_POP);
-
+    consume(p, TOK_LBRACE, open_msg);
     scope_begin(p);
     parse_block(p);
     scope_end(p);
+}
 
-    u32 else_jump = emit_jump(p, OP_JUMP);
-    patch_jump(p, then_jump);
+/* Each branch ends by joining a "ran" path and a "did-not-run" path so
+ * that the next branch's gate can re-evaluate matched/prev_ran:
+ *
+ *     ran path: ... block ...; OP_IF_SET_RAN; JUMP join
+ *     skip path: ...; OP_IF_CLEAR_PREV; (fall through)
+ *   join:
+ *
+ * After join the IF frame's flags reflect what just happened; the
+ * subsequent branch (if any) tests them.  No "skip-to-end-of-chain"
+ * jump is emitted because every branch in an ALSO-style chain may
+ * still need to be evaluated -- gating is done at runtime.            */
+
+/* Parse the first branch of an IF chain (the leading IF expr { block }).
+ * On entry the IF token has already been consumed.                     */
+static void parse_if_first_branch(CandoParser *p)
+{
+    parse_expression(p);                                /* [cond] */
+    u32 skip_jump = emit_jump(p, OP_JUMP_IF_FALSE);
+    emit_op(p, OP_POP);                                 /* pop cond (true) */
+
+    parse_if_branch_body(p, "expected '{' after IF condition");
+    emit_op(p, OP_IF_SET_RAN);
+    u32 join = emit_jump(p, OP_JUMP);
+
+    /* False path: pop cond.  matched/prev_ran are still false; emit
+     * CLEAR_PREV anyway so the runtime state mirrors any other branch. */
+    patch_jump(p, skip_jump);
     emit_op(p, OP_POP);
+    emit_op(p, OP_IF_CLEAR_PREV);
 
-    if (match(p, TOK_ELSE)) {
-        if (match(p, TOK_IF)) {
-            parse_if(p);
+    patch_jump(p, join);
+}
+
+/* Parse an ELSE IF or ELSE branch.  On entry ELSE has already been
+ * matched.  has_cond indicates whether IF followed it.                  */
+static void parse_else_branch(CandoParser *p, bool has_cond)
+{
+    emit_op(p, OP_IF_TEST_MATCHED);                     /* [matched] */
+    u32 skip_m = emit_jump(p, OP_JUMP_IF_TRUE);         /* matched=>skip */
+    emit_op(p, OP_POP);                                 /* pop matched */
+
+    u32 skip_c = 0;
+    if (has_cond) {
+        parse_expression(p);                            /* [cond] */
+        skip_c = emit_jump(p, OP_JUMP_IF_FALSE);
+        emit_op(p, OP_POP);                             /* pop cond (true) */
+    }
+
+    parse_if_branch_body(p,
+        has_cond ? "expected '{' after ELSE IF condition"
+                 : "expected '{' after ELSE");
+    emit_op(p, OP_IF_SET_RAN);
+    u32 join = emit_jump(p, OP_JUMP);
+
+    /* Cond-false path. */
+    u32 jmp_to_clear = 0;
+    if (has_cond) {
+        patch_jump(p, skip_c);
+        emit_op(p, OP_POP);                             /* pop cond */
+        jmp_to_clear = emit_jump(p, OP_JUMP);
+    }
+
+    /* Matched-skip path. */
+    patch_jump(p, skip_m);
+    emit_op(p, OP_POP);                                 /* pop matched */
+    if (has_cond) patch_jump(p, jmp_to_clear);
+    emit_op(p, OP_IF_CLEAR_PREV);
+
+    patch_jump(p, join);
+}
+
+/* Parse an ALSO IF or ALSO branch.  On entry ALSO has already been
+ * matched.  has_cond indicates whether IF followed it.                  */
+static void parse_also_branch(CandoParser *p, bool has_cond)
+{
+    /* Step 1: if prev_ran, run the body unconditionally (cond is
+     * ignored when prev_ran).                                          */
+    emit_op(p, OP_IF_TEST_PREV);                        /* [prev] */
+    u32 prev_false = emit_jump(p, OP_JUMP_IF_FALSE);    /* prev=false=>else */
+    emit_op(p, OP_POP);                                 /* pop prev (true) */
+    u32 to_run_from_prev = emit_jump(p, OP_JUMP);
+
+    /* Step 2: prev_ran was false -- fall back to else-style gate. */
+    patch_jump(p, prev_false);
+    emit_op(p, OP_POP);                                 /* pop prev (false) */
+    emit_op(p, OP_IF_TEST_MATCHED);                     /* [matched] */
+    u32 skip_m = emit_jump(p, OP_JUMP_IF_TRUE);
+    emit_op(p, OP_POP);                                 /* pop matched */
+
+    u32 skip_c = 0;
+    if (has_cond) {
+        parse_expression(p);                            /* [cond] */
+        skip_c = emit_jump(p, OP_JUMP_IF_FALSE);
+        emit_op(p, OP_POP);                             /* pop cond (true) */
+    }
+    /* Else-style true path -- fall through to body.            */
+    u32 to_run_from_else = emit_jump(p, OP_JUMP);
+
+    /* Cond-false path. */
+    u32 jmp_to_clear_from_c = 0;
+    if (has_cond) {
+        patch_jump(p, skip_c);
+        emit_op(p, OP_POP);                             /* pop cond */
+        jmp_to_clear_from_c = emit_jump(p, OP_JUMP);
+    }
+
+    /* Matched-skip path. */
+    patch_jump(p, skip_m);
+    emit_op(p, OP_POP);                                 /* pop matched */
+    u32 jmp_to_clear_from_m = emit_jump(p, OP_JUMP);
+
+    /* Run target -- joined by prev_ran and else-true paths. */
+    patch_jump(p, to_run_from_prev);
+    patch_jump(p, to_run_from_else);
+    parse_if_branch_body(p,
+        has_cond ? "expected '{' after ALSO IF condition"
+                 : "expected '{' after ALSO");
+    emit_op(p, OP_IF_SET_RAN);
+    u32 join = emit_jump(p, OP_JUMP);
+
+    /* Clear-prev path -- joined by cond-false (if any) and matched-skip. */
+    if (has_cond) patch_jump(p, jmp_to_clear_from_c);
+    patch_jump(p, jmp_to_clear_from_m);
+    emit_op(p, OP_IF_CLEAR_PREV);
+
+    patch_jump(p, join);
+}
+
+static void parse_if(CandoParser *p)
+{
+    /* Push the IF frame.  The A operand is the forward offset to the
+     * SETTLE target (the byte just past OP_IF_END); we patch it once
+     * we know where that is.                                           */
+    u32 mark_patch = emit_jump(p, OP_IF_MARK);
+
+    parse_if_first_branch(p);
+
+    /* Subsequent branches: ELSE / ELSE IF / ALSO / ALSO IF, in any
+     * order, until neither token follows.  Each branch handles its own
+     * gate and falls through; runtime flags drive whether the next
+     * branch executes.                                                 */
+    for (;;) {
+        if (match(p, TOK_ELSE)) {
+            bool has_cond = match(p, TOK_IF);
+            parse_else_branch(p, has_cond);
+        } else if (match(p, TOK_ALSO)) {
+            bool has_cond = match(p, TOK_IF);
+            parse_also_branch(p, has_cond);
         } else {
-            consume(p, TOK_LBRACE, "expected '{' after ELSE");
-            scope_begin(p);
-            parse_block(p);
-            scope_end(p);
+            break;
         }
     }
-    patch_jump(p, else_jump);
+
+    emit_op(p, OP_IF_END);
+    /* Patch OP_IF_MARK's settle-target offset to the byte just past the
+     * OP_IF_END we emitted -- the current code_len.                    */
+    patch_jump(p, mark_patch);
 }
 
 /* --- WHILE loop --------------------------------------------------------- */
@@ -2424,17 +2589,69 @@ static void parse_throw(CandoParser *p)
     emit_op_a(p, OP_THROW, count);
 }
 
-/* --- BREAK / CONTINUE --------------------------------------------------- */
+/* --- BREAK / CONTINUE / SETTLE -----------------------------------------
+ *
+ * All three accept an optional non-negative integer-literal depth:
+ *   BREAK;             // depth 0 (innermost)
+ *   BREAK 2;           // depth 2 (skip past two enclosing loops)
+ *   CONTINUE 1;        // depth 1
+ *   SETTLE;            // depth 0 (innermost IF chain)
+ *   SETTLE 1;          // depth 1
+ *
+ * For BREAK/CONTINUE, depth counts enclosing loops only (IF chains are
+ * transparent).  For SETTLE, depth counts enclosing IF chains only
+ * (loops are transparent).  The depth bound is checked at runtime; the
+ * compiler only validates that it fits in u16.                          */
+static u16 parse_optional_depth(CandoParser *p, const char *kw_name)
+{
+    u16 depth = 0;
+    if (check(p, TOK_NUMBER)) {
+        advance(p);
+        const CandoToken *t = &p->previous;
+        /* Reject any literal that contains a fractional part.  We expect
+         * a non-negative integer here.                                   */
+        for (u32 i = 0; i < t->length; i++) {
+            if (t->start[i] == '.') {
+                error(p, "depth argument must be a non-negative integer");
+                break;
+            }
+        }
+        char buf[32];
+        u32  n = t->length < sizeof(buf) - 1 ? t->length : (u32)(sizeof(buf) - 1);
+        memcpy(buf, t->start, n);
+        buf[n] = '\0';
+        long val = strtol(buf, NULL, 10);
+        if (val < 0 || val > 0xFFFF) {
+            char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "%s depth %ld out of range (0..65535)", kw_name, val);
+            error(p, msg);
+            val = 0;
+        }
+        depth = (u16)val;
+    }
+    return depth;
+}
+
 static void parse_break(CandoParser *p)
 {
+    u16 depth = parse_optional_depth(p, "BREAK");
     match(p, TOK_SEMI);
-    emit_op_a(p, OP_BREAK, 0);   /* depth 0 = innermost loop */
+    emit_op_a(p, OP_BREAK, depth);
 }
 
 static void parse_continue(CandoParser *p)
 {
+    u16 depth = parse_optional_depth(p, "CONTINUE");
     match(p, TOK_SEMI);
-    emit_op_a(p, OP_CONTINUE, 0);
+    emit_op_a(p, OP_CONTINUE, depth);
+}
+
+static void parse_settle(CandoParser *p)
+{
+    u16 depth = parse_optional_depth(p, "SETTLE");
+    match(p, TOK_SEMI);
+    emit_op_a(p, OP_SETTLE, depth);
 }
 
 /* --- Expression statement ----------------------------------------------- */
@@ -2493,6 +2710,8 @@ static void parse_statement(CandoParser *p)
         parse_break(p);
     } else if (match(p, TOK_CONTINUE)) {
         parse_continue(p);
+    } else if (match(p, TOK_SETTLE)) {
+        parse_settle(p);
     } else if (match(p, TOK_LBRACE)) {
         /* Block statement: open a scope to contain any locals.          */
         scope_begin(p);

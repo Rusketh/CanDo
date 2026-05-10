@@ -135,6 +135,23 @@ typedef enum {
      * loop_type values (bits 15-14 of B):                                */
     OP_LOOP_MARK,
     OP_LOOP_END,        /* pop one loop frame                             */
+    /* IF-chain frame markers for SETTLE.  OP_IF_MARK pushes a frame that
+     * records the IP to jump to on SETTLE and the stack-mark to restore.
+     * A = forward byte offset from end of OP_IF_MARK to the SETTLE target
+     *     (the instruction following OP_IF_END).
+     * OP_IF_END pops a single IF frame.
+     * OP_SETTLE: A = if-chain depth (0 = innermost).  Pops A+1 if-frames
+     *     and jumps to the recorded settle_ip.                             */
+    OP_IF_MARK,
+    OP_IF_END,
+    OP_SETTLE,
+    /* IF-chain branch-gating helpers.  The parser emits these in front of
+     * each branch's body to compute the should-run gate and to update the
+     * chain's runtime flags after the body runs (or is skipped).         */
+    OP_IF_TEST_MATCHED, /* push innermost if-frame's matched flag         */
+    OP_IF_TEST_PREV,    /* push innermost if-frame's prev_ran flag        */
+    OP_IF_SET_RAN,      /* matched := true, prev_ran := true              */
+    OP_IF_CLEAR_PREV,   /* prev_ran := false (matched unchanged)          */
 
     /* ===== Band 11: Functions and calls ================================= */
     OP_CLOSURE,         /* build closure from chunk prototype constants[A] */

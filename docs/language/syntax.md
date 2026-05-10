@@ -47,13 +47,13 @@ The canonical CanDo style is **all-uppercase**; the all-lowercase form
 exists for users coming from other languages.
 
 ```
-IF       ELSE      WHILE      FOR        IN         OF        OVER
+IF       ELSE      ALSO       WHILE      FOR        IN         OF      OVER
 FUNCTION RETURN    CLASS      EXTENDS
 TRY      CATCH     FINALY     THROW
 VAR      CONST     GLOBAL     STATIC     PRIVATE
 THREAD   ASYNC     AWAIT
 TRUE     FALSE     NULL
-BREAK    CONTINUE
+BREAK    CONTINUE  SETTLE
 pipe
 ```
 

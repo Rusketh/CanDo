@@ -136,6 +136,7 @@ different failure modes.
 | `cannot assign to constant '<name>'`     | Reassigning a `CONST` binding. |
 | `BREAK outside loop`                     | `BREAK` (or `BREAK n`) used where no loop is active. |
 | `CONTINUE outside loop`                  | `CONTINUE` used where no loop is active. |
+| `SETTLE outside IF`                      | `SETTLE` (or `SETTLE n`) used outside an `IF` chain. |
 | `RERAISE outside of catch block`         | `RERAISE` used outside a `CATCH` body. |
 
 ### Threads and concurrency

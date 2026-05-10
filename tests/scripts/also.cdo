@@ -1,0 +1,62 @@
+/* also.cdo -- ALSO keyword in IF chains.
+ *
+ * `ALSO` makes a branch inclusive: it fires when the previous branch in
+ * the chain ran (in addition to the standard else-style fallback).
+ * `ALSO IF cond` is identical to `ELSE IF cond` when the previous branch
+ * did NOT run; if the previous branch DID run, the body fires
+ * unconditionally and `cond` is ignored.
+ */
+
+print("--- T1: if true, also if false, also ---");
+IF 1 < 2 { print("A"); }
+ALSO IF 1 > 2 { print("B"); }
+ALSO { print("C"); }
+/* expected: A B C */
+
+print("--- T2: if false, else if true, also if false, else ---");
+IF 2 < 1 { print("X"); }
+ELSE IF 1 < 2 { print("B"); }
+ALSO IF 1 > 2 { print("C"); }
+ELSE { print("D"); }
+/* expected: B C */
+
+print("--- T3: if true, else if true, also (matched + prev=false) ---");
+IF 1 < 2 { print("A"); }
+ELSE IF 1 < 2 { print("B"); }
+ALSO { print("C"); }
+/* expected: A only */
+
+print("--- T4: if false, also (else-style fallback) ---");
+IF 2 < 1 { print("X"); }
+ALSO { print("B"); }
+/* expected: B */
+
+print("--- T5: nested chains ---");
+IF 1 < 2 {
+    IF 1 < 2 { print("inner-A"); } ALSO { print("inner-B"); }
+} ALSO {
+    print("outer-also");
+}
+/* expected: inner-A inner-B outer-also */
+
+print("--- T6: also-if when prev did not run, cond true ---");
+IF 2 < 1 { print("X"); }
+ALSO IF 1 < 2 { print("B"); }
+/* expected: B */
+
+print("--- T7: switch-style fall-through chain ---");
+/* Demonstrates the switch/case pattern: once any branch matches, all
+ * trailing `also` branches also fire. */
+FUNCTION describe(n) {
+    IF n > 0   { print("positive"); }
+    ALSO IF n > 5  { print(">5"); }      /* fires if positive ran */
+    ALSO IF n > 10 { print(">10"); }     /* fires if previous ran */
+    ELSE IF n == 0 { print("zero"); }    /* alternate: only if no prior */
+    ELSE { print("negative"); }
+}
+describe(20);  /* positive, >5, >10        (fall-through chain) */
+describe(3);   /* positive, >5, >10        (also-if cond ignored when prev ran) */
+describe(0);   /* zero                     (else-if path) */
+describe(-1);  /* negative                 (else path) */
+
+print("done");

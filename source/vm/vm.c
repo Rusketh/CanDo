@@ -162,6 +162,7 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     vm->frame_count    = 0;
     vm->try_depth      = 0;
     vm->loop_depth     = 0;
+    vm->if_depth       = 0;
     vm->open_upvalues  = NULL;
     /* Native registry: lazily grown on first cando_vm_register_native(). */
     vm->native_fns     = NULL;
@@ -245,6 +246,7 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
     child->frame_count    = 0;
     child->try_depth      = 0;
     child->loop_depth     = 0;
+    child->if_depth       = 0;
     child->open_upvalues  = NULL;
     child->mem            = parent->mem;
     child->has_error       = false;
@@ -1386,6 +1388,7 @@ static bool vm_push_frame(CandoVM *vm, CandoClosure *closure, u8 *ip,
     frame->slots     = vm->stack_top - arg_count - 1;
     frame->ret_count = 0;
     frame->loop_save = vm->loop_depth;
+    frame->if_save   = vm->if_depth;
     frame->is_fluent = is_fluent;
     /* Pre-allocate null slots for the function's remaining locals so
      * expression evaluation never overwrites them; n_present = slot-0
@@ -1918,6 +1921,13 @@ static CandoVMResult vm_run(CandoVM *vm) {
         [OP_CONTINUE]         = &&lbl_OP_CONTINUE,
         [OP_LOOP_MARK]        = &&lbl_OP_LOOP_MARK,
         [OP_LOOP_END]         = &&lbl_OP_LOOP_END,
+        [OP_IF_MARK]          = &&lbl_OP_IF_MARK,
+        [OP_IF_END]           = &&lbl_OP_IF_END,
+        [OP_SETTLE]           = &&lbl_OP_SETTLE,
+        [OP_IF_TEST_MATCHED]  = &&lbl_OP_IF_TEST_MATCHED,
+        [OP_IF_TEST_PREV]     = &&lbl_OP_IF_TEST_PREV,
+        [OP_IF_SET_RAN]       = &&lbl_OP_IF_SET_RAN,
+        [OP_IF_CLEAR_PREV]    = &&lbl_OP_IF_CLEAR_PREV,
         [OP_CLOSURE]          = &&lbl_OP_CLOSURE,
         [OP_CALL]             = &&lbl_OP_CALL,
         [OP_METHOD_CALL]      = &&lbl_OP_METHOD_CALL,
@@ -3044,6 +3054,71 @@ static CandoVMResult vm_run(CandoVM *vm) {
             if (vm->loop_depth > 0) vm->loop_depth--;
             DISPATCH();
         }
+        OP_CASE(OP_IF_MARK): {
+            /* Parser emits OP_IF_MARK at the start of each IF chain.
+             * A = forward byte offset from (ip after instruction) to the
+             * SETTLE target (the byte just past the chain's OP_IF_END).   */
+            u16 settle_fwd = READ_U16();
+            CANDO_ASSERT_MSG(vm->if_depth < CANDO_IF_MAX,
+                             "if-chain depth overflow");
+            CandoIfFrame *iff = &vm->if_stack[vm->if_depth];
+            iff->settle_ip  = ip + settle_fwd;
+            iff->stack_save = (u32)(vm->stack_top - vm->stack);
+            iff->matched    = false;
+            iff->prev_ran   = false;
+            vm->if_depth++;
+            DISPATCH();
+        }
+        OP_CASE(OP_IF_END): {
+            if (vm->if_depth > 0) vm->if_depth--;
+            DISPATCH();
+        }
+        OP_CASE(OP_SETTLE): {
+            u16 depth = READ_U16();
+            if (vm->if_depth == 0 || depth >= vm->if_depth) {
+                vm_runtime_error(vm, "SETTLE outside IF (depth %u, if_depth %u)",
+                                 depth, vm->if_depth);
+                goto handle_error;
+            }
+            u32 idx  = vm->if_depth - 1 - depth;
+            u32 save = vm->if_stack[idx].stack_save;
+            /* Release any temporaries the IF chain pushed above its mark. */
+            while ((u32)(vm->stack_top - vm->stack) > save)
+                cando_value_release(POP());
+            vm->spread_extra = 0;
+            ip = vm->if_stack[idx].settle_ip;
+            vm->if_depth = idx;
+            DISPATCH();
+        }
+        OP_CASE(OP_IF_TEST_MATCHED): {
+            CANDO_ASSERT_MSG(vm->if_depth > 0,
+                             "OP_IF_TEST_MATCHED outside IF chain");
+            CandoIfFrame *iff = &vm->if_stack[vm->if_depth - 1];
+            cando_vm_push(vm, cando_bool(iff->matched));
+            DISPATCH();
+        }
+        OP_CASE(OP_IF_TEST_PREV): {
+            CANDO_ASSERT_MSG(vm->if_depth > 0,
+                             "OP_IF_TEST_PREV outside IF chain");
+            CandoIfFrame *iff = &vm->if_stack[vm->if_depth - 1];
+            cando_vm_push(vm, cando_bool(iff->prev_ran));
+            DISPATCH();
+        }
+        OP_CASE(OP_IF_SET_RAN): {
+            CANDO_ASSERT_MSG(vm->if_depth > 0,
+                             "OP_IF_SET_RAN outside IF chain");
+            CandoIfFrame *iff = &vm->if_stack[vm->if_depth - 1];
+            iff->matched  = true;
+            iff->prev_ran = true;
+            DISPATCH();
+        }
+        OP_CASE(OP_IF_CLEAR_PREV): {
+            CANDO_ASSERT_MSG(vm->if_depth > 0,
+                             "OP_IF_CLEAR_PREV outside IF chain");
+            CandoIfFrame *iff = &vm->if_stack[vm->if_depth - 1];
+            iff->prev_ran = false;
+            DISPATCH();
+        }
 
         /* ── Band 11: Functions ─────────────────────────────────────── */
         /* ── Band 12: Closures, calls, returns ──────────────────────── */
@@ -3443,8 +3518,10 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * depth was active when the frame was entered, so any FOR-IN /
              * WHILE / FOR-OVER loops the function left open (e.g. via an
              * early RETURN inside the body) cannot leak frames into the
-             * caller's BREAK/CONTINUE depth math. */
+             * caller's BREAK/CONTINUE depth math.  Likewise the if-chain
+             * stack so SETTLE depth math stays per-frame.                */
             vm->loop_depth = frame->loop_save;
+            vm->if_depth   = frame->if_save;
             vm->frame_count--;
 
             /* Thread result capture: if we've returned to the thread boundary,
@@ -4005,6 +4082,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             tf->stack_save = (u32)(vm->stack_top - vm->stack);
             tf->frame_save = vm->frame_count;
             tf->loop_save  = vm->loop_depth;
+            tf->if_save    = vm->if_depth;
             DISPATCH();
         }
         OP_CASE(OP_TRY_END): {
@@ -4468,6 +4546,7 @@ handle_error:
             cando_value_release(POP());
         }
         vm->loop_depth = tf->loop_save;
+        vm->if_depth   = tf->if_save;
         vm->try_depth--;
 
         if (tf->catch_ip) {

@@ -95,7 +95,7 @@ If the RHS is shorter than the LHS, missing slots are bound to `NULL`.
 If longer, extras are dropped (use a [mask](expressions.md#mask-selectors-) to
 select specific positions).
 
-## `IF` / `ELSE`
+## `IF` / `ELSE` / `ALSO`
 
 ```cdo
 IF x > 0 {
@@ -119,6 +119,67 @@ IF grade > 50, 60, 70 {
     print("solid pass");
 }
 ```
+
+### `ALSO` — inclusive branches
+
+`ALSO` makes a branch *inclusive*: it fires when the immediately
+preceding branch in the chain ran (in addition to the standard
+`ELSE`-style fallback).  This turns an `IF` chain into a switch/case-style
+construct where multiple cases can fire.
+
+```cdo
+IF TRUE  { print("A"); }
+ALSO IF FALSE { print("B"); }
+ALSO          { print("C"); }
+//  → A, B, C all run
+```
+
+`ALSO` and `ELSE` may be mixed in the same chain.  Each chain has two
+runtime flags:
+
+- **`matched`** — true once any branch has fired in this chain.
+- **`prev_ran`** — true iff the immediately-preceding branch fired.
+
+| Branch       | Fires when                                                                                   |
+|---           |---                                                                                           |
+| `IF C`       | `C`                                                                                          |
+| `ELSE IF C`  | `!matched && C`                                                                              |
+| `ELSE`       | `!matched`                                                                                   |
+| `ALSO IF C`  | `prev_ran` **OR** `(!matched && C)` — when `prev_ran`, the body runs and `C` is **ignored**. |
+| `ALSO`       | `prev_ran` **OR** `!matched`                                                                 |
+
+Worked examples:
+
+```cdo
+// Switch-style fall-through:
+FUNCTION describe(n) {
+    IF n > 0       { print("positive"); }
+    ALSO IF n > 5  { print(">5");  }    // fires if `positive` ran
+    ALSO IF n > 10 { print(">10"); }    // fires if previous ran
+    ELSE           { print("non-positive"); }
+}
+describe(20);   //  positive  >5  >10
+describe(3);    //  positive  >5  >10   (also-if cond ignored when prev ran)
+describe(-1);   //  non-positive
+
+// Mixed else / also:
+IF FALSE      { /* skip */ }
+ELSE IF TRUE  { print("B"); }    //   matched := true
+ALSO IF FALSE { print("C"); }    //   prev_ran true → fires (cond ignored)
+ELSE          { /* skip */ }     //   matched still true
+//  → B, C
+```
+
+Constraints:
+
+- `ALSO` may only follow `IF`, `ELSE IF`, `ELSE`, `ALSO IF`, or `ALSO`.
+  A bare `ALSO { … }` at the start of a statement is a parse error.
+- `ELSE` / `ELSE IF` after an `ALSO` is still legal and is gated against
+  the `matched` flag.
+
+`SETTLE` (described under [`BREAK`, `CONTINUE`,
+`SETTLE`](#break-continue-and-settle) below) exits an `IF` chain early
+the same way `BREAK` exits a loop.
 
 ## `WHILE`
 
@@ -188,17 +249,24 @@ This is the standard iterator-protocol shape.  See
 [../libraries/array.md](../libraries/array.md) for stdlib-supplied
 iterators.
 
-## `BREAK` and `CONTINUE`
+## `BREAK`, `CONTINUE`, and `SETTLE`
 
 ```cdo
 BREAK;                           // exit the innermost loop
 BREAK 2;                         // exit two levels of nesting
 CONTINUE;                        // skip to the next iteration of the innermost loop
 CONTINUE 2;                      // continue the loop two levels out
+
+SETTLE;                          // exit the innermost IF chain
+SETTLE 1;                        // exit two nested IF chains
 ```
 
-The optional numeric argument is the loop depth to skip (where 0 ==
-innermost).
+The optional numeric argument is the depth to skip (where 0 == innermost).
+
+`BREAK` / `CONTINUE` count enclosing **loops** only; `SETTLE` counts
+enclosing **`IF` chains** only.  The two are independent: a loop inside
+an `IF` chain is transparent to `SETTLE`, and an `IF` chain inside a
+loop is transparent to `BREAK`.
 
 ```cdo
 FOR row IN 0 -> 9 {
@@ -206,9 +274,21 @@ FOR row IN 0 -> 9 {
         IF grid[row][col] == NULL { BREAK 2; }
     }
 }
+
+IF condition {
+    WHILE active {
+        IF should_stop { SETTLE; }    // exits the OUTER `IF` chain;
+                                       // the WHILE is skipped over.
+        IF want_break  { BREAK; }     // exits the WHILE; the outer
+                                       // `IF` chain continues.
+        do_work();
+    }
+    cleanup();                         // skipped by SETTLE, reached by BREAK.
+}
 ```
 
-`BREAK` and `CONTINUE` outside a loop produce a runtime error.
+`BREAK` / `CONTINUE` outside a loop and `SETTLE` outside an `IF` chain
+produce runtime errors.
 
 ## `RETURN`
 

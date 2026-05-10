@@ -574,10 +574,16 @@ TEST(test_if_statement)
 TEST(test_if_else)
 {
     CandoChunk *c = compile_ok("IF TRUE { 1; } ELSE { 2; }");
-    int jif = count_op(c, OP_JUMP_IF_FALSE);
-    int j   = count_op(c, OP_JUMP);
-    EXPECT_EQ(jif, 1);
-    EXPECT_EQ(j,   1);
+    /* Every IF chain wraps its branches in OP_IF_MARK / OP_IF_END so
+     * SETTLE has a frame to unwind.  The IF body ends with OP_IF_SET_RAN
+     * on the ran path and OP_IF_CLEAR_PREV on the skip path; the ELSE
+     * branch checks OP_IF_TEST_MATCHED before deciding to fire.        */
+    EXPECT_EQ(count_op(c, OP_IF_MARK), 1);
+    EXPECT_EQ(count_op(c, OP_IF_END),  1);
+    EXPECT_TRUE(count_op(c, OP_JUMP_IF_FALSE) >= 1);
+    EXPECT_TRUE(count_op(c, OP_JUMP_IF_TRUE)  >= 1);
+    EXPECT_EQ(count_op(c, OP_IF_SET_RAN),    2);
+    EXPECT_EQ(count_op(c, OP_IF_CLEAR_PREV), 2);
     cando_chunk_free(c);
 }
 
@@ -586,6 +592,78 @@ TEST(test_while_loop)
     CandoChunk *c = compile_ok("WHILE FALSE { 1; }");
     EXPECT_TRUE(find_op(c, OP_JUMP_IF_FALSE) >= 0);
     EXPECT_TRUE(find_op(c, OP_LOOP) >= 0);
+    cando_chunk_free(c);
+}
+
+TEST(test_if_also_chain)
+{
+    /* Every IF chain produces exactly one OP_IF_MARK and one OP_IF_END
+     * regardless of the number of branches; an `also` branch contributes
+     * the prev-test/matched-test/set-ran/clear-prev quartet alongside
+     * the standard jumps.                                              */
+    CandoChunk *c = compile_ok("IF TRUE { 1; } ALSO { 2; }");
+    EXPECT_EQ(count_op(c, OP_IF_MARK),  1);
+    EXPECT_EQ(count_op(c, OP_IF_END),   1);
+    EXPECT_TRUE(count_op(c, OP_IF_TEST_PREV) >= 1);
+    EXPECT_TRUE(count_op(c, OP_IF_TEST_MATCHED) >= 1);
+    EXPECT_TRUE(count_op(c, OP_IF_SET_RAN) >= 2);
+    EXPECT_TRUE(count_op(c, OP_IF_CLEAR_PREV) >= 2);
+    cando_chunk_free(c);
+}
+
+TEST(test_if_also_if_chain)
+{
+    CandoChunk *c = compile_ok(
+        "IF TRUE { 1; } ALSO IF FALSE { 2; } ALSO { 3; }");
+    EXPECT_EQ(count_op(c, OP_IF_MARK),  1);
+    EXPECT_EQ(count_op(c, OP_IF_END),   1);
+    /* Three branches -> three OP_IF_SET_RAN. */
+    EXPECT_EQ(count_op(c, OP_IF_SET_RAN), 3);
+    /* Two `also` branches -> at least two OP_IF_TEST_PREV. */
+    EXPECT_TRUE(count_op(c, OP_IF_TEST_PREV) >= 2);
+    cando_chunk_free(c);
+}
+
+TEST(test_settle_emits_settle)
+{
+    CandoChunk *c = compile_ok("IF TRUE { SETTLE; }");
+    int pos = find_op(c, OP_SETTLE);
+    EXPECT_TRUE(pos >= 0);
+    /* Bare SETTLE -> depth 0 (lo byte of u16). */
+    EXPECT_EQ(c->code[pos + 1], 0u);
+    EXPECT_EQ(c->code[pos + 2], 0u);
+    cando_chunk_free(c);
+}
+
+TEST(test_settle_with_depth)
+{
+    CandoChunk *c = compile_ok("IF TRUE { IF TRUE { SETTLE 1; } }");
+    int pos = find_op(c, OP_SETTLE);
+    EXPECT_TRUE(pos >= 0);
+    EXPECT_EQ(c->code[pos + 1], 1u);
+    EXPECT_EQ(c->code[pos + 2], 0u);
+    cando_chunk_free(c);
+}
+
+TEST(test_break_with_depth)
+{
+    /* The parser previously hardcoded BREAK to depth 0; verify the new
+     * optional-numeric-arg path threads the depth through correctly.   */
+    CandoChunk *c = compile_ok("WHILE TRUE { WHILE TRUE { BREAK 1; } }");
+    int pos = find_op(c, OP_BREAK);
+    EXPECT_TRUE(pos >= 0);
+    EXPECT_EQ(c->code[pos + 1], 1u);
+    EXPECT_EQ(c->code[pos + 2], 0u);
+    cando_chunk_free(c);
+}
+
+TEST(test_continue_with_depth)
+{
+    CandoChunk *c = compile_ok("WHILE TRUE { WHILE TRUE { CONTINUE 1; } }");
+    int pos = find_op(c, OP_CONTINUE);
+    EXPECT_TRUE(pos >= 0);
+    EXPECT_EQ(c->code[pos + 1], 1u);
+    EXPECT_EQ(c->code[pos + 2], 0u);
     cando_chunk_free(c);
 }
 
@@ -1161,6 +1239,12 @@ int main(void)
     printf("\n-- control flow --\n");
     run_test("if statement",                   test_if_statement);
     run_test("if/else statement",              test_if_else);
+    run_test("if/also chain",                  test_if_also_chain);
+    run_test("if/also if chain",               test_if_also_if_chain);
+    run_test("settle without depth",           test_settle_emits_settle);
+    run_test("settle with depth",              test_settle_with_depth);
+    run_test("break with depth",               test_break_with_depth);
+    run_test("continue with depth",            test_continue_with_depth);
     run_test("while loop",                     test_while_loop);
 
     printf("\n-- functions --\n");

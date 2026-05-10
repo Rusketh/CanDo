@@ -1902,6 +1902,28 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             break;
         }
 
+        case OP_IF_MARK:
+        case OP_IF_END:
+        case OP_IF_SET_RAN:
+        case OP_IF_CLEAR_PREV: {
+            /* IF-chain frame bookkeeping with no value-stack effect.
+             * Pass through; the bytecode interpreter (or trace replay)
+             * handles the if_stack itself.                              */
+            break;
+        }
+
+        case OP_SETTLE: {
+            /* Like OP_BREAK: a control transfer that the recorder
+             * can't model in detail.  Treat as a side-exit anchor and
+             * close the trace cleanly.                                  */
+            IRRef false_ir = rec_emit_const_bool(&r->ir, false);
+            u16 snap = rec_build_snapshot(r);
+            cando_ir_emit(&r->ir, IR_GUARD_TRUE, IRT_BOOL, IRF_GUARD,
+                          false_ir, snap);
+            cando_recorder_finish(vm);
+            return;
+        }
+
         case OP_BREAK: {
             /* Phase 8.8: OP_BREAK recorder support.
              *

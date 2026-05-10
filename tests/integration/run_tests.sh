@@ -67,6 +67,12 @@ run_test "comparison" "$SCRIPTS/comparison.cdo" \
 run_test "if_else" "$SCRIPTS/if_else.cdo" \
     "$(printf 'if_true\nelse_branch\nA\nB\nC\nF\nfirst\nsecond\nbig_positive\nscoped')"
 
+run_test "also" "$SCRIPTS/also.cdo" \
+    "$(printf -- '--- T1: if true, also if false, also ---\nA\nB\nC\n--- T2: if false, else if true, also if false, else ---\nB\nC\n--- T3: if true, else if true, also (matched + prev=false) ---\nA\n--- T4: if false, also (else-style fallback) ---\nB\n--- T5: nested chains ---\ninner-A\ninner-B\nouter-also\n--- T6: also-if when prev did not run, cond true ---\nB\n--- T7: switch-style fall-through chain ---\npositive\n>5\n>10\npositive\n>5\n>10\nzero\nnegative\ndone')"
+
+run_test "settle" "$SCRIPTS/settle.cdo" \
+    "$(printf -- '--- T1: settle exits the chain ---\nbefore\nafter-T1\n--- T2: settle 1 exits two nested chains ---\ninner-before\nafter-T2\n--- T3: settle inside a loop is transparent (exits IF, not loop) ---\n0\n1\nafter-T3\n--- T4: BREAK ignores IF chains ---\n0\n1\nafter-T4\n--- T5: BREAK 0 inside an IF inside a loop -- still loop, not IF ---\nloop 0\nafter-T5\n--- T6: settle without depth == settle 0 ---\nafter-T6\ndone')"
+
 run_test "while" "$SCRIPTS/while.cdo" \
     "$(printf '0\n1\n2\n3\n4\n3\n2\n1\n15\n11\n12\n21\n22')"
 

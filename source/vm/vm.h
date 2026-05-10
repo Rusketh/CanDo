@@ -51,6 +51,7 @@
 #define CANDO_FRAMES_MAX       256    /* maximum call depth                 */
 #define CANDO_TRY_MAX          64     /* maximum nested try blocks          */
 #define CANDO_LOOP_MAX         64     /* maximum nested loop depth          */
+#define CANDO_IF_MAX           64     /* maximum nested if-chain depth      */
 #define CANDO_NATIVE_MAX      512     /* size of the static core-native dispatch table
                                         * in source/natives.c.  Per-VM native registries
                                         * grow dynamically and are NOT bounded by this. */
@@ -159,6 +160,10 @@ typedef struct CandoCallFrame {
                                 loops the function left open (e.g. via
                                 an early RETURN inside a FOR-IN body)
                                 do not leak frames into the caller       */
+    u32           if_save;   /* if-chain depth at frame entry; OP_RETURN
+                                restores vm->if_depth to this so any
+                                IF chains the function left open do not
+                                leak frames into the caller              */
     bool           is_fluent; /* return receiver instead of result         */
 } CandoCallFrame;
 
@@ -171,6 +176,7 @@ typedef struct CandoTryFrame {
     u32         stack_save;   /* value-stack depth to restore on unwind   */
     u32         frame_save;   /* call-frame depth to restore on unwind    */
     u32         loop_save;    /* loop-stack depth to restore on unwind    */
+    u32         if_save;      /* if-chain depth to restore on unwind      */
 } CandoTryFrame;
 
 /* =========================================================================
@@ -182,6 +188,20 @@ typedef struct CandoLoopFrame {
     u32  stack_save;  /* value-stack depth at loop body entry (for BREAK)*/
     u8   loop_type;   /* one of CANDO_LOOP_* above                       */
 } CandoLoopFrame;
+
+/* =========================================================================
+ * CandoIfFrame -- one entry in the if-chain depth stack (for SETTLE).
+ *
+ * Pushed by OP_IF_MARK at the start of each IF chain and popped by
+ * OP_IF_END at the end.  OP_SETTLE walks this stack A levels up and
+ * jumps to the recorded settle_ip after restoring stack_save.
+ * ===================================================================== */
+typedef struct CandoIfFrame {
+    u8  *settle_ip;   /* target for OP_SETTLE (instruction after OP_IF_END)*/
+    u32  stack_save;  /* value-stack depth at chain entry (for unwind)    */
+    bool matched;     /* has any branch condition matched in this chain?  */
+    bool prev_ran;    /* did the immediately-preceding branch execute?    */
+} CandoIfFrame;
 
 /* =========================================================================
  * CandoGlobalEntry -- one slot in the flat global hash table.
@@ -294,6 +314,10 @@ struct CandoVM {
     /* Loop stack ------------------------------------------------------- */
     CandoLoopFrame loop_stack[CANDO_LOOP_MAX];
     u32            loop_depth;
+
+    /* If-chain stack (for SETTLE) -------------------------------------- */
+    CandoIfFrame   if_stack[CANDO_IF_MAX];
+    u32            if_depth;
 
     /* Open upvalue list ------------------------------------------------ */
     CandoUpvalue  *open_upvalues;  /* linked, sorted by stack slot        */
