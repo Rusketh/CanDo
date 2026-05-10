@@ -98,7 +98,7 @@ run_test "closures" "$SCRIPTS/closures.cdo" \
     "$(printf '1\n2\n3\n1\n2\n2\n3\n3\n1\n2\n1\n3\n2')"
 
 run_test "strings" "$SCRIPTS/strings.cdo" \
-    "$(printf 'hello world\n5\nstring\nnumber\nbool\nnull\n42\n3.1400000000000001\ntrue\ntrue\nfalse\ntrue\n5\nworld\nhello world\nHELLO WORLD\nhi\nabc\ndef\nababab\n6\na\nb\nc\ncount: 99')"
+    "$(printf 'hello world\n5\nstring\nnumber\nbool\nnull\n42\n3.1400000000000001\ntrue\ntrue\nfalse\ntrue\n5\nworld\nhello world\nHELLO WORLD\nhi\nabc\ndef\nababab\n6\na\nb\nc\ncount: 99\ncount: 99\n99 items\nflag: true\nmissing: null\na1b')"
 
 run_test "template_strings" "$SCRIPTS/template_strings.cdo" \
     "$(printf 'hello\nhi world!\nworld\n3 = three\na42b43c\nbool=true null=null\nprepost\nauth=user:pass')"
