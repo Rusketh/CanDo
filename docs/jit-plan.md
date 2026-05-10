@@ -526,8 +526,19 @@ and (where applicable) measurable performance numbers.
 Decomposed into commit-sized steps.  Each step is self-contained
 (builds + tests + benches green) and individually shippable.  Real
 sinking only kicks in at step `j+k` -- earlier steps lay down the
-plumbing.  As of writing, the rest of Phase 4 (HREF/AREF/CALLN/CALLC)
-is done; Phase 4.4 is the only Phase 4 item still open.
+plumbing.
+
+**Status: COMPLETE.**  All 11 sub-steps (a through k) shipped.
+Phase 4 is now closed.  Headline result: arrays-in-loop benchmark
+went from ~1.9x JIT speedup (codegen with helper calls) to ~10.7x
+(sinking with stack buffers).  Existing benches unchanged.
+
+v1 follow-ups still open:
+  - Sinking for IR_NEW_OBJECT (needs name->slot mapping).
+  - Sinking for IR_RANGE_* (size known only at runtime).
+  - Materialize-on-side-exit for pre-loop VARs (currently sinking
+    is unsafe if post-trace bytecode reads the slot).
+  - Smarter escape analysis (alias-aware across SSTORE/SLOAD chains).
 
 | step | scope | recorder | IR-interp | codegen | sinking | bench impact |
 |------|-------|----------|-----------|---------|---------|--------------|
