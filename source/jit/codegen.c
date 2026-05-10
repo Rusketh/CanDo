@@ -765,6 +765,44 @@ static void emit_field_get(CG *cg, u32 op1, IRRef name_kref, u32 i,
     cg_invalidate_xmm0(cg);
 }
 
+/* ============================================================ */
+/* Phase 4.4i: range allocation codegen                          */
+/* ============================================================ */
+
+extern u64 cando_jit_range_asc_for_mcode(struct CandoVM *vm,
+                                          double from, double to);
+extern u64 cando_jit_range_desc_for_mcode(struct CandoVM *vm,
+                                           double from, double to);
+
+/* movsd xmm1, xmm0 -- F2 0F 10 C8.  Used when both args need the
+ * same xmm-cached value moved to a different register. */
+static void emit_movsd_xmm1_xmm0(CG *cg) {
+    static const u8 b[] = { 0xF2, 0x0F, 0x10, 0xC8 };
+    cg_emit_bytes(cg, b, 4);
+}
+
+/* IR_RANGE_ASC / IR_RANGE_DESC: vals[i].u = helper(vm, from, to).
+ * SysV: vm/rdi, from/xmm0, to/xmm1.  Always succeeds. */
+static void emit_range(CG *cg, IROp op, u32 from_ref, u32 to_ref, u32 i) {
+    emit_mov_rdi_rbx(cg);
+    emit_load_xmm0(cg, from_ref);
+    /* Load `to` into xmm1.  If from == to we'd need same value in
+     * both -- emit_movsd_xmm1_xmm0 handles that without re-reading
+     * from memory. */
+    if (from_ref == to_ref) {
+        emit_movsd_xmm1_xmm0(cg);
+    } else {
+        emit_movsd_xmm1_vals(cg, to_ref);
+    }
+    void *fn = (op == IR_RANGE_ASC)
+                ? (void *)&cando_jit_range_asc_for_mcode
+                : (void *)&cando_jit_range_desc_for_mcode;
+    emit_movabs_rax(cg, (u64)(uintptr_t)fn);
+    emit_call_rax(cg);
+    emit_mov_vals_rax(cg, i);
+    cg_invalidate_xmm0(cg);
+}
+
 /* IR_NEG: vals[i] = -vals[op1].  Computed as 0 - vals[op1] using the
  * existing subsd-with-zero idiom -- avoids encoding a 64-bit
  * sign-bit-mask constant. */
@@ -1107,6 +1145,10 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             emit_field_set(&cg, in->op1, in->op2, val_ref, &t->ir);
             break;
         }
+        case IR_RANGE_ASC:
+        case IR_RANGE_DESC:
+            emit_range(&cg, (IROp)in->op, in->op1, in->op2, i);
+            break;
         case IR_LOOP:
             /* Trace-close marker; we'll emit the LOOP_DONE epilogue
              * right after the body loop exits. */

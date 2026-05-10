@@ -2806,3 +2806,28 @@ int cando_jit_field_get_for_mcode(struct CandoVM *vm, u64 obj_u,
     *out = cv.as.number;
     return 0;
 }
+
+/* ============================================================ */
+/* Phase 4.4i: range allocation helpers                          */
+/* ============================================================ */
+
+/* IR_RANGE_ASC helper.  Returns the new range array's CandoValue.u. */
+u64 cando_jit_range_asc_for_mcode(struct CandoVM *vm, double from_d,
+                                   double to_d) {
+    CandoValue arr_val = cando_bridge_new_array(vm);
+    CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(arr_val));
+    i64 from = (i64)from_d, to = (i64)to_d;
+    for (i64 v = from; v <= to; v++)
+        cdo_array_push(arr, cdo_number((f64)v));
+    return arr_val.u;
+}
+
+u64 cando_jit_range_desc_for_mcode(struct CandoVM *vm, double from_d,
+                                    double to_d) {
+    CandoValue arr_val = cando_bridge_new_array(vm);
+    CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(arr_val));
+    i64 from = (i64)from_d, to = (i64)to_d;
+    for (i64 v = from; v >= to; v--)
+        cdo_array_push(arr, cdo_number((f64)v));
+    return arr_val.u;
+}
