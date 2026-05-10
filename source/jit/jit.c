@@ -710,6 +710,11 @@ static void cando_recorder_finish(struct CandoVM *vm) {
     t->last_used  = j->next_use_tick++;
     t->values_buf = NULL;   /* lazy-allocated by cando_trace_run */
     t->values_cap = 0;
+    /* Phase 6: codegen is opt-in and starts with no native body.  A
+     * later cando_jit_codegen_trace() call may install one.  Until
+     * then, mcode_fn = NULL routes execution through the IR-interp. */
+    memset(&t->mcode, 0, sizeof(t->mcode));
+    t->mcode_fn   = NULL;
     /* Transfer Phase 4 staging snapshot pool. */
     t->snapshots         = r->staging_snapshots;
     t->snapshot_count    = r->staging_snapshot_count;
@@ -1759,12 +1764,15 @@ static void trace_release_storage(CandoTrace *t) {
     cando_free(t->values_buf);
     cando_free(t->snapshots);
     cando_free(t->snap_entries);
-    t->values_buf      = NULL;
-    t->values_cap      = 0;
-    t->snapshots       = NULL;
-    t->snapshot_count  = 0;
-    t->snapshot_cap    = 0;
-    t->snap_entries    = NULL;
+    /* Phase 6: release the executable mapping if codegen produced one. */
+    cando_mcode_free(&t->mcode);
+    t->mcode_fn         = NULL;
+    t->values_buf       = NULL;
+    t->values_cap       = 0;
+    t->snapshots        = NULL;
+    t->snapshot_count   = 0;
+    t->snapshot_cap     = 0;
+    t->snap_entries     = NULL;
     t->snap_entry_count = 0;
     t->snap_entry_cap   = 0;
 }
@@ -1828,6 +1836,13 @@ static void trace_replay_snapshot(struct CandoVM *vm, CandoTrace *t,
 CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                                  bool skip_invariant) {
     if (!vm || !t) return TRACE_RANGE_ERROR;
+
+    /* Phase 6: prefer the codegen'd native body when available.  The
+     * compiled function honours the same calling convention as this
+     * IR-interpreter (vm, trace, skip_invariant -> CandoTraceStatus)
+     * and is responsible for its own snapshot rollback on guard fail. */
+    if (t->mcode_fn != NULL)
+        return t->mcode_fn(vm, t, skip_invariant);
 
     /* Lazy-allocate the scratch values table; reused across every
      * trace_run for this trace, so cost amortises over many

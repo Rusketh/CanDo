@@ -89,8 +89,9 @@ VM_SRCS = \
     source/vm/debug.c
 
 JIT_SRCS = \
-    source/jit/ir.c   \
-    source/jit/hot.c  \
+    source/jit/ir.c    \
+    source/jit/hot.c   \
+    source/jit/mcode.c \
     source/jit/jit.c
 
 # All library sources — everything compiled into libcando.so / libcando.a
@@ -117,6 +118,7 @@ CANDO_LIB_SRCS = \
     source/vm/debug.c             \
     source/jit/ir.c               \
     source/jit/hot.c              \
+    source/jit/mcode.c            \
     source/jit/jit.c              \
     source/natives.c              \
     source/lib/gc.c               \
@@ -166,17 +168,19 @@ TEST_VM_BIN       = tests/test_vm
 TEST_THREAD_BIN   = tests/test_thread
 TEST_SOCKUTIL_BIN = tests/test_sockutil
 TEST_YAML_BIN     = tests/test_yaml
-TEST_JIT_IR_BIN   = tests/test_jit_ir
-TEST_JIT_HOT_BIN  = tests/test_jit_hot
+TEST_JIT_IR_BIN    = tests/test_jit_ir
+TEST_JIT_HOT_BIN   = tests/test_jit_hot
+TEST_JIT_MCODE_BIN = tests/test_jit_mcode
 
-TEST_CORE_SRCS     = $(CORE_SRCS)   tests/test_core.c
-TEST_OBJECT_SRCS   = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_object.c
-TEST_LEXER_SRCS    = $(LEXER_SRCS)  tests/test_lexer.c
-TEST_PARSER_SRCS   = $(PARSER_SRCS) tests/test_parser.c
-TEST_THREAD_SRCS   = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_thread.c
-TEST_SOCKUTIL_SRCS = $(CORE_SRCS) source/lib/sockutil.c tests/test_sockutil.c
-TEST_JIT_IR_SRCS   = $(CORE_SRCS) $(OBJECT_SRCS) $(VM_SRCS) $(JIT_SRCS) tests/test_jit_ir.c
-TEST_JIT_HOT_SRCS  = $(CORE_SRCS) source/jit/hot.c tests/test_jit_hot.c
+TEST_CORE_SRCS      = $(CORE_SRCS)   tests/test_core.c
+TEST_OBJECT_SRCS    = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_object.c
+TEST_LEXER_SRCS     = $(LEXER_SRCS)  tests/test_lexer.c
+TEST_PARSER_SRCS    = $(PARSER_SRCS) tests/test_parser.c
+TEST_THREAD_SRCS    = $(CORE_SRCS) $(OBJECT_SRCS) tests/test_thread.c
+TEST_SOCKUTIL_SRCS  = $(CORE_SRCS) source/lib/sockutil.c tests/test_sockutil.c
+TEST_JIT_IR_SRCS    = $(CORE_SRCS) $(OBJECT_SRCS) $(VM_SRCS) $(JIT_SRCS) tests/test_jit_ir.c
+TEST_JIT_HOT_SRCS   = $(CORE_SRCS) source/jit/hot.c tests/test_jit_hot.c
+TEST_JIT_MCODE_SRCS = $(CORE_SRCS) source/jit/mcode.c tests/test_jit_mcode.c
 
 # ---------------------------------------------------------------------------
 # Default target
@@ -184,7 +188,7 @@ TEST_JIT_HOT_SRCS  = $(CORE_SRCS) source/jit/hot.c tests/test_jit_hot.c
 
 .PHONY: all cando libcando.so libcando.a \
         test test_core test_object test_lexer test_parser test_vm test_thread \
-        test_sockutil test_yaml test_jit_ir test_jit_hot test_integration \
+        test_sockutil test_yaml test_jit_ir test_jit_hot test_jit_mcode test_integration \
         clean bench \
         modules modules-test modules-windows modules-clean
 
@@ -192,7 +196,7 @@ all: libcando.so libcando.a $(CANDO_BIN) \
      $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) \
      $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN) \
      $(TEST_SOCKUTIL_BIN) $(TEST_YAML_BIN) \
-     $(TEST_JIT_IR_BIN) $(TEST_JIT_HOT_BIN)
+     $(TEST_JIT_IR_BIN) $(TEST_JIT_HOT_BIN) $(TEST_JIT_MCODE_BIN)
 
 # ---------------------------------------------------------------------------
 # Shared library: libcando.so
@@ -272,6 +276,12 @@ $(TEST_JIT_IR_BIN): $(TEST_JIT_IR_SRCS)
 $(TEST_JIT_HOT_BIN): $(TEST_JIT_HOT_SRCS)
 	$(CC) $(CFLAGS_CORE) -iquote source/jit $^ -o $@ $(LDFLAGS)
 
+# test_jit_mcode covers the executable-memory wrapper.  Same minimal
+# link footprint as test_jit_hot -- mcode.c only depends on libc /
+# mmap, not on any other JIT module.
+$(TEST_JIT_MCODE_BIN): $(TEST_JIT_MCODE_SRCS)
+	$(CC) $(CFLAGS_CORE) -iquote source/jit $^ -o $@ $(LDFLAGS)
+
 test: all
 	./$(TEST_CORE_BIN)
 	./$(TEST_OBJECT_BIN)
@@ -283,6 +293,7 @@ test: all
 	./$(TEST_YAML_BIN)
 	./$(TEST_JIT_IR_BIN)
 	./$(TEST_JIT_HOT_BIN)
+	./$(TEST_JIT_MCODE_BIN)
 	bash tests/integration/run_tests.sh
 
 test_integration: $(CANDO_BIN)
@@ -317,6 +328,9 @@ test_jit_ir: $(TEST_JIT_IR_BIN)
 
 test_jit_hot: $(TEST_JIT_HOT_BIN)
 	./$(TEST_JIT_HOT_BIN)
+
+test_jit_mcode: $(TEST_JIT_MCODE_BIN)
+	./$(TEST_JIT_MCODE_BIN)
 
 # ---------------------------------------------------------------------------
 # Benchmarks -- baseline numbers for the JIT effort (see docs/jit-plan.md).

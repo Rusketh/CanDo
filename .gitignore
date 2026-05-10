@@ -17,6 +17,7 @@ tests/test_sockutil
 tests/test_yaml
 tests/test_jit_ir
 tests/test_jit_hot
+tests/test_jit_mcode
 
 # Library build artifacts (CMake and Makefile)
 build/

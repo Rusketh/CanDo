@@ -33,6 +33,7 @@
 
 #include "ir.h"
 #include "hot.h"
+#include "mcode.h"
 
 /* Forward declarations: the recorder reads from CandoVM during
  * observe (frame depth, stack pointer, current chunk's constants).
@@ -100,6 +101,18 @@ typedef union TraceVal {
 } TraceVal;
 
 /* -----------------------------------------------------------------------
+ * Trace execution status.  Returned by both the IR-interpreter
+ * (cando_trace_run) and the codegen'd native trace function (mcode_fn
+ * on CandoTrace).
+ * --------------------------------------------------------------------- */
+typedef enum {
+    TRACE_LOOP_DONE     = 0,  /* hit IR_LOOP cleanly; caller may iterate */
+    TRACE_GUARD_FAILED  = 1,  /* guard fired; bytecode resumes at start_pc */
+    TRACE_BAD_TYPE      = 2,  /* SLOAD found a non-numeric value           */
+    TRACE_RANGE_ERROR   = 3,  /* malformed IR -- should not happen         */
+} CandoTraceStatus;
+
+/* -----------------------------------------------------------------------
  * CandoTrace -- a finalised IR sequence the IR-interpreter executes
  * (Phase 3.4) and the future codegen compiles to mcode (Phase 6+).
  *
@@ -117,6 +130,18 @@ typedef struct CandoTrace {
                                       when the cache is full. */
     TraceVal       *values_buf;    /* scratch table for cando_trace_run */
     u32             values_cap;
+    /* Phase 6: optional native machine-code body.  If mcode.base is
+     * non-NULL AND mcode.finalized, cando_trace_run dispatches into
+     * the compiled function instead of walking the IR.  When codegen
+     * fails or isn't attempted, mcode stays zeroed and the trace
+     * runs through the IR-interpreter path as before.
+     *
+     * mcode_fn is the entry point cast to the trace function type;
+     * cached so the call site doesn't have to recompute (mcode.base
+     * + offset).  Same lifetime as the mcode buffer. */
+    CandoMCode      mcode;
+    CandoTraceStatus (*mcode_fn)(struct CandoVM *vm, struct CandoTrace *t,
+                                 bool skip_invariant);
     /* Snapshots (Phase 4) -- guards reference these by index via the
      * GUARD IR op's op2 field.  An op2 of 0 means "no snapshot" (the
      * guard predates Phase 4 or didn't need one). */
@@ -128,15 +153,6 @@ typedef struct CandoTrace {
     u32             snap_entry_cap;
 } CandoTrace;
 
-/* -----------------------------------------------------------------------
- * Trace execution status (Phase 3.4).
- * --------------------------------------------------------------------- */
-typedef enum {
-    TRACE_LOOP_DONE     = 0,  /* hit IR_LOOP cleanly; caller may iterate */
-    TRACE_GUARD_FAILED  = 1,  /* guard fired; bytecode resumes at start_pc */
-    TRACE_BAD_TYPE      = 2,  /* SLOAD found a non-numeric value           */
-    TRACE_RANGE_ERROR   = 3,  /* malformed IR -- should not happen         */
-} CandoTraceStatus;
 
 /* cando_jit_find_trace -- look up a compiled trace whose start_pc
  * matches `pc`.  Linear scan over CandoJit.traces[] (capped at
