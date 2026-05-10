@@ -670,6 +670,32 @@ void cando_jit_dump_traces(const CandoVM *vm, FILE *out) {
         const CandoTrace *t = &vm->jit->traces[i];
         fprintf(out, "trace %u  start_pc=%p\n", t->id, (const void *)t->start_pc);
         cando_ir_dump(&t->ir, out);
+        /* Phase 8: hex-dump the codegen'd mcode body when present.
+         * 16 bytes per line, addressed from the mcode base so the
+         * output can be cross-referenced with `objdump -D --target
+         * binary -m i386:x86-64` after extraction. */
+        if (t->mcode.base && t->mcode.written > 0) {
+            fprintf(out, "==== trace mcode (%u bytes @ %p) ====\n",
+                    t->mcode.written, (const void *)t->mcode.base);
+            const u8 *p = t->mcode.base;
+            for (u32 off = 0; off < t->mcode.written; off += 16) {
+                fprintf(out, "  %04x ", off);
+                u32 row = (t->mcode.written - off > 16) ? 16
+                                                       : (t->mcode.written - off);
+                for (u32 c = 0; c < row; c++)
+                    fprintf(out, "%02x ", p[off + c]);
+                fputc('\n', out);
+            }
+        }
+        if (t->sink_rec_count > 0) {
+            fprintf(out, "==== trace sink_recs (%u) ====\n", t->sink_rec_count);
+            for (u32 s = 0; s < t->sink_rec_count; s++) {
+                const CandoSinkRec *r = &t->sink_recs[s];
+                fprintf(out, "  [%u] slot=%u stack_off=%d cap=%u %s\n",
+                        s, r->slot, r->stack_off, r->capacity,
+                        r->is_array ? "array" : "object");
+            }
+        }
     }
 }
 
