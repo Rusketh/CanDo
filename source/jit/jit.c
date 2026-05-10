@@ -641,10 +641,13 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
             case IR_FIELD_GET:
             case IR_FIELD_SET:
             case IR_FIELD_SET_VAL:
-                /* Phase 4.4a-e: allocations and array/object reads
+            case IR_RANGE_ASC:
+            case IR_RANGE_DESC:
+                /* Phase 4.4a-f: allocations and array/object reads
                  * /writes are NEVER invariant.  Allocations produce
                  * fresh handles; mutations don't commute with reads.
-                 * SET_VAL ops are pinned pair-prefixes. */
+                 * SET_VAL ops are pinned pair-prefixes.  Range ops
+                 * allocate per call. */
                 inv = false;
                 break;
             case IR_CALL_F1: {
@@ -1806,6 +1809,41 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             break;
         }
 
+        case OP_RANGE_ASC:
+        case OP_RANGE_DESC: {
+            /* Phase 4.4f: pop two numerics (start, end), allocate
+             * a heap range array.  v1 always allocates -- the
+             * sinking that would let nbody-style FOR-IN over a
+             * small range avoid the per-iter alloc lands with
+             * Phase 4.4k. */
+            if (sp < 2) {
+                cando_recorder_abort(vm,
+                    "OP_RANGE_*: too few stack slots");
+                return;
+            }
+            IRRef end_ref   = r->stack_map[sp - 1];
+            IRRef start_ref = r->stack_map[sp - 2];
+            if (start_ref == IRREF_NIL || end_ref == IRREF_NIL) {
+                cando_recorder_abort(vm,
+                    "OP_RANGE_*: operand not in stack_map");
+                return;
+            }
+            const IRIns *s_in = cando_ir_get_ins(&r->ir, start_ref);
+            const IRIns *e_in = cando_ir_get_ins(&r->ir, end_ref);
+            if ((s_in && s_in->type != IRT_NUM) ||
+                (e_in && e_in->type != IRT_NUM)) {
+                cando_recorder_abort(vm,
+                    "OP_RANGE_*: non-numeric bound (v1)");
+                return;
+            }
+            IROp ir_op = (op == OP_RANGE_ASC) ? IR_RANGE_ASC : IR_RANGE_DESC;
+            IRRef arr_ref = cando_ir_emit(&r->ir, ir_op, IRT_OBJ,
+                                          IRF_PINNED, start_ref, end_ref);
+            /* Stack effect: pop 2, push 1 -- land at sp-2. */
+            rec_push(r, arr_ref, sp - 2);
+            break;
+        }
+
         case OP_NEW_OBJECT: {
             /* Phase 4.4e: allocate a fresh empty object.  No
              * operands; result lives in stack_map as IRT_OBJ.
@@ -2510,6 +2548,27 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                 cdo_string_release(key);
                 break;
             }
+            case IR_RANGE_ASC:
+            case IR_RANGE_DESC: {
+                /* Phase 4.4f: build a fresh range array.  Casts the
+                 * f64 bounds to i64 to mirror OP_RANGE_ASC's int
+                 * truncation behaviour. */
+                CandoValue arr_val = cando_bridge_new_array(vm);
+                CdoObject *arr = cando_bridge_resolve(vm,
+                                                      cando_as_handle(arr_val));
+                i64 from = (i64)vals[in->op1].d;
+                i64 to   = (i64)vals[in->op2].d;
+                if (in->op == IR_RANGE_ASC) {
+                    for (i64 v = from; v <= to; v++)
+                        cdo_array_push(arr, cdo_number((f64)v));
+                } else {
+                    for (i64 v = from; v >= to; v--)
+                        cdo_array_push(arr, cdo_number((f64)v));
+                }
+                vals[i].u = arr_val.u;
+                break;
+            }
+
             case IR_FIELD_GET: {
                 /* Phase 4.4e: object.field.  Resolve obj, intern
                  * name, cdo_object_rawget.  Side-exit on missing or

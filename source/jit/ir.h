@@ -227,6 +227,16 @@ typedef enum {
                               IR-interp resolves obj + interns key +
                               cdo_object_rawget, requires numeric.
                               Side-exits on missing/non-numeric. */
+    IR_RANGE_ASC,          /* op1: start IRRef (IRT_NUM, integer
+                              value).  op2: end IRRef (IRT_NUM,
+                              integer value, inclusive).  Returns
+                              IRT_OBJ -- a freshly-allocated array
+                              of cdo_number(v) for v in start..end.
+                              Mirrors OP_RANGE_ASC in vm.c.  v1
+                              always allocates per call; the
+                              actual sinking lands in 4.4j+k. */
+    IR_RANGE_DESC,         /* Same as IR_RANGE_ASC but counts down
+                              from start to end (inclusive). */
 
     /* ===== Band 7: Trace control ======================================== */
     IR_LOOP,               /* head-of-loop marker; the trace closes here    */

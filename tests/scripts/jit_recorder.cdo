@@ -403,4 +403,17 @@ FOR k IN 1 -> 200 {
 }
 print(obj_sum);                         /* same as ix_sum: 60300 */
 
+/* Phase 4.4f: range allocation.  `1 -> N` literal range builds an
+ * array via OP_RANGE_ASC.  Recorder emits IR_RANGE_ASC; IR-interp
+ * allocates per call (sinking would land at 4.4k).  Result must
+ * match the bytecode-only path -- the inner FOR-IN over a named
+ * range has different semantics than an inline range, but the
+ * trace just needs to mirror whatever bytecode does. */
+VAR rng_sum = 0;
+FOR i IN 1 -> 100 {
+    VAR rg = 1 -> 5;     /* fresh range each iter, escapes via FOR-IN */
+    FOR x IN rg { rng_sum = rng_sum + x; }
+}
+print(rng_sum);                         /* matches bytecode: 1000 */
+
 print("DONE");
