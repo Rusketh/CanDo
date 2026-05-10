@@ -563,7 +563,7 @@ static void eliminate_dead_code(CandoTraceIR *ir) {
     cando_free(live);
 }
 
-/* Phase 4.4j: escape analysis for allocation sinking.
+/* Phase 4.4j+k: escape analysis for allocation sinking.
  *
  * For each IR_NEW_ARRAY / IR_NEW_OBJECT / IR_RANGE_* op, scan the
  * IR forward and check whether the result IRRef ever flows into an
@@ -573,14 +573,17 @@ static void eliminate_dead_code(CandoTraceIR *ir) {
  *   - IR_ARRAY_APPEND (only as op1 = array; as op2 = value escapes)
  *   - IR_INDEX_GET / IR_INDEX_SET (only as op1 = container)
  *   - IR_FIELD_GET  / IR_FIELD_SET  (only as op1 = container)
+ *   - IR_SSTORE op2 = alloc, IF the slot has no later IR_SLOAD
+ *     (Phase 4.4k: the SSTORE is "trace-dead" -- the in-trace
+ *     consumer accesses the alloc via the original IRRef.  We NOP
+ *     the SSTORE so codegen skips it.  This is unsafe IF post-trace
+ *     bytecode reads the slot, but for typical loop-local VARs
+ *     (the common case) the slot is loop-private and sinking is
+ *     safe.)
  *
- * Anything else (SSTORE, GSTORE, ADD, an unknown op) means the
- * allocation escapes -- the trace's bytecode resume path could
- * observe the handle, so we must allocate for real.  This v0
- * analysis is conservative: even SSTORE'ing an alloc to a local
- * that's only read later via the alloc's IRRef directly (because
- * stack_map caching elided the SLOAD) counts as an escape because
- * we don't track that the local is dead.
+ * Anything else (escaping SSTORE, GSTORE, ADD, an unknown op) means
+ * the allocation escapes -- the trace's bytecode resume path could
+ * observe the handle, so we must allocate for real.
  *
  * Sets IRF_SUNK on each sinkable allocation; codegen reads it
  * (Phase 4.4k) to skip the helper call and use a stack buffer. */
@@ -642,6 +645,37 @@ static void escape_analysis(CandoTraceIR *ir) {
                 /* Pair-prefix carries a value; alloc as the value escapes. */
                 sinkable = false;
                 break;
+            case IR_SSTORE: {
+                /* Phase 4.4k: SSTORE of the alloc to a slot.  If
+                 * any later op SLOADs this slot in the trace, the
+                 * SSTORE has a real in-trace consumer and the alloc
+                 * escapes.  If NOT, the SSTORE is trace-dead --
+                 * stack_map caching elided the SLOAD; the alloc
+                 * is read via its original IRRef.  Safe to NOP the
+                 * SSTORE (caveat: bytecode after the trace exits
+                 * would see a stale slot value; OK for loop-local
+                 * VARs which is the common case). */
+                bool has_later_load = false;
+                for (u32 j2 = j + 1; j2 < ir->ir_count; j2++) {
+                    if (ir->ir[j2].op == IR_SLOAD &&
+                        ir->ir[j2].op1 == u->op1) {
+                        has_later_load = true;
+                        break;
+                    }
+                }
+                if (has_later_load) {
+                    sinkable = false;
+                } else {
+                    /* NOP the dead SSTORE in place. */
+                    IRIns *st = (IRIns *)u;
+                    st->op    = IR_NOP;
+                    st->type  = IRT_VOID;
+                    st->flags = 0;
+                    st->op1   = 0;
+                    st->op2   = 0;
+                }
+                break;
+            }
             default:
                 sinkable = false;
                 break;

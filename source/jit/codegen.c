@@ -51,7 +51,16 @@ void cando_jit_replay_snapshot_for_mcode(struct CandoVM *vm,
                                           u32 snap_idx);
 
 #define CG_MAX_GUARDS  128
+#define CG_MAX_SUNK    16
 #define CG_BUF_SIZE    4096u    /* one page; bail if a trace needs more */
+
+/* Phase 4.4k sunk-allocation tracking. */
+typedef struct {
+    u32 ref;            /* IRRef of the IR_NEW_ARRAY (with IRF_SUNK)    */
+    u32 capacity;       /* op1 of the NEW_ARRAY -- max appends          */
+    u32 cursor;         /* current append index, increments per APPEND  */
+    i32 stack_off;      /* negative offset from rbp to slot 0           */
+} CGSunk;
 
 typedef struct {
     u8  *base;          /* start of mcode buffer */
@@ -62,6 +71,13 @@ typedef struct {
     u16 cur_snap;       /* most-recent guard's snapshot index, used by
                            IR_GLOAD/IR_GSTORE bad-type side-exits to
                            match the IR-interpreter's behaviour */
+    /* Phase 4.4k: sunk allocations get a stack-local buffer instead
+     * of a heap call.  Filled by a pre-pass before the body emits;
+     * indexed by IRRef during emit. */
+    CGSunk sunk[CG_MAX_SUNK];
+    u32    sunk_count;
+    u32    sunk_total_bytes;   /* total stack to reserve, 16-aligned   */
+
     u32 xmm0_holds;     /* Phase 6.8: IRRef whose vals[] value is
                            currently in xmm0 (0 = unknown).  Lets
                            consecutive non-invariant ops skip a
@@ -173,6 +189,59 @@ static void emit_movsd_vals_xmm(CG *cg, u32 idx, u8 xmm) {
     cg_emit_u8(cg, 0x11);
     cg_emit_u8(cg, (u8)(0x86 | (xmm << 3)));
     cg_emit_u32(cg, idx * 8);
+}
+
+/* movsd xmm0, [rbp + disp32]  -- F2 0F 10 85 disp32.  Phase 4.4k
+ * sunk-buffer reads.  disp is signed; negative = below rbp. */
+static void emit_movsd_xmm0_rbp(CG *cg, i32 disp) {
+    static const u8 prefix[] = { 0xF2, 0x0F, 0x10, 0x85 };
+    cg_emit_bytes(cg, prefix, 4);
+    cg_emit_u32(cg, (u32)disp);
+}
+/* movsd [rbp + disp32], xmm0  -- F2 0F 11 85 disp32.  Sunk-buffer
+ * writes. */
+static void emit_movsd_rbp_xmm0(CG *cg, i32 disp) {
+    static const u8 prefix[] = { 0xF2, 0x0F, 0x11, 0x85 };
+    cg_emit_bytes(cg, prefix, 4);
+    cg_emit_u32(cg, (u32)disp);
+}
+
+/* Lookup a sunk allocation by its IRRef.  Returns NULL if not sunk. */
+static CGSunk *cg_find_sunk(CG *cg, u32 ref) {
+    for (u32 k = 0; k < cg->sunk_count; k++)
+        if (cg->sunk[k].ref == ref) return &cg->sunk[k];
+    return NULL;
+}
+
+/* Pre-pass: scan IR for IRF_SUNK IR_NEW_ARRAY ops and assign each
+ * a stack offset.  Total bytes go in cg->sunk_total_bytes which the
+ * prologue uses to size its sub rsp.  Per-alloc base offset = -56 -
+ * (running total) -- below the 5 callee-saved pushes (40 bytes) and
+ * the 16-alignment pad (8 bytes).  The +8 from the pad is rolled
+ * into the running offset to make slot accesses 8-byte aligned. */
+static void cg_assign_sunk_offsets(CG *cg, const CandoTraceIR *ir) {
+    u32 running = 0;
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        const IRIns *in = &ir->ir[i];
+        if (in->op != IR_NEW_ARRAY || !(in->flags & IRF_SUNK)) continue;
+        if (cg->sunk_count >= CG_MAX_SUNK) {
+            /* Drop the SUNK flag so codegen falls back to the
+             * regular helper-call path for this alloc.  Doesn't
+             * affect correctness; just no perf win for it. */
+            ((IRIns *)in)->flags &= (u8)~IRF_SUNK;
+            continue;
+        }
+        cg->sunk[cg->sunk_count].ref       = i;
+        cg->sunk[cg->sunk_count].capacity  = in->op1;
+        cg->sunk[cg->sunk_count].cursor    = 0;
+        /* Slot 0 lives at rbp - 56 - cumulative_prev_alloc_bytes.
+         * Element K of this alloc is at stack_off - 8*K. */
+        cg->sunk[cg->sunk_count].stack_off = -(i32)(56 + running);
+        running += in->op1 * 8;
+        cg->sunk_count++;
+    }
+    cg->sunk_total_bytes = running;
+    /* The prologue rounds (8 + sunk_total_bytes) up to 16-aligned. */
 }
 
 /* mov rax, [r15 + 8*slot]   -- load 8 bytes from frame_slots[slot]. */
@@ -483,35 +552,25 @@ static void emit_call_rax(CG *cg) {
 /* ============================================================ */
 
 /* Prologue:
- *   push rbp              ; 55
- *   mov  rbp, rsp         ; 48 89 e5
- *   push rbx              ; 53
- *   push r12              ; 41 54
- *   push r13              ; 41 55
- *   push r14              ; 41 56
- *   push r15              ; 41 57
- *   sub  rsp, 8           ; 48 83 ec 08         -- 16-align stack
- *   mov  rbx, rdi         ; 48 89 fb            -- vm
- *   mov  r12, rsi         ; 49 89 f4            -- t
- *   mov  r13b, dl         ; 41 88 d5            -- skip_invariant
- *   mov  r15, rcx         ; 49 89 cf            -- frame_slots
- *   mov  r14, r8          ; 4d 89 c6            -- vals
+ *   push rbp / mov rbp, rsp / push rbx/r12/r13/r14/r15
+ *   sub rsp, 8 + sunk_total       (16-aligned)
+ *   mov rbx,rdi / mov r12,rsi / mov r13b,dl / mov r15,rcx / mov r14,r8
  *
- * Stack discipline: caller aligns RSP to 16 before `call mcode_fn`,
- * which pushes the return address (RSP -> aligned-8).  Six pushes
- * (rbp, rbx, r12, r13, r14, r15) bring us to aligned-56, so we sub
- * an extra 8 to land at aligned-64 = 16-aligned.  This keeps the
- * side-exit's `call rax` to the snapshot helper on an aligned
- * stack so the helper's internal SSE ops can't fault.
+ * Stack alignment: caller is 16-aligned before `call mcode_fn`;
+ * the call+six pushes leave RSP at aligned-56 (8-misaligned), so
+ * we subtract enough to re-align to 16.  Total reservation is
+ * 8 + sunk_total_bytes where sunk_total is rounded up to a multiple
+ * of 8 to keep slot accesses 8-byte aligned and the +8 brings the
+ * grand total (56 + 8 + sunk_total) to a multiple of 16.
  *
- * Phase 6.6: r13b mirrors the skip_invariant arg byte.  We can't
- * read DL directly during the body because emit_sload (and other
- * ops) clobber RDX with intermediate computation -- caching in a
- * callee-saved register keeps the LICM-skip prefix's `test r13b,
- * r13b` correct for the lifetime of the trace iteration.
- */
+ * Phase 6.6: r13b mirrors the skip_invariant arg byte for the
+ * LICM-skip prefix (body emits clobber RDX so we cache).
+ *
+ * Phase 4.4k: sunk_total_bytes lives below the 8-byte alignment
+ * pad, accessed via [rbp - 56 - 8*N] for the Nth element of the
+ * Nth sunk allocation (per-alloc base offsets stored in cg->sunk[]). */
 static void emit_prologue(CG *cg) {
-    static const u8 b[] = {
+    static const u8 fixed1[] = {
         0x55,
         0x48, 0x89, 0xE5,
         0x53,
@@ -519,20 +578,45 @@ static void emit_prologue(CG *cg) {
         0x41, 0x55,
         0x41, 0x56,
         0x41, 0x57,
-        0x48, 0x83, 0xEC, 0x08,
+    };
+    cg_emit_bytes(cg, fixed1, sizeof(fixed1));
+
+    /* sub rsp, 8 + sunk_total.  Round (8 + sunk_total) up to a
+     * multiple of 16 so RSP stays aligned. */
+    u32 sub_amt = 8 + cg->sunk_total_bytes;
+    if (sub_amt % 16 != 0) sub_amt = ((sub_amt + 15) / 16) * 16;
+    if (sub_amt < 0x80) {
+        /* sub rsp, imm8: 48 83 EC ib */
+        cg_emit_u8(cg, 0x48); cg_emit_u8(cg, 0x83);
+        cg_emit_u8(cg, 0xEC); cg_emit_u8(cg, (u8)sub_amt);
+    } else {
+        /* sub rsp, imm32: 48 81 EC id */
+        cg_emit_u8(cg, 0x48); cg_emit_u8(cg, 0x81);
+        cg_emit_u8(cg, 0xEC); cg_emit_u32(cg, sub_amt);
+    }
+
+    static const u8 fixed2[] = {
         0x48, 0x89, 0xFB,
         0x49, 0x89, 0xF4,
         0x41, 0x88, 0xD5,
         0x49, 0x89, 0xCF,
         0x4D, 0x89, 0xC6,
     };
-    cg_emit_bytes(cg, b, sizeof(b));
+    cg_emit_bytes(cg, fixed2, sizeof(fixed2));
 }
 
-/* Epilogue restoring callee-saveds and returning.  Caller has set EAX. */
+/* Epilogue: undo the prologue's sub rsp + pops + ret. */
 static void emit_epilogue(CG *cg) {
+    u32 sub_amt = 8 + cg->sunk_total_bytes;
+    if (sub_amt % 16 != 0) sub_amt = ((sub_amt + 15) / 16) * 16;
+    if (sub_amt < 0x80) {
+        cg_emit_u8(cg, 0x48); cg_emit_u8(cg, 0x83);
+        cg_emit_u8(cg, 0xC4); cg_emit_u8(cg, (u8)sub_amt);
+    } else {
+        cg_emit_u8(cg, 0x48); cg_emit_u8(cg, 0x81);
+        cg_emit_u8(cg, 0xC4); cg_emit_u32(cg, sub_amt);
+    }
     static const u8 b[] = {
-        0x48, 0x83, 0xC4, 0x08,    /* add rsp, 8     */
         0x41, 0x5F,                /* pop r15        */
         0x41, 0x5E,                /* pop r14        */
         0x41, 0x5D,                /* pop r13        */
@@ -1013,6 +1097,11 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
     cg.end  = t->mcode.base + t->mcode.size;
     cg.vm   = vm;
 
+    /* Phase 4.4k: pre-pass to assign stack offsets to sunk allocs
+     * BEFORE the prologue so its sub rsp can reserve the right
+     * amount.  Reads IRF_SUNK set by escape_analysis. */
+    cg_assign_sunk_offsets(&cg, &t->ir);
+
     emit_prologue(&cg);
 
     /* Per-IR-op emit.  LICM-aware: ops marked IRF_INVARIANT get a
@@ -1107,14 +1196,52 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             emit_aref(&cg, in->op1, in->op2, i);
             break;
         case IR_NEW_ARRAY:
+            /* Phase 4.4k: sunk allocs emit nothing -- the buffer is
+             * already reserved by the prologue's sub rsp. */
+            if (in->flags & IRF_SUNK) break;
             emit_new_array(&cg, i);
             break;
-        case IR_ARRAY_APPEND:
+        case IR_ARRAY_APPEND: {
+            /* Phase 4.4k: if op1 references a sunk alloc, lower to
+             * a direct buffer write at slot[cursor++]. */
+            CGSunk *s = cg_find_sunk(&cg, in->op1);
+            if (s) {
+                if (s->cursor >= s->capacity) { cg.failed = true; break; }
+                emit_load_xmm0(&cg, in->op2);
+                i32 disp = s->stack_off - (i32)(8 * s->cursor);
+                emit_movsd_rbp_xmm0(&cg, disp);
+                s->cursor++;
+                cg_invalidate_xmm0(&cg);
+                break;
+            }
             emit_array_append(&cg, in->op1, in->op2);
             break;
-        case IR_INDEX_GET:
+        }
+        case IR_INDEX_GET: {
+            /* Phase 4.4k: sunk path requires a constant idx that
+             * fits within the buffer.  Variable-idx access falls
+             * back to the helper-call path -- but a sunk alloc has
+             * no real handle, so falling back is wrong.  Bail in
+             * that case so the trace runs via IR-interp. */
+            CGSunk *s = cg_find_sunk(&cg, in->op1);
+            if (s) {
+                const IRIns *idx_in = cando_ir_get_ins(&t->ir, in->op2);
+                if (!idx_in || idx_in->op != IR_KNUM) {
+                    cg.failed = true; break;
+                }
+                CandoValue idx_val = cando_ir_get_const(&t->ir, idx_in->op1);
+                if (!cando_is_number(idx_val)) { cg.failed = true; break; }
+                u32 idx = (u32)cando_as_number(idx_val);
+                if (idx >= s->capacity) { cg.failed = true; break; }
+                i32 disp = s->stack_off - (i32)(8 * idx);
+                emit_movsd_xmm0_rbp(&cg, disp);
+                emit_movsd_vals_xmm(&cg, i, 0);
+                cg.xmm0_holds = i;
+                break;
+            }
             emit_index_get(&cg, in->op1, in->op2, i);
             break;
+        }
         case IR_INDEX_SET_VAL:
             /* No-op at runtime; the value IRRef is consumed by the
              * IR_INDEX_SET that immediately follows via i-1. */
@@ -1125,6 +1252,22 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
                 cg.failed = true; break;
             }
             u32 val_ref = t->ir.ir[i - 1].op1;
+            CGSunk *s = cg_find_sunk(&cg, in->op1);
+            if (s) {
+                const IRIns *idx_in = cando_ir_get_ins(&t->ir, in->op2);
+                if (!idx_in || idx_in->op != IR_KNUM) {
+                    cg.failed = true; break;
+                }
+                CandoValue idx_val = cando_ir_get_const(&t->ir, idx_in->op1);
+                if (!cando_is_number(idx_val)) { cg.failed = true; break; }
+                u32 idx = (u32)cando_as_number(idx_val);
+                if (idx >= s->capacity) { cg.failed = true; break; }
+                i32 disp = s->stack_off - (i32)(8 * idx);
+                emit_load_xmm0(&cg, val_ref);
+                emit_movsd_rbp_xmm0(&cg, disp);
+                cg_invalidate_xmm0(&cg);
+                break;
+            }
             emit_index_set(&cg, in->op1, in->op2, val_ref);
             break;
         }

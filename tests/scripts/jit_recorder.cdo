@@ -416,4 +416,19 @@ FOR i IN 1 -> 100 {
 }
 print(rng_sum);                         /* matches bytecode: 1000 */
 
+/* Phase 4.4j+k: allocation sinking for IR_NEW_ARRAY.  Escape
+ * analysis NOPs the dead SSTORE of the array literal to the local
+ * (no later SLOAD reads it -- stack_map caching elided it).  The
+ * alloc is then marked IRF_SUNK and codegen replaces the helper
+ * call with stack-buffer ops; ARRAY_APPEND lowers to direct
+ * mov [rbp - off - 8*cursor], xmm0; INDEX_GET on a constant idx
+ * lowers to a direct stack load.  Result must still match
+ * bytecode (the local 'a' isn't observed post-loop). */
+VAR snk_sum = 0;
+FOR k IN 1 -> 200 {
+    VAR a = [k, k * 2, k * 3];
+    snk_sum = snk_sum + a[0] + a[1] + a[2];
+}
+print(snk_sum);                         /* sum(6k for k=1..200) = 120600 */
+
 print("DONE");
