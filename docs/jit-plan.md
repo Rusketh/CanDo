@@ -521,6 +521,36 @@ and (where applicable) measurable performance numbers.
 - Abort gracefully on `OP_TRY_BEGIN`, `OP_THROW`, `OP_THREAD`,
   `OP_AWAIT`, eval-boundary returns.
 
+#### Phase 4.4 — Allocation sinking sub-plan
+
+Decomposed into commit-sized steps.  Each step is self-contained
+(builds + tests + benches green) and individually shippable.  Real
+sinking only kicks in at step `j+k` -- earlier steps lay down the
+plumbing.  As of writing, the rest of Phase 4 (HREF/AREF/CALLN/CALLC)
+is done; Phase 4.4 is the only Phase 4 item still open.
+
+| step | scope | recorder | IR-interp | codegen | sinking | bench impact |
+|------|-------|----------|-----------|---------|---------|--------------|
+| **a** | IR shape: `IR_NEW_ARRAY` (op1=count) + `IR_ARRAY_APPEND` (array, value).  Recorder emits both for `OP_NEW_ARRAY <count>`.  Result `IRT_OBJ` lives in `vals[i].u`. | yes | yes (call `cando_bridge_new_array` + `cdo_array_push`) | bail | no | none yet -- traces still abort downstream |
+| **b** | Allow `IRT_OBJ` values through `IR_SLOAD` / `IR_SSTORE`.  Per-slot type tracking on the recorder; `IR_SSTORE` dispatches on source type for the wrap (`cando_number(d)` for nums, raw `.u` for objects).  `IR_SLOAD` honours its `type` field at runtime. | yes | yes | bail | no | scripts that store an array literal to a local now compile traces |
+| **c** | `IR_INDEX_GET` (array, idx) for `OP_GET_INDEX`.  Result `IRT_NUM` initially (assumes array of numbers; bail otherwise). | yes | yes | bail | no | `arr[k]` reads inside a hot loop trace |
+| **d** | `IR_INDEX_SET` for `OP_SET_INDEX` -- 3 operands need either a packed encoding or a 2-op pair (`IR_INDEX_PREP` + `IR_INDEX_STORE`). | yes | yes | bail | no | `arr[k] = v` writes inside a hot loop trace |
+| **e** | `IR_NEW_OBJECT` + `IR_FIELD_GET` / `IR_FIELD_SET` for empty + small object literals. | yes | yes | bail | no | object literals trace |
+| **f** | `IR_RANGE_ASC` for `OP_RANGE_ASC` (and DESC variant).  Pops 2 numerics, allocates the range array.  Same shape as `IR_NEW_ARRAY` + N `IR_ARRAY_APPEND` but lowered specially for the typical contiguous case. | yes | yes | bail | no | nbody-class scripts trace via `FOR i IN 0 -> N - 1` |
+| **g** | Codegen for `IR_NEW_ARRAY` / `IR_ARRAY_APPEND` -- C calls to the bridge helpers from mcode.  `IR_INDEX_GET/SET` codegen too. | done above | done above | yes | no | array-allocating traces fully native |
+| **h** | Codegen for `IR_NEW_OBJECT` + field ops. | done above | done above | yes | no | object literal traces fully native |
+| **i** | Codegen for `IR_RANGE_ASC`. | done above | done above | yes | no | range-FOR traces fully native (still allocates per iter) |
+| **j** | Escape analysis pass that runs after DSE/DCE/LICM in `cando_recorder_finish`.  For each `IR_NEW_*` op, follow the result IRRef forward; mark sinkable iff every use is one of `IR_INDEX_GET/SET`, `IR_FIELD_GET/SET`, or another sinkable allocation -- i.e. the value never reaches an `IR_SSTORE` to a slot, an `IR_GSTORE` to a global, an `IR_CALL_*`, or `IR_RETURN`.  Bit per IR op marking sinkable. | -- | -- | -- | partly | no direct bench (groundwork) |
+| **k** | Allocation sinking codegen.  For sunk allocations: emit no allocation in the body (or pre-allocate a stack-local buffer for indexed access).  Lower `IR_INDEX_GET/SET` on sunk arrays to direct `[rsp+8*idx]` reads/writes.  At every guard's side-exit stub: emit a "materialize" trampoline that `cando_bridge_new_array` + populates from the buffer + writes the resulting handle into whatever slot would have held it -- so bytecode resuming sees the right state.  Update snapshots to know about sunk-allocation handles too. | -- | -- | yes | yes | nbody hot loop allocates 0 ranges per iter; modest -> big speedup depending on workload |
+
+Step c-d-e-f open the door to many more recordable shapes; once
+those are in (even with no codegen), the bench surface widens.
+Step j+k is where the actual perf payoff lands -- before that, every
+step is correctness-and-coverage groundwork.
+
+Tracking notes will live in commit messages.  When all eleven are
+shipped Phase 4.4 is done and Phase 4 is closed.
+
 ### Phase 5 — Optimiser (2 weeks)
 
 - FOLD table + CSE + LOAD/STORE-forward + DSE + LICM +
