@@ -216,6 +216,7 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     cando_lock_init(&vm->globals_owned->lock);
     vm->globals_owned->capacity = 64;
     vm->globals_owned->count    = 0;
+    vm->globals_owned->version  = 1;   /* Phase 8.7: starts at 1 so 0 means "uninitialised" */
     vm->globals_owned->entries  = (CandoGlobalEntry *)cando_alloc(
                                        64 * sizeof(CandoGlobalEntry));
     memset(vm->globals_owned->entries, 0, 64 * sizeof(CandoGlobalEntry));
@@ -813,6 +814,29 @@ static void vm_globals_resize(CandoGlobalEnv *g, u32 new_cap) {
         g->count++;
     }
     cando_free(old);
+    /* Phase 8.7: invalidate JIT trace caches that refer to old
+     * entry pointers.  Any trace with cached_entry_ptrs will see
+     * a version mismatch on next entry and bail to bytecode. */
+    g->version++;
+}
+
+/* Phase 8.7: look up the entry pointer for a global by name.  The
+ * JIT caches this pointer at codegen time and dereferences it
+ * directly in mcode (skips the per-iter hash lookup).  Validity
+ * is enforced via globals->version: the trace stores the version
+ * at codegen time and aborts if it differs at trace entry. */
+CandoGlobalEntry *cando_vm_get_global_entry(CandoVM *vm, const char *name) {
+    CandoGlobalEnv *g   = vm->globals;
+    u32             len = (u32)strlen(name);
+    u32             h   = vm_global_hash(name, len);
+    u32             idx = h & (g->capacity - 1);
+    while (g->entries[idx].key) {
+        CandoString *k = g->entries[idx].key;
+        if (k->length == len && memcmp(k->data, name, len) == 0)
+            return &g->entries[idx];
+        idx = (idx + 1) & (g->capacity - 1);
+    }
+    return NULL;
 }
 
 bool cando_vm_set_global(CandoVM *vm, const char *name, CandoValue val,

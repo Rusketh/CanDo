@@ -1153,6 +1153,9 @@ static void cando_recorder_finish(struct CandoVM *vm) {
     t->mcode_fn   = NULL;
     t->consecutive_exits = 0;
     t->total_dispatch_misses = 0;
+    t->gload_entry_cache = NULL;
+    t->gload_entry_cache_cap = 0;
+    t->globals_version_seen = 0;
     /* Phase 4.4 v1c: codegen populates sink_recs lazily. */
     t->sink_recs        = NULL;
     t->sink_rec_count   = 0;
@@ -2704,6 +2707,9 @@ static void trace_release_storage(CandoTrace *t) {
     cando_free(t->snap_entries);
     cando_free(t->sink_recs);
     cando_free(t->sink_shadow);
+    cando_free(t->gload_entry_cache);
+    t->gload_entry_cache = NULL;
+    t->gload_entry_cache_cap = 0;
     /* Phase 6: release the executable mapping if codegen produced one. */
     cando_mcode_free(&t->mcode);
     t->mcode_fn         = NULL;
@@ -3386,6 +3392,66 @@ int cando_jit_gstore_for_mcode(struct CandoVM *vm, struct CandoString *name,
                                double value) {
     return cando_vm_set_global(vm, ((CandoString *)name)->data,
                                 cando_number(value), false) ? 0 : 1;
+}
+
+/* Phase 8.7: cached-entry-pointer variants.  On warm cache, skip
+ * the hash lookup and dereference the entry directly.  On cold
+ * cache OR a globals_version mismatch (rehash since last cache),
+ * resolve via the slow path and update the cache.  ~30ns saved
+ * per access on the warm path. */
+static CandoGlobalEntry *cando_jit_resolve_global_entry(
+        struct CandoVM *vm, CandoTrace *t, u32 kidx, struct CandoString *name) {
+    if (kidx < t->gload_entry_cache_cap &&
+        t->gload_entry_cache[kidx] != NULL &&
+        t->globals_version_seen == vm->globals->version) {
+        return (CandoGlobalEntry *)t->gload_entry_cache[kidx];
+    }
+    /* Cache miss or stale.  (Re)resolve. */
+    if (kidx >= t->gload_entry_cache_cap) {
+        u32 nc = t->gload_entry_cache_cap ? t->gload_entry_cache_cap * 2 : 8;
+        while (nc <= kidx) nc *= 2;
+        t->gload_entry_cache = cando_realloc(t->gload_entry_cache,
+                                              sizeof(void *) * nc);
+        memset(t->gload_entry_cache + t->gload_entry_cache_cap, 0,
+               sizeof(void *) * (nc - t->gload_entry_cache_cap));
+        t->gload_entry_cache_cap = nc;
+    }
+    if (t->globals_version_seen != vm->globals->version) {
+        /* Rehash happened -- invalidate all cached pointers. */
+        memset(t->gload_entry_cache, 0,
+               sizeof(void *) * t->gload_entry_cache_cap);
+        t->globals_version_seen = vm->globals->version;
+    }
+    CandoGlobalEntry *e = cando_vm_get_global_entry(vm,
+                                                    ((CandoString *)name)->data);
+    t->gload_entry_cache[kidx] = e;
+    return e;
+}
+
+int cando_jit_gload_cached_for_mcode(struct CandoVM *vm, CandoTrace *t,
+                                      u32 kidx, struct CandoString *name,
+                                      double *out) {
+    CandoGlobalEntry *e = cando_jit_resolve_global_entry(vm, t, kidx, name);
+    if (!e || !cando_is_number(e->value)) return 1;
+    *out = cando_as_number(e->value);
+    return 0;
+}
+
+int cando_jit_gstore_cached_for_mcode(struct CandoVM *vm, CandoTrace *t,
+                                       u32 kidx, struct CandoString *name,
+                                       double value) {
+    CandoGlobalEntry *e = cando_jit_resolve_global_entry(vm, t, kidx, name);
+    if (!e) {
+        /* Fresh global: fall through to the full set_global path which
+         * handles allocation + capacity grow.  After this set, the next
+         * cache lookup will (re)resolve. */
+        return cando_vm_set_global(vm, ((CandoString *)name)->data,
+                                    cando_number(value), false) ? 0 : 1;
+    }
+    if (e->is_const) return 1;
+    cando_value_release(e->value);
+    e->value = cando_number(value);
+    return 0;
 }
 
 /* IR_HLOAD_SLOT helper: read frame_slots[slot], require it's an

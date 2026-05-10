@@ -364,8 +364,18 @@ static void emit_movabs_rdx(CG *cg, u64 imm) {
  * REX = 0x49 (W=1 R=0 X=0 B=1 -- B for r14 base).
  * Opcode 8D /r.  ModR/M = 10 010 110 = 0x96 (mod=disp32, reg=rdx,
  * r/m=110 since R14&7=110 needs no SIB). */
+/* lea rdx, [r14 + 8*idx]  -- replaced by lea_r8 in Phase 8.7's
+ * cached gload helper; kept for any future 3-arg helpers.        */
+__attribute__((unused))
 static void emit_lea_rdx_vals(CG *cg, u32 idx) {
     static const u8 prefix[] = { 0x49, 0x8D, 0x96 };
+    cg_emit_bytes(cg, prefix, 3);
+    cg_emit_u32(cg, idx * 8);
+}
+/* lea r8, [r14 + 8*idx]   -- 4D 8D 86 disp32.  Phase 8.7 5th
+ * arg pointer for cando_jit_gload_cached_for_mcode (out-pointer). */
+static void emit_lea_r8_vals(CG *cg, u32 idx) {
+    static const u8 prefix[] = { 0x4D, 0x8D, 0x86 };
     cg_emit_bytes(cg, prefix, 3);
     cg_emit_u32(cg, idx * 8);
 }
@@ -1251,6 +1261,17 @@ extern int cando_jit_gload_for_mcode(struct CandoVM *vm,
 extern int cando_jit_gstore_for_mcode(struct CandoVM *vm,
                                       struct CandoString *name,
                                       double value);
+/* Phase 8.7: cached-entry-pointer variants.  vm/t/kidx/name/out
+ * (5 args).  On warm cache the helper is a few-instruction
+ * fast path -- no hash lookup, no string memcmp. */
+extern int cando_jit_gload_cached_for_mcode(struct CandoVM *vm,
+                                             CandoTrace *t, u32 kidx,
+                                             struct CandoString *name,
+                                             double *out);
+extern int cando_jit_gstore_cached_for_mcode(struct CandoVM *vm,
+                                              CandoTrace *t, u32 kidx,
+                                              struct CandoString *name,
+                                              double value);
 /* Phase 8.2: resolve a global array to its CdoObject* once.
  * Returns NULL on bad type so the caller side-exits. */
 extern void *cando_jit_gload_arr_for_mcode(struct CandoVM *vm,
@@ -1281,10 +1302,14 @@ static void emit_gload(CG *cg, const CandoTraceIR *ir, IRRef name_ref, u32 i) {
     CandoValue cv = cando_ir_get_const(ir, name_ref);
     if (!cando_is_string(cv)) { cg->failed = true; return; }
     CandoString *name = cando_as_string(cv);
+    /* Phase 8.7: cached helper -- 5 args (vm, t, kidx, name, &out). */
+    u32 kidx = IRREF_KIDX(name_ref);
     emit_mov_rdi_rbx(cg);                         /* arg1: vm        */
-    emit_movabs_rsi(cg, (u64)(uintptr_t)name);    /* arg2: name      */
-    emit_lea_rdx_vals(cg, i);                     /* arg3: &vals[i]  */
-    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_gload_for_mcode);
+    emit_mov_rsi_r12(cg);                         /* arg2: t         */
+    emit_mov_edx_imm(cg, kidx);                   /* arg3: kidx      */
+    emit_movabs_rcx(cg, (u64)(uintptr_t)name);    /* arg4: name      */
+    emit_lea_r8_vals(cg, i);                      /* arg5: &vals[i]  */
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_gload_cached_for_mcode);
     emit_call_rax(cg);
     emit_test_eax_eax(cg);
     emit_jne_to_stub(cg, cg->cur_snap);
@@ -1377,10 +1402,14 @@ static void emit_gstore(CG *cg, const CandoTraceIR *ir, IRRef name_ref,
     CandoValue cv = cando_ir_get_const(ir, name_ref);
     if (!cando_is_string(cv)) { cg->failed = true; return; }
     CandoString *name = cando_as_string(cv);
+    /* Phase 8.7: cached helper -- 5 args (vm, t, kidx, name, value). */
+    u32 kidx = IRREF_KIDX(name_ref);
     emit_mov_rdi_rbx(cg);                         /* arg1: vm        */
-    emit_movabs_rsi(cg, (u64)(uintptr_t)name);    /* arg2: name      */
-    emit_load_xmm0(cg, op2);                      /* arg3 (f64 in xmm0) */
-    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_gstore_for_mcode);
+    emit_mov_rsi_r12(cg);                         /* arg2: t         */
+    emit_mov_edx_imm(cg, kidx);                   /* arg3: kidx      */
+    emit_movabs_rcx(cg, (u64)(uintptr_t)name);    /* arg4: name      */
+    emit_load_xmm0(cg, op2);                      /* arg5: value (xmm0) */
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_gstore_cached_for_mcode);
     emit_call_rax(cg);
     emit_test_eax_eax(cg);
     emit_jne_to_stub(cg, cg->cur_snap);

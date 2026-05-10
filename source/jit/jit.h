@@ -194,6 +194,18 @@ typedef struct CandoTrace {
                                  bool skip_invariant,
                                  CandoValue *frame_slots,
                                  TraceVal *vals);
+    /* Phase 8.7: per-trace cached pointers to global hash-table
+     * entries.  Indexed by const-pool kidx; populated lazily on
+     * first IR_GLOAD / IR_GSTORE through the cached helper.  A
+     * non-NULL entry means "this kidx's GlobalEntry pointer was
+     * resolved when globals_version_seen matched vm->globals->version
+     * -- subsequent accesses can skip the hash lookup".  When
+     * vm->globals->version increments (rehash), the helper detects
+     * the mismatch and re-resolves. */
+    void          **gload_entry_cache;   /* CandoGlobalEntry **       */
+    u32             gload_entry_cache_cap;
+    u32             globals_version_seen;
+
     /* Phase 8.6: side-exit attribution for multi-version specialization.
      *   consecutive_exits: bumped on TRACE_GUARD_FAILED, reset on
      *     TRACE_LOOP_DONE.  Diagnostic; not used to gate decisions.

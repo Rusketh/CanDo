@@ -204,6 +204,11 @@ typedef struct CandoGlobalEnv {
     CandoGlobalEntry *entries;
     u32               capacity;  /* always a power of two                 */
     u32               count;
+    /* Phase 8.7: bumped whenever entries[] is reallocated (rehash on
+     * NEW key insertion).  JIT traces cache entry pointers at codegen
+     * time and verify this version at trace entry; on mismatch the
+     * trace bails to bytecode (the cached ptrs may be dangling). */
+    u32               version;
 } CandoGlobalEnv;
 
 /* =========================================================================
@@ -623,6 +628,14 @@ CANDO_API bool cando_vm_set_global(CandoVM *vm, const char *name, CandoValue val
 /* cando_vm_get_global -- look up a global; returns false if not found. */
 CANDO_API bool cando_vm_get_global(const CandoVM *vm, const char *name,
                           CandoValue *out);
+
+/* Phase 8.7: cando_vm_get_global_entry -- look up a global's
+ * underlying CandoGlobalEntry*.  Used by the JIT to cache the
+ * entry pointer (via the entry's value field) at codegen time
+ * and skip the per-iter hash lookup.  Validity is gated on
+ * vm->globals->version. */
+CANDO_API CandoGlobalEntry *cando_vm_get_global_entry(CandoVM *vm,
+                                                       const char *name);
 
 /* =========================================================================
  * Meta-method dispatch helper
