@@ -249,6 +249,15 @@ typedef enum {
     IR_RANGE_DESC,         /* Same as IR_RANGE_ASC but counts down
                               from start to end (inclusive). */
 
+    /* ===== Band 6.5: Object introspection =============================== */
+    IR_HLEN,               /* op1: CdoObject* IRRef (IRT_PTR), op2 unused.
+                              Returns IRT_NUM = arr->items_len.  Mirrors
+                              cdo_array_len without the read-lock (the
+                              JIT assumes single-mutator semantics like
+                              everywhere else in the codegen).  Used by
+                              OP_FOR_INIT recording to set up the FOR-
+                              state's len slot. */
+
     /* ===== Band 7: Trace control ======================================== */
     IR_LOOP,               /* head-of-loop marker; the trace closes here    */
 

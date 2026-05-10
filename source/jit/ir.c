@@ -201,6 +201,7 @@ static const char *const s_op_names[IR__COUNT] = {
     [IR_FIELD_GET]   = "IR_FIELD_GET",
     [IR_RANGE_ASC]   = "IR_RANGE_ASC",
     [IR_RANGE_DESC]  = "IR_RANGE_DESC",
+    [IR_HLEN]        = "IR_HLEN",
     [IR_LOOP]        = "IR_LOOP",
 };
 

@@ -60,14 +60,21 @@ void cando_jit_materialize_sunk_for_mcode(struct CandoVM *vm,
                                            char *rbp_base,
                                            CandoValue *frame_slots);
 
-#define CG_MAX_GUARDS     128
+#define CG_MAX_GUARDS     512    /* Phase 8.4: outer-loop traces with
+                                    * unrolled inner can have many
+                                    * inline INDEX_GET/SETs (2 guards
+                                    * each).  nbody's outer trace 2
+                                    * needs ~150 guards. */
 #define CG_MAX_SUNK       16
 #define CG_MAX_OBJ_FIELDS 8       /* per-sunk-object field cap */
-#define CG_BUF_SIZE       8192u   /* two pages; Phase 8.2 inline array
-                                    * access expanded the typical trace
-                                    * by ~2x (no more helper calls per
-                                    * INDEX_GET/SET).  4096 was tight
-                                    * even for the IR-interp era. */
+#define CG_BUF_SIZE       32768u  /* eight pages; Phase 8.4 unrolled
+                                    * outer-loop traces (e.g. nbody's
+                                    * outer FOR with inner unrolled
+                                    * via OP_FOR_INIT recording) need
+                                    * 16-20KB.  Phase 8.2 inline array
+                                    * access doubled per-op size from
+                                    * the helper-call era (4096 was
+                                    * tight even then). */
 
 /* Phase 4.4k / v1: sunk-allocation tracking.  Either:
  *   IS_ARRAY=true  -- backing buffer indexed 0..capacity-1; APPEND
@@ -1309,6 +1316,61 @@ static void emit_hload_slot(CG *cg, u32 slot, u32 i) {
  * emit_index_get_inline (the path is identical: ptr + numeric idx).
  * The helper still ships in jit.c for the IR-interpreter path. */
 
+/* mov eax, [rdi + disp32]   -- 8B 87 disp32.  Load 32-bit field
+ * (e.g. items_len) from a CdoObject pointed to by rdi. */
+static void emit_mov_eax_rdi_off(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x8B, 0x87 };
+    cg_emit_bytes(cg, b, 2);
+    cg_emit_u32(cg, (u32)disp);
+}
+/* IR_HLEN: vals[i] = (f64)((CdoObject*)vals[op1])->items_len.
+ * Phase 8.3: open-coded load + i32->f64 conversion.
+ *
+ * op1's vals[] may hold either:
+ *   - a CdoObject* (when produced by IR_HLOAD_SLOT or IR_HLOAD, or
+ *     by IR_GLOAD with IRT_OBJ after Phase 8.2)
+ *   - a CandoValue.u handle (when produced by IR_RANGE_*, IR_NEW_*).
+ *
+ * We dispatch on the producer's IRType via the trace IR.  For
+ * handles, call cando_bridge_resolve to convert; the helper
+ * returns NULL on bad-type (we side-exit).  Within the same
+ * trace, the kind is stable so no per-call kind check is
+ * needed once IR_HLEN fired once. */
+static void emit_hlen(CG *cg, const CandoTraceIR *ir, u32 op1, u32 i) {
+    i32 items_len_off = (i32)offsetof(struct CdoObject, items_len);
+    bool is_ptr = false;
+    if (op1 < ir->ir_count) {
+        const IRIns *src = &ir->ir[op1];
+        is_ptr = (src->type == IRT_PTR);
+    }
+    if (is_ptr) {
+        emit_mov_rdi_vals(cg, op1);
+    } else {
+        /* Handle source: resolve via cando_bridge_resolve(vm, idx). */
+        emit_mov_rdi_rbx(cg);                     /* arg1: vm */
+        emit_load_xmm0(cg, op1);                  /* xmm0 = handle f64 lane */
+        /* Reinterpret the u64 as the handle: the helper takes a
+         * CandoHandle which is a u32 index.  We need to extract
+         * that from the boxed value.  Simpler: call a thin
+         * wrapper that takes the raw u64 and returns the obj ptr
+         * (or NULL on bad type). */
+        emit_mov_rsi_vals(cg, op1);               /* arg2: arr_u u64 */
+        extern void *cando_jit_resolve_arr_for_mcode(struct CandoVM *vm,
+                                                      u64 arr_u);
+        emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_resolve_arr_for_mcode);
+        emit_call_rax(cg);
+        emit_test_rax_rax(cg);
+        emit_je_to_stub(cg, cg->cur_snap);
+        /* rax now holds CdoObject*; copy to rdi for the next read. */
+        static const u8 mov_rdi_rax[] = { 0x48, 0x89, 0xC7 };
+        cg_emit_bytes(cg, mov_rdi_rax, 3);
+    }
+    emit_mov_eax_rdi_off(cg, items_len_off);      /* eax = items_len */
+    emit_cvtsi2sd_xmm0_eax(cg);                   /* xmm0 = (f64)eax */
+    emit_movsd_vals_xmm(cg, i, 0);                /* vals[i] = xmm0 */
+    cg->xmm0_holds = i;
+}
+
 static void emit_gstore(CG *cg, const CandoTraceIR *ir, IRRef name_ref,
                         u32 op2) {
     if (!IRREF_IS_K(name_ref)) { cg->failed = true; return; }
@@ -1703,6 +1765,9 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
         case IR_RANGE_ASC:
         case IR_RANGE_DESC:
             emit_range(&cg, (IROp)in->op, in->op1, in->op2, i);
+            break;
+        case IR_HLEN:
+            emit_hlen(&cg, &t->ir, in->op1, i);
             break;
         case IR_LOOP:
             /* Trace-close marker; we'll emit the LOOP_DONE epilogue

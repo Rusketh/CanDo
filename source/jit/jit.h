@@ -66,20 +66,26 @@ struct CandoChunk;
  * --------------------------------------------------------------------- */
 /* Snapshot entry kind: SNAP_SLOT writes back to a frame slot;
  * SNAP_GLOBAL writes back to vm->globals via the trace's interned
- * name string.  Both restore numeric values; non-numeric stores
+ * name string; SNAP_INDEX writes back to a heap array's items[idx]
+ * (Phase 8.4).  All restore numeric values; non-numeric stores
  * aren't recorded today. */
 typedef enum {
     SNAP_SLOT   = 0,
     SNAP_GLOBAL = 1,
+    SNAP_INDEX  = 2,
 } CandoSnapKind;
 
 typedef struct CandoSnapEntry {
     u8    kind;        /* CandoSnapKind */
     u32   key;         /* SNAP_SLOT: frame-relative slot.
                           SNAP_GLOBAL: trace IR const-pool index of
-                          the name string (cando_ir_get_const). */
+                          the name string (cando_ir_get_const).
+                          SNAP_INDEX: array IRRef. */
     IRRef irref;       /* IRRef whose vals[irref].d holds the pre-iter
                           value to write back. */
+    IRRef irref2;      /* SNAP_INDEX: idx IRRef (treated as u32 idx
+                          via cvttsd2si of vals[irref2].d).  Unused
+                          for SNAP_SLOT / SNAP_GLOBAL. */
 } CandoSnapEntry;
 
 typedef struct CandoSnapshot {
@@ -287,6 +293,21 @@ typedef struct CandoRecorder {
      * of the same name returns this IRRef instead of emitting a fresh
      * load.  Shares first_load_global_cap. */
     IRRef                *cur_global_value;
+
+    /* Phase 8.4: per-(arr_irref, idx_irref) pre-trace IR_INDEX_GET
+     * IRRef.  Populated lazily on the FIRST IR_INDEX_GET on a
+     * given (arr, idx) pair.  At IR_INDEX_SET time we look up
+     * (arr, idx); if found, use the cached IRRef as the SNAP_INDEX
+     * pre-value (= true pre-trace).  If not, emit a fresh GET
+     * first.  Linear scan; entries fit in a small array since
+     * traces have <100 unique (arr, idx) pairs in practice. */
+    struct {
+        IRRef arr_ref;
+        IRRef idx_ref;
+        IRRef get_ref;
+    }                    *first_index_get;
+    u32                   first_index_get_count;
+    u32                   first_index_get_cap;
 
     /* Phase 4.2: parallel-to-stack_map "aux" tag for slots holding
      * non-numeric values the recorder tracks (object globals, fast

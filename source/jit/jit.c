@@ -133,6 +133,9 @@ void cando_recorder_init(CandoRecorder *r) {
     r->first_load_global    = NULL;
     r->first_load_global_cap = 0;
     r->cur_global_value     = NULL;
+    r->first_index_get        = NULL;
+    r->first_index_get_count  = 0;
+    r->first_index_get_cap    = 0;
     r->stack_aux            = NULL;
     r->pending_snap         = NULL;
     r->pending_snap_count   = 0;
@@ -161,6 +164,7 @@ void cando_recorder_destroy(CandoRecorder *r) {
     cando_free(r->first_load);
     cando_free(r->first_load_global);
     cando_free(r->cur_global_value);
+    cando_free(r->first_index_get);
     cando_free(r->stack_aux);
     cando_free(r->pending_snap);
     cando_free(r->staging_snapshots);
@@ -171,6 +175,9 @@ void cando_recorder_destroy(CandoRecorder *r) {
     r->first_load_global      = NULL;
     r->first_load_global_cap  = 0;
     r->cur_global_value       = NULL;
+    r->first_index_get        = NULL;
+    r->first_index_get_count  = 0;
+    r->first_index_get_cap    = 0;
     r->stack_aux              = NULL;
     r->pending_snap           = NULL;
     r->pending_snap_cap  = 0;
@@ -219,9 +226,68 @@ static void rec_pending_snap_add(CandoRecorder *r, CandoSnapKind kind,
                                         sizeof(CandoSnapEntry) * nc);
         r->pending_snap_cap = nc;
     }
-    r->pending_snap[r->pending_snap_count].kind  = (u8)kind;
-    r->pending_snap[r->pending_snap_count].key   = key;
-    r->pending_snap[r->pending_snap_count].irref = irref;
+    r->pending_snap[r->pending_snap_count].kind   = (u8)kind;
+    r->pending_snap[r->pending_snap_count].key    = key;
+    r->pending_snap[r->pending_snap_count].irref  = irref;
+    r->pending_snap[r->pending_snap_count].irref2 = 0;
+    r->pending_snap_count++;
+}
+
+/* Phase 8.4: lookup a (arr, idx) pair in the first-INDEX_GET cache.
+ * Returns the IRRef of the first IR_INDEX_GET on this pair within
+ * the current recording, or IRREF_NIL if none. */
+static IRRef rec_lookup_first_index_get(CandoRecorder *r,
+                                         IRRef arr_ref, IRRef idx_ref) {
+    for (u32 i = 0; i < r->first_index_get_count; i++) {
+        if (r->first_index_get[i].arr_ref == arr_ref &&
+            r->first_index_get[i].idx_ref == idx_ref)
+            return r->first_index_get[i].get_ref;
+    }
+    return IRREF_NIL;
+}
+/* Phase 8.4: record this IR_INDEX_GET as the first on (arr, idx) if
+ * not already present.  Capacity grows lazily. */
+static void rec_record_first_index_get(CandoRecorder *r,
+                                        IRRef arr_ref, IRRef idx_ref,
+                                        IRRef get_ref) {
+    if (rec_lookup_first_index_get(r, arr_ref, idx_ref) != IRREF_NIL)
+        return;
+    if (r->first_index_get_count >= r->first_index_get_cap) {
+        u32 nc = r->first_index_get_cap ? r->first_index_get_cap * 2 : 8;
+        r->first_index_get = cando_realloc(r->first_index_get,
+                                            sizeof(*r->first_index_get) * nc);
+        r->first_index_get_cap = nc;
+    }
+    r->first_index_get[r->first_index_get_count].arr_ref = arr_ref;
+    r->first_index_get[r->first_index_get_count].idx_ref = idx_ref;
+    r->first_index_get[r->first_index_get_count].get_ref = get_ref;
+    r->first_index_get_count++;
+}
+
+/* Phase 8.4: record a heap-rollback entry for IR_INDEX_SET.
+ * Dedup key is (SNAP_INDEX, arr_irref, idx_irref): if the same
+ * (array, idx) pair was already snap'd, the existing entry already
+ * captures the true pre-trace value (since irref points to the
+ * FIRST INDEX_GET on the pair). */
+static void rec_pending_snap_add_index(CandoRecorder *r,
+                                        IRRef arr_irref,
+                                        IRRef idx_irref,
+                                        IRRef pre_value_irref) {
+    for (u32 i = 0; i < r->pending_snap_count; i++) {
+        if (r->pending_snap[i].kind   == SNAP_INDEX &&
+            r->pending_snap[i].key    == arr_irref &&
+            r->pending_snap[i].irref2 == idx_irref) return;
+    }
+    if (r->pending_snap_count >= r->pending_snap_cap) {
+        u32 nc = r->pending_snap_cap ? r->pending_snap_cap * 2 : 8;
+        r->pending_snap = cando_realloc(r->pending_snap,
+                                        sizeof(CandoSnapEntry) * nc);
+        r->pending_snap_cap = nc;
+    }
+    r->pending_snap[r->pending_snap_count].kind   = (u8)SNAP_INDEX;
+    r->pending_snap[r->pending_snap_count].key    = arr_irref;
+    r->pending_snap[r->pending_snap_count].irref  = pre_value_irref;
+    r->pending_snap[r->pending_snap_count].irref2 = idx_irref;
     r->pending_snap_count++;
 }
 
@@ -357,6 +423,7 @@ void cando_recorder_begin(struct CandoVM *vm, const u8 *pc) {
     r->pending_snap_count        = 0;
     r->staging_snapshot_count    = 0;
     r->staging_snap_entry_count  = 0;
+    r->first_index_get_count     = 0;
 }
 
 /* Finish a successfully closed trace: emit IR_LOOP, copy the IR into
@@ -498,6 +565,9 @@ static void ir_op_uses_irref(IROp op, bool *uses1, bool *uses2) {
     case IR_CALL_F1:
         /* op1 is the native idx (raw u32); op2 is arg IRRef. */
         *uses1 = false; break;
+    case IR_HLEN:
+        /* op1 is the array IRRef; op2 unused. */
+        *uses2 = false; break;
     default:
         break;
     }
@@ -628,6 +698,12 @@ static void escape_analysis(CandoTraceIR *ir) {
                 /* op1 is container IRRef; op2 is name const-pool ref. */
                 uses_op1 = (u->op1 == a);
                 break;
+            case IR_HLEN:
+                /* op1 is the array IRRef; op2 unused.  Reading
+                 * items_len of a sunk alloc would need a sink-buffer
+                 * specific count -- skip sinking. */
+                uses_op1 = (u->op1 == a);
+                break;
             default:
                 uses_op1 = (u->op1 == a);
                 uses_op2 = (u->op2 == a);
@@ -645,6 +721,12 @@ static void escape_analysis(CandoTraceIR *ir) {
                 break;
             case IR_FIELD_GET: case IR_FIELD_SET:
                 /* Only op1 is a container ref; op2 is name. */
+                break;
+            case IR_HLEN:
+                /* IR_HLEN of a sunk alloc would need to know the
+                 * sink buffer's logical length -- bail out of
+                 * sinking when we see this pattern. */
+                if (uses_op1) sinkable = false;
                 break;
             case IR_INDEX_SET_VAL:
             case IR_FIELD_SET_VAL:
@@ -779,6 +861,32 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
                  * SET_VAL ops are pinned pair-prefixes.  Range ops
                  * allocate per call. */
                 inv = false;
+                break;
+            case IR_HLEN:
+                /* Phase 8.3: invariant iff the array's IRRef is
+                 * itself invariant AND no later op mutates the
+                 * array's length (IR_ARRAY_APPEND).  IR_INDEX_SET
+                 * doesn't change items_len so it doesn't matter.
+                 *
+                 * For OUTER traces in nbody, IR_HLEN's operand is
+                 * IR_RANGE_ASC which is allocated fresh per iter
+                 * (NOT invariant) -- so IR_HLEN tracks the per-iter
+                 * length correctly without LICM hoisting. */
+                if (in->op1 < ir->ir_count &&
+                    (ir->ir[in->op1].flags & IRF_INVARIANT)) {
+                    /* Source is invariant.  Check no APPEND on it. */
+                    bool mutated = false;
+                    for (u32 j = 1; j < ir->ir_count; j++) {
+                        if (ir->ir[j].op == IR_ARRAY_APPEND &&
+                            ir->ir[j].op1 == in->op1) {
+                            mutated = true;
+                            break;
+                        }
+                    }
+                    inv = !mutated;
+                } else {
+                    inv = false;
+                }
                 break;
             case IR_CALL_F1: {
                 /* op1 is the native registry index (NOT an IRRef);
@@ -1641,6 +1749,118 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             break;
         }
 
+        case OP_FOR_INIT: {
+            /* Phase 8.3: OP_FOR_INIT recorder support, array case.
+             *
+             * Bytecode semantics (vm.c:OP_FOR_INIT):
+             *   keys_mode = READ_U16()
+             *   iter      = POP()
+             *   if iter is OBJ_ARRAY:
+             *     PUSH(iter); PUSH(±len); PUSH(0)
+             *   else: snapshot or scalar-wrap (UNSUPPORTED in recorder)
+             *
+             * The trace replays this as 3 IR_SSTOREs to the FOR-state
+             * slots.  IR_HLEN computes the length from the iterable's
+             * handle/ptr.  Subsequent OP_FOR_NEXT recordings do
+             * IR_HLOAD_SLOT(source_slot) + IR_AREF, so we MUST write
+             * the iterable as a handle (not a resolved ptr) to the
+             * source slot.  IR_RANGE_ASC and IR_NEW_ARRAY both
+             * produce handles; IR_GLOAD with IRT_OBJ post-Phase-8.2
+             * produces a ptr -- the latter case currently aborts. */
+            u16 keys_mode = read_op_arg(ip);
+
+            if (sp < 1) {
+                cando_recorder_abort(vm, "OP_FOR_INIT empty stack");
+                return;
+            }
+
+            CandoValue iterable = vm->stack_top[-1];
+            if (!cando_is_object(iterable)) {
+                cando_recorder_abort(vm,
+                    "OP_FOR_INIT non-object iterable (v1)");
+                return;
+            }
+            CdoObject *obj = cando_bridge_resolve(vm,
+                                                   cando_as_handle(iterable));
+            if (!obj || obj->kind != OBJ_ARRAY) {
+                cando_recorder_abort(vm,
+                    "OP_FOR_INIT non-array iterable (v1)");
+                return;
+            }
+
+            u32 abs_iter = sp - 1;
+            IRRef iter_ir = (abs_iter < r->stack_map_cap)
+                            ? r->stack_map[abs_iter] : IRREF_NIL;
+            if (iter_ir == IRREF_NIL) {
+                cando_recorder_abort(vm,
+                    "OP_FOR_INIT iterable IRRef missing");
+                return;
+            }
+            /* Reject ptr-typed iterables (IR_GLOAD-IRT_OBJ post-8.2,
+             * IR_HLOAD_SLOT) -- writing a raw ptr to source_slot
+             * would confuse OP_FOR_NEXT's IR_HLOAD_SLOT which
+             * expects a NaN-boxed handle. */
+            const IRIns *src_ins = cando_ir_get_ins(&r->ir, iter_ir);
+            if (src_ins && src_ins->type == IRT_PTR) {
+                cando_recorder_abort(vm,
+                    "OP_FOR_INIT iterable is ptr-typed (v1)");
+                return;
+            }
+
+            /* Slot positions after the 3-slot push (-1 pop +3 push = +2).
+             * Source/len/idx land at sp-1, sp, sp+1 (POST adjustment). */
+            u32 abs_src = sp - 1;
+            u32 abs_len = sp;
+            u32 abs_idx = sp + 1;
+            u32 rel_src = abs_src - r->outer_frame_base;
+            u32 rel_len = abs_len - r->outer_frame_base;
+            u32 rel_idx = abs_idx - r->outer_frame_base;
+
+            /* SSTORE source_slot = iterable handle. */
+            cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED,
+                          rel_src, iter_ir);
+
+            /* Compute len via IR_HLEN. */
+            IRRef len_ir = cando_ir_emit(&r->ir, IR_HLEN, IRT_NUM, 0,
+                                          iter_ir, 0);
+            IRRef len_signed_ir = keys_mode
+                ? rec_emit_pure(r, IR_NEG, IRT_NUM, 0, len_ir, 0)
+                : len_ir;
+
+            /* Phase 8.3: emit a length-match guard at trace entry --
+             * a future replay where the inner has a different length
+             * (e.g. nbody's `i+1 -> N-1` for varying outer i) side-
+             * exits HERE, before any unrolled inner iter runs.  This
+             * is much cheaper than letting the unrolled inner run
+             * partially and rolling back via SNAP_INDEX heap entries.
+             * The guard captures the runtime length AT RECORDING
+             * TIME as an IR_KNUM constant. */
+            u32 captured_len = (u32)cdo_array_len(obj);
+            IRRef expected_len_ir = rec_emit_const_num(&r->ir,
+                                                        (f64)captured_len);
+            IRRef len_match_ir = rec_emit_pure(r, IR_EQ, IRT_BOOL, 0,
+                                                len_ir, expected_len_ir);
+            u16 init_snap = rec_build_snapshot(r);
+            cando_ir_emit(&r->ir, IR_GUARD_TRUE, IRT_BOOL, IRF_GUARD,
+                          len_match_ir, init_snap);
+
+            /* SSTORE len_slot = ±len. */
+            cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED,
+                          rel_len, len_signed_ir);
+
+            /* SSTORE idx_slot = 0. */
+            IRRef zero_ir = rec_emit_const_num(&r->ir, 0.0);
+            cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED,
+                          rel_idx, zero_ir);
+
+            /* Update stack_map: pop 1, push 3.  Net +2 slots. */
+            rec_ensure_stack_map(r, abs_idx + 1);
+            r->stack_map[abs_src] = iter_ir;
+            r->stack_map[abs_len] = len_signed_ir;
+            r->stack_map[abs_idx] = zero_ir;
+            break;
+        }
+
         case OP_FOR_NEXT: {
             /* FOR-IN / FOR-OF iterator advance.  Stack at entry:
              *   [..., source_array, len_signed, index]
@@ -1677,13 +1897,73 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             f64 abs_len = keys ? -len_f : len_f;
             f64 idx_f  = cando_as_number(idx_v);
 
-            /* If the runtime says this iteration is the loop-exit, the
-             * recorded trace would only contain the exit path -- no
-             * point.  Abort so the recorder can re-trigger from a
-             * later (non-exit) iteration. */
+            /* If the runtime says this iteration is the loop-exit:
+             *
+             *   - If this is the recording's start_pc, the recorded
+             *     trace would only contain the exit path -- abort so
+             *     the recorder can re-trigger from a later (non-exit)
+             *     iteration.
+             *
+             *   - Otherwise (Phase 8.3 + 8.4): this OP_FOR_NEXT is
+             *     INSIDE the recorded body -- typically an inner
+             *     loop's terminator inside an outer trace.  Emit
+             *     IR_GUARD_FALSE on the iter condition so future
+             *     replays side-exit on early-exit; pop the 3 FOR-
+             *     state slots from stack_map; continue recording.
+             *     Phase 8.4 added IR_INDEX_SET heap rollback via
+             *     SNAP_INDEX so the side-exit cleans up unrolled
+             *     iters' heap mutations safely. */
             if (idx_f >= abs_len) {
-                cando_recorder_abort(vm, "OP_FOR_NEXT recorded at exit iter");
-                return;
+                if (ip == r->start_pc) {
+                    cando_recorder_abort(vm,
+                        "OP_FOR_NEXT recorded at exit iter");
+                    return;
+                }
+                u32 abs_src_e      = sp - 3;
+                u32 abs_len_slot_e = sp - 2;
+                u32 abs_idx_e      = sp - 1;
+                u32 rel_len_e      = abs_len_slot_e - r->outer_frame_base;
+                u32 rel_idx_e      = abs_idx_e      - r->outer_frame_base;
+
+                IRRef idx_ir_e = (abs_idx_e < r->stack_map_cap)
+                                 ? r->stack_map[abs_idx_e] : IRREF_NIL;
+                if (idx_ir_e == IRREF_NIL) {
+                    idx_ir_e = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0,
+                                              rel_idx_e, 0);
+                    if (abs_idx_e < r->stack_map_cap) {
+                        r->stack_map[abs_idx_e] = idx_ir_e;
+                        if (r->first_load[abs_idx_e] == IRREF_NIL)
+                            r->first_load[abs_idx_e] = idx_ir_e;
+                    }
+                }
+                IRRef len_ir_e = (abs_len_slot_e < r->stack_map_cap)
+                                 ? r->stack_map[abs_len_slot_e] : IRREF_NIL;
+                if (len_ir_e == IRREF_NIL) {
+                    len_ir_e = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0,
+                                              rel_len_e, 0);
+                    if (abs_len_slot_e < r->stack_map_cap) {
+                        r->stack_map[abs_len_slot_e] = len_ir_e;
+                        if (r->first_load[abs_len_slot_e] == IRREF_NIL)
+                            r->first_load[abs_len_slot_e] = len_ir_e;
+                    }
+                }
+                IRRef threshold_ir_e = keys
+                    ? rec_emit_pure(r, IR_NEG, IRT_NUM, 0, len_ir_e, 0)
+                    : len_ir_e;
+                IRRef cmp_ir_e = rec_emit_pure(r, IR_LT, IRT_BOOL, 0,
+                                                idx_ir_e, threshold_ir_e);
+                u16 snap_e = rec_build_snapshot(r);
+                cando_ir_emit(&r->ir, IR_GUARD_FALSE, IRT_BOOL, IRF_GUARD,
+                              cmp_ir_e, snap_e);
+
+                /* Pop the 3 FOR-state slots from stack_map. */
+                if (abs_src_e < r->stack_map_cap)
+                    r->stack_map[abs_src_e] = IRREF_NIL;
+                if (abs_len_slot_e < r->stack_map_cap)
+                    r->stack_map[abs_len_slot_e] = IRREF_NIL;
+                if (abs_idx_e < r->stack_map_cap)
+                    r->stack_map[abs_idx_e] = IRREF_NIL;
+                break;
             }
 
             /* Frame-relative slot indices for the FOR state.  sp is
@@ -2110,6 +2390,32 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                     "OP_SET_INDEX: value is non-numeric (v1)");
                 return;
             }
+            /* Phase 8.4: capture the heap-rollback pre-value BEFORE
+             * the SET goes in.  If a prior IR_INDEX_GET on the same
+             * (arr, idx) is already cached, reuse it -- that GET's
+             * vals[] holds the true pre-trace value of the slot.
+             * Otherwise emit a fresh IR_INDEX_GET to capture it
+             * (the GET's runtime side effect is null beyond reading,
+             * so adding one doesn't change semantics).
+             *
+             * The pending_snap entry lets a future guard's snapshot
+             * undo this SET on side-exit, putting the array back to
+             * its pre-trace state.  Without this, mid-iter side-
+             * exits leak heap mutations into post-trace bytecode. */
+            IRRef pre_value_ref = rec_lookup_first_index_get(r, arr_ref,
+                                                              idx_ref);
+            if (pre_value_ref == IRREF_NIL) {
+                /* PINNED: this GET's only consumer is the SNAP_INDEX
+                 * entry below; DCE doesn't track snap-entry refs, so
+                 * without PIN this GET would be NOPped at DCE time
+                 * and the snap rollback would read uninit vals[]. */
+                pre_value_ref = cando_ir_emit(&r->ir, IR_INDEX_GET, IRT_NUM,
+                                               IRF_PINNED, arr_ref, idx_ref);
+                rec_record_first_index_get(r, arr_ref, idx_ref,
+                                            pre_value_ref);
+            }
+            rec_pending_snap_add_index(r, arr_ref, idx_ref, pre_value_ref);
+
             cando_ir_emit(&r->ir, IR_INDEX_SET_VAL, IRT_VOID,
                           IRF_PINNED, val_ref, 0);
             cando_ir_emit(&r->ir, IR_INDEX_SET, IRT_VOID,
@@ -2155,6 +2461,11 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             }
             IRRef e = cando_ir_emit(&r->ir, IR_INDEX_GET, IRT_NUM, 0,
                                     arr_ref, idx_ref);
+            /* Phase 8.4: cache first GET per (arr, idx) for INDEX_SET
+             * heap-rollback snapshots.  Subsequent GETs on the same
+             * pair are post-mutation; only the FIRST one captures
+             * the true pre-trace value. */
+            rec_record_first_index_get(r, arr_ref, idx_ref, e);
             /* Stack effect: pop idx + obj, push result.  Land at sp-2. */
             rec_push(r, e, sp - 2);
             break;
@@ -2301,20 +2612,49 @@ static void trace_replay_snapshot(struct CandoVM *vm, CandoTrace *t,
     const CandoSnapshot *s = &t->snapshots[snap_idx - 1];
     for (u32 e = 0; e < s->entry_count; e++) {
         const CandoSnapEntry *en = &t->snap_entries[s->entry_offset + e];
-        CandoValue restored = cando_number(vals[en->irref].d);
         if (en->kind == SNAP_SLOT) {
+            CandoValue restored = cando_number(vals[en->irref].d);
             frame_slots[en->key] = restored;
-        } else {
-            /* SNAP_GLOBAL: en->key is a const-pool index naming the
-             * global.  Best-effort write back; const-protected globals
+        } else if (en->kind == SNAP_GLOBAL) {
+            /* en->key is a const-pool index naming the global.
+             * Best-effort write back; const-protected globals
              * silently skip (the guard fail will surface the error
              * via the bytecode interpreter on the next iteration). */
+            CandoValue restored = cando_number(vals[en->irref].d);
             CandoValue name = cando_ir_get_const(&t->ir,
                                                  IRREF_K(en->key));
             if (cando_is_string(name)) {
                 cando_vm_set_global(vm, cando_as_string(name)->data,
                                     restored, false);
             }
+        } else if (en->kind == SNAP_INDEX) {
+            /* Phase 8.4: heap rollback.  en->key is the array's IRRef,
+             * en->irref2 is the idx IRRef, en->irref is the pre-trace
+             * value's IRRef.  vals[en->key] may hold:
+             *   - CdoObject* (IR_HLOAD_SLOT -- IRT_PTR producer).
+             *   - CdoObject* (IR_GLOAD-IRT_OBJ post-Phase-8.2 -- the
+             *     codegen resolved + cached the ptr).
+             *   - CandoValue.u handle (IR_RANGE_*, IR_NEW_ARRAY).
+             * Dispatch on the producer's IROp/IRType. */
+            const IRIns *arr_in = (en->key < t->ir.ir_count)
+                                   ? &t->ir.ir[en->key] : NULL;
+            CdoObject *arr = NULL;
+            bool ptr_source = arr_in &&
+                              (arr_in->type == IRT_PTR ||
+                               (arr_in->op == IR_GLOAD &&
+                                arr_in->type == IRT_OBJ));
+            if (ptr_source) {
+                arr = (CdoObject *)(uintptr_t)vals[en->key].u;
+                if (!arr || arr->kind != OBJ_ARRAY) continue;
+            } else {
+                CandoValue v; v.u = vals[en->key].u;
+                if (!cando_is_object(v)) continue;
+                arr = cando_bridge_resolve(vm, cando_as_handle(v));
+                if (!arr || arr->kind != OBJ_ARRAY) continue;
+            }
+            u32 idx = (u32)vals[en->irref2].d;
+            f64 pre = vals[en->irref].d;
+            cdo_array_rawset_idx(arr, idx, cdo_number(pre));
         }
     }
 }
@@ -2708,6 +3048,40 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                 cdo_string_release(key);
                 break;
             }
+            case IR_HLEN: {
+                /* Phase 8.3: items_len of a CdoObject*.  op1's vals[]
+                 * holds either a CdoObject* (from IR_HLOAD_SLOT or
+                 * IR_HLOAD) or a NaN-boxed handle (from IR_NEW_ARRAY/
+                 * IR_RANGE_*).  In the IR-interp we just resolve via
+                 * the handle path (the recorder is required to issue
+                 * IR_HLOAD before IR_HLEN when the source is a handle,
+                 * so the operand here is always already a CdoObject*).
+                 *
+                 * Defensively handle both shapes: if the IRRef's
+                 * producer typed this op as IRT_PTR, use as-ptr;
+                 * otherwise the value is a CandoValue.u handle. */
+                const IRIns *src = (in->op1 < t->ir.ir_count)
+                                    ? &t->ir.ir[in->op1] : NULL;
+                CdoObject *arr = NULL;
+                if (src && src->type == IRT_PTR) {
+                    arr = (CdoObject *)(uintptr_t)vals[in->op1].u;
+                } else {
+                    CandoValue v; v.u = vals[in->op1].u;
+                    if (!cando_is_object(v)) {
+                        trace_replay_snapshot(vm, t, vals, frame_slots,
+                                              cur_snap);
+                        return TRACE_BAD_TYPE;
+                    }
+                    arr = cando_bridge_resolve(vm, cando_as_handle(v));
+                }
+                if (!arr || arr->kind != OBJ_ARRAY) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots,
+                                          cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
+                vals[i].d = (f64)arr->items_len;
+                break;
+            }
             case IR_RANGE_ASC:
             case IR_RANGE_DESC: {
                 /* Phase 4.4f: build a fresh range array.  Casts the
@@ -2889,6 +3263,18 @@ int cando_jit_array_append_for_mcode(struct CandoVM *vm, u64 arr_u, double val) 
     if (!arr || arr->kind != OBJ_ARRAY) return 1;
     cdo_array_push(arr, cdo_number(val));
     return 0;
+}
+
+/* Phase 8.3: resolve a CandoValue.u (NaN-boxed handle) to the
+ * CdoObject* it points to, with kind-check.  Used by IR_HLEN
+ * codegen when the source IRRef is a handle (IR_RANGE_*, etc.).
+ * Returns NULL on non-array so the caller side-exits. */
+void *cando_jit_resolve_arr_for_mcode(struct CandoVM *vm, u64 arr_u) {
+    CandoValue v; v.u = arr_u;
+    if (!cando_is_object(v)) return NULL;
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
+    if (!obj || obj->kind != OBJ_ARRAY) return NULL;
+    return obj;
 }
 
 /* Phase 8.2: resolve a global named array's CdoObject* once at

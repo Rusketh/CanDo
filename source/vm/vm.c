@@ -2868,8 +2868,17 @@ static CandoVMResult vm_run(CandoVM *vm) {
                  * it via the IR-interpreter until it side-exits.  On
                  * exit, the bytecode interpreter resumes at the same
                  * PC and re-evaluates whatever caused the guard to
-                 * fail (typically the loop condition becoming false). */
-                CandoTrace *t = cando_jit_find_trace(vm, ip);
+                 * fail (typically the loop condition becoming false).
+                 *
+                 * Phase 8.3: while the recorder is ACTIVE, skip
+                 * trace dispatch entirely.  Otherwise an inner-loop
+                 * trace would run iters 2+ during outer-trace
+                 * recording, leaving the outer's IR with only iter 1
+                 * + a stale EXIT guard that fires on every replay.
+                 * Letting bytecode handle every op during recording
+                 * makes the outer trace's IR a faithful unroll. */
+                CandoTrace *t = (vm->jit && vm->jit->recorder.active)
+                                ? NULL : cando_jit_find_trace(vm, ip);
                 if (t) {
                     /* First iteration computes every IR op (incl.
                      * invariants); subsequent iterations skip ops
