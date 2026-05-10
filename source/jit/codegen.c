@@ -38,6 +38,7 @@
  */
 
 #include "codegen.h"
+#include "../vm/vm.h"
 
 #include <string.h>
 #include <stddef.h>
@@ -57,6 +58,7 @@ typedef struct {
     u8  *cur;           /* current write pointer */
     u8  *end;           /* one past the last writable byte */
     bool failed;        /* set on overflow or unsupported op */
+    struct CandoVM *vm; /* threaded through for fast-native lookup */
 
     /* Patch table for per-guard side-exit jumps.  Each entry is the
      * offset (relative to base) of a 4-byte placeholder displacement
@@ -469,6 +471,26 @@ static void emit_neg(CG *cg, u32 op1, u32 i) {
     emit_movsd_vals_xmm(cg, i, 1);
 }
 
+/* IR_CALL_F1: vals[i] = fast_native(vals[op2]).  op1 is the index
+ * into vm->fast_natives_f1[].  We resolve the function pointer at
+ * codegen time and embed it as an immediate -- registrations are
+ * write-once at startup so the pointer is stable for the trace's
+ * lifetime.  SysV ABI: f64 arg in XMM0, result in XMM0.  Stack is
+ * 16-aligned at this point (5 callee-saved pushes from the prologue
+ * land RSP at aligned), so `call rax` to the helper is well-formed. */
+static void emit_call_f1(CG *cg, u32 native_idx, u32 op2, u32 i) {
+    if (!cg->vm || native_idx >= cg->vm->fast_natives_f1_cap ||
+        cg->vm->fast_natives_f1[native_idx] == NULL) {
+        cg->failed = true;
+        return;
+    }
+    CandoFastFn1 fn = cg->vm->fast_natives_f1[native_idx];
+    emit_movsd_xmm_vals(cg, 0, op2);         /* xmm0 = vals[op2]     */
+    emit_movabs_rax(cg, (u64)(uintptr_t)fn);
+    emit_call_rax(cg);
+    emit_movsd_vals_xmm(cg, i, 0);           /* vals[i] = xmm0       */
+}
+
 /* Comparisons: vals[a] CMP vals[b] -> vals[i] as 1.0 or 0.0.
  * Mirrors the IR-interp's "(a CMP b) ? 1.0 : 0.0" semantics.  We
  * trust no NaN inputs in v1 (numeric IR by construction). */
@@ -520,7 +542,7 @@ static void emit_guard_bool(CG *cg, IROp op, u32 op1, u16 snap_idx) {
 /* Main entry point                                              */
 /* ============================================================ */
 
-bool cando_jit_codegen_trace(CandoTrace *t) {
+bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
     if (!t || t->mcode_fn != NULL) return t && t->mcode_fn != NULL;
     if (t->ir.ir_count == 0) return false;
 
@@ -530,6 +552,7 @@ bool cando_jit_codegen_trace(CandoTrace *t) {
     cg.base = t->mcode.base;
     cg.cur  = t->mcode.base;
     cg.end  = t->mcode.base + t->mcode.size;
+    cg.vm   = vm;
 
     emit_prologue(&cg);
 
@@ -557,6 +580,9 @@ bool cando_jit_codegen_trace(CandoTrace *t) {
             break;
         case IR_NEG:
             emit_neg(&cg, in->op1, i);
+            break;
+        case IR_CALL_F1:
+            emit_call_f1(&cg, in->op1, in->op2, i);
             break;
         case IR_EQ: case IR_NEQ: case IR_LT: case IR_LE:
         case IR_GT: case IR_GE:

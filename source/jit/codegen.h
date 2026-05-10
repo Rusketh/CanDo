@@ -40,8 +40,12 @@
  * On failure (unsupported op, out of buffer space, mprotect refusal)
  * t->mcode stays zeroed and the trace runs on the IR-interpreter.
  *
+ * `vm` is the VM the trace was recorded in, threaded through so the
+ * codegen can resolve fast-native function pointers from
+ * vm->fast_natives_f1[] for IR_CALL_F1 emit.
+ *
  * Returns true on success, false on bail.  Either way the trace is
  * still runnable; this is purely an optimisation. */
-CANDO_API bool cando_jit_codegen_trace(CandoTrace *t);
+CANDO_API bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t);
 
 #endif /* CANDO_JIT_CODEGEN_H */

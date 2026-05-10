@@ -737,8 +737,9 @@ static void cando_recorder_finish(struct CandoVM *vm) {
      * On failure (unsupported op, out of buffer, mprotect refusal)
      * t->mcode_fn stays NULL and the trace runs on the IR-interpreter
      * unchanged.  Either way the trace is functional; codegen is a
-     * pure speedup. */
-    cando_jit_codegen_trace(t);
+     * pure speedup.  vm is threaded through so codegen can resolve
+     * fast-native fn pointers for IR_CALL_F1. */
+    cando_jit_codegen_trace(vm, t);
 }
 
 /* ============================================================ */

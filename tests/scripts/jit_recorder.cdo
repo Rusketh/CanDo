@@ -310,4 +310,21 @@ FUNCTION counter_native() {
 }
 print(counter_native());               // 10000
 
+/* Phase 6.3: IR_CALL_F1 codegen.  A loop calling math.sqrt on a
+ * local emits IR_CALL_F1 in the recorder; codegen translates that
+ * to a direct `call sqrt` from the loop body.  This trace is
+ * fully native (no globals, no arrays) so the codegen actually
+ * fires. */
+FUNCTION sqrt_local_native() {
+    VAR x = 4.0;
+    VAR s = 0;
+    VAR i = 0;
+    WHILE i < 100 {
+        s = s + math.sqrt(x);    /* sqrt(4) = 2 every iter */
+        i = i + 1;
+    }
+    RETURN s;
+}
+print(sqrt_local_native());             /* 100 * 2 = 200 */
+
 print("DONE");
