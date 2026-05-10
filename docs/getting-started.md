@@ -1,99 +1,164 @@
 # Getting Started
 
-This guide takes you from a clean checkout to a running script in a few
-minutes.
+This guide walks you through installing CanDo, running your first
+script, and getting your editor set up.
 
 ## Requirements
 
-- A C11 compiler (gcc 7+, clang 6+, MSVC 2019+)
-- CMake 3.16+ **or** GNU Make
-- pthreads (POSIX) / Win32 threads (Windows)
-- OpenSSL development headers (for the `https` / TLS client)
+- A C11 compiler (`gcc 7+`, `clang 6+`, or MSVC 2019+).
+- **CMake 3.13+** (preferred) or GNU Make.
+- **OpenSSL** development headers (used by `https`, `secure_socket`,
+  and `crypto`).
+- **pthreads** on POSIX (used by `thread`); native threads on Windows.
 
-## Build
-
-### CMake (recommended)
+On Debian/Ubuntu:
 
 ```bash
+sudo apt install build-essential cmake libssl-dev
+```
+
+On macOS with Homebrew:
+
+```bash
+brew install cmake openssl@3
+```
+
+On Windows the easiest path is the MSYS2 mingw-w64 toolchain or Visual
+Studio with the CMake integration enabled.
+
+## Building
+
+CMake is the supported build system.  GNU `Makefile` is provided as a
+fallback for environments where CMake is unavailable.
+
+### With CMake
+
+```bash
+git clone <repo-url> CanDo
+cd CanDo
 cmake -B build
-cmake --build build
+cmake --build build -j
 ```
 
-Artifacts appear in `build/`:
+The build produces:
 
-- `cando` — the CLI interpreter
-- `libcando.so` (`.dll` on Windows, `.dylib` on macOS) — shared library
-- `libcando_static.a` — static library
+- `build/cando` (or `cando.exe`) — the standalone interpreter.
+- `build/libcando.so` (or `.dylib` / `.dll`) — the shared library for
+  embedding.
+- `build/libcando.a` (or `cando_static.lib`) — static archive.
 
-### GNU Make
+### With make
 
 ```bash
-make            # builds libcando.so, libcando.a, cando, and all tests
-make cando      # just the interpreter
-make test       # runs the unit + script tests
+make            # builds tests + the cando interpreter
+make cando      # builds only the interpreter (faster)
+make test       # builds and runs the full test suite
+make clean      # removes generated artefacts
 ```
 
-## Run your first script
+### Verifying the build
+
+Run any script from the test suite:
+
+```bash
+./cando tests/scripts/hello.cdo
+```
+
+You should see the script's output.  If the binary exits with a
+"command not found" error from your shell, prepend `./`.
+
+## Your first script
 
 Create `hello.cdo`:
 
-```cando
-print("hello, world");
+```cdo
+// hello.cdo
+VAR name = "CanDo";
+print(`Hello, ${name}!`);
+
+VAR squares = [1, 2, 3, 4] ~> pipe * pipe;
+print("squares:", inspect(squares));
 ```
 
 Run it:
 
 ```bash
-./build/cando hello.cdo
+./cando hello.cdo
 ```
 
-Every script run via the `cando` CLI gets all 19 standard libraries
-pre-loaded.  When embedding CanDo yourself you decide which libraries
-to open — see [embedding.md](embedding.md).
+Output:
 
-### See the bytecode
+```
+Hello, CanDo!
+squares: [1, 4, 9, 16]
+```
+
+### What's happening
+
+- `VAR name = "CanDo"` declares a local variable.  Use `CONST` instead
+  to make the binding write-protected.
+- Backtick strings (`` `…` ``) interpolate `${expr}`.
+- `~>` is the pipe operator: it takes the array on the left and
+  evaluates the body on the right with `pipe` bound to each element,
+  collecting the results into a new array.
+- `print()` writes to stdout with a trailing newline; `inspect()`
+  formats nested values for readable debug output.
+
+A guided tour of the rest of the language is in
+[language/README.md](language/README.md).
+
+## Passing arguments to a script
 
 ```bash
-./build/cando hello.cdo --disasm
+./cando script.cdo --port 8080 input.txt
 ```
 
-The disassembler dumps the compiled chunk before execution.  Output
-includes line numbers, opcodes, and constant-pool references.  Useful
-for understanding what an expression compiles to.
+Inside the script, `args` is an array of the trailing arguments:
 
-## A slightly larger example
-
-```cando
-/* Pythagorean triples up to N. */
-
-FUNCTION hypot(a, b) {
-    RETURN math.sqrt(a * a + b * b);
-}
-
-VAR N = 10;
-FOR a IN 1 -> N {
-    FOR b IN a -> N {
-        VAR c = hypot(a, b);
-        IF c == math.floor(c) {
-            print(a, b, c);
-        }
-    }
-}
+```cdo
+// args.cdo
+print("got", #args, "arguments");
+FOR i, v IN args { print(i, "=", v); }
 ```
 
-Things to notice:
+The `cando` binary's own flags (`--disasm`, `--jit`, `--no-jit`,
+`--jit-stats`, `--jit-dump`) are consumed before the script starts and
+**do not appear in `args`**.  See [cli.md](cli.md) for the full list.
 
-- Keywords (`VAR`, `FOR`, `IN`, `IF`, `FUNCTION`, `RETURN`) are
-  upper-case.  Identifiers are case-sensitive.
-- Ranges are inclusive at both ends: `1 -> N` iterates `1, 2, … N`.
-- Blocks are always braced.  Statements end with `;`; statements *inside*
-  a braced block may omit the trailing semicolon before `}`.
-- `math.sqrt` comes from the standard library; `print` is a core native
-  always registered by `cando_open()`.
+## Running a quick eval
 
-## Where to go next
+If you just want to evaluate an expression:
 
-- [language-reference.md](language-reference.md) — the full syntax
-- [standard-library.md](standard-library.md) — what's in `math`, `string`, `array`, `file`, `json`, `thread`, …
-- [embedding.md](embedding.md) — run CanDo from your own C program
-- [threading.md](threading.md) — `thread { … }` and `await`
+```bash
+./cando -e '1 + 2 * 3'
+```
+
+(For longer one-liners, write to a file — quoting in shells gets ugly
+fast.)
+
+## Editor setup
+
+A VS Code extension lives in
+[`editors/vscode-cando/`](../editors/vscode-cando/) and provides syntax
+highlighting, snippets, completion, and hover documentation.  To install
+it locally:
+
+```bash
+cd editors/vscode-cando
+npm install
+npm run compile
+npm run package        # produces vscode-cando-<version>.vsix
+code --install-extension vscode-cando-*.vsix
+```
+
+For other editors, syntax highlighting is straightforward to recreate
+— the keyword list is in
+[language/syntax.md](language/syntax.md).
+
+## Where to next
+
+- A guided language tour: [language/README.md](language/README.md).
+- The standard library, function-by-function:
+  [libraries/README.md](libraries/README.md).
+- Embedding CanDo in a C application:
+  [api/embedding.md](api/embedding.md).
