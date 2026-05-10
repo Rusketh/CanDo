@@ -3,6 +3,34 @@
 This guide walks you through installing CanDo, running your first
 script, and getting your editor set up.
 
+## Prebuilt binaries
+
+If you'd rather not build from source, every green push to the trunk
+branches publishes a fresh build to a rolling release tag on GitHub.
+
+| Platform           | Release tag       | Asset                       |
+|--------------------|-------------------|-----------------------------|
+| Linux (x86_64)     | `linux-latest`    | `cando-linux-x86_64.zip`    |
+| Windows (x86_64)   | `windows-latest`  | `cando-windows-x86_64.zip`  |
+| VS Code extension  | `vscode-latest`   | `vscode-cando.vsix`         |
+
+Each platform zip extracts to:
+
+- `cando` / `cando.exe` -- the standalone interpreter.
+- `libcando.so` / `libcando.dll` -- the shared library, sitting next to
+  the binary so `-Wl,-rpath,'$ORIGIN'` (Linux) or the default DLL search
+  order (Windows) finds it at runtime.
+- `libcando.a` / `libcando.lib` -- static archive / MSVC import library
+  for embedding.
+- `include/` -- public embedding headers (`cando.h` and the internal
+  per-subsystem headers).
+- `modules/<name>/` -- one `.so`/`.dll` per binary module.
+
+The latest builds are linked from the repository's
+[Releases](https://github.com/Rusketh/CanDo/releases) page.
+
+If you want to build from source, read on.
+
 ## Requirements
 
 - A C11 compiler (`gcc 7+`, `clang 6+`, or MSVC 2019+).
