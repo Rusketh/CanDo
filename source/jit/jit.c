@@ -1151,6 +1151,8 @@ static void cando_recorder_finish(struct CandoVM *vm) {
      * then, mcode_fn = NULL routes execution through the IR-interp. */
     memset(&t->mcode, 0, sizeof(t->mcode));
     t->mcode_fn   = NULL;
+    t->consecutive_exits = 0;
+    t->total_dispatch_misses = 0;
     /* Phase 4.4 v1c: codegen populates sink_recs lazily. */
     t->sink_recs        = NULL;
     t->sink_rec_count   = 0;
@@ -2747,6 +2749,29 @@ CandoTrace *cando_jit_find_trace(struct CandoVM *vm, const u8 *pc) {
         }
     }
     return NULL;
+}
+
+u32 cando_jit_find_traces(struct CandoVM *vm, const u8 *pc,
+                           CandoTrace **out, u32 max) {
+    CandoJit *j = jit_of(vm);
+    if (!j || !pc || !out || max == 0) return 0;
+    u32 n = 0;
+    for (u32 i = 0; i < j->trace_count && n < max; i++) {
+        if (j->traces[i].start_pc == pc)
+            out[n++] = &j->traces[i];
+    }
+    /* Order by last_used DESC so the most-recent successful sibling
+     * is tried first.  Insertion sort -- n is small (1-5). */
+    for (u32 a = 1; a < n; a++) {
+        CandoTrace *cur = out[a];
+        u32 b = a;
+        while (b > 0 && out[b-1]->last_used < cur->last_used) {
+            out[b] = out[b-1];
+            b--;
+        }
+        out[b] = cur;
+    }
+    return n;
 }
 
 /* Walk a guard's snapshot and restore each captured slot/global to

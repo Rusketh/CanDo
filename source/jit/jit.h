@@ -194,6 +194,18 @@ typedef struct CandoTrace {
                                  bool skip_invariant,
                                  CandoValue *frame_slots,
                                  TraceVal *vals);
+    /* Phase 8.6: side-exit attribution for multi-version specialization.
+     *   consecutive_exits: bumped on TRACE_GUARD_FAILED, reset on
+     *     TRACE_LOOP_DONE.  Diagnostic; not used to gate decisions.
+     *   total_dispatch_misses: bumped on the OLDEST sibling at this
+     *     PC every time vm.c iterates ALL siblings without any LOOP_
+     *     DONE.  Doesn't reset.  When it crosses a threshold AND
+     *     sibling count < cap, start_pc is un-blacklisted so the
+     *     next backedge accumulates hot counts and the recorder can
+     *     record a sibling specialised for whatever runtime state is
+     *     current at the future trigger. */
+    u32             consecutive_exits;
+    u32             total_dispatch_misses;
     /* Snapshots (Phase 4) -- guards reference these by index via the
      * GUARD IR op's op2 field.  An op2 of 0 means "no snapshot" (the
      * guard predates Phase 4 or didn't need one). */
@@ -213,6 +225,15 @@ typedef struct CandoTrace {
  * miss.  Returns a non-const pointer because cando_trace_run mutates
  * the trace's lazy values_buf scratch on first invocation. */
 CandoTrace *cando_jit_find_trace(struct CandoVM *vm, const u8 *pc);
+
+/* Phase 8.6: multi-version specialization.  Returns up to `max`
+ * traces matching `pc`, ordered by last_used (most recent first).
+ * Caller iterates them, running each until one succeeds.  Used for
+ * traces with FOR_INIT length guards: each variant specializes for
+ * a particular runtime length; non-matching variants side-exit at
+ * the guard with no heap mutations to roll back. */
+CANDO_API u32 cando_jit_find_traces(struct CandoVM *vm, const u8 *pc,
+                                     CandoTrace **out, u32 max);
 
 /* cando_trace_run -- execute one iteration of `trace` against the
  * VM's current stack state.  Reads SLOAD slots, computes IR values

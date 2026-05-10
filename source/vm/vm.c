@@ -15,6 +15,7 @@
 #include "../object/function.h"
 #include "../object/thread.h"
 #include "../jit/jit.h"
+#include "../jit/hot.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -2864,38 +2865,68 @@ static CandoVMResult vm_run(CandoVM *vm) {
                  * head; the next DISPATCH() will route through
                  * cando_recorder_observe and start recording. */
                 cando_jit_hot_hit(vm, ip);
-                /* If a trace was previously recorded for this PC, run
-                 * it via the IR-interpreter until it side-exits.  On
-                 * exit, the bytecode interpreter resumes at the same
-                 * PC and re-evaluates whatever caused the guard to
-                 * fail (typically the loop condition becoming false).
-                 *
-                 * Phase 8.3: while the recorder is ACTIVE, skip
+                /* Phase 8.3: while the recorder is ACTIVE, skip
                  * trace dispatch entirely.  Otherwise an inner-loop
                  * trace would run iters 2+ during outer-trace
                  * recording, leaving the outer's IR with only iter 1
                  * + a stale EXIT guard that fires on every replay.
-                 * Letting bytecode handle every op during recording
-                 * makes the outer trace's IR a faithful unroll. */
-                CandoTrace *t = (vm->jit && vm->jit->recorder.active)
-                                ? NULL : cando_jit_find_trace(vm, ip);
-                if (t) {
-                    /* First iteration computes every IR op (incl.
-                     * invariants); subsequent iterations skip ops
-                     * marked IRF_INVARIANT, which already populated
-                     * values_buf on iter 1.  See Phase 5 LICM in
-                     * source/jit/jit.c. */
-                    bool skip_inv = false;
-                    for (;;) {
-                        CandoTraceStatus s = cando_trace_run(vm, t, skip_inv);
-                        if (s == TRACE_LOOP_DONE) {
-                            vm->jit_stats.trace_iters++;
-                            skip_inv = true;
-                            continue;
+                 *
+                 * Phase 8.6: multi-version specialization -- iterate
+                 * up to 8 sibling traces at this PC, ordered by
+                 * recency.  Run each until one LOOP_DONE's at least
+                 * once; otherwise side-exit + try the next.  After
+                 * all siblings fail, fall through to bytecode. */
+                if (vm->jit && !vm->jit->recorder.active) {
+                    CandoTrace *traces[8];
+                    u32 ntr = cando_jit_find_traces(vm, ip, traces,
+                                                      sizeof(traces) /
+                                                      sizeof(traces[0]));
+                    for (u32 ti = 0; ti < ntr; ti++) {
+                        CandoTrace *t = traces[ti];
+                        bool succeeded_once = false;
+                        bool skip_inv = false;
+                        for (;;) {
+                            CandoTraceStatus s = cando_trace_run(vm, t,
+                                                                  skip_inv);
+                            if (s == TRACE_LOOP_DONE) {
+                                vm->jit_stats.trace_iters++;
+                                skip_inv = true;
+                                succeeded_once = true;
+                                t->consecutive_exits = 0;
+                                continue;
+                            }
+                            vm->jit_stats.trace_exits++;
+                            t->consecutive_exits++;
+                            break;
                         }
-                        vm->jit_stats.trace_exits++;
-                        break;
+                        if (succeeded_once) goto trace_done;
                     }
+                    /* All siblings side-exited prematurely.  Cap
+                     * sibling count at 8 per PC; if we're under the
+                     * cap, accumulate dispatch misses on the OLDEST
+                     * sibling and un-blacklist start_pc when the
+                     * miss count crosses 16 -- the next ~50 backedge
+                     * hits will retrigger the recorder, which appends
+                     * a new sibling specialised for whatever inner
+                     * length is current at that future trigger. */
+                    if (ntr > 0 && ntr < 4) {
+                        CandoTrace *oldest = traces[ntr - 1];
+                        oldest->total_dispatch_misses++;
+                        /* Trigger at 64 misses (vs the inner-loop
+                         * trace's 50 hot threshold), and only the
+                         * first 4 sibling spawns -- nbody-style
+                         * patterns where each outer iter has a
+                         * different inner length show that more
+                         * siblings cost more in dispatch overhead
+                         * than they save in matched runs. */
+                        if (oldest->total_dispatch_misses == 64 ||
+                            oldest->total_dispatch_misses == 128 ||
+                            oldest->total_dispatch_misses == 256 ||
+                            oldest->total_dispatch_misses == 512) {
+                            cando_hot_unblacklist(&vm->jit->hot, ip);
+                        }
+                    }
+                  trace_done: ;
                 }
             }
             DISPATCH();
