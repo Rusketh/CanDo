@@ -544,6 +544,152 @@ static const CandoChunk *current_chunk(const struct CandoVM *vm) {
 }
 
 /* ============================================================ */
+/* IR-level FOLD + CSE (Phase 5d / 5e)                          */
+/* ============================================================ */
+
+/* If `ref` resolves to a numeric constant (an IR_KNUM op pointing
+ * into the constant pool, or a direct constant-pool ref), set *out
+ * and return true.  Used by FOLD to recognise constant operands. */
+static bool ir_get_const_num(const CandoTraceIR *ir, IRRef ref, f64 *out) {
+    if (IRREF_IS_K(ref)) {
+        CandoValue cv = cando_ir_get_const(ir, ref);
+        if (!cando_is_number(cv)) return false;
+        *out = cando_as_number(cv);
+        return true;
+    }
+    const IRIns *in = cando_ir_get_ins(ir, ref);
+    if (!in || in->op != IR_KNUM) return false;
+    CandoValue cv = cando_ir_get_const(ir, in->op1);
+    if (!cando_is_number(cv)) return false;
+    *out = cando_as_number(cv);
+    return true;
+}
+
+/* Intern `v` in the constant pool, then emit (or CSE-reuse) IR_KNUM
+ * referencing it.  Used by FOLD when an algebraic rule reduces an op
+ * to a numeric constant -- the result has to land in the IR stream
+ * so callers get an IRRef they can store in stack_map. */
+static IRRef rec_emit_const_num(CandoTraceIR *ir, f64 v) {
+    IRRef k_idx = cando_ir_const(ir, cando_number(v));
+    /* Phase 5e: dedup identical IR_KNUMs against the existing IR. */
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        const IRIns *in = &ir->ir[i];
+        if (in->op == IR_KNUM && in->op1 == k_idx) return i;
+    }
+    return cando_ir_emit(ir, IR_KNUM, IRT_NUM, 0, k_idx, 0);
+}
+
+/* Same for IR_KBOOL. */
+static IRRef rec_emit_const_bool(CandoTraceIR *ir, bool v) {
+    IRRef arg = v ? 1u : 0u;
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        const IRIns *in = &ir->ir[i];
+        if (in->op == IR_KBOOL && in->op1 == arg) return i;
+    }
+    return cando_ir_emit(ir, IR_KBOOL, IRT_BOOL, 0, arg, 0);
+}
+
+/* FOLD: try cheap algebraic identities and constant folding for a
+ * pure op being emitted.  Returns IRREF_NIL if nothing applied;
+ * otherwise returns an IRRef that produces the same value (an
+ * existing operand, or a freshly-emitted KNUM/KBOOL).
+ *
+ * Identities: x+0, 0+x, x-0, x*1, 1*x, x*0, 0*x, x/1, neg(KNUM).
+ * Constant fold: KNUM op KNUM for arithmetic and comparisons.
+ * Divide-by-zero is intentionally NOT folded -- the recorder emits
+ * a NEZ guard before IR_DIV that catches it at trace_run time. */
+static IRRef ir_try_fold(CandoTraceIR *ir, IROp op, IRRef op1, IRRef op2) {
+    f64 a, b;
+    bool a_const = ir_get_const_num(ir, op1, &a);
+    bool b_const = ir_get_const_num(ir, op2, &b);
+
+    switch (op) {
+    case IR_ADD:
+        if (a_const && b_const) return rec_emit_const_num(ir, a + b);
+        if (a_const && a == 0.0) return op2;
+        if (b_const && b == 0.0) return op1;
+        return IRREF_NIL;
+    case IR_SUB:
+        if (a_const && b_const) return rec_emit_const_num(ir, a - b);
+        if (b_const && b == 0.0) return op1;
+        return IRREF_NIL;
+    case IR_MUL:
+        if (a_const && b_const) return rec_emit_const_num(ir, a * b);
+        if (a_const) {
+            if (a == 0.0) return rec_emit_const_num(ir, 0.0);
+            if (a == 1.0) return op2;
+        }
+        if (b_const) {
+            if (b == 0.0) return rec_emit_const_num(ir, 0.0);
+            if (b == 1.0) return op1;
+        }
+        return IRREF_NIL;
+    case IR_DIV:
+        if (a_const && b_const && b != 0.0)
+            return rec_emit_const_num(ir, a / b);
+        if (b_const && b == 1.0) return op1;
+        return IRREF_NIL;
+    case IR_NEG:
+        if (a_const) return rec_emit_const_num(ir, -a);
+        return IRREF_NIL;
+    case IR_EQ:
+        if (a_const && b_const) return rec_emit_const_bool(ir, a == b);
+        if (op1 == op2) return rec_emit_const_bool(ir, true);
+        return IRREF_NIL;
+    case IR_NEQ:
+        if (a_const && b_const) return rec_emit_const_bool(ir, a != b);
+        if (op1 == op2) return rec_emit_const_bool(ir, false);
+        return IRREF_NIL;
+    case IR_LT:
+        if (a_const && b_const) return rec_emit_const_bool(ir, a <  b);
+        if (op1 == op2) return rec_emit_const_bool(ir, false);
+        return IRREF_NIL;
+    case IR_LE:
+        if (a_const && b_const) return rec_emit_const_bool(ir, a <= b);
+        if (op1 == op2) return rec_emit_const_bool(ir, true);
+        return IRREF_NIL;
+    case IR_GT:
+        if (a_const && b_const) return rec_emit_const_bool(ir, a >  b);
+        if (op1 == op2) return rec_emit_const_bool(ir, false);
+        return IRREF_NIL;
+    case IR_GE:
+        if (a_const && b_const) return rec_emit_const_bool(ir, a >= b);
+        if (op1 == op2) return rec_emit_const_bool(ir, true);
+        return IRREF_NIL;
+    default:
+        return IRREF_NIL;
+    }
+}
+
+/* CSE: scan the existing IR for an identical pure op; reuse on hit.
+ * Linear scan is fine in practice: traces are short (max 4096 ops)
+ * and each op is at most 12 bytes.  This runs ONCE per recording
+ * (not per trace iteration) so the cost amortises away. */
+static IRRef ir_cse_lookup(const CandoTraceIR *ir, IROp op, IRType type,
+                           u8 flags, IRRef op1, IRRef op2) {
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        const IRIns *in = &ir->ir[i];
+        if (in->op == op && in->type == type && in->flags == flags &&
+            in->op1 == op1 && in->op2 == op2)
+            return i;
+    }
+    return IRREF_NIL;
+}
+
+/* Emit a pure (side-effect-free) op with FOLD + CSE applied.  Use
+ * for arithmetic, comparisons, KNUM, KBOOL, KNULL, SLOAD, GLOAD,
+ * HLOAD_SLOT, AREF, CALL_F1.  Don't use for SSTORE, GSTORE, guards,
+ * or IR_LOOP -- those have side effects or must run each iteration. */
+static IRRef rec_emit_pure(CandoRecorder *r, IROp op, IRType type,
+                           u8 flags, IRRef op1, IRRef op2) {
+    IRRef folded = ir_try_fold(&r->ir, op, op1, op2);
+    if (folded != IRREF_NIL) return folded;
+    IRRef cse = ir_cse_lookup(&r->ir, op, type, flags, op1, op2);
+    if (cse != IRREF_NIL) return cse;
+    return cando_ir_emit(&r->ir, op, type, flags, op1, op2);
+}
+
+/* ============================================================ */
 /* OP_CALL helpers (Phase 4.2 fast-native + Phase 4.3 inline)    */
 /* ============================================================ */
 
@@ -565,7 +711,8 @@ static bool rec_call_fast_native(struct CandoVM *vm, CandoRecorder *r,
         return false;
     }
     arg_ref = ensure_num(&r->ir, arg_ref);
-    IRRef result = cando_ir_emit(&r->ir, IR_CALL_F1, IRT_NUM, 0,
+    /* CSE-eligible: same fast native + same arg IRRef => same value. */
+    IRRef result = rec_emit_pure(r, IR_CALL_F1, IRT_NUM, 0,
                                  (IRRef)native_idx, arg_ref);
     rec_push(r, result, callee_pos);
     return true;
@@ -694,15 +841,15 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
 
     switch (op) {
         case OP_NULL:
-            rec_push(r, cando_ir_emit(&r->ir, IR_KNULL, IRT_NIL, 0, 0, 0), sp);
+            rec_push(r, rec_emit_pure(r, IR_KNULL, IRT_NIL, 0, 0, 0), sp);
             break;
 
         case OP_TRUE:
-            rec_push(r, cando_ir_emit(&r->ir, IR_KBOOL, IRT_BOOL, 0, 1, 0), sp);
+            rec_push(r, rec_emit_pure(r, IR_KBOOL, IRT_BOOL, 0, 1, 0), sp);
             break;
 
         case OP_FALSE:
-            rec_push(r, cando_ir_emit(&r->ir, IR_KBOOL, IRT_BOOL, 0, 0, 0), sp);
+            rec_push(r, rec_emit_pure(r, IR_KBOOL, IRT_BOOL, 0, 0, 0), sp);
             break;
 
         case OP_POP: {
@@ -723,7 +870,7 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                 return;
             }
             IRRef k = cando_ir_const(&r->ir, cando_value_copy(cv));
-            IRRef e = cando_ir_emit(&r->ir, IR_KNUM, IRT_NUM, 0, k, 0);
+            IRRef e = rec_emit_pure(r, IR_KNUM, IRT_NUM, 0, k, 0);
             rec_push(r, e, sp);
             break;
         }
@@ -930,8 +1077,8 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                 /* Emit (b != 0) and guard it true, with a snapshot of
                  * any pending SSTOREs so a div-by-zero side-exit
                  * leaves the frame as if this iteration never ran. */
-                IRRef zero = cando_ir_emit_knum(&r->ir, 0.0);
-                IRRef nez  = cando_ir_emit(&r->ir, IR_NEQ, IRT_BOOL, 0, b, zero);
+                IRRef zero = rec_emit_const_num(&r->ir, 0.0);
+                IRRef nez  = rec_emit_pure(r, IR_NEQ, IRT_BOOL, 0, b, zero);
                 u16 snap_idx = rec_build_snapshot(r);
                 cando_ir_emit(&r->ir, IR_GUARD_TRUE, IRT_VOID,
                               IRF_GUARD, nez, snap_idx);
@@ -939,7 +1086,7 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             IROp ir_op = (op == OP_ADD) ? IR_ADD :
                          (op == OP_SUB) ? IR_SUB :
                          (op == OP_MUL) ? IR_MUL : IR_DIV;
-            IRRef e = cando_ir_emit(&r->ir, ir_op, IRT_NUM, 0, a, b);
+            IRRef e = rec_emit_pure(r, ir_op, IRT_NUM, 0, a, b);
             rec_push(r, e, sp - 2);
             break;
         }
@@ -955,7 +1102,7 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                 return;
             }
             a = ensure_num(&r->ir, a);
-            IRRef e = cando_ir_emit(&r->ir, IR_NEG, IRT_NUM, 0, a, 0);
+            IRRef e = rec_emit_pure(r, IR_NEG, IRT_NUM, 0, a, 0);
             rec_push(r, e, sp - 1);
             break;
         }
@@ -986,7 +1133,7 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                          (op == OP_LT)  ? IR_LT  :
                          (op == OP_LEQ)  ? IR_LE  :
                          (op == OP_GT)  ? IR_GT  : IR_GE;
-            IRRef e = cando_ir_emit(&r->ir, ir_op, IRT_BOOL, 0, a, b);
+            IRRef e = rec_emit_pure(r, ir_op, IRT_BOOL, 0, a, b);
             rec_push(r, e, sp - 2);
             break;
         }
@@ -1151,9 +1298,9 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
              * can fold if len is a known constant).  In values mode
              * the threshold is len_ir directly. */
             IRRef threshold_ir = keys
-                ? cando_ir_emit(&r->ir, IR_NEG, IRT_NUM, 0, len_ir, 0)
+                ? rec_emit_pure(r, IR_NEG, IRT_NUM, 0, len_ir, 0)
                 : len_ir;
-            IRRef cmp_ir = cando_ir_emit(&r->ir, IR_LT, IRT_BOOL, 0,
+            IRRef cmp_ir = rec_emit_pure(r, IR_LT, IRT_BOOL, 0,
                                          idx_ir, threshold_ir);
             /* Phase 4: snapshot before the guard so a side-exit can
              * roll back any iteration-local SSTOREs.  At this point
@@ -1189,8 +1336,8 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             rec_push(r, pushed_ir, sp);
 
             /* Update the index slot with idx + 1. */
-            IRRef one_ir  = cando_ir_emit_knum(&r->ir, 1.0);
-            IRRef next_ir = cando_ir_emit(&r->ir, IR_ADD, IRT_NUM, 0,
+            IRRef one_ir  = rec_emit_const_num(&r->ir, 1.0);
+            IRRef next_ir = rec_emit_pure(r, IR_ADD, IRT_NUM, 0,
                                           idx_ir, one_ir);
             cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED,
                           rel_idx, next_ir);

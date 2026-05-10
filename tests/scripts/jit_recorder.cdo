@@ -239,4 +239,19 @@ FOR i IN 1 -> 200 { loop_sum = loop_sum + inner_loop(3); }
 print(loop_sum);                       // 200 * (0+1+2) = 600
 print(jit.stats().last_abort);         // "loop inside inlined call (v1 limitation)"
 
+/* Phase 5d/5e: FOLD + CSE.  Algebraic identities (x+0, x*1, x-0)
+ * collapse at IR-emit time; constant folding evaluates KNUM op KNUM
+ * eagerly; CSE merges duplicate pure ops within a trace.  Result
+ * must still be correct -- both paths compute the same number. */
+FUNCTION fold_cse() {
+    VAR s = 0;
+    FOR i IN 1 -> 200 {
+        VAR x = (i + 0) * 1;        // -> i  (FOLD)
+        VAR y = (i * 2) + (i * 2);  // -> 4*i, the second i*2 CSE-reused
+        s = s + x + y;
+    }
+    RETURN s;
+}
+print(fold_cse());                     // (1+...+200) + 4*(1+...+200) = 5*20100 = 100500
+
 print("DONE");
