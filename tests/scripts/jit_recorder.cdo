@@ -349,4 +349,18 @@ FOR i IN 1 -> 200 {
 }
 print(for_sum);                         /* 1+...+200 = 20100 */
 
+/* Phase 6.7: self-op arithmetic peephole.  When both operands of a
+ * binary op are the same IRRef (e.g. squaring x*x), codegen loads
+ * once into xmm0 and uses the addsd/mulsd-self variant instead of
+ * loading the same value into xmm1 too.  Result must still match
+ * the bytecode-only path. */
+FUNCTION square_sum() {
+    VAR s = 0;
+    FOR i IN 1 -> 100 {
+        s = s + i * i;        /* IR_MUL #ref #ref -> peephole hits */
+    }
+    RETURN s;
+}
+print(square_sum());                    /* sum of i*i for i=1..100 = 338350 */
+
 print("DONE");

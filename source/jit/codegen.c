@@ -299,6 +299,26 @@ static void emit_divsd(CG *cg) {
     static const u8 b[] = { 0xF2, 0x0F, 0x5E, 0xC1 };
     cg_emit_bytes(cg, b, 4);
 }
+/* Self-op variants of arithmetic (xmm0 OP= xmm0).  Used by the
+ * Phase 6.7 peephole when both operands of a binary op are the
+ * same IRRef -- one load + one self-op instead of two loads + a
+ * cross-register op. */
+static void emit_addsd_self(CG *cg) {
+    static const u8 b[] = { 0xF2, 0x0F, 0x58, 0xC0 };
+    cg_emit_bytes(cg, b, 4);
+}
+static void emit_subsd_self(CG *cg) {
+    static const u8 b[] = { 0xF2, 0x0F, 0x5C, 0xC0 };
+    cg_emit_bytes(cg, b, 4);
+}
+static void emit_mulsd_self(CG *cg) {
+    static const u8 b[] = { 0xF2, 0x0F, 0x59, 0xC0 };
+    cg_emit_bytes(cg, b, 4);
+}
+static void emit_divsd_self(CG *cg) {
+    static const u8 b[] = { 0xF2, 0x0F, 0x5E, 0xC0 };
+    cg_emit_bytes(cg, b, 4);
+}
 /* subsd xmm1, xmm0   -- F2 0F 5C C8.  Used to compute -x via 0 - x:
  * caller zeroes xmm1 with xorpd, loads x into xmm0, then this
  * leaves -x in xmm1. */
@@ -514,16 +534,31 @@ static void emit_kbool(CG *cg, u32 imm, u32 i) {
 /* Two-operand SSE2 arithmetic: vals[a] OP vals[b] -> vals[i].  IR_DIV
  * is recorded with a NEZ guard immediately preceding it (see OP_DIV
  * in cando_recorder_observe), so the divisor is provably nonzero by
- * the time control reaches divsd here.  No runtime check needed. */
+ * the time control reaches divsd here.  No runtime check needed.
+ *
+ * Phase 6.7 peephole: when a == b (e.g. squaring `x * x`), load
+ * once into xmm0 and use the self-op variant -- saves one 9-byte
+ * movsd load.  Mandelbrot's hot loop has two such MULs (zr*zr,
+ * zi*zi) per iteration. */
 static void emit_arith(CG *cg, IROp op, u32 a, u32 b, u32 i) {
     emit_movsd_xmm_vals(cg, 0, a);
-    emit_movsd_xmm_vals(cg, 1, b);
-    switch (op) {
-    case IR_ADD: emit_addsd(cg); break;
-    case IR_SUB: emit_subsd(cg); break;
-    case IR_MUL: emit_mulsd(cg); break;
-    case IR_DIV: emit_divsd(cg); break;
-    default:     cg->failed = true; return;
+    if (a == b) {
+        switch (op) {
+        case IR_ADD: emit_addsd_self(cg); break;
+        case IR_SUB: emit_subsd_self(cg); break;
+        case IR_MUL: emit_mulsd_self(cg); break;
+        case IR_DIV: emit_divsd_self(cg); break;
+        default:     cg->failed = true; return;
+        }
+    } else {
+        emit_movsd_xmm_vals(cg, 1, b);
+        switch (op) {
+        case IR_ADD: emit_addsd(cg); break;
+        case IR_SUB: emit_subsd(cg); break;
+        case IR_MUL: emit_mulsd(cg); break;
+        case IR_DIV: emit_divsd(cg); break;
+        default:     cg->failed = true; return;
+        }
     }
     emit_movsd_vals_xmm(cg, i, 0);
 }
