@@ -296,4 +296,18 @@ FUNCTION dce_check() {
 }
 print(dce_check());                    // 1+2+...+200 = 20100
 
+/* Phase 6.1: native codegen for the counter-loop subset.  This
+ * trace uses only ops that the x86_64 emitter supports (KNUM,
+ * SLOAD, SSTORE, ADD, LT, GUARD_TRUE, LOOP), so the recorder
+ * compiles it down to mcode and the IR-interpreter is bypassed.
+ * The script-visible result must match the bytecode-only path. */
+FUNCTION counter_native() {
+    VAR i = 0;
+    WHILE i < 10000 {
+        i = i + 1;
+    }
+    RETURN i;
+}
+print(counter_native());               // 10000
+
 print("DONE");

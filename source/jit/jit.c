@@ -26,6 +26,7 @@
  */
 
 #include "jit.h"
+#include "codegen.h"
 #include "../vm/vm.h"
 #include "../vm/bridge.h"
 #include "../vm/opcodes.h"
@@ -731,6 +732,13 @@ static void cando_recorder_finish(struct CandoVM *vm) {
     cando_trace_ir_init(&r->ir);
     r->traces_compiled++;
     r->active = false;
+
+    /* Phase 6: try native codegen for the freshly-installed trace.
+     * On failure (unsupported op, out of buffer, mprotect refusal)
+     * t->mcode_fn stays NULL and the trace runs on the IR-interpreter
+     * unchanged.  Either way the trace is functional; codegen is a
+     * pure speedup. */
+    cando_jit_codegen_trace(t);
 }
 
 /* ============================================================ */
@@ -1837,13 +1845,6 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                                  bool skip_invariant) {
     if (!vm || !t) return TRACE_RANGE_ERROR;
 
-    /* Phase 6: prefer the codegen'd native body when available.  The
-     * compiled function honours the same calling convention as this
-     * IR-interpreter (vm, trace, skip_invariant -> CandoTraceStatus)
-     * and is responsible for its own snapshot rollback on guard fail. */
-    if (t->mcode_fn != NULL)
-        return t->mcode_fn(vm, t, skip_invariant);
-
     /* Lazy-allocate the scratch values table; reused across every
      * trace_run for this trace, so cost amortises over many
      * iterations. */
@@ -1861,6 +1862,14 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
      * intermediate values pushed by the caller before the call). */
     if (vm->frame_count == 0) return TRACE_RANGE_ERROR;
     CandoValue *frame_slots = vm->frames[vm->frame_count - 1].slots;
+
+    /* Phase 6: prefer the codegen'd native body when available.  We
+     * resolve vals + frame_slots above so the JIT'd code doesn't
+     * have to chase struct offsets every iteration.  The compiled
+     * function is responsible for its own snapshot rollback on
+     * guard fail. */
+    if (t->mcode_fn != NULL)
+        return t->mcode_fn(vm, t, skip_invariant, frame_slots, vals);
 
     /* IR-interpreter.  All values are doubles in v1 (numeric
      * constants only, comparisons stored as 0.0/1.0).  Booleans
@@ -2116,4 +2125,21 @@ bool cando_jit_hot_hit(struct CandoVM *vm, const u8 *pc) {
         return j->recorder.active;
     }
     return false;
+}
+
+/* ============================================================ */
+/* Codegen entry points (Phase 6)                                */
+/* ============================================================ */
+
+/* Called from codegen-emitted code on guard fail to roll back any
+ * iteration-local stores via the guard's snapshot before bytecode
+ * resumes at the trace's start_pc.  Same semantics as the static
+ * trace_replay_snapshot used by the IR-interpreter; this wrapper
+ * exists so the codegen can take its address as a callable. */
+void cando_jit_replay_snapshot_for_mcode(struct CandoVM *vm,
+                                          CandoTrace *t,
+                                          TraceVal *vals,
+                                          CandoValue *frame_slots,
+                                          u32 snap_idx) {
+    trace_replay_snapshot(vm, t, vals, frame_slots, (u16)snap_idx);
 }

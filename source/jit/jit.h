@@ -138,10 +138,17 @@ typedef struct CandoTrace {
      *
      * mcode_fn is the entry point cast to the trace function type;
      * cached so the call site doesn't have to recompute (mcode.base
-     * + offset).  Same lifetime as the mcode buffer. */
+     * + offset).  Same lifetime as the mcode buffer.
+     *
+     * The compiled function takes (vm, t, skip_invariant) plus
+     * frame_slots and vals as extra args -- cando_trace_run resolves
+     * those once on entry so the JIT'd code doesn't have to chase
+     * vm->frames or t->values_buf indirections every iteration. */
     CandoMCode      mcode;
     CandoTraceStatus (*mcode_fn)(struct CandoVM *vm, struct CandoTrace *t,
-                                 bool skip_invariant);
+                                 bool skip_invariant,
+                                 CandoValue *frame_slots,
+                                 TraceVal *vals);
     /* Snapshots (Phase 4) -- guards reference these by index via the
      * GUARD IR op's op2 field.  An op2 of 0 means "no snapshot" (the
      * guard predates Phase 4 or didn't need one). */

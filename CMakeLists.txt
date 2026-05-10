@@ -74,6 +74,7 @@ set(JIT_SRCS
     source/jit/ir.c
     source/jit/hot.c
     source/jit/mcode.c
+    source/jit/codegen.c
     source/jit/jit.c
 )
 

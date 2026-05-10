@@ -89,9 +89,10 @@ VM_SRCS = \
     source/vm/debug.c
 
 JIT_SRCS = \
-    source/jit/ir.c    \
-    source/jit/hot.c   \
-    source/jit/mcode.c \
+    source/jit/ir.c      \
+    source/jit/hot.c     \
+    source/jit/mcode.c   \
+    source/jit/codegen.c \
     source/jit/jit.c
 
 # All library sources — everything compiled into libcando.so / libcando.a
@@ -119,6 +120,7 @@ CANDO_LIB_SRCS = \
     source/jit/ir.c               \
     source/jit/hot.c              \
     source/jit/mcode.c            \
+    source/jit/codegen.c          \
     source/jit/jit.c              \
     source/natives.c              \
     source/lib/gc.c               \
