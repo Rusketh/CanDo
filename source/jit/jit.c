@@ -931,6 +931,72 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
     cando_free(stored_name);
 }
 
+/* Mark IR_SLOAD ops whose slot is also SSTORE'd somewhere in the
+ * trace, with a known-numeric value, as IRF_NUM_KNOWN.
+ *
+ * Codegen uses the flag to skip the per-iter NaN-box type guard on
+ * the warm path (skip_invariant == true / r13b set).  The reasoning:
+ * the recorder only emits a numeric SSTORE when the value's IRRef has
+ * type IRT_NUM, so once one iteration has executed the SSTORE, the
+ * slot is guaranteed to hold a numeric value.  Iter 1 still runs the
+ * guard (the trace may be re-entered with whatever the bytecode
+ * interpreter left in the slot), but iter 2+ inside the mcode's
+ * internal loop can skip it.
+ *
+ * Per-iter savings: roughly 5 instructions per tagged SLOAD (NaN-box
+ * AND + CMP + JE + scratch-restore + the constant-pool MOVABS).  On
+ * loops.cdo and similar numeric-loop hot paths this is observable
+ * because the loop body has only a handful of ops total.
+ *
+ * Must run AFTER eliminate_dead_stores (so a NOPped SSTORE doesn't
+ * confer a false guarantee on the SLOAD) and AFTER mark_loop_invariants
+ * (an IRF_INVARIANT SLOAD has its entire body LICM-skipped already, so
+ * flagging it is redundant). */
+static void mark_known_num_sloads(CandoTraceIR *ir) {
+    if (ir->ir_count <= 1) return;
+
+    u32 max_slot = 0;
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        const IRIns *in = &ir->ir[i];
+        if ((in->op == IR_SSTORE || in->op == IR_SLOAD) &&
+            in->op1 + 1 > max_slot) {
+            max_slot = in->op1 + 1;
+        }
+    }
+    if (max_slot == 0) return;
+
+    u8 *has_num_sstore = cando_alloc(max_slot);
+    memset(has_num_sstore, 0, max_slot);
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        const IRIns *in = &ir->ir[i];
+        if (in->op != IR_SSTORE) continue;
+        if (in->op1 >= max_slot) continue;
+        /* The value-IRRef sits in op2.  Constants are always numeric
+         * in v1; otherwise, verify the producer's type is IRT_NUM. */
+        IRRef val_ref = in->op2;
+        bool is_num = false;
+        if (IRREF_IS_K(val_ref)) {
+            is_num = true;
+        } else if (val_ref != 0) {
+            const IRIns *val_in = cando_ir_get_ins(ir, val_ref);
+            if (val_in && val_in->type == IRT_NUM) is_num = true;
+        }
+        if (is_num) has_num_sstore[in->op1] = 1;
+    }
+
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        IRIns *in = &ir->ir[i];
+        if (in->op != IR_SLOAD) continue;
+        if (in->type != IRT_NUM) continue;
+        if (in->flags & IRF_INVARIANT) continue;   /* whole op gets skipped */
+        if (in->op1 >= max_slot) continue;
+        if (has_num_sstore[in->op1])
+            in->flags |= IRF_NUM_KNOWN;
+    }
+
+    cando_free(has_num_sstore);
+}
+
 /* Phase 8.5: common subexpression elimination.
  *
  * Walks the IR and dedups PURE ops -- those whose result is fully
@@ -1104,6 +1170,11 @@ static void cando_recorder_finish(struct CandoVM *vm) {
     /* Re-DCE after CSE to clean up any newly-dead ops. */
     eliminate_dead_code(&r->ir);
     mark_loop_invariants(&r->ir);
+    /* After invariance is settled, tag the loop-carried numeric
+     * SLOADs whose slot is provably re-stored as IRT_NUM in the
+     * same trace.  Codegen uses the flag to drop the per-iter type
+     * guard on the warm path. */
+    mark_known_num_sloads(&r->ir);
     /* Phase 4.4j: must run AFTER DSE -- a NOPped store no longer
      * counts as an escape, so escape analysis can mark allocations
      * sinkable that DSE has unhooked from a dead SSTORE. */

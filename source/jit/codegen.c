@@ -817,8 +817,31 @@ static void emit_epilogue(CG *cg) {
  * cg->cur_snap so any pinned SSTOREs since the last guard get
  * rolled back (matches the IR-interpreter at jit.c:IR_SLOAD).  An
  * earlier draft hardcoded snap=0, which left mid-iteration writes
- * unrestored on type-driven side-exits. */
-static void emit_sload(CG *cg, u32 slot, u32 i, IRType slot_type) {
+ * unrestored on type-driven side-exits.
+ *
+ * When `num_known` is true (IRF_NUM_KNOWN; numeric-typed SLOAD whose
+ * slot is also SSTORE'd as IRT_NUM elsewhere in the trace), the warm
+ * path skips the guard: any iter past the first is preceded by an
+ * SSTORE that wrote a numeric, so the slot is guaranteed numeric on
+ * re-load.  Layout:
+ *
+ *     mov rax, [slot]
+ *     mov [vals+i], rax           ; commit raw bits first
+ *     test r13b, r13b
+ *     jne  .skip                  ; warm: r13b=1, skip type check
+ *     movabs rcx, NB_MASK
+ *     and  rax, rcx
+ *     cmp  rax, rcx
+ *     je   side_exit              ; cold: validate and bail on mismatch
+ *   .skip:
+ *
+ * The early store is safe because nothing past the guard reads
+ * vals[i] until the next SLOAD's downstream use, and the snapshot
+ * mechanism at side-exit reads vals[first_load].d (this same IRRef)
+ * to restore the slot -- which already matches the slot's current
+ * (loaded) value, so the snapshot replay is a no-op for this slot. */
+static void emit_sload(CG *cg, u32 slot, u32 i, IRType slot_type,
+                       bool num_known) {
     emit_mov_rax_slot(cg, slot);
     if (slot_type == IRT_OBJ) {
         emit_movabs_rcx(cg, 0xFFFF000000000000ULL);   /* NB_TAG_BITS_MASK */
@@ -835,19 +858,53 @@ static void emit_sload(CG *cg, u32 slot, u32 i, IRType slot_type) {
         cg->guards[cg->guard_count].snap_idx    = cg->cur_snap;
         cg->guards[cg->guard_count].stub_off    = 0;
         cg->guard_count++;
-    } else {
-        emit_movabs_rcx(cg, 0xFFF8000000000000ULL);   /* NB_MASK */
-        emit_mov_rdx_rax(cg);
-        emit_and_rax_rcx(cg);                         /* rax = v.u & MASK */
+        /* Restore raw bits into rax (clobbered by AND) before store. */
+        static const u8 mov_rax_rdx[] = { 0x48, 0x89, 0xD0 };
+        cg_emit_bytes(cg, mov_rax_rdx, 3);
+        emit_mov_vals_rax(cg, i);
+        return;
+    }
+
+    if (num_known) {
+        /* Commit raw bits to vals[i] BEFORE the guard so the warm-path
+         * skip doesn't have to repeat the store -- and so the side-exit
+         * stub's snapshot replay sees a coherent vals[first_load]. */
+        emit_mov_vals_rax(cg, i);
+        /* test r13b, r13b ; jne .skip -- 4 bytes incl. JNE disp8. */
+        static const u8 test_jne[] = { 0x45, 0x84, 0xED, 0x75 };
+        cg_emit_bytes(cg, test_jne, 4);
+        u32 skip_disp_off = cg_off(cg);
+        cg_emit_u8(cg, 0);              /* disp8 patched after guard */
+        u32 guard_start = cg_off(cg);
+        emit_movabs_rcx(cg, 0xFFF8000000000000ULL);
+        emit_and_rax_rcx(cg);
         emit_cmp_rax_rcx(cg);
-        /* je side_exit (boxed value) */
         if (cg->guard_count >= CG_MAX_GUARDS) { cg->failed = true; return; }
         cg->guards[cg->guard_count].je_disp_off = emit_je_rel32_placeholder(cg);
         cg->guards[cg->guard_count].snap_idx    = cg->cur_snap;
         cg->guards[cg->guard_count].stub_off    = 0;
         cg->guard_count++;
+        u32 guard_end = cg_off(cg);
+        /* Patch the disp8 to jump just past the guard sequence. */
+        u32 disp = guard_end - (skip_disp_off + 1);
+        if (disp > 127) { cg->failed = true; return; }
+        cg->base[skip_disp_off] = (u8)disp;
+        (void)guard_start;
+        return;
     }
-    /* Restore raw bits into rax (we clobbered it with AND), then store. */
+
+    /* Standard path: type-check before store so a bad type leaves
+     * vals[i] untouched.  Side-exit at the JE.  After the check we
+     * restore raw bits into rax from rdx (the AND clobbered them). */
+    emit_movabs_rcx(cg, 0xFFF8000000000000ULL);       /* NB_MASK */
+    emit_mov_rdx_rax(cg);
+    emit_and_rax_rcx(cg);                             /* rax = v.u & MASK */
+    emit_cmp_rax_rcx(cg);
+    if (cg->guard_count >= CG_MAX_GUARDS) { cg->failed = true; return; }
+    cg->guards[cg->guard_count].je_disp_off = emit_je_rel32_placeholder(cg);
+    cg->guards[cg->guard_count].snap_idx    = cg->cur_snap;
+    cg->guards[cg->guard_count].stub_off    = 0;
+    cg->guard_count++;
     static const u8 mov_rax_rdx[] = { 0x48, 0x89, 0xD0 };  /* mov rax, rdx */
     cg_emit_bytes(cg, mov_rax_rdx, 3);
     emit_mov_vals_rax(cg, i);
@@ -1590,7 +1647,8 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             if (in->type != IRT_NUM && in->type != IRT_OBJ) {
                 cg.failed = true; break;
             }
-            emit_sload(&cg, in->op1, i, (IRType)in->type);
+            emit_sload(&cg, in->op1, i, (IRType)in->type,
+                       (in->flags & IRF_NUM_KNOWN) != 0);
             break;
         case IR_SSTORE:
             /* Phase 4.4g: raw u64 copy works for both IRT_NUM and
