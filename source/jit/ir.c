@@ -283,12 +283,13 @@ void cando_ir_dump(const CandoTraceIR *t, FILE *out) {
         else
             format_ref(in->op1, b1, sizeof(b1));
         format_ref(in->op2, b2, sizeof(b2));
-        fprintf(out, "  %04u  %-4s  %-16s %-6s %-6s%s%s\n",
+        fprintf(out, "  %04u  %-4s  %-16s %-6s %-6s%s%s%s\n",
                 i,
                 cando_ir_type_name((IRType)in->type),
                 cando_ir_op_name((IROp)in->op),
                 b1, b2,
                 (in->flags & IRF_GUARD)     ? " [GUARD]" : "",
-                (in->flags & IRF_INVARIANT) ? " [INV]"   : "");
+                (in->flags & IRF_INVARIANT) ? " [INV]"   : "",
+                (in->flags & IRF_SUNK)      ? " [SUNK]"  : "");
     }
 }

@@ -81,6 +81,17 @@ typedef enum {
                                    no SSTORE, GLOADs of names that have
                                    no GSTORE, and pure ops whose operands
                                    are themselves invariant. */
+#define IRF_SUNK        0x08    /* Phase 4.4j: allocation IR op
+                                   (IR_NEW_ARRAY / IR_NEW_OBJECT /
+                                   IR_RANGE_*) whose result IRRef
+                                   never escapes the trace iteration --
+                                   only used by INDEX/FIELD GET/SET or
+                                   ARRAY_APPEND.  Phase 4.4k codegen
+                                   replaces sunk allocations with stack
+                                   buffers + lowers field/index access
+                                   to direct memory ops; on side-exit
+                                   it materialises the buffer into a
+                                   real heap object. */
 
 /* -----------------------------------------------------------------------
  * IROp -- IR opcode set.

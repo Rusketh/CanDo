@@ -563,6 +563,95 @@ static void eliminate_dead_code(CandoTraceIR *ir) {
     cando_free(live);
 }
 
+/* Phase 4.4j: escape analysis for allocation sinking.
+ *
+ * For each IR_NEW_ARRAY / IR_NEW_OBJECT / IR_RANGE_* op, scan the
+ * IR forward and check whether the result IRRef ever flows into an
+ * op that would observe the allocation's identity outside the
+ * trace iteration.  An allocation is "sinkable" iff every consumer
+ * of its IRRef is one of:
+ *   - IR_ARRAY_APPEND (only as op1 = array; as op2 = value escapes)
+ *   - IR_INDEX_GET / IR_INDEX_SET (only as op1 = container)
+ *   - IR_FIELD_GET  / IR_FIELD_SET  (only as op1 = container)
+ *
+ * Anything else (SSTORE, GSTORE, ADD, an unknown op) means the
+ * allocation escapes -- the trace's bytecode resume path could
+ * observe the handle, so we must allocate for real.  This v0
+ * analysis is conservative: even SSTORE'ing an alloc to a local
+ * that's only read later via the alloc's IRRef directly (because
+ * stack_map caching elided the SLOAD) counts as an escape because
+ * we don't track that the local is dead.
+ *
+ * Sets IRF_SUNK on each sinkable allocation; codegen reads it
+ * (Phase 4.4k) to skip the helper call and use a stack buffer. */
+static void escape_analysis(CandoTraceIR *ir) {
+    if (ir->ir_count <= 1) return;
+
+    for (u32 a = 1; a < ir->ir_count; a++) {
+        IRIns *alloc = &ir->ir[a];
+        if (alloc->op != IR_NEW_ARRAY && alloc->op != IR_NEW_OBJECT &&
+            alloc->op != IR_RANGE_ASC && alloc->op != IR_RANGE_DESC)
+            continue;
+
+        bool sinkable = true;
+        for (u32 j = a + 1; j < ir->ir_count && sinkable; j++) {
+            const IRIns *u = &ir->ir[j];
+            bool uses_op1 = false, uses_op2 = false;
+            switch (u->op) {
+            case IR_NOP:
+            case IR_KNUM: case IR_KBOOL: case IR_KNULL:
+            case IR_KSTR: case IR_KOBJ:
+            case IR_SLOAD: case IR_HLOAD_SLOT:
+            case IR_LOOP:
+            case IR_NEW_ARRAY: case IR_NEW_OBJECT:
+                break;
+            case IR_GLOAD:
+                /* op1 is const-pool ref; not an IRRef. */
+                break;
+            case IR_SSTORE: case IR_GSTORE:
+                uses_op2 = (u->op2 == a);
+                break;
+            case IR_CALL_F1:
+                /* op1 is native idx; op2 is arg IRRef. */
+                uses_op2 = (u->op2 == a);
+                break;
+            case IR_FIELD_GET: case IR_FIELD_SET:
+                /* op1 is container IRRef; op2 is name const-pool ref. */
+                uses_op1 = (u->op1 == a);
+                break;
+            default:
+                uses_op1 = (u->op1 == a);
+                uses_op2 = (u->op2 == a);
+                break;
+            }
+
+            if (!uses_op1 && !uses_op2) continue;
+
+            switch (u->op) {
+            case IR_ARRAY_APPEND:
+                if (uses_op2) sinkable = false;   /* alloc-as-value escapes */
+                break;
+            case IR_INDEX_GET: case IR_INDEX_SET:
+                if (uses_op2) sinkable = false;
+                break;
+            case IR_FIELD_GET: case IR_FIELD_SET:
+                /* Only op1 is a container ref; op2 is name. */
+                break;
+            case IR_INDEX_SET_VAL:
+            case IR_FIELD_SET_VAL:
+                /* Pair-prefix carries a value; alloc as the value escapes. */
+                sinkable = false;
+                break;
+            default:
+                sinkable = false;
+                break;
+            }
+        }
+
+        if (sinkable) alloc->flags |= IRF_SUNK;
+    }
+}
+
 static void mark_loop_invariants(CandoTraceIR *ir) {
     /* Pass 1: collect the set of slots written by IR_SSTORE and the
      * set of names written by IR_GSTORE.  Slot indices are u32 so we
@@ -719,6 +808,10 @@ static void cando_recorder_finish(struct CandoVM *vm) {
     eliminate_dead_stores(&r->ir);
     eliminate_dead_code(&r->ir);
     mark_loop_invariants(&r->ir);
+    /* Phase 4.4j: must run AFTER DSE -- a NOPped store no longer
+     * counts as an escape, so escape analysis can mark allocations
+     * sinkable that DSE has unhooked from a dead SSTORE. */
+    escape_analysis(&r->ir);
 
     /* Pick a slot to receive the new trace.  When the cache isn't
      * full we just append; when full we evict the approximate-LRU
