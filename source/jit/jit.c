@@ -2891,6 +2891,23 @@ int cando_jit_array_append_for_mcode(struct CandoVM *vm, u64 arr_u, double val) 
     return 0;
 }
 
+/* Phase 8.2: resolve a global named array's CdoObject* once at
+ * trace prologue (the [INV] path) and cache the pointer in vals[].
+ * Subsequent IR_INDEX_GET / IR_INDEX_SET on this IRRef use the
+ * pointer directly, skipping per-access type checks + handle
+ * resolution + locking.  Returns NULL on missing/non-array so the
+ * caller side-exits. */
+void *cando_jit_gload_arr_for_mcode(struct CandoVM *vm,
+                                     struct CandoString *name) {
+    CandoValue v;
+    if (!cando_vm_get_global(vm, ((CandoString *)name)->data, &v))
+        return NULL;
+    if (!cando_is_object(v)) return NULL;
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
+    if (!obj || obj->kind != OBJ_ARRAY) return NULL;
+    return obj;
+}
+
 /* IR_INDEX_GET helper: read array[idx] as f64.  Returns 0 on
  * success (writes to *out), 1 on bad-array / out-of-range / non-num. */
 int cando_jit_index_get_for_mcode(struct CandoVM *vm, u64 arr_u, u32 idx,

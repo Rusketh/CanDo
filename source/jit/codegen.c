@@ -42,6 +42,9 @@
 
 #include <string.h>
 #include <stddef.h>
+#include <math.h>     /* sqrt/fabs/floor/ceil for IR_CALL_F1 inlining */
+#include "../object/object.h"   /* offsetof CdoObject for inline AREF */
+#include "../object/value.h"    /* CDO_NUMBER tag + offsetof CdoValue */
 
 /* External symbol for the side-exit helper (exported from jit.c). */
 void cando_jit_replay_snapshot_for_mcode(struct CandoVM *vm,
@@ -60,7 +63,11 @@ void cando_jit_materialize_sunk_for_mcode(struct CandoVM *vm,
 #define CG_MAX_GUARDS     128
 #define CG_MAX_SUNK       16
 #define CG_MAX_OBJ_FIELDS 8       /* per-sunk-object field cap */
-#define CG_BUF_SIZE       4096u   /* one page; bail if a trace needs more */
+#define CG_BUF_SIZE       8192u   /* two pages; Phase 8.2 inline array
+                                    * access expanded the typical trace
+                                    * by ~2x (no more helper calls per
+                                    * INDEX_GET/SET).  4096 was tight
+                                    * even for the IR-interp era. */
 
 /* Phase 4.4k / v1: sunk-allocation tracking.  Either:
  *   IS_ARRAY=true  -- backing buffer indexed 0..capacity-1; APPEND
@@ -906,6 +913,158 @@ static void emit_array_append(CG *cg, u32 op1, u32 op2) {
     cg_invalidate_xmm0(cg);
 }
 
+/* Phase 8.2 inline emit primitives for the resolved-array fast
+ * path.  Used when vals[op1] holds a CdoObject* (set by
+ * emit_gload_arr or emit_hload_slot) rather than a NaN-boxed
+ * handle.  Saves the call/ret overhead AND the per-access lock
+ * acquire/release inside cdo_array_rawget_idx. */
+
+/* mov rdi, [r14 + 8*idx]   -- already exists as emit_mov_rdi_vals. */
+
+/* cmp esi, [rdi + disp32]  -- 3B B7 disp32. Bounds check vs items_len. */
+static void emit_cmp_esi_rdi_off(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x3B, 0xB7 };
+    cg_emit_bytes(cg, b, 2);
+    cg_emit_u32(cg, (u32)disp);
+}
+/* mov rax, [rdi + disp32]  -- 48 8B 87 disp32.  Load arr->items. */
+static void emit_mov_rax_rdi_off(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x48, 0x8B, 0x87 };
+    cg_emit_bytes(cg, b, 3);
+    cg_emit_u32(cg, (u32)disp);
+}
+/* shl rsi, 4   -- 48 C1 E6 04.  Multiply idx by sizeof(CdoValue)=16. */
+static void emit_shl_rsi_4(CG *cg) {
+    static const u8 b[] = { 0x48, 0xC1, 0xE6, 0x04 };
+    cg_emit_bytes(cg, b, 4);
+}
+/* add rax, rsi  -- 48 01 F0.  rax += idx*16. */
+static void emit_add_rax_rsi(CG *cg) {
+    static const u8 b[] = { 0x48, 0x01, 0xF0 };
+    cg_emit_bytes(cg, b, 3);
+}
+/* cmp BYTE [rax], imm8  -- 80 38 imm8.  Tag check at offset 0. */
+static void emit_cmp_rax_byte_imm(CG *cg, u8 imm) {
+    cg_emit_u8(cg, 0x80);
+    cg_emit_u8(cg, 0x38);
+    cg_emit_u8(cg, imm);
+}
+/* movsd xmm0, [rax + 8]  -- F2 0F 10 40 08.  Read items[idx].as.number. */
+static void emit_movsd_xmm0_rax_off8(CG *cg, i8 disp) {
+    static const u8 b[] = { 0xF2, 0x0F, 0x10, 0x40 };
+    cg_emit_bytes(cg, b, 4);
+    cg_emit_u8(cg, (u8)disp);
+}
+/* movsd [rax + 8], xmm0  -- F2 0F 11 40 08.  Write items[idx].as.number. */
+static void emit_movsd_rax_off8_xmm0(CG *cg, i8 disp) {
+    static const u8 b[] = { 0xF2, 0x0F, 0x11, 0x40 };
+    cg_emit_bytes(cg, b, 4);
+    cg_emit_u8(cg, (u8)disp);
+}
+/* mov BYTE [rax], imm8  -- C6 00 imm8.  Set tag at offset 0. */
+static void emit_mov_rax_byte_imm(CG *cg, u8 imm) {
+    cg_emit_u8(cg, 0xC6);
+    cg_emit_u8(cg, 0x00);
+    cg_emit_u8(cg, imm);
+}
+
+/* Inline IR_INDEX_GET / IR_AREF when vals[op1] holds CdoObject*.
+ *   rdi  = vals[op1]                     (resolved arr ptr)
+ *   esi  = (u32)(f64)vals[op2]           (idx)
+ *   esi >= [rdi + items_len_off]   ?     side-exit (out of range)
+ *   rax  = [rdi + items_off]             (items ptr)
+ *   rax += esi * 16
+ *   [rax + 0].tag != CDO_NUMBER    ?     side-exit (bad type)
+ *   xmm0 = [rax + 8]                     (items[idx].as.number)
+ *   vals[i] = xmm0
+ */
+static void emit_index_get_inline(CG *cg, u32 op1, u32 op2, u32 i) {
+    i32 items_len_off = (i32)offsetof(struct CdoObject, items_len);
+    i32 items_off     = (i32)offsetof(struct CdoObject, items);
+
+    emit_mov_rdi_vals(cg, op1);
+    emit_load_xmm0(cg, op2);
+    emit_cvttsd2si_esi_xmm0(cg);
+    emit_cmp_esi_rdi_off(cg, items_len_off);
+    /* JAE = unsigned above-or-equal; treats negative idx as huge u32. */
+    if (cg->guard_count >= CG_MAX_GUARDS) { cg->failed = true; return; }
+    cg_emit_u8(cg, 0x0F); cg_emit_u8(cg, 0x83);   /* JAE rel32 */
+    u32 disp_off = cg_off(cg);
+    cg_emit_u32(cg, 0);
+    cg->guards[cg->guard_count].je_disp_off = disp_off;
+    cg->guards[cg->guard_count].snap_idx    = cg->cur_snap;
+    cg->guards[cg->guard_count].stub_off    = 0;
+    cg->guard_count++;
+
+    emit_mov_rax_rdi_off(cg, items_off);
+    emit_shl_rsi_4(cg);
+    emit_add_rax_rsi(cg);
+    emit_cmp_rax_byte_imm(cg, CDO_NUMBER);
+    /* JNE rel32 -- not a number, side-exit. */
+    if (cg->guard_count >= CG_MAX_GUARDS) { cg->failed = true; return; }
+    cg_emit_u8(cg, 0x0F); cg_emit_u8(cg, 0x85);   /* JNE rel32 */
+    u32 disp_off2 = cg_off(cg);
+    cg_emit_u32(cg, 0);
+    cg->guards[cg->guard_count].je_disp_off = disp_off2;
+    cg->guards[cg->guard_count].snap_idx    = cg->cur_snap;
+    cg->guards[cg->guard_count].stub_off    = 0;
+    cg->guard_count++;
+
+    emit_movsd_xmm0_rax_off8(cg, 8);
+    emit_movsd_vals_xmm(cg, i, 0);
+    cg->xmm0_holds = i;
+}
+
+/* Inline IR_INDEX_SET when vals[op1] holds CdoObject*.
+ *   rdi  = vals[op1]                     (resolved arr ptr)
+ *   esi  = (u32)(f64)vals[idx_op]        (idx)
+ *   esi >= [rdi + items_len_off]   ?     side-exit
+ *   rax  = [rdi + items_off]
+ *   rax += esi * 16
+ *   [rax + 0] = CDO_NUMBER (overwrite tag in case it changed)
+ *   xmm0 = vals[val_op]
+ *   [rax + 8] = xmm0
+ *
+ * Same atomic-free property: callers must ensure no other thread
+ * mutates the array during a JIT'd region.  Same assumption as
+ * everywhere else in the codegen. */
+static void emit_index_set_inline(CG *cg, u32 op1, u32 idx_op, u32 val_op) {
+    i32 items_len_off = (i32)offsetof(struct CdoObject, items_len);
+    i32 items_off     = (i32)offsetof(struct CdoObject, items);
+
+    emit_mov_rdi_vals(cg, op1);
+    emit_load_xmm0(cg, idx_op);
+    emit_cvttsd2si_esi_xmm0(cg);
+    emit_cmp_esi_rdi_off(cg, items_len_off);
+    if (cg->guard_count >= CG_MAX_GUARDS) { cg->failed = true; return; }
+    cg_emit_u8(cg, 0x0F); cg_emit_u8(cg, 0x83);
+    u32 disp_off = cg_off(cg);
+    cg_emit_u32(cg, 0);
+    cg->guards[cg->guard_count].je_disp_off = disp_off;
+    cg->guards[cg->guard_count].snap_idx    = cg->cur_snap;
+    cg->guards[cg->guard_count].stub_off    = 0;
+    cg->guard_count++;
+
+    emit_mov_rax_rdi_off(cg, items_off);
+    emit_shl_rsi_4(cg);
+    emit_add_rax_rsi(cg);
+    emit_mov_rax_byte_imm(cg, CDO_NUMBER);
+    emit_load_xmm0(cg, val_op);
+    emit_movsd_rax_off8_xmm0(cg, 8);
+    cg_invalidate_xmm0(cg);
+}
+
+/* Phase 8.2: classify op1's producer to decide whether vals[op1]
+ * holds a CdoObject* (use inline path) or a CandoValue.u handle
+ * (use the helper-call path with handle resolve). */
+static bool ir_ref_holds_arr_ptr(const CandoTraceIR *ir, IRRef ref) {
+    if (!ir || ref == 0) return false;
+    if (ref >= ir->ir_count) return false;
+    const IRIns *in = &ir->ir[ref];
+    return (in->op == IR_GLOAD && in->type == IRT_OBJ) ||
+           (in->op == IR_HLOAD_SLOT);
+}
+
 /* IR_INDEX_GET: cando_jit_index_get(vm, vals[op1].u, (u32)vals[op2].d, &vals[i]).
  * Returns 0/1; on 1 we side-exit. */
 static void emit_index_get(CG *cg, u32 op1, u32 op2, u32 i) {
@@ -1085,6 +1244,30 @@ extern int cando_jit_gload_for_mcode(struct CandoVM *vm,
 extern int cando_jit_gstore_for_mcode(struct CandoVM *vm,
                                       struct CandoString *name,
                                       double value);
+/* Phase 8.2: resolve a global array to its CdoObject* once.
+ * Returns NULL on bad type so the caller side-exits. */
+extern void *cando_jit_gload_arr_for_mcode(struct CandoVM *vm,
+                                            struct CandoString *name);
+
+/* Phase 8.2: emit_gload_arr -- IR_GLOAD with IRT_OBJ.  Calls
+ * cando_jit_gload_arr_for_mcode and stores the resolved CdoObject*
+ * in vals[i].u.  Side-exit on NULL.  Subsequent IR_INDEX_GET on
+ * this IRRef uses the pointer directly via the inline fast path
+ * (no per-access lock, no handle resolve). */
+static void emit_gload_arr(CG *cg, const CandoTraceIR *ir, IRRef name_ref, u32 i) {
+    if (!IRREF_IS_K(name_ref)) { cg->failed = true; return; }
+    CandoValue cv = cando_ir_get_const(ir, name_ref);
+    if (!cando_is_string(cv)) { cg->failed = true; return; }
+    CandoString *name = cando_as_string(cv);
+    emit_mov_rdi_rbx(cg);                         /* arg1: vm        */
+    emit_movabs_rsi(cg, (u64)(uintptr_t)name);    /* arg2: name      */
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_gload_arr_for_mcode);
+    emit_call_rax(cg);
+    emit_test_rax_rax(cg);
+    emit_je_to_stub(cg, cg->cur_snap);            /* NULL -> bad type */
+    emit_mov_vals_rax(cg, i);                     /* vals[i] = obj_ptr */
+    cg_invalidate_xmm0(cg);
+}
 
 static void emit_gload(CG *cg, const CandoTraceIR *ir, IRRef name_ref, u32 i) {
     if (!IRREF_IS_K(name_ref)) { cg->failed = true; return; }
@@ -1122,24 +1305,9 @@ static void emit_hload_slot(CG *cg, u32 slot, u32 i) {
     cg_invalidate_xmm0(cg);                       /* call clobbered xmm0 */
 }
 
-/* IR_AREF: vals[i].d = cando_jit_aref(vals[op1].p, (u32)vals[op2].d).
- * Helper returns 0/f64-out on success, 1/bad-type on failure.
- *
- * Argument layout:
- *   rdi = arr (loaded from vals[op1] as raw u64 pointer)
- *   esi = idx (cvttsd2si of vals[op2])
- *   rdx = &vals[i] (out pointer for the f64 result) */
-static void emit_aref(CG *cg, u32 op1, u32 op2, u32 i) {
-    emit_mov_rdi_vals(cg, op1);                   /* arr ptr         */
-    emit_load_xmm0(cg, op2);                      /* xmm0 = idx (f64) */
-    emit_cvttsd2si_esi_xmm0(cg);                  /* esi = (i32)xmm0 */
-    emit_lea_rdx_vals(cg, i);                     /* &vals[i]        */
-    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_aref_for_mcode);
-    emit_call_rax(cg);
-    emit_test_eax_eax(cg);
-    emit_jne_to_stub(cg, cg->cur_snap);
-    cg_invalidate_xmm0(cg);                       /* call clobbered xmm0 */
-}
+/* IR_AREF formerly used cando_jit_aref_for_mcode -- replaced by
+ * emit_index_get_inline (the path is identical: ptr + numeric idx).
+ * The helper still ships in jit.c for the IR-interpreter path. */
 
 static void emit_gstore(CG *cg, const CandoTraceIR *ir, IRRef name_ref,
                         u32 op2) {
@@ -1157,13 +1325,25 @@ static void emit_gstore(CG *cg, const CandoTraceIR *ir, IRRef name_ref,
     cg_invalidate_xmm0(cg);                       /* call clobbered xmm0 */
 }
 
+/* sqrtsd xmm0, xmm0   ; F2 0F 51 C0   (4 bytes; in-place sqrt of xmm0). */
+static void emit_sqrtsd_xmm0(CG *cg) {
+    static const u8 b[] = { 0xF2, 0x0F, 0x51, 0xC0 };
+    cg_emit_bytes(cg, b, 4);
+}
+
 /* IR_CALL_F1: vals[i] = fast_native(vals[op2]).  op1 is the index
  * into vm->fast_natives_f1[].  We resolve the function pointer at
  * codegen time and embed it as an immediate -- registrations are
  * write-once at startup so the pointer is stable for the trace's
  * lifetime.  SysV ABI: f64 arg in XMM0, result in XMM0.  Stack is
  * 16-aligned at this point (5 callee-saved pushes from the prologue
- * land RSP at aligned), so `call rax` to the helper is well-formed. */
+ * land RSP at aligned), so `call rax` to the helper is well-formed.
+ *
+ * Phase 8.2: detect well-known libm functions whose semantics map
+ * to a single SSE2 instruction and inline directly -- avoids the
+ * call/ret pair plus the wrapper's argument-passing overhead.
+ * Currently: sqrt -> sqrtsd.  Hot in nbody (~21 calls per inner
+ * iter, 9919 trace iters total). */
 static void emit_call_f1(CG *cg, u32 native_idx, u32 op2, u32 i) {
     if (!cg->vm || native_idx >= cg->vm->fast_natives_f1_cap ||
         cg->vm->fast_natives_f1[native_idx] == NULL) {
@@ -1172,8 +1352,12 @@ static void emit_call_f1(CG *cg, u32 native_idx, u32 op2, u32 i) {
     }
     CandoFastFn1 fn = cg->vm->fast_natives_f1[native_idx];
     emit_load_xmm0(cg, op2);                 /* xmm0 = vals[op2]     */
-    emit_movabs_rax(cg, (u64)(uintptr_t)fn);
-    emit_call_rax(cg);
+    if (fn == (CandoFastFn1)sqrt) {
+        emit_sqrtsd_xmm0(cg);
+    } else {
+        emit_movabs_rax(cg, (u64)(uintptr_t)fn);
+        emit_call_rax(cg);
+    }
     emit_movsd_vals_xmm(cg, i, 0);           /* vals[i] = xmm0       */
     cg->xmm0_holds = i;
 }
@@ -1353,11 +1537,18 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             cg.cur_snap = (u16)in->op2;
             break;
         case IR_GLOAD:
-            /* Phase 4.4d: only IRT_NUM globals are codegen'd today;
-             * IRT_OBJ globals (script object handles) need a different
-             * type-check encoding that lands with Phase 4.4g. */
-            if (in->type != IRT_NUM) { cg.failed = true; break; }
-            emit_gload(&cg, &t->ir, in->op1, i);
+            /* Phase 8.2: IRT_OBJ globals resolve to CdoObject* and
+             * cache the pointer in vals[i].  Downstream IR_INDEX_GET
+             * / IR_INDEX_SET detect ptr-source via
+             * ir_ref_holds_arr_ptr and use the inline fast path
+             * (no per-access lock + no handle resolve). */
+            if (in->type == IRT_OBJ) {
+                emit_gload_arr(&cg, &t->ir, in->op1, i);
+            } else if (in->type == IRT_NUM) {
+                emit_gload(&cg, &t->ir, in->op1, i);
+            } else {
+                cg.failed = true;
+            }
             break;
         case IR_GSTORE:
             emit_gstore(&cg, &t->ir, in->op1, in->op2);
@@ -1366,7 +1557,9 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             emit_hload_slot(&cg, in->op1, i);
             break;
         case IR_AREF:
-            emit_aref(&cg, in->op1, in->op2, i);
+            /* Phase 8.2: IR_AREF's op1 is always a pointer (from
+             * IR_HLOAD_SLOT) so the inline path is always usable. */
+            emit_index_get_inline(&cg, in->op1, in->op2, i);
             break;
         case IR_NEW_ARRAY:
             /* Phase 4.4k: sunk allocs emit nothing -- the buffer is
@@ -1412,7 +1605,14 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
                 cg.xmm0_holds = i;
                 break;
             }
-            emit_index_get(&cg, in->op1, in->op2, i);
+            /* Phase 8.2: when op1 is from IR_GLOAD-IRT_OBJ or
+             * IR_HLOAD_SLOT, vals[op1] holds CdoObject* directly --
+             * use the inline fast path. */
+            if (ir_ref_holds_arr_ptr(&t->ir, in->op1)) {
+                emit_index_get_inline(&cg, in->op1, in->op2, i);
+            } else {
+                emit_index_get(&cg, in->op1, in->op2, i);
+            }
             break;
         }
         case IR_INDEX_SET_VAL:
@@ -1441,7 +1641,12 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
                 cg_invalidate_xmm0(&cg);
                 break;
             }
-            emit_index_set(&cg, in->op1, in->op2, val_ref);
+            /* Phase 8.2: ptr-source fast path. */
+            if (ir_ref_holds_arr_ptr(&t->ir, in->op1)) {
+                emit_index_set_inline(&cg, in->op1, in->op2, val_ref);
+            } else {
+                emit_index_set(&cg, in->op1, in->op2, val_ref);
+            }
             break;
         }
         case IR_NEW_OBJECT:
