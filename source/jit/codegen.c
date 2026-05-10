@@ -605,6 +605,50 @@ static void emit_mov_rcx_r15(CG *cg) {
 static void emit_mov_r8_r9(CG *cg) {
     static const u8 b[] = { 0x4D, 0x89, 0xC8 }; cg_emit_bytes(cg, b, 3);
 }
+/* Phase 4.4 v1d: shadow-buffer plumbing for sunk allocations.
+ *
+ * mov rax, [r12 + disp32]   ; 49 8B 84 24 disp32  (load shadow ptr)
+ * mov rcx, [rax + disp32]   ; 48 8B 88 disp32     (read shadow slot)
+ * mov rcx, [rbp + disp32]   ; 48 8B 8D disp32     (read stack slot)
+ * mov [rbp + disp32], rcx   ; 48 89 8D disp32     (write stack slot)
+ * mov [rax + disp32], rcx   ; 48 89 88 disp32     (write shadow slot)
+ * mov BYTE [r12 + disp32], 1 ; 41 C6 84 24 disp32 01  (set init flag)
+ *
+ * Always uses disp32 so callers don't worry about disp8/disp32
+ * boundaries (CG_MAX_SUNK * CG_MAX_OBJ_FIELDS * 8 = 1024 bytes max,
+ * which exceeds disp8 range for the negative rbp offsets).
+ */
+static void emit_mov_rax_r12_off(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x49, 0x8B, 0x84, 0x24 };
+    cg_emit_bytes(cg, b, 4);
+    cg_emit_u32(cg, (u32)disp);
+}
+static void emit_mov_rcx_rax_off(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x48, 0x8B, 0x88 };
+    cg_emit_bytes(cg, b, 3);
+    cg_emit_u32(cg, (u32)disp);
+}
+static void emit_mov_rcx_rbp_off(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x48, 0x8B, 0x8D };
+    cg_emit_bytes(cg, b, 3);
+    cg_emit_u32(cg, (u32)disp);
+}
+static void emit_mov_rbp_off_rcx(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x48, 0x89, 0x8D };
+    cg_emit_bytes(cg, b, 3);
+    cg_emit_u32(cg, (u32)disp);
+}
+static void emit_mov_rax_off_rcx(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x48, 0x89, 0x88 };
+    cg_emit_bytes(cg, b, 3);
+    cg_emit_u32(cg, (u32)disp);
+}
+static void emit_mov_r12_off_byte_imm(CG *cg, i32 disp, u8 imm) {
+    static const u8 b[] = { 0x41, 0xC6, 0x84, 0x24 };
+    cg_emit_bytes(cg, b, 4);
+    cg_emit_u32(cg, (u32)disp);
+    cg_emit_u8(cg, imm);
+}
 /* mov rdx, rbp   ; 48 89 EA  -- Phase 4.4 v1c: rbp_base arg for
  * the side-exit materialisation helper. */
 static void emit_mov_rdx_rbp(CG *cg) {
@@ -685,6 +729,22 @@ static void emit_prologue(CG *cg) {
         0x4D, 0x89, 0xC6,
     };
     cg_emit_bytes(cg, fixed2, sizeof(fixed2));
+
+    /* Phase 4.4 v1d: shadow buffer copy.  When sunk_total_bytes>0,
+     * load t->sink_shadow into rax and copy each 8-byte slot into
+     * the stack buffer.  This way the stack always reflects either
+     * (a) the last LOOP_DONE'd iter's writes, or (b) zeros when
+     * no iter has completed.  Materialise-on-side-exit reads
+     * defined memory in either case (valgrind clean). */
+    if (cg->sunk_total_bytes > 0) {
+        emit_mov_rax_r12_off(cg, (i32)offsetof(struct CandoTrace,
+                                                sink_shadow));
+        u32 slots = cg->sunk_total_bytes / 8;
+        for (u32 i = 0; i < slots; i++) {
+            emit_mov_rcx_rax_off(cg, (i32)(8 * i));
+            emit_mov_rbp_off_rcx(cg, -(i32)(56 + 8 * i));
+        }
+    }
 }
 
 /* Epilogue: undo the prologue's sub rsp + pops + ret. */
@@ -712,8 +772,11 @@ static void emit_epilogue(CG *cg) {
 
 /* IR_SLOAD slot: load frame_slots[slot] into rax, type-check, store
  * to vals[i].  IRT_NUM checks (rax & NB_MASK) != NB_MASK; IRT_OBJ
- * checks (rax & NB_TAG_BITS_MASK) == NB_TAG_OBJECT.  Side-exits
- * (snap=0) on type mismatch. */
+ * checks (rax & NB_TAG_BITS_MASK) == NB_TAG_OBJECT.  Side-exits use
+ * cg->cur_snap so any pinned SSTOREs since the last guard get
+ * rolled back (matches the IR-interpreter at jit.c:IR_SLOAD).  An
+ * earlier draft hardcoded snap=0, which left mid-iteration writes
+ * unrestored on type-driven side-exits. */
 static void emit_sload(CG *cg, u32 slot, u32 i, IRType slot_type) {
     emit_mov_rax_slot(cg, slot);
     if (slot_type == IRT_OBJ) {
@@ -728,7 +791,7 @@ static void emit_sload(CG *cg, u32 slot, u32 i, IRType slot_type) {
         u32 disp_off = cg_off(cg);
         cg_emit_u32(cg, 0);
         cg->guards[cg->guard_count].je_disp_off = disp_off;
-        cg->guards[cg->guard_count].snap_idx    = 0;
+        cg->guards[cg->guard_count].snap_idx    = cg->cur_snap;
         cg->guards[cg->guard_count].stub_off    = 0;
         cg->guard_count++;
     } else {
@@ -739,7 +802,7 @@ static void emit_sload(CG *cg, u32 slot, u32 i, IRType slot_type) {
         /* je side_exit (boxed value) */
         if (cg->guard_count >= CG_MAX_GUARDS) { cg->failed = true; return; }
         cg->guards[cg->guard_count].je_disp_off = emit_je_rel32_placeholder(cg);
-        cg->guards[cg->guard_count].snap_idx    = 0;
+        cg->guards[cg->guard_count].snap_idx    = cg->cur_snap;
         cg->guards[cg->guard_count].stub_off    = 0;
         cg->guard_count++;
     }
@@ -1244,18 +1307,25 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
              * resumes. */
             if (in->flags & IRF_SUNK) {
                 CGSunk *s = cg_find_sunk(&cg, in->op2);
-                if (s && cg.sink_count < CG_MAX_SUNK) {
-                    CGSinkRec *r = &cg.sink_recs[cg.sink_count++];
-                    r->slot       = in->op1;
-                    r->stack_off  = s->stack_off;
-                    r->capacity   = (s->is_array ? s->cursor : s->capacity);
-                    r->is_array   = s->is_array;
-                    if (!s->is_array) {
-                        for (u32 f = 0; f < s->capacity; f++)
-                            r->field_kref[f] = s->field_kref[f];
+                if (s) {
+                    if (cg.sink_count < CG_MAX_SUNK) {
+                        CGSinkRec *r = &cg.sink_recs[cg.sink_count++];
+                        r->slot       = in->op1;
+                        r->stack_off  = s->stack_off;
+                        r->capacity   = (s->is_array ? s->cursor : s->capacity);
+                        r->is_array   = s->is_array;
+                        if (!s->is_array) {
+                            for (u32 f = 0; f < s->capacity; f++)
+                                r->field_kref[f] = s->field_kref[f];
+                        }
                     }
+                    break;
                 }
-                break;
+                /* Phase 4.4 v1d: defensive fall-through.  The IRF_SUNK
+                 * flag was set on an alloc the codegen doesn't track
+                 * (e.g. RANGE_ASC slipped through escape_analysis in
+                 * an older build).  Don't silently drop the store --
+                 * emit it normally so the slot at least gets written. */
             }
             emit_sstore(&cg, in->op1, in->op2);
             break;
@@ -1459,6 +1529,24 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
         return false;
     }
 
+    /* Phase 4.4 v1d: at LOOP_DONE, sync stack buffer back to the
+     * heap shadow + flip sink_shadow_init=1.  The shadow now
+     * reflects this iter's writes; next iter's prologue will
+     * pre-fill the stack buffer with these values, so a side-
+     * exit BEFORE any FIELD_SET / APPEND of the next iter still
+     * materialises a valid object (= last completed iter). */
+    if (cg.sunk_total_bytes > 0) {
+        emit_mov_rax_r12_off(&cg, (i32)offsetof(struct CandoTrace,
+                                                 sink_shadow));
+        u32 slots = cg.sunk_total_bytes / 8;
+        for (u32 i = 0; i < slots; i++) {
+            emit_mov_rcx_rbp_off(&cg, -(i32)(56 + 8 * i));
+            emit_mov_rax_off_rcx(&cg, (i32)(8 * i));
+        }
+        emit_mov_r12_off_byte_imm(&cg,
+            (i32)offsetof(struct CandoTrace, sink_shadow_init), 1);
+    }
+
     /* LOOP_DONE epilogue: returns 0 (TRACE_LOOP_DONE). */
     emit_xor_eax_eax(&cg);
     emit_epilogue(&cg);
@@ -1560,6 +1648,25 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
         t->sink_rec_cap   = cg.sink_count;
     }
 
+    /* Phase 4.4 v1d: allocate the heap-persistent shadow buffer
+     * matching the mcode's stack reservation.  Zeroed; flips to
+     * "valid" via sink_shadow_init=1 at first LOOP_DONE.  Refer
+     * to the prologue / LOOP_DONE / materialise comments above. */
+    if (cg.sunk_total_bytes > 0) {
+        t->sink_shadow = cando_alloc(cg.sunk_total_bytes);
+        if (!t->sink_shadow) {
+            cando_mcode_free(&t->mcode);
+            cando_free(t->sink_recs);
+            t->sink_recs = NULL;
+            t->sink_rec_count = 0;
+            t->sink_rec_cap = 0;
+            return false;
+        }
+        memset(t->sink_shadow, 0, cg.sunk_total_bytes);
+        t->sink_shadow_bytes = cg.sunk_total_bytes;
+        t->sink_shadow_init  = 0;
+    }
+
     t->mcode.written = (u32)(cg.cur - cg.base);
     if (!cando_mcode_finalize(&t->mcode)) {
         cando_mcode_free(&t->mcode);
@@ -1567,6 +1674,10 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
         t->sink_recs = NULL;
         t->sink_rec_count = 0;
         t->sink_rec_cap = 0;
+        cando_free(t->sink_shadow);
+        t->sink_shadow = NULL;
+        t->sink_shadow_bytes = 0;
+        t->sink_shadow_init = 0;
         return false;
     }
     t->mcode_fn = (CandoTraceStatus (*)(struct CandoVM *, CandoTrace *,

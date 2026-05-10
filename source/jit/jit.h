@@ -155,6 +155,20 @@ typedef struct CandoTrace {
     CandoSinkRec   *sink_recs;
     u32             sink_rec_count;
     u32             sink_rec_cap;
+    /* Phase 4.4 v1d: heap-persistent shadow buffer mirroring the
+     * mcode's stack-allocated sunk storage.  At trace entry the
+     * prologue copies shadow -> stack; at LOOP_DONE epilogue the
+     * stack is copied back to shadow and `sink_shadow_init` flips
+     * to 1.  Side-exit reads the stack buffer (which holds either
+     * this iter's writes or shadow's pre-iter values), but the
+     * materialise call is gated on sink_shadow_init -- when no
+     * iter has ever completed, frame_slots[slot] keeps its pre-
+     * trace value (correct rollback semantics).  Without the
+     * shadow, side-exit would read uninitialised stack memory
+     * (valgrind-visible, only-by-accident-correct). */
+    void           *sink_shadow;
+    u32             sink_shadow_bytes;
+    u8              sink_shadow_init;
     /* Phase 6: optional native machine-code body.  If mcode.base is
      * non-NULL AND mcode.finalized, cando_trace_run dispatches into
      * the compiled function instead of walking the IR.  When codegen

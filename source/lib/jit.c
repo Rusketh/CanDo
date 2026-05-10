@@ -106,6 +106,10 @@ static int jit_stats_native(CandoVM *vm, int argc, CandoValue *args)
         CandoValue   vv = cando_string_value(vs);
         CdoValue     bv = cando_bridge_to_cdo(vm, vv);
         cdo_object_rawset(o, kk, bv, FIELD_NONE);
+        /* cdo_object_rawset retains via cdo_value_copy; release our
+         * local refs.  Without this we leak ~50 bytes per --jit-stats
+         * call (the bridge_to_cdo'd CdoString and the CandoString). */
+        cdo_value_release(bv);
         cando_value_release(vv);
         cdo_string_release(kk);
     }

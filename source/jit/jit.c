@@ -592,8 +592,14 @@ static void escape_analysis(CandoTraceIR *ir) {
 
     for (u32 a = 1; a < ir->ir_count; a++) {
         IRIns *alloc = &ir->ir[a];
-        if (alloc->op != IR_NEW_ARRAY && alloc->op != IR_NEW_OBJECT &&
-            alloc->op != IR_RANGE_ASC && alloc->op != IR_RANGE_DESC)
+        /* Phase 4.4 v1d: RANGE_ASC/DESC sinking is deferred (v1b);
+         * cg_assign_sunk_offsets only handles NEW_ARRAY / NEW_OBJECT.
+         * Including RANGE_* here used to silently drop the SSTORE
+         * at codegen.c IR_SSTORE because cg_find_sunk returned NULL,
+         * so the alloc happened but the slot never got written --
+         * post-trace bytecode read stale data.  Restrict to ops the
+         * codegen actually understands. */
+        if (alloc->op != IR_NEW_ARRAY && alloc->op != IR_NEW_OBJECT)
             continue;
 
         bool sinkable = true;
@@ -880,9 +886,12 @@ static void cando_recorder_finish(struct CandoVM *vm) {
     memset(&t->mcode, 0, sizeof(t->mcode));
     t->mcode_fn   = NULL;
     /* Phase 4.4 v1c: codegen populates sink_recs lazily. */
-    t->sink_recs       = NULL;
-    t->sink_rec_count  = 0;
-    t->sink_rec_cap    = 0;
+    t->sink_recs        = NULL;
+    t->sink_rec_count   = 0;
+    t->sink_rec_cap     = 0;
+    t->sink_shadow      = NULL;
+    t->sink_shadow_bytes = 0;
+    t->sink_shadow_init = 0;
     /* Transfer Phase 4 staging snapshot pool. */
     t->snapshots         = r->staging_snapshots;
     t->snapshot_count    = r->staging_snapshot_count;
@@ -2223,6 +2232,7 @@ static void trace_release_storage(CandoTrace *t) {
     cando_free(t->snapshots);
     cando_free(t->snap_entries);
     cando_free(t->sink_recs);
+    cando_free(t->sink_shadow);
     /* Phase 6: release the executable mapping if codegen produced one. */
     cando_mcode_free(&t->mcode);
     t->mcode_fn         = NULL;
@@ -2237,6 +2247,9 @@ static void trace_release_storage(CandoTrace *t) {
     t->sink_recs        = NULL;
     t->sink_rec_count   = 0;
     t->sink_rec_cap     = 0;
+    t->sink_shadow      = NULL;
+    t->sink_shadow_bytes = 0;
+    t->sink_shadow_init = 0;
 }
 
 void cando_jit_destroy(CandoJit *j) {
@@ -2892,18 +2905,6 @@ int cando_jit_index_set_for_mcode(struct CandoVM *vm, u64 arr_u, u32 idx,
     return 0;
 }
 
-/* IR_GLOAD helper for IRT_OBJ globals: returns the CandoValue.u
- * raw bits (an object handle) on success.  Returns 0 in *out_ok
- * for missing/non-object globals so the caller side-exits. */
-u64 cando_jit_gload_obj_for_mcode(struct CandoVM *vm, struct CandoString *name,
-                                   int *out_ok) {
-    CandoValue v;
-    if (!cando_vm_get_global(vm, ((CandoString *)name)->data, &v) ||
-        !cando_is_object(v)) { *out_ok = 0; return 0; }
-    *out_ok = 1;
-    return v.u;
-}
-
 /* ============================================================ */
 /* Phase 4.4h: object allocation / field access helpers          */
 /* ============================================================ */
@@ -2984,6 +2985,13 @@ void cando_jit_materialize_sunk_for_mcode(struct CandoVM *vm,
                                            CandoTrace *t,
                                            char *rbp_base,
                                            CandoValue *frame_slots) {
+    /* Phase 4.4 v1d: gate materialisation on the shadow-init flag.
+     * If no iter has ever LOOP_DONE'd, the stack buffer was just
+     * copied from a zeroed shadow at prologue, and writing zero-
+     * valued objects to frame_slots would clobber the (correct)
+     * pre-trace value left there by bytecode.  Skip entirely. */
+    if (!t->sink_shadow_init) return;
+
     for (u32 i = 0; i < t->sink_rec_count; i++) {
         const CandoSinkRec *r = &t->sink_recs[i];
         char *slot0 = rbp_base + r->stack_off;
