@@ -15,7 +15,7 @@
 #ifndef CDO_VALUE_H
 #define CDO_VALUE_H
 
-#include "common.h"
+#include "../core/common.h"
 #include "string.h"
 
 /* -----------------------------------------------------------------------

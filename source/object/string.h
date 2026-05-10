@@ -13,7 +13,7 @@
 #ifndef CDO_STRING_H
 #define CDO_STRING_H
 
-#include "common.h"
+#include "../core/common.h"
 
 /* -----------------------------------------------------------------------
  * CdoString -- ref-counted, internable heap string
