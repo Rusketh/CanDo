@@ -23,9 +23,10 @@
  * Loop type identifiers -- stored in CandoLoopFrame.loop_type and encoded
  * in bits[15:14] of OP_LOOP_MARK's B operand.
  * ---------------------------------------------------------------------- */
-#define CANDO_LOOP_WHILE    0   /* WHILE loop                             */
-#define CANDO_LOOP_FOR      1   /* FOR IN / FOR OF loop                   */
-#define CANDO_LOOP_FOR_OVER 2   /* FOR OVER (Lua-style triplet) loop      */
+#define CANDO_LOOP_WHILE     0   /* WHILE loop                             */
+#define CANDO_LOOP_FOR       1   /* FOR IN / FOR OF loop                   */
+#define CANDO_LOOP_FOR_OVER  2   /* FOR OVER (Lua-style triplet) loop      */
+#define CANDO_LOOP_FOR_RANGE 3   /* FOR IN numeric range (no allocation)   */
 
 /* -------------------------------------------------------------------------
  * CandoOpcode -- the full Cando instruction set.
@@ -230,6 +231,16 @@ typedef enum {
     OP_GT_SPREAD,
     OP_LEQ_SPREAD,
     OP_GEQ_SPREAD,
+
+    /* ===== Band 13 (cont.): numeric range FOR ============================
+     * OP_FOR_RANGE_INIT / OP_FOR_RANGE_NEXT specialise `FOR i IN N -> M`
+     * (or `<-`) so the parser does not have to materialise the entire
+     * range into a heap array first.  Layout on the value stack while
+     * the loop runs:   [..., end, step, cur]   (all numeric, step = +/-1).
+     * The parser emits this pair only when the FOR iterable's last byte
+     * is OP_RANGE_ASC/OP_RANGE_DESC and the loop binds a single var. */
+    OP_FOR_RANGE_INIT,  /* A=0 ascending step=+1, A=1 descending step=-1   */
+    OP_FOR_RANGE_NEXT,  /* A = signed forward jump offset when exhausted   */
 
     /* ===== Sentinels ==================================================== */
     OP_NOP,             /* no operation                                   */

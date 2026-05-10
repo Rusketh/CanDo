@@ -1972,6 +1972,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
         [OP_RANGE_DESC]       = &&lbl_OP_RANGE_DESC,
         [OP_FOR_INIT]         = &&lbl_OP_FOR_INIT,
         [OP_FOR_NEXT]         = &&lbl_OP_FOR_NEXT,
+        [OP_FOR_RANGE_INIT]   = &&lbl_OP_FOR_RANGE_INIT,
+        [OP_FOR_RANGE_NEXT]   = &&lbl_OP_FOR_RANGE_NEXT,
         [OP_FOR_OVER_INIT]    = &&lbl_OP_FOR_OVER_INIT,
         [OP_FOR_OVER_NEXT]    = &&lbl_OP_FOR_OVER_NEXT,
         [OP_PIPE_INIT]        = &&lbl_OP_PIPE_INIT,
@@ -3066,6 +3068,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cando_value_release(POP()); /* index   */
                 cando_value_release(POP()); /* len     */
                 cando_value_release(POP()); /* source  */
+            } else if (ltyp == CANDO_LOOP_FOR_RANGE) {
+                /* All three slots are numbers (cur, step, end); the POP
+                 * is still needed to advance stack_top. */
+                DROP();
+                DROP();
+                DROP();
             }
 
             vm->spread_extra = 0;
@@ -3859,6 +3867,65 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 }
                 /* PUSH above moved stack_top; the index slot is now at -2. */
                 cando_set_number(&vm->stack_top[-2], index_f + 1.0);
+                if (CANDO_UNLIKELY(vm->jit_enabled))
+                    vm->jit_stats.iter_next_hits++;
+            }
+            DISPATCH();
+        }
+        OP_CASE(OP_FOR_RANGE_INIT): {
+            /* Numeric range FOR -- avoids allocating a heap array.
+             * A = 0 ascending (step = +1), 1 descending (step = -1).
+             * Stack before: [..., lo, hi]   (lo pushed first by parser)
+             * Stack after:  [..., end, step, cur]
+             *
+             *   ASC : cur = lo, end = hi, step = +1  -- iterate lo..hi
+             *   DESC: cur = lo, end = hi, step = -1  -- iterate lo..hi descending
+             *
+             * Match OP_RANGE_ASC / OP_RANGE_DESC operand convention:
+             * OP_RANGE_ASC iterates from a (first-pushed) up to b
+             * (second-pushed); OP_RANGE_DESC iterates from a down to b.
+             * So for ASC we step +1 from lo toward hi, for DESC step -1.
+             *
+             * If lo and hi are in the wrong direction (e.g. ASC with lo > hi),
+             * OP_FOR_RANGE_NEXT exits immediately on its first check, matching
+             * the empty-array behaviour of the OP_RANGE_ASC + OP_FOR_INIT
+             * path (RANGE_ASC builds an empty array for from > to). */
+            u16 a = READ_U16();
+            CandoValue hi = POP();
+            CandoValue lo = POP();
+            if (!cando_is_number(lo) || !cando_is_number(hi)) {
+                vm_runtime_error(vm, "range requires numbers");
+                goto handle_error;
+            }
+            f64 cur_f  = cando_as_number(lo);
+            f64 end_f  = cando_as_number(hi);
+            f64 step_f = (a == 0) ? 1.0 : -1.0;
+            PUSH(cando_number(end_f));
+            PUSH(cando_number(step_f));
+            PUSH(cando_number(cur_f));
+            DISPATCH();
+        }
+        OP_CASE(OP_FOR_RANGE_NEXT): {
+            /* Stack: [..., end, step, cur]
+             * step is +1 (ascending) or -1 (descending).
+             * Exit condition: cur has moved past end in the step direction.
+             * On non-exit, push cur as the loop variable, advance cur by step. */
+            i16 off    = (i16)(READ_U16());
+            f64 cur_f  = cando_as_number(*(vm->stack_top - 1));
+            f64 step_f = cando_as_number(*(vm->stack_top - 2));
+            f64 end_f  = cando_as_number(*(vm->stack_top - 3));
+
+            bool done = (step_f > 0.0) ? (cur_f > end_f) : (cur_f < end_f);
+            if (done) {
+                /* Numbers are inline values; no release needed. Just drop. */
+                DROP();
+                DROP();
+                DROP();
+                ip += off;
+            } else {
+                PUSH(cando_number(cur_f));
+                /* After PUSH the cur slot is at -2. */
+                cando_set_number(&vm->stack_top[-2], cur_f + step_f);
                 if (CANDO_UNLIKELY(vm->jit_enabled))
                     vm->jit_stats.iter_next_hits++;
             }

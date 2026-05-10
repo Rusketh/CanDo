@@ -2271,6 +2271,146 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             break;
         }
 
+        case OP_FOR_RANGE_NEXT: {
+            /* Numeric-range FOR advance (companion to OP_FOR_RANGE_INIT).
+             * Stack at entry: [..., end, step, cur], all numbers; step
+             * always +1.0 or -1.0 (the parser-emitted INIT enforces this).
+             *
+             * Recording strategy: specialise the trace for the runtime
+             * step direction.  The recorder reads the live step value
+             * from vm->stack_top[-2], picks IR_LE (ascending step=+1)
+             * or IR_GE (descending step=-1) for the continue-guard, and
+             * embeds the step as a KNUM in the IR_ADD for cur'.  end is
+             * SLOAD-ed once (the loop body never touches it, so LICM
+             * keeps it on the warm path).
+             *
+             * This avoids the IR_HLOAD_SLOT + IR_AREF chain that
+             * OP_FOR_NEXT needs for array iteration -- the next loop
+             * variable is just `cur` itself, with no memory load. */
+            if (sp < 3) {
+                cando_recorder_abort(vm, "OP_FOR_RANGE_NEXT with too few state slots");
+                return;
+            }
+            CANDO_ASSERT_MSG(sp - 3 >= r->frame_base,
+                             "FOR_RANGE state below frame_base");
+
+            CandoValue cur_v  = vm->stack_top[-1];
+            CandoValue step_v = vm->stack_top[-2];
+            CandoValue end_v  = vm->stack_top[-3];
+            if (!cando_is_number(cur_v) || !cando_is_number(step_v) ||
+                !cando_is_number(end_v)) {
+                cando_recorder_abort(vm, "OP_FOR_RANGE_NEXT state non-numeric");
+                return;
+            }
+            f64  cur_f   = cando_as_number(cur_v);
+            f64  step_f  = cando_as_number(step_v);
+            f64  end_f   = cando_as_number(end_v);
+            bool asc     = (step_f > 0.0);
+            bool done    = asc ? (cur_f > end_f) : (cur_f < end_f);
+
+            u32 abs_end  = sp - 3;
+            u32 abs_step = sp - 2;
+            u32 abs_cur  = sp - 1;
+            u32 rel_end  = abs_end  - r->outer_frame_base;
+            u32 rel_step = abs_step - r->outer_frame_base;
+            u32 rel_cur  = abs_cur  - r->outer_frame_base;
+
+            /* SLOAD cur (use cached IRRef if a previous iter SSTORE'd
+             * it; mirrors the OP_FOR_NEXT idx pattern). */
+            IRRef cur_ir = (abs_cur < r->stack_map_cap)
+                           ? r->stack_map[abs_cur] : IRREF_NIL;
+            if (cur_ir == IRREF_NIL) {
+                cur_ir = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0,
+                                       rel_cur, 0);
+                if (abs_cur < r->stack_map_cap) {
+                    r->stack_map[abs_cur] = cur_ir;
+                    if (r->first_load[abs_cur] == IRREF_NIL)
+                        r->first_load[abs_cur] = cur_ir;
+                }
+            }
+
+            if (done) {
+                /* Loop-exit iteration.  Same pattern as the OP_FOR_NEXT
+                 * exit branch: if this is the trace's start_pc, the
+                 * recording would only see the exit path -- abort.
+                 * Otherwise emit a GUARD_FALSE on the continue-condition
+                 * so future replays side-exit cleanly on the early
+                 * terminator. */
+                if (ip == r->start_pc) {
+                    cando_recorder_abort(vm,
+                        "OP_FOR_RANGE_NEXT recorded at exit iter");
+                    return;
+                }
+                IRRef end_ir = (abs_end < r->stack_map_cap)
+                                ? r->stack_map[abs_end] : IRREF_NIL;
+                if (end_ir == IRREF_NIL) {
+                    end_ir = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0,
+                                            rel_end, 0);
+                    if (abs_end < r->stack_map_cap) {
+                        r->stack_map[abs_end] = end_ir;
+                        if (r->first_load[abs_end] == IRREF_NIL)
+                            r->first_load[abs_end] = end_ir;
+                    }
+                }
+                IRRef cmp_ir = rec_emit_pure(r,
+                                              asc ? IR_LE : IR_GE,
+                                              IRT_BOOL, 0,
+                                              cur_ir, end_ir);
+                u16 snap_e = rec_build_snapshot(r);
+                cando_ir_emit(&r->ir, IR_GUARD_FALSE, IRT_BOOL, IRF_GUARD,
+                              cmp_ir, snap_e);
+
+                if (abs_end  < r->stack_map_cap) r->stack_map[abs_end]  = IRREF_NIL;
+                if (abs_step < r->stack_map_cap) r->stack_map[abs_step] = IRREF_NIL;
+                if (abs_cur  < r->stack_map_cap) r->stack_map[abs_cur]  = IRREF_NIL;
+                (void)rel_step;
+                break;
+            }
+
+            /* Normal iteration: SLOAD end (LICM will hoist it), emit
+             * the continue-guard, push cur as the loop variable, and
+             * SSTORE cur+step back to the cur slot. */
+            IRRef end_ir = (abs_end < r->stack_map_cap)
+                            ? r->stack_map[abs_end] : IRREF_NIL;
+            if (end_ir == IRREF_NIL) {
+                end_ir = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0,
+                                        rel_end, 0);
+                if (abs_end < r->stack_map_cap) {
+                    r->stack_map[abs_end] = end_ir;
+                    if (r->first_load[abs_end] == IRREF_NIL)
+                        r->first_load[abs_end] = end_ir;
+                }
+            }
+            IRRef cmp_ir = rec_emit_pure(r,
+                                          asc ? IR_LE : IR_GE,
+                                          IRT_BOOL, 0,
+                                          cur_ir, end_ir);
+            u16 snap = rec_build_snapshot(r);
+            cando_ir_emit(&r->ir, IR_GUARD_TRUE, IRT_BOOL, IRF_GUARD,
+                          cmp_ir, snap);
+
+            /* Loop body sees `cur` as the freshly-bound loop variable;
+             * push the cur IRRef at the new TOS so the following
+             * OP_DEF_LOCAL stores it into the loop var's slot. */
+            rec_push(r, cur_ir, sp);
+
+            /* cur' = cur + step.  step is a runtime constant (+1.0 or
+             * -1.0), embed it directly so codegen can fold the ADD. */
+            IRRef step_k_ir = rec_emit_const_num(&r->ir, step_f);
+            IRRef next_ir   = rec_emit_pure(r, IR_ADD, IRT_NUM, 0,
+                                             cur_ir, step_k_ir);
+            cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED,
+                          rel_cur, next_ir);
+            if (abs_cur < r->stack_map_cap) {
+                if (r->first_load[abs_cur] != IRREF_NIL)
+                    rec_pending_snap_add(r, SNAP_SLOT, rel_cur,
+                                         r->first_load[abs_cur]);
+                r->stack_map[abs_cur] = next_ir;
+            }
+            (void)rel_step;
+            break;
+        }
+
         case OP_GET_FIELD: {
             /* Phase 4.2 + 4.4e: two paths.
              *   (a) Source is an AUX_OBJECT_GLOBAL marker AND the
