@@ -2767,3 +2767,42 @@ u64 cando_jit_gload_obj_for_mcode(struct CandoVM *vm, struct CandoString *name,
     *out_ok = 1;
     return v.u;
 }
+
+/* ============================================================ */
+/* Phase 4.4h: object allocation / field access helpers          */
+/* ============================================================ */
+
+/* IR_NEW_OBJECT helper: allocate empty object, return CandoValue.u. */
+u64 cando_jit_new_object_for_mcode(struct CandoVM *vm) {
+    return cando_bridge_new_object(vm).u;
+}
+
+/* IR_FIELD_SET helper: object[name] = val.  Returns 0/1.
+ * v1 ignores __newindex semantics. */
+int cando_jit_field_set_for_mcode(struct CandoVM *vm, u64 obj_u,
+                                   struct CandoString *name, double val) {
+    CandoValue obj_val; obj_val.u = obj_u;
+    if (!cando_is_object(obj_val)) return 1;
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(obj_val));
+    if (!obj) return 1;
+    CdoString *key = cando_bridge_intern_key((CandoString *)name);
+    cdo_object_rawset(obj, key, cdo_number(val), FIELD_NONE);
+    cdo_string_release(key);
+    return 0;
+}
+
+/* IR_FIELD_GET helper: read object[name] as f64.  Returns 0/1. */
+int cando_jit_field_get_for_mcode(struct CandoVM *vm, u64 obj_u,
+                                   struct CandoString *name, double *out) {
+    CandoValue obj_val; obj_val.u = obj_u;
+    if (!cando_is_object(obj_val)) return 1;
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(obj_val));
+    if (!obj) return 1;
+    CdoString *key = cando_bridge_intern_key((CandoString *)name);
+    CdoValue cv;
+    bool got = cdo_object_rawget(obj, key, &cv);
+    cdo_string_release(key);
+    if (!got || !cdo_is_number(cv)) return 1;
+    *out = cv.as.number;
+    return 0;
+}

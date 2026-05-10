@@ -207,6 +207,12 @@ static void emit_movabs_rsi(CG *cg, u64 imm) {
     cg_emit_u8(cg, 0xBE);
     cg_emit_u64(cg, imm);
 }
+/* movabs rdx, imm64          -- 48 BA imm64. */
+static void emit_movabs_rdx(CG *cg, u64 imm) {
+    cg_emit_u8(cg, 0x48);
+    cg_emit_u8(cg, 0xBA);
+    cg_emit_u64(cg, imm);
+}
 /* lea rdx, [r14 + 8*idx]     -- compute address of vals[idx].
  * REX = 0x49 (W=1 R=0 X=0 B=1 -- B for r14 base).
  * Opcode 8D /r.  ModR/M = 10 010 110 = 0x96 (mod=disp32, reg=rdx,
@@ -704,6 +710,61 @@ static void emit_index_set(CG *cg, u32 op1, u32 op2, u32 val_ref) {
     cg_invalidate_xmm0(cg);
 }
 
+/* ============================================================ */
+/* Phase 4.4h: object allocation + field access codegen          */
+/* ============================================================ */
+
+extern u64 cando_jit_new_object_for_mcode(struct CandoVM *vm);
+extern int cando_jit_field_set_for_mcode(struct CandoVM *vm, u64 obj_u,
+                                          struct CandoString *name, double val);
+extern int cando_jit_field_get_for_mcode(struct CandoVM *vm, u64 obj_u,
+                                          struct CandoString *name, double *out);
+
+/* IR_NEW_OBJECT: vals[i].u = cando_jit_new_object(vm). */
+static void emit_new_object(CG *cg, u32 i) {
+    emit_mov_rdi_rbx(cg);
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_new_object_for_mcode);
+    emit_call_rax(cg);
+    emit_mov_vals_rax(cg, i);
+    cg_invalidate_xmm0(cg);
+}
+
+/* IR_FIELD_SET: cando_jit_field_set(vm, vals[op1].u, name_str, val).
+ * Args: vm/rdi, obj/rsi, name/rdx, val/xmm0.  val_ref from i-1
+ * IR_FIELD_SET_VAL. */
+static void emit_field_set(CG *cg, u32 op1, IRRef name_kref, u32 val_ref,
+                           const CandoTraceIR *ir) {
+    CandoValue cv = cando_ir_get_const(ir, name_kref);
+    if (!cando_is_string(cv)) { cg->failed = true; return; }
+    CandoString *name = cando_as_string(cv);
+    emit_mov_rdi_rbx(cg);
+    emit_mov_rsi_vals(cg, op1);
+    emit_movabs_rdx(cg, (u64)(uintptr_t)name);    /* arg3: name      */
+    emit_load_xmm0(cg, val_ref);                  /* arg4: val (xmm0) */
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_field_set_for_mcode);
+    emit_call_rax(cg);
+    emit_test_eax_eax(cg);
+    emit_jne_to_stub(cg, cg->cur_snap);
+    cg_invalidate_xmm0(cg);
+}
+
+/* IR_FIELD_GET: cando_jit_field_get(vm, vals[op1].u, name, &vals[i]). */
+static void emit_field_get(CG *cg, u32 op1, IRRef name_kref, u32 i,
+                           const CandoTraceIR *ir) {
+    CandoValue cv = cando_ir_get_const(ir, name_kref);
+    if (!cando_is_string(cv)) { cg->failed = true; return; }
+    CandoString *name = cando_as_string(cv);
+    emit_mov_rdi_rbx(cg);
+    emit_mov_rsi_vals(cg, op1);
+    emit_movabs_rdx(cg, (u64)(uintptr_t)name);
+    emit_lea_rcx_vals(cg, i);                     /* arg4: &vals[i]  */
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_field_get_for_mcode);
+    emit_call_rax(cg);
+    emit_test_eax_eax(cg);
+    emit_jne_to_stub(cg, cg->cur_snap);
+    cg_invalidate_xmm0(cg);
+}
+
 /* IR_NEG: vals[i] = -vals[op1].  Computed as 0 - vals[op1] using the
  * existing subsd-with-zero idiom -- avoids encoding a 64-bit
  * sign-bit-mask constant. */
@@ -1027,6 +1088,23 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             }
             u32 val_ref = t->ir.ir[i - 1].op1;
             emit_index_set(&cg, in->op1, in->op2, val_ref);
+            break;
+        }
+        case IR_NEW_OBJECT:
+            emit_new_object(&cg, i);
+            break;
+        case IR_FIELD_GET:
+            emit_field_get(&cg, in->op1, in->op2, i, &t->ir);
+            break;
+        case IR_FIELD_SET_VAL:
+            /* Pair-prefix no-op; FIELD_SET reads from i-1. */
+            break;
+        case IR_FIELD_SET: {
+            if (i == 0 || t->ir.ir[i - 1].op != IR_FIELD_SET_VAL) {
+                cg.failed = true; break;
+            }
+            u32 val_ref = t->ir.ir[i - 1].op1;
+            emit_field_set(&cg, in->op1, in->op2, val_ref, &t->ir);
             break;
         }
         case IR_LOOP:
