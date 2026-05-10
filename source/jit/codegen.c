@@ -497,6 +497,93 @@ static u32 emit_jmp_rel32_placeholder(CG *cg) {
     return disp_off;
 }
 
+/* JNE rel32 -- 0F 85 disp32.  Returns offset of the disp32. */
+static u32 emit_jne_rel32_placeholder(CG *cg) {
+    cg_emit_u8(cg, 0x0F);
+    cg_emit_u8(cg, 0x85);
+    u32 disp_off = cg_off(cg);
+    cg_emit_u32(cg, 0);
+    return disp_off;
+}
+
+/* JAE rel32 -- 0F 83 disp32.  Returns offset of the disp32. */
+static u32 emit_jae_rel32_placeholder(CG *cg) {
+    cg_emit_u8(cg, 0x0F);
+    cg_emit_u8(cg, 0x83);
+    u32 disp_off = cg_off(cg);
+    cg_emit_u32(cg, 0);
+    return disp_off;
+}
+
+/* mov ecx, imm32     -- B9 imm32. */
+static void emit_mov_ecx_imm32(CG *cg, u32 imm) {
+    cg_emit_u8(cg, 0xB9);
+    cg_emit_u32(cg, imm);
+}
+
+/* mov ecx, [r12 + disp32]   -- 41 8B 8C 24 disp32  (32-bit load). */
+static void emit_mov_ecx_r12_off(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x41, 0x8B, 0x8C, 0x24 };
+    cg_emit_bytes(cg, b, 4);
+    cg_emit_u32(cg, (u32)disp);
+}
+
+/* cmp ecx, [r12 + disp32]   -- 41 3B 8C 24 disp32  (32-bit cmp). */
+static void emit_cmp_ecx_r12_off(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x41, 0x3B, 0x8C, 0x24 };
+    cg_emit_bytes(cg, b, 4);
+    cg_emit_u32(cg, (u32)disp);
+}
+
+/* mov rdx, [rbx + disp32]   -- 48 8B 93 disp32. */
+static void emit_mov_rdx_rbx_off(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x48, 0x8B, 0x93 };
+    cg_emit_bytes(cg, b, 3);
+    cg_emit_u32(cg, (u32)disp);
+}
+
+/* cmp ecx, [rdx + disp32]   -- 3B 8A disp32  (32-bit cmp). */
+static void emit_cmp_ecx_rdx_off(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x3B, 0x8A };
+    cg_emit_bytes(cg, b, 2);
+    cg_emit_u32(cg, (u32)disp);
+}
+
+/* mov rax, [rax + disp32]   -- 48 8B 80 disp32  (chained load). */
+static void emit_mov_rax_rax_off(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x48, 0x8B, 0x80 };
+    cg_emit_bytes(cg, b, 3);
+    cg_emit_u32(cg, (u32)disp);
+}
+
+/* cmp BYTE [rax + disp32], imm8   -- 80 B8 disp32 imm8. */
+static void emit_cmp_byte_rax_off_imm(CG *cg, i32 disp, u8 imm) {
+    static const u8 b[] = { 0x80, 0xB8 };
+    cg_emit_bytes(cg, b, 2);
+    cg_emit_u32(cg, (u32)disp);
+    cg_emit_u8(cg, imm);
+}
+
+/* ucomisd xmm0, xmm0   -- 66 0F 2E C0.  Sets PF=1 (and ZF=1) iff
+ * xmm0 holds NaN.  Used as a NaN test in inline GSTORE so we can
+ * dodge the helper's NaN canonicalisation only when xmm0 is a real
+ * number; NaNs fall through to the helper which writes the canonical
+ * positive qNaN bit pattern via cando_number(). */
+static void emit_ucomisd_xmm0_xmm0(CG *cg) {
+    static const u8 b[] = { 0x66, 0x0F, 0x2E, 0xC0 };
+    cg_emit_bytes(cg, b, 4);
+}
+
+/* JP rel32  -- 0F 8A disp32.  Branch on PF=1 (parity even); after
+ * ucomisd this fires iff the comparison saw a NaN operand. */
+static u32 emit_jp_rel32_placeholder(CG *cg) {
+    cg_emit_u8(cg, 0x0F);
+    cg_emit_u8(cg, 0x8A);
+    u32 disp_off = cg_off(cg);
+    cg_emit_u32(cg, 0);
+    return disp_off;
+}
+
 /* Patch a placeholder rel32 at `disp_off` so it targets `target`. */
 static void cg_patch_rel32(CG *cg, u32 disp_off, u32 target) {
     /* rel32 is `target - (disp_off + 4)` */
@@ -1371,13 +1458,108 @@ static void emit_gload_arr(CG *cg, const CandoTraceIR *ir, IRRef name_ref, u32 i
     cg_invalidate_xmm0(cg);
 }
 
-static void emit_gload(CG *cg, const CandoTraceIR *ir, IRRef name_ref, u32 i) {
+static void emit_gload(CG *cg, const CandoTraceIR *ir, IRRef name_ref,
+                       u32 i, bool inv) {
     if (!IRREF_IS_K(name_ref)) { cg->failed = true; return; }
     CandoValue cv = cando_ir_get_const(ir, name_ref);
     if (!cando_is_string(cv)) { cg->failed = true; return; }
     CandoString *name = cando_as_string(cv);
-    /* Phase 8.7: cached helper -- 5 args (vm, t, kidx, name, &out). */
     u32 kidx = IRREF_KIDX(name_ref);
+
+    /* Skip the inline fast path when the op is loop-invariant: the
+     * per-iter LICM `test r13b ; jne +disp8` skip caps op size at
+     * 127 bytes, and the inline path is much larger.  Invariant ops
+     * only execute on iter 1, so cache-warming gives no benefit -- a
+     * single helper call is the right tradeoff. */
+    if (inv) {
+        emit_mov_rdi_rbx(cg);
+        emit_mov_rsi_r12(cg);
+        emit_mov_edx_imm(cg, kidx);
+        emit_movabs_rcx(cg, (u64)(uintptr_t)name);
+        emit_lea_r8_vals(cg, i);
+        emit_movabs_rax(cg,
+            (u64)(uintptr_t)&cando_jit_gload_cached_for_mcode);
+        emit_call_rax(cg);
+        emit_test_eax_eax(cg);
+        emit_jne_to_stub(cg, cg->cur_snap);
+        cg_invalidate_xmm0(cg);
+        return;
+    }
+
+    /* Inline warm-path fast lookup: skip the helper call when the
+     * trace's per-kidx entry-pointer cache is hot AND globals_version
+     * matches.  The slow-path helper still ships untouched at the
+     * end so cold cache and bad-type all bail through it correctly.
+     *
+     * Layout (rax/rcx/rdx are scratch; r12 = trace, rbx = vm,
+     * r14 = vals):
+     *
+     *   mov  ecx, kidx
+     *   cmp  ecx, [r12 + cap_off]
+     *   jae  slow                        ; kidx out of cache range
+     *   mov  rax, [r12 + cache_off]
+     *   test rax, rax
+     *   jz   slow                        ; cache table not allocated
+     *   mov  rax, [rax + 8*kidx]         ; entry pointer
+     *   test rax, rax
+     *   jz   slow                        ; entry not yet cached
+     *   mov  ecx, [r12 + ver_seen_off]
+     *   mov  rdx, [rbx + globals_off]
+     *   cmp  ecx, [rdx + ver_off]
+     *   jne  slow                        ; rehash since cache populated
+     *   mov  rax, [rax + value_off]      ; entry->value.u
+     *   mov  [r14 + 8*i], rax
+     *   movabs rcx, NB_MASK
+     *   and  rax, rcx
+     *   cmp  rax, rcx
+     *   je   slow                        ; non-numeric -> let helper bail
+     *   jmp  done
+     * slow:
+     *   <existing 5-arg helper call>
+     * done:
+     */
+    u32 slow_jumps[5];
+    u32 n_slow = 0;
+
+    emit_mov_ecx_imm32(cg, kidx);
+    emit_cmp_ecx_r12_off(cg,
+        (i32)offsetof(struct CandoTrace, gload_entry_cache_cap));
+    slow_jumps[n_slow++] = emit_jae_rel32_placeholder(cg);
+
+    emit_mov_rax_r12_off(cg,
+        (i32)offsetof(struct CandoTrace, gload_entry_cache));
+    emit_test_rax_rax(cg);
+    slow_jumps[n_slow++] = emit_je_rel32_placeholder(cg);
+
+    /* 8 * kidx fits in disp32 for any sane kidx (const-pool indices
+     * stay well under 2^28). */
+    emit_mov_rax_rax_off(cg, (i32)(8u * kidx));
+    emit_test_rax_rax(cg);
+    slow_jumps[n_slow++] = emit_je_rel32_placeholder(cg);
+
+    emit_mov_ecx_r12_off(cg,
+        (i32)offsetof(struct CandoTrace, globals_version_seen));
+    emit_mov_rdx_rbx_off(cg, (i32)offsetof(struct CandoVM, globals));
+    emit_cmp_ecx_rdx_off(cg,
+        (i32)offsetof(struct CandoGlobalEnv, version));
+    slow_jumps[n_slow++] = emit_jne_rel32_placeholder(cg);
+
+    /* Cache + version OK.  Load value, commit, then verify type. */
+    emit_mov_rax_rax_off(cg,
+        (i32)offsetof(struct CandoGlobalEntry, value));
+    emit_mov_vals_rax(cg, i);
+    emit_movabs_rcx(cg, 0xFFF8000000000000ULL);   /* NB_MASK */
+    emit_and_rax_rcx(cg);
+    emit_cmp_rax_rcx(cg);
+    slow_jumps[n_slow++] = emit_je_rel32_placeholder(cg);
+
+    u32 jmp_done = emit_jmp_rel32_placeholder(cg);
+
+    /* Slow path: existing 5-arg helper (vm, t, kidx, name, &vals[i]). */
+    u32 slow_off = cg_off(cg);
+    for (u32 k = 0; k < n_slow; k++)
+        cg_patch_rel32(cg, slow_jumps[k], slow_off);
+
     emit_mov_rdi_rbx(cg);                         /* arg1: vm        */
     emit_mov_rsi_r12(cg);                         /* arg2: t         */
     emit_mov_edx_imm(cg, kidx);                   /* arg3: kidx      */
@@ -1387,6 +1569,9 @@ static void emit_gload(CG *cg, const CandoTraceIR *ir, IRRef name_ref, u32 i) {
     emit_call_rax(cg);
     emit_test_eax_eax(cg);
     emit_jne_to_stub(cg, cg->cur_snap);
+
+    u32 done_off = cg_off(cg);
+    cg_patch_rel32(cg, jmp_done, done_off);
     cg_invalidate_xmm0(cg);                       /* call clobbered xmm0 */
 }
 
@@ -1471,23 +1656,117 @@ static void emit_hlen(CG *cg, const CandoTraceIR *ir, u32 op1, u32 i) {
 }
 
 static void emit_gstore(CG *cg, const CandoTraceIR *ir, IRRef name_ref,
-                        u32 op2) {
+                        u32 op2, bool inv) {
     if (!IRREF_IS_K(name_ref)) { cg->failed = true; return; }
     CandoValue cv = cando_ir_get_const(ir, name_ref);
     if (!cando_is_string(cv)) { cg->failed = true; return; }
     CandoString *name = cando_as_string(cv);
-    /* Phase 8.7: cached helper -- 5 args (vm, t, kidx, name, value). */
     u32 kidx = IRREF_KIDX(name_ref);
+
+    if (inv) {
+        /* Same rationale as emit_gload's invariant branch -- the
+         * 80+ byte inline doesn't fit in the LICM-skip disp8 budget,
+         * and a value that only gets written once doesn't need the
+         * inline anyway. */
+        emit_mov_rdi_rbx(cg);
+        emit_mov_rsi_r12(cg);
+        emit_mov_edx_imm(cg, kidx);
+        emit_movabs_rcx(cg, (u64)(uintptr_t)name);
+        emit_load_xmm0(cg, op2);
+        emit_movabs_rax(cg,
+            (u64)(uintptr_t)&cando_jit_gstore_cached_for_mcode);
+        emit_call_rax(cg);
+        emit_test_eax_eax(cg);
+        emit_jne_to_stub(cg, cg->cur_snap);
+        cg_invalidate_xmm0(cg);
+        return;
+    }
+
+    /* Inline warm-path fast write: same cache-pointer handshake as
+     * emit_gload, plus an is_const guard and a NaN bail (so a NaN
+     * result from arith doesn't alias the boxed-value tag space).
+     * On any miss / version mismatch / const-protected entry / NaN
+     * value, fall through to the existing 5-arg helper which handles
+     * all the boxing edge cases.
+     *
+     * xmm0 holds the value (loaded from vals[op2]).  Layout is:
+     *
+     *   <cache lookup, identical to emit_gload>      ; rax = entry
+     *   cmp BYTE [rax + is_const_off], 0
+     *   jne slow                                     ; const-protected
+     *   ucomisd xmm0, xmm0
+     *   jp  slow                                     ; NaN -> helper
+     *   movsd [rax + value_off], xmm0
+     *   jmp done
+     * slow:
+     *   <existing 5-arg helper>
+     * done:
+     */
+    emit_load_xmm0(cg, op2);                      /* xmm0 = value     */
+
+    u32 slow_jumps[7];
+    u32 n_slow = 0;
+
+    emit_mov_ecx_imm32(cg, kidx);
+    emit_cmp_ecx_r12_off(cg,
+        (i32)offsetof(struct CandoTrace, gload_entry_cache_cap));
+    slow_jumps[n_slow++] = emit_jae_rel32_placeholder(cg);
+
+    emit_mov_rax_r12_off(cg,
+        (i32)offsetof(struct CandoTrace, gload_entry_cache));
+    emit_test_rax_rax(cg);
+    slow_jumps[n_slow++] = emit_je_rel32_placeholder(cg);
+
+    emit_mov_rax_rax_off(cg, (i32)(8u * kidx));
+    emit_test_rax_rax(cg);
+    slow_jumps[n_slow++] = emit_je_rel32_placeholder(cg);
+
+    emit_mov_ecx_r12_off(cg,
+        (i32)offsetof(struct CandoTrace, globals_version_seen));
+    emit_mov_rdx_rbx_off(cg, (i32)offsetof(struct CandoVM, globals));
+    emit_cmp_ecx_rdx_off(cg,
+        (i32)offsetof(struct CandoGlobalEnv, version));
+    slow_jumps[n_slow++] = emit_jne_rel32_placeholder(cg);
+
+    /* is_const guard.  CandoGlobalEntry.is_const is a bool (1 byte)
+     * placed after key + value; a non-zero byte means write-protected. */
+    emit_cmp_byte_rax_off_imm(cg,
+        (i32)offsetof(struct CandoGlobalEntry, is_const), 0);
+    slow_jumps[n_slow++] = emit_jne_rel32_placeholder(cg);
+
+    /* NaN bail -- the helper canonicalises NaNs to positive qNaN to
+     * keep them out of the NaN-box tag space; we don't want to write
+     * a raw negative-NaN that would alias a boxed value. */
+    emit_ucomisd_xmm0_xmm0(cg);
+    slow_jumps[n_slow++] = emit_jp_rel32_placeholder(cg);
+
+    /* offsetof(CandoGlobalEntry, value) is 8 in the current layout
+     * (key=8, then value=8); use the existing disp8 movsd helper.
+     * Static_assert below catches a future re-layout. */
+    _Static_assert(offsetof(struct CandoGlobalEntry, value) == 8,
+                   "GSTORE inline assumes CandoGlobalEntry.value is at offset 8");
+    emit_movsd_rax_off8_xmm0(cg, 8);
+
+    u32 jmp_done = emit_jmp_rel32_placeholder(cg);
+
+    /* Slow path: existing 5-arg helper (vm, t, kidx, name, value). */
+    u32 slow_off = cg_off(cg);
+    for (u32 k = 0; k < n_slow; k++)
+        cg_patch_rel32(cg, slow_jumps[k], slow_off);
+
     emit_mov_rdi_rbx(cg);                         /* arg1: vm        */
     emit_mov_rsi_r12(cg);                         /* arg2: t         */
     emit_mov_edx_imm(cg, kidx);                   /* arg3: kidx      */
     emit_movabs_rcx(cg, (u64)(uintptr_t)name);    /* arg4: name      */
-    emit_load_xmm0(cg, op2);                      /* arg5: value (xmm0) */
+    /* xmm0 still holds the value -- no reload needed before the call. */
     emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_gstore_cached_for_mcode);
     emit_call_rax(cg);
     emit_test_eax_eax(cg);
     emit_jne_to_stub(cg, cg->cur_snap);
-    cg_invalidate_xmm0(cg);                       /* call clobbered xmm0 */
+
+    u32 done_off = cg_off(cg);
+    cg_patch_rel32(cg, jmp_done, done_off);
+    cg_invalidate_xmm0(cg);                       /* call may have clobbered */
 }
 
 /* sqrtsd xmm0, xmm0   ; F2 0F 51 C0   (4 bytes; in-place sqrt of xmm0). */
@@ -1717,13 +1996,13 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             if (in->type == IRT_OBJ) {
                 emit_gload_arr(&cg, &t->ir, in->op1, i);
             } else if (in->type == IRT_NUM) {
-                emit_gload(&cg, &t->ir, in->op1, i);
+                emit_gload(&cg, &t->ir, in->op1, i, is_inv);
             } else {
                 cg.failed = true;
             }
             break;
         case IR_GSTORE:
-            emit_gstore(&cg, &t->ir, in->op1, in->op2);
+            emit_gstore(&cg, &t->ir, in->op1, in->op2, is_inv);
             break;
         case IR_HLOAD_SLOT:
             emit_hload_slot(&cg, in->op1, i);
