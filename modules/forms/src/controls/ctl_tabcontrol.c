@@ -49,8 +49,8 @@ int native_remove_tab(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "removeTab");
     if (!s) return -1;
-    int idx = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-              (int)args[1].as.number : -1;
+    int idx = (argc >= 2 && cando_is_number(args[1])) ?
+              (int)cando_as_number(args[1]) : -1;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TABCONTROL && idx >= 0) {
         SendMessageW(s->hwnd, TCM_DELETEITEM, (WPARAM)idx, 0);
@@ -107,8 +107,8 @@ int native_set_selected_tab(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setSelectedIndex");
     if (!s) return -1;
-    int idx = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-              (int)args[1].as.number : 0;
+    int idx = (argc >= 2 && cando_is_number(args[1])) ?
+              (int)cando_as_number(args[1]) : 0;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TABCONTROL) {
         SendMessageW(s->hwnd, TCM_SETCURSEL, (WPARAM)idx, 0);
@@ -124,8 +124,8 @@ int native_get_tab_text(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "getTabText");
     if (!s) return -1;
-    int idx = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-              (int)args[1].as.number : -1;
+    int idx = (argc >= 2 && cando_is_number(args[1])) ?
+              (int)cando_as_number(args[1]) : -1;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TABCONTROL && idx >= 0) {
         wchar_t buf[512] = {0};
@@ -154,8 +154,8 @@ int native_set_tab_text(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setTabText");
     if (!s) return -1;
-    int idx = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-              (int)args[1].as.number : -1;
+    int idx = (argc >= 2 && cando_is_number(args[1])) ?
+              (int)cando_as_number(args[1]) : -1;
     char buf[256] = {0};
     if (argc >= 3) parse_text_arg(vm, args[2], buf, sizeof(buf));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)

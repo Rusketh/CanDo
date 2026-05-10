@@ -48,7 +48,7 @@
    } CandoString;
    /* Field names mirror the production CandoValue layout in
     * source/core/value.h so any TU that compiles in both modes can
-    * use `v.as.number` / `v.as.string` / `v.as.boolean` / `v.as.handle`
+    * use `v.as.number` / `v.as.string` / `v.as.boolean` / `cando_as_handle(v)`
     * uniformly. */
    typedef struct CandoValue {
        int tag;
@@ -73,6 +73,17 @@
        CDO_NATIVE   = 7,
    };
    #endif
+   /* Match the production NaN-box accessors (source/core/value.h) so
+    * forms TUs can use the same API in both build modes. */
+   static inline bool         cando_is_null  (CandoValue v) { return v.tag == CDO_NULL; }
+   static inline bool         cando_is_bool  (CandoValue v) { return v.tag == CDO_BOOL; }
+   static inline bool         cando_is_number(CandoValue v) { return v.tag == CDO_NUMBER; }
+   static inline bool         cando_is_string(CandoValue v) { return v.tag == CDO_STRING; }
+   static inline bool         cando_is_object(CandoValue v) { return v.tag == CDO_OBJECT; }
+   static inline bool         cando_as_bool  (CandoValue v) { return v.as.boolean; }
+   static inline double       cando_as_number(CandoValue v) { return v.as.number; }
+   static inline CandoString *cando_as_string(CandoValue v) { return v.as.string; }
+   static inline unsigned int cando_as_handle(CandoValue v) { return v.as.handle; }
    static inline CdoString *cdo_string_intern(const char *s, u32 n) {
        (void)s; (void)n; return (CdoString *)0;
    }

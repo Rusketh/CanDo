@@ -13,13 +13,13 @@
 
 static int parse_splitter_orientation(CandoValue v)
 {
-    if (v.tag == CDO_NUMBER) {
-        int n = (int)v.as.number;
+    if (cando_is_number(v)) {
+        int n = (int)cando_as_number(v);
         return (n == 1) ? 1 : 0;
     }
-    if (v.tag == CDO_STRING && v.as.string) {
-        const char *t = v.as.string->data;
-        u32 n = v.as.string->length;
+    if (cando_is_string(v) && cando_as_string(v)) {
+        const char *t = cando_as_string(v)->data;
+        u32 n = cando_as_string(v)->length;
         if (n == 8 && memcmp(t, "vertical",   8) == 0) return 0;
         if (n == 10 && memcmp(t, "horizontal", 10) == 0) return 1;
     }

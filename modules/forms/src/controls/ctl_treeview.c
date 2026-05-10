@@ -39,8 +39,8 @@ int native_tree_add_node(CandoVM *vm, int argc, CandoValue *args)
     if (!s) return -1;
 
     /* args[1] = parent handle (number) or NULL/0; args[2] = text. */
-    double parent_n = (argc >= 2 && args[1].tag == CDO_NUMBER) ? args[1].as.number : 0.0;
-    int    text_arg = (argc >= 3) ? 2 : (argc >= 2 && args[1].tag == CDO_STRING ? 1 : -1);
+    double parent_n = (argc >= 2 && cando_is_number(args[1])) ? cando_as_number(args[1]) : 0.0;
+    int    text_arg = (argc >= 3) ? 2 : (argc >= 2 && cando_is_string(args[1]) ? 1 : -1);
     char buf[512] = {0};
     if (text_arg >= 0) parse_text_arg(vm, args[text_arg], buf, sizeof(buf));
 
@@ -73,7 +73,7 @@ int native_tree_remove_node(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "removeNode");
     if (!s) return -1;
-    double n = (argc >= 2 && args[1].tag == CDO_NUMBER) ? args[1].as.number : 0.0;
+    double n = (argc >= 2 && cando_is_number(args[1])) ? cando_as_number(args[1]) : 0.0;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TREEVIEW && n != 0.0) {
         SendMessageW(s->hwnd, TVM_DELETEITEM, 0, (LPARAM)tv_number_to_handle(n));
@@ -118,7 +118,7 @@ int native_tree_set_selected_node(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setSelectedNode");
     if (!s) return -1;
-    double n = (argc >= 2 && args[1].tag == CDO_NUMBER) ? args[1].as.number : 0.0;
+    double n = (argc >= 2 && cando_is_number(args[1])) ? cando_as_number(args[1]) : 0.0;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TREEVIEW) {
         SendMessageW(s->hwnd, TVM_SELECTITEM, TVGN_CARET,
@@ -135,7 +135,7 @@ int native_tree_expand_node(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "expandNode");
     if (!s) return -1;
-    double n = (argc >= 2 && args[1].tag == CDO_NUMBER) ? args[1].as.number : 0.0;
+    double n = (argc >= 2 && cando_is_number(args[1])) ? cando_as_number(args[1]) : 0.0;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TREEVIEW && n != 0.0) {
         SendMessageW(s->hwnd, TVM_EXPAND, TVE_EXPAND,
@@ -152,7 +152,7 @@ int native_tree_collapse_node(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "collapseNode");
     if (!s) return -1;
-    double n = (argc >= 2 && args[1].tag == CDO_NUMBER) ? args[1].as.number : 0.0;
+    double n = (argc >= 2 && cando_is_number(args[1])) ? cando_as_number(args[1]) : 0.0;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TREEVIEW && n != 0.0) {
         SendMessageW(s->hwnd, TVM_EXPAND, TVE_COLLAPSE,
@@ -169,7 +169,7 @@ int native_tree_get_node_text(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "getNodeText");
     if (!s) return -1;
-    double n = (argc >= 2 && args[1].tag == CDO_NUMBER) ? args[1].as.number : 0.0;
+    double n = (argc >= 2 && cando_is_number(args[1])) ? cando_as_number(args[1]) : 0.0;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TREEVIEW && n != 0.0) {
         wchar_t buf[512] = {0};
@@ -199,7 +199,7 @@ int native_tree_set_node_text(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setNodeText");
     if (!s) return -1;
-    double n = (argc >= 2 && args[1].tag == CDO_NUMBER) ? args[1].as.number : 0.0;
+    double n = (argc >= 2 && cando_is_number(args[1])) ? cando_as_number(args[1]) : 0.0;
     char buf[512] = {0};
     if (argc >= 3) parse_text_arg(vm, args[2], buf, sizeof(buf));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)

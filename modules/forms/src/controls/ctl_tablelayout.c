@@ -211,8 +211,8 @@ int native_set_columns(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setColumns");
     if (!s) return -1;
-    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-            (int)args[1].as.number : 1;
+    int n = (argc >= 2 && cando_is_number(args[1])) ?
+            (int)cando_as_number(args[1]) : 1;
     if (n < 1) n = 1;
     s->table_cols = n;
     tablelayout_relayout_now(s);
@@ -224,8 +224,8 @@ int native_set_rows(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setRows");
     if (!s) return -1;
-    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-            (int)args[1].as.number : 1;
+    int n = (argc >= 2 && cando_is_number(args[1])) ?
+            (int)cando_as_number(args[1]) : 1;
     if (n < 1) n = 1;
     s->table_rows = n;
     tablelayout_relayout_now(s);
@@ -237,8 +237,8 @@ int native_set_cell_padding(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setCellPadding");
     if (!s) return -1;
-    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-            (int)args[1].as.number : 0;
+    int n = (argc >= 2 && cando_is_number(args[1])) ?
+            (int)cando_as_number(args[1]) : 0;
     if (n < 0) n = 0;
     s->cell_padding = n;
     tablelayout_relayout_now(s);
@@ -259,10 +259,10 @@ int native_table_add(CandoVM *vm, int argc, CandoValue *args)
         forms_throw(vm, "add: invalid child instance");
         return -1;
     }
-    int col = (args[2].tag == CDO_NUMBER) ? (int)args[2].as.number : 0;
-    int row = (args[3].tag == CDO_NUMBER) ? (int)args[3].as.number : 0;
-    int cs  = (argc >= 5 && args[4].tag == CDO_NUMBER) ? (int)args[4].as.number : 1;
-    int rs  = (argc >= 6 && args[5].tag == CDO_NUMBER) ? (int)args[5].as.number : 1;
+    int col = (cando_is_number(args[2])) ? (int)cando_as_number(args[2]) : 0;
+    int row = (cando_is_number(args[3])) ? (int)cando_as_number(args[3]) : 0;
+    int cs  = (argc >= 5 && cando_is_number(args[4])) ? (int)cando_as_number(args[4]) : 1;
+    int rs  = (argc >= 6 && cando_is_number(args[5])) ? (int)cando_as_number(args[5]) : 1;
     if (col < 0) col = 0;
     if (row < 0) row = 0;
     if (cs  < 1) cs  = 1;

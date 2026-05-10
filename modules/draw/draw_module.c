@@ -99,17 +99,17 @@ static void obj_set_string(CdoObject *obj, const char *key,
 
 static double argd(CandoValue v, double dflt)
 {
-    return (v.tag == CDO_NUMBER) ? v.as.number : dflt;
+    return (cando_is_number(v)) ? cando_as_number(v) : dflt;
 }
 
 /* Match a string CandoValue against a literal -- helper for
  * mode-string discrimination ("fill" vs "line" on rectangle()). */
 static bool arg_streq(CandoValue v, const char *s)
 {
-    if (v.tag != CDO_STRING || !v.as.string) return false;
+    if (!cando_is_string(v) || !cando_as_string(v)) return false;
     u32 n = (u32)strlen(s);
-    if (v.as.string->length != n) return false;
-    return memcmp(v.as.string->data, s, n) == 0;
+    if (cando_as_string(v)->length != n) return false;
+    return memcmp(cando_as_string(v)->data, s, n) == 0;
 }
 
 /* =========================================================================
@@ -420,7 +420,7 @@ static ImageSlot *resolve_image(CandoVM *vm, CandoValue v, const char *fn)
         cando_vm_error(vm, "%s: expected image instance", fn);
         return NULL;
     }
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     f64 fslot = -1.0, fgen = -1.0;
     CdoString *kslot = cdo_string_intern(IMAGE_SLOT_KEY,
                                          (u32)strlen(IMAGE_SLOT_KEY));
@@ -460,15 +460,15 @@ static void obj_set_number_local(CdoObject *obj, const char *key, f64 value)
  * context here. */
 static int draw_new_image(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || args[0].tag != CDO_STRING || !args[0].as.string) {
+    if (argc < 1 || !cando_is_string(args[0]) || !cando_as_string(args[0])) {
         cando_vm_error(vm, "draw.newImage: (path) required");
         return -1;
     }
     /* Copy path to a NUL-terminated buffer. */
-    u32 plen = args[0].as.string->length;
+    u32 plen = cando_as_string(args[0])->length;
     if (plen >= 1024) plen = 1023;
     char path[1024];
-    memcpy(path, args[0].as.string->data, plen);
+    memcpy(path, cando_as_string(args[0])->data, plen);
     path[plen] = '\0';
 
     int w = 0, h = 0, n = 0;
@@ -490,7 +490,7 @@ static int draw_new_image(CandoVM *vm, int argc, CandoValue *args)
     g_images[idx].height = h;
 
     CandoValue inst = cando_bridge_new_object(vm);
-    CdoObject *o    = cando_bridge_resolve(vm, inst.as.handle);
+    CdoObject *o    = cando_bridge_resolve(vm, cando_as_handle(inst));
     obj_set_number_local(o, IMAGE_SLOT_KEY, (f64)idx);
     obj_set_number_local(o, IMAGE_GEN_KEY,  (f64)g_images[idx].generation);
     obj_set_number_local(o, "width",  (f64)w);
@@ -633,7 +633,7 @@ static int image_release(CandoVM *vm, int argc, CandoValue *args)
 {
     if (argc < 1) { cando_vm_error(vm, "image.release: (image) required"); return -1; }
     if (!cando_is_object(args[0])) { cando_vm_push(vm, cando_bool(false)); return 1; }
-    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     f64 fslot = -1.0;
     CdoString *kslot = cdo_string_intern(IMAGE_SLOT_KEY,
                                          (u32)strlen(IMAGE_SLOT_KEY));
@@ -722,7 +722,7 @@ static FontSlot *resolve_font(CandoVM *vm, CandoValue v, const char *fn)
         cando_vm_error(vm, "%s: expected font instance", fn);
         return NULL;
     }
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     f64 fslot = -1.0, fgen = -1.0;
     CdoString *kslot = cdo_string_intern(FONT_SLOT_KEY,
                                          (u32)strlen(FONT_SLOT_KEY));
@@ -752,7 +752,7 @@ static FontSlot *resolve_font(CandoVM *vm, CandoValue v, const char *fn)
 /* draw.newFont(path, pixel_height) */
 static int draw_new_font(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 1 || args[0].tag != CDO_STRING || !args[0].as.string) {
+    if (argc < 1 || !cando_is_string(args[0]) || !cando_as_string(args[0])) {
         cando_vm_error(vm, "draw.newFont: (path[, size]) required");
         return -1;
     }
@@ -761,9 +761,9 @@ static int draw_new_font(CandoVM *vm, int argc, CandoValue *args)
 
     /* Slurp the file. */
     char path[1024];
-    u32 plen = args[0].as.string->length;
+    u32 plen = cando_as_string(args[0])->length;
     if (plen >= sizeof(path)) plen = sizeof(path) - 1;
-    memcpy(path, args[0].as.string->data, plen);
+    memcpy(path, cando_as_string(args[0])->data, plen);
     path[plen] = '\0';
 
     FILE *f = fopen(path, "rb");
@@ -827,7 +827,7 @@ static int draw_new_font(CandoVM *vm, int argc, CandoValue *args)
     }
 
     CandoValue inst = cando_bridge_new_object(vm);
-    CdoObject *o    = cando_bridge_resolve(vm, inst.as.handle);
+    CdoObject *o    = cando_bridge_resolve(vm, cando_as_handle(inst));
     obj_set_number_local(o, FONT_SLOT_KEY, (f64)idx);
     obj_set_number_local(o, FONT_GEN_KEY,  (f64)fs->generation);
     obj_set_number_local(o, "size", (f64)ph);
@@ -879,7 +879,7 @@ static int draw_set_font(CandoVM *vm, int argc, CandoValue *args)
  *              matrix the same way draw.draw does. */
 static int draw_print(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 3 || args[0].tag != CDO_STRING || !args[0].as.string) {
+    if (argc < 3 || !cando_is_string(args[0]) || !cando_as_string(args[0])) {
         cando_vm_error(vm, "draw.print: (text, x, y[, r, sx, sy]) required");
         return -1;
     }
@@ -892,8 +892,8 @@ static int draw_print(CandoVM *vm, int argc, CandoValue *args)
     }
     FontSlot *fs = &g_fonts[g_current_font_slot];
 
-    const char *text = args[0].as.string->data;
-    u32         tlen = args[0].as.string->length;
+    const char *text = cando_as_string(args[0])->data;
+    u32         tlen = cando_as_string(args[0])->length;
     float x = (float)argd(args[1], 0.0);
     float y = (float)argd(args[2], 0.0);
     float r  = (float)(argc >= 4 ? argd(args[3], 0.0) : 0.0);
@@ -939,14 +939,14 @@ static int draw_print(CandoVM *vm, int argc, CandoValue *args)
 /* font:getWidth(text) */
 static int font_get_width(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 2 || args[1].tag != CDO_STRING || !args[1].as.string) {
+    if (argc < 2 || !cando_is_string(args[1]) || !cando_as_string(args[1])) {
         cando_vm_error(vm, "font.getWidth: (font, text) required");
         return -1;
     }
     FontSlot *fs = resolve_font(vm, args[0], "font.getWidth");
     if (!fs) return -1;
-    const char *text = args[1].as.string->data;
-    u32         tlen = args[1].as.string->length;
+    const char *text = cando_as_string(args[1])->data;
+    u32         tlen = cando_as_string(args[1])->length;
     float w = 0.0f;
     for (u32 i = 0; i < tlen; i++) {
         unsigned char ch = (unsigned char)text[i];
@@ -972,7 +972,7 @@ static int font_release(CandoVM *vm, int argc, CandoValue *args)
 {
     if (argc < 1) { cando_vm_error(vm, "font.release: (font) required"); return -1; }
     if (!cando_is_object(args[0])) { cando_vm_push(vm, cando_bool(false)); return 1; }
-    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     f64 fslot = -1.0;
     CdoString *kslot = cdo_string_intern(FONT_SLOT_KEY,
                                          (u32)strlen(FONT_SLOT_KEY));
@@ -1015,7 +1015,7 @@ CandoValue cando_module_init(CandoVM *vm)
     cando_lib_meta_define(vm, font_meta, "release",   font_release);
 
     CandoValue tbl = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(tbl));
 
     obj_set_string(obj, "VERSION",
                    DRAW_MODULE_VERSION,

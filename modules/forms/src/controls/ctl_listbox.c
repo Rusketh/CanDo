@@ -95,7 +95,7 @@ int native_get_item(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "getItem");
     if (!s) return -1;
-    int idx = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : -1;
+    int idx = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : -1;
     if (idx < 0) {
         cando_vm_push(vm, cando_null());
         return 1;
@@ -118,7 +118,7 @@ int native_get_items(CandoVM *vm, int argc, CandoValue *args)
     FormsSlot *s = arg_self(vm, argc, args, "getItems");
     if (!s) return -1;
     CandoValue arr = cando_bridge_new_array(vm);
-    CdoObject *a   = cando_bridge_resolve(vm, arr.as.handle);
+    CdoObject *a   = cando_bridge_resolve(vm, cando_as_handle(arr));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd) {
         int n = 0;
@@ -146,7 +146,7 @@ int native_remove_item(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "removeItem");
     if (!s) return -1;
-    int idx = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : -1;
+    int idx = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : -1;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && idx >= 0) {
         if (s->kind == KIND_LISTBOX)
@@ -182,7 +182,7 @@ int native_set_selected_index(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setSelectedIndex");
     if (!s) return -1;
-    int idx = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : -1;
+    int idx = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : -1;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd) {
         if (s->kind == KIND_LISTBOX)

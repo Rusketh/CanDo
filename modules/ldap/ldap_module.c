@@ -298,7 +298,7 @@ static void obj_set_number(CdoObject *obj, const char *key, f64 value)
 static CandoValue make_handle(CandoVM *vm, int slot)
 {
     CandoValue v   = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     obj_set_number(obj, LDAP_SLOT_KEY, (f64)slot);
     return v;
 }
@@ -308,7 +308,7 @@ static CandoValue make_handle(CandoVM *vm, int slot)
 static int handle_slot(CandoVM *vm, CandoValue v)
 {
     if (!cando_is_object(v)) return -1;
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     f64 idx = -1.0;
     if (!obj_get_number(obj, LDAP_SLOT_KEY, &idx)) return -1;
     int i = (int)idx;
@@ -341,7 +341,7 @@ static void handle_mark_closed(CandoVM *vm, CandoValue v)
     if (slot >= 0) pool_release(slot);
     /* Stomp the field so subsequent unwraps see "expected connection". */
     if (cando_is_object(v)) {
-        CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+        CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
         obj_set_number(obj, LDAP_SLOT_KEY, -1.0);
     }
 }
@@ -455,7 +455,7 @@ static int native_ldap_set_option(CandoVM *vm, int argc, CandoValue *args)
         int v = (int)libutil_arg_num_at(args, argc, 2, (f64)LDAP_VERSION3);
         rc = ldap_set_option(ld, LDAP_OPT_PROTOCOL_VERSION, &v);
     } else if (strcmp(name, "referrals") == 0) {
-        bool on = cando_is_bool(args[2]) && args[2].as.boolean;
+        bool on = cando_is_bool(args[2]) && cando_as_bool(args[2]);
 #if defined(LDAP_PLATFORM_WINDOWS)
         ULONG v = on ? 1U : 0U;
         rc = (int)ldap_set_option(ld, LDAP_OPT_REFERRALS, &v);
@@ -732,7 +732,7 @@ static int native_ldap_search(CandoVM *vm, int argc, CandoValue *args)
         ldap_throw(vm, NULL, 0, "ldap.search: options must be an object");
         return -1;
     }
-    CdoObject *opts = cando_bridge_resolve(vm, args[1].as.handle);
+    CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[1]));
 
     const char *base   = NULL;
     const char *filter = "(objectClass=*)";
@@ -803,7 +803,7 @@ static int native_ldap_search(CandoVM *vm, int argc, CandoValue *args)
     /* Build [{dn, attributes:{name:[vals]}}, ...] -- accumulating entries
      * across paged responses if page_size > 0. */
     CandoValue out_arr_v = cando_bridge_new_array(vm);
-    CdoObject *out_arr   = cando_bridge_resolve(vm, out_arr_v.as.handle);
+    CdoObject *out_arr   = cando_bridge_resolve(vm, cando_as_handle(out_arr_v));
 
 #if defined(LDAP_PLATFORM_WINDOWS)
     struct l_timeval tv;  tv.tv_sec = time_limit; tv.tv_usec = 0;
@@ -868,7 +868,7 @@ static int native_ldap_search(CandoVM *vm, int argc, CandoValue *args)
              e = ldap_next_entry(ld, e))
         {
             CandoValue ent_v = cando_bridge_new_object(vm);
-            CdoObject *ent   = cando_bridge_resolve(vm, ent_v.as.handle);
+            CdoObject *ent   = cando_bridge_resolve(vm, cando_as_handle(ent_v));
 
             char *dn = ldap_get_dn(ld, e);
             if (dn) {
@@ -877,7 +877,7 @@ static int native_ldap_search(CandoVM *vm, int argc, CandoValue *args)
             }
 
             CandoValue attr_v = cando_bridge_new_object(vm);
-            CdoObject *attro  = cando_bridge_resolve(vm, attr_v.as.handle);
+            CdoObject *attro  = cando_bridge_resolve(vm, cando_as_handle(attr_v));
 
             BerElement *ber = NULL;
             for (char *aname = ldap_first_attribute(ld, e, &ber);
@@ -886,7 +886,7 @@ static int native_ldap_search(CandoVM *vm, int argc, CandoValue *args)
             {
                 struct berval **vals = ldap_get_values_len(ld, e, aname);
                 CandoValue vals_v   = cando_bridge_new_array(vm);
-                CdoObject *vals_arr = cando_bridge_resolve(vm, vals_v.as.handle);
+                CdoObject *vals_arr = cando_bridge_resolve(vm, cando_as_handle(vals_v));
                 if (vals) {
                     for (int i = 0; vals[i] != NULL; i++) {
                         CdoString *vs = cdo_string_intern(
@@ -1244,7 +1244,7 @@ static int native_ldap_add(CandoVM *vm, int argc, CandoValue *args)
         ldap_throw(vm, NULL, 0, "ldap.add: attrs must be an object");
         return -1;
     }
-    CdoObject *attrs = cando_bridge_resolve(vm, args[2].as.handle);
+    CdoObject *attrs = cando_bridge_resolve(vm, cando_as_handle(args[2]));
     if (attrs->kind == OBJ_ARRAY) {
         ldap_throw(vm, NULL, 0, "ldap.add: attrs must be an object, not an array");
         return -1;
@@ -1291,7 +1291,7 @@ static int native_ldap_modify(CandoVM *vm, int argc, CandoValue *args)
         ldap_throw(vm, NULL, 0, "ldap.modify: mods must be an array");
         return -1;
     }
-    CdoObject *modarr = cando_bridge_resolve(vm, args[2].as.handle);
+    CdoObject *modarr = cando_bridge_resolve(vm, cando_as_handle(args[2]));
     if (modarr->kind != OBJ_ARRAY) {
         ldap_throw(vm, NULL, 0, "ldap.modify: mods must be an array of objects");
         return -1;
@@ -1367,7 +1367,7 @@ static int native_ldap_rename(CandoVM *vm, int argc, CandoValue *args)
     }
     int delete_old = 1;
     if (argc >= 4 && cando_is_bool(args[3])) {
-        delete_old = args[3].as.boolean ? 1 : 0;
+        delete_old = cando_as_bool(args[3]) ? 1 : 0;
     }
 #if defined(LDAP_PLATFORM_WINDOWS)
     int rc = (int)ldap_rename_ext_s(ld, (PCHAR)dn, (PCHAR)new_rdn, NULL,
@@ -1407,7 +1407,7 @@ static int native_ldap_move(CandoVM *vm, int argc, CandoValue *args)
     const char *new_rdn = libutil_arg_cstr_at(args, argc, 3);
     int delete_old = 1;
     if (argc >= 5 && cando_is_bool(args[4])) {
-        delete_old = args[4].as.boolean ? 1 : 0;
+        delete_old = cando_as_bool(args[4]) ? 1 : 0;
     }
 
     /* Default RDN = the leftmost component of dn, up to first unescaped comma */
@@ -1465,8 +1465,8 @@ static int native_ldap_compare(CandoVM *vm, int argc, CandoValue *args)
         return -1;
     }
     struct berval bv;
-    bv.bv_val = (char *)args[3].as.string->data;
-    bv.bv_len = args[3].as.string->length;
+    bv.bv_val = (char *)cando_as_string(args[3])->data;
+    bv.bv_len = cando_as_string(args[3])->length;
 
 #if defined(LDAP_PLATFORM_WINDOWS)
     int rc = (int)ldap_compare_ext_s(ld, (PCHAR)dn, (PCHAR)attr,
@@ -1503,7 +1503,7 @@ static int native_ldap_escape_filter(CandoVM *vm, int argc, CandoValue *args)
             "ldap.escape_filter: value must be a string");
         return -1;
     }
-    CandoString *s = args[0].as.string;
+    CandoString *s = cando_as_string(args[0]);
     long need = ldap_helpers_escape_filter(s->data, s->length, NULL, 0);
     if (need < 0) {
         ldap_throw(vm, NULL, 0, "ldap.escape_filter: failed to size buffer");
@@ -1540,7 +1540,7 @@ static int native_ldap_escape_dn(CandoVM *vm, int argc, CandoValue *args)
             "ldap.escape_dn: value must be a string");
         return -1;
     }
-    CandoString *s = args[0].as.string;
+    CandoString *s = cando_as_string(args[0]);
     long need = ldap_helpers_escape_dn(s->data, s->length, NULL, 0);
     if (need < 0) {
         ldap_throw(vm, NULL, 0, "ldap.escape_dn: failed to size buffer");
@@ -1586,7 +1586,7 @@ static int native_ldap_rootdse(CandoVM *vm, int argc, CandoValue *args)
     /* Build attrs[] if caller passed a list. */
     char **attrs = NULL;
     if (argc >= 2 && cando_is_object(args[1])) {
-        CdoObject *aro = cando_bridge_resolve(vm, args[1].as.handle);
+        CdoObject *aro = cando_bridge_resolve(vm, cando_as_handle(args[1]));
         if (aro->kind == OBJ_ARRAY) {
             u32 n = cdo_array_len(aro);
             attrs = (char **)calloc((size_t)n + 1, sizeof(char *));
@@ -1645,7 +1645,7 @@ static int native_ldap_rootdse(CandoVM *vm, int argc, CandoValue *args)
     }
 
     CandoValue attr_v = cando_bridge_new_object(vm);
-    CdoObject *attro  = cando_bridge_resolve(vm, attr_v.as.handle);
+    CdoObject *attro  = cando_bridge_resolve(vm, cando_as_handle(attr_v));
 
     BerElement *ber = NULL;
     for (char *aname = ldap_first_attribute(ld, e, &ber);
@@ -1654,7 +1654,7 @@ static int native_ldap_rootdse(CandoVM *vm, int argc, CandoValue *args)
     {
         struct berval **vals = ldap_get_values_len(ld, e, aname);
         CandoValue vals_v   = cando_bridge_new_array(vm);
-        CdoObject *vals_arr = cando_bridge_resolve(vm, vals_v.as.handle);
+        CdoObject *vals_arr = cando_bridge_resolve(vm, cando_as_handle(vals_v));
         if (vals) {
             for (int i = 0; vals[i] != NULL; i++) {
                 CdoString *vs = cdo_string_intern(
@@ -2299,12 +2299,12 @@ static int native_ldap_members(CandoVM *vm, int argc, CandoValue *args)
     }
     bool recursive = false;
     if (argc >= 3 && cando_is_object(args[2])) {
-        CdoObject *o = cando_bridge_resolve(vm, args[2].as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[2]));
         recursive = opts_bool(o, "recursive", false);
     }
 
     CandoValue arr_v  = cando_bridge_new_array(vm);
-    CdoObject *arr    = cando_bridge_resolve(vm, arr_v.as.handle);
+    CdoObject *arr    = cando_bridge_resolve(vm, cando_as_handle(arr_v));
 
     if (do_membership(vm, ld, slot, dn, recursive,
                       /*from_group=*/true, arr) != 0) {
@@ -2331,12 +2331,12 @@ static int native_ldap_member_of(CandoVM *vm, int argc, CandoValue *args)
     }
     bool recursive = false;
     if (argc >= 3 && cando_is_object(args[2])) {
-        CdoObject *o = cando_bridge_resolve(vm, args[2].as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[2]));
         recursive = opts_bool(o, "recursive", false);
     }
 
     CandoValue arr_v = cando_bridge_new_array(vm);
-    CdoObject *arr   = cando_bridge_resolve(vm, arr_v.as.handle);
+    CdoObject *arr   = cando_bridge_resolve(vm, cando_as_handle(arr_v));
 
     if (do_membership(vm, ld, slot, dn, recursive,
                       /*from_group=*/false, arr) != 0) {
@@ -2362,8 +2362,8 @@ static int native_ldap_rc4(CandoVM *vm, int argc, CandoValue *args)
             "ldap.rc4: (key, data) must both be strings");
         return -1;
     }
-    CandoString *key  = args[0].as.string;
-    CandoString *data = args[1].as.string;
+    CandoString *key  = cando_as_string(args[0]);
+    CandoString *data = cando_as_string(args[1]);
 
     uint8_t *out = (uint8_t *)malloc(data->length ? data->length : 1);
     if (!out) {
@@ -2388,7 +2388,7 @@ static int native_ldap_md5(CandoVM *vm, int argc, CandoValue *args)
         ldap_throw(vm, NULL, 0, "ldap.md5: data must be a string");
         return -1;
     }
-    CandoString *s = args[0].as.string;
+    CandoString *s = cando_as_string(args[0]);
     uint8_t out[16];
     adc_md5((const uint8_t *)s->data, s->length, out);
     libutil_push_str(vm, (const char *)out, 16);
@@ -2423,8 +2423,8 @@ static int native_ldap_decode_reversible_password(
             "ldap.decode_reversible_password: (blob, key) must both be strings");
         return -1;
     }
-    CandoString *blob = args[0].as.string;
-    CandoString *key  = args[1].as.string;
+    CandoString *blob = cando_as_string(args[0]);
+    CandoString *key  = cando_as_string(args[1]);
 
     if (blob->length & 1) {
         ldap_throw(vm, NULL, 0,
@@ -2481,7 +2481,7 @@ __attribute__((visibility("default")))
 CandoValue cando_module_init(CandoVM *vm)
 {
     CandoValue tbl = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(tbl));
 
     libutil_set_method(vm, obj, "connect",         native_ldap_connect);
     libutil_set_method(vm, obj, "set_option",      native_ldap_set_option);

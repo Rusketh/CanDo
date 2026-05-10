@@ -18,7 +18,7 @@
 FormsSlot *slot_from_inst(CandoVM *vm, CandoValue v)
 {
     if (!cando_is_object(v)) return NULL;
-    CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(v));
     if (!o) return NULL;
     CdoString *ks = cdo_string_intern(FORMS_SLOT_KEY, (u32)strlen(FORMS_SLOT_KEY));
     CdoString *kg = cdo_string_intern(FORMS_GEN_KEY,  (u32)strlen(FORMS_GEN_KEY));
@@ -88,9 +88,9 @@ void parse_text_arg(CandoVM *vm, CandoValue v, char *out, int outcap)
     (void)vm;
     if (out == NULL || outcap <= 0) return;
     out[0] = 0;
-    if (v.tag == CDO_STRING && v.as.string) {
-        const char *s = v.as.string->data;
-        u32 n = v.as.string->length;
+    if (cando_is_string(v) && cando_as_string(v)) {
+        const char *s = cando_as_string(v)->data;
+        u32 n = cando_as_string(v)->length;
         if ((int)n >= outcap) n = (u32)(outcap - 1);
         memcpy(out, s, n);
         out[n] = 0;

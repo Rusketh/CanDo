@@ -18,7 +18,7 @@ int native_set_checked(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setChecked");
     if (!s) return -1;
-    bool checked = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool checked = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && (s->kind == KIND_CHECKBOX || s->kind == KIND_RADIO)) {
         SendMessageW(s->hwnd, BM_SETCHECK,

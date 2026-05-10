@@ -319,7 +319,7 @@ static void obj_set_array(CdoObject *obj, const char *key, CdoObject *child)
 static CandoValue make_handle(CandoVM *vm, int slot)
 {
     CandoValue v   = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     obj_set_number(obj, SMTP_SLOT_KEY, (f64)slot);
     return v;
 }
@@ -327,7 +327,7 @@ static CandoValue make_handle(CandoVM *vm, int slot)
 static int handle_slot(CandoVM *vm, CandoValue v)
 {
     if (!cando_is_object(v)) return -1;
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     f64 idx = -1.0;
     if (!obj_get_number(obj, SMTP_SLOT_KEY, &idx)) return -1;
     int i = (int)idx;
@@ -356,7 +356,7 @@ static void handle_mark_closed(CandoVM *vm, CandoValue v)
     int slot = handle_slot(vm, v);
     if (slot >= 0) pool_release(slot);
     if (cando_is_object(v)) {
-        CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+        CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
         obj_set_number(obj, SMTP_SLOT_KEY, -1.0);
     }
 }
@@ -477,7 +477,7 @@ static int native_connect(CandoVM *vm, int argc, CandoValue *args)
         smtp_throw(vm, 0, "", "smtp.connect: opts object required");
         return -1;
     }
-    CdoObject *o = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[0]));
 
     const char *host = NULL; size_t hostl = 0;
     f64 port = 587;
@@ -731,7 +731,7 @@ static int native_capabilities(CandoVM *vm, int argc, CandoValue *args)
     SmtpSlot *s = handle_unwrap(vm, args[0], SMTP_KIND_SMTP, "smtp.capabilities");
     if (!s) return -1;
     CandoValue arr_v = cando_bridge_new_array(vm);
-    CdoObject *arr   = cando_bridge_resolve(vm, arr_v.as.handle);
+    CdoObject *arr   = cando_bridge_resolve(vm, cando_as_handle(arr_v));
     if (s->capabilities) {
         const char *p = s->capabilities;
         while (*p) {
@@ -759,8 +759,8 @@ static int simple_smtp_cmd(CandoVM *vm, int argc, CandoValue *args,
     if (!s) return -1;
     char cmd[1024];
     if (argc >= 2 && cando_is_string(args[1])) {
-        const char *arg = args[1].as.string->data;
-        size_t al = args[1].as.string->length;
+        const char *arg = cando_as_string(args[1])->data;
+        size_t al = cando_as_string(args[1])->length;
         if (!header_value_safe(arg, al)) {
             smtp_throw(vm, 0, "", "%s: argument contains CR/LF", fn);
             return -1;
@@ -832,7 +832,7 @@ static int native_data(CandoVM *vm, int argc, CandoValue *args)
 
     /* Dot-stuff and write the body. */
     sb_t body; sb_init(&body);
-    dot_stuff(args[1].as.string->data, args[1].as.string->length, &body);
+    dot_stuff(cando_as_string(args[1])->data, cando_as_string(args[1])->length, &body);
     if (!slot_send_all(s, body.data, body.len)) {
         sb_free(&body);
         smtp_throw(vm, 0, "", "smtp.data: send failed mid-body");
@@ -944,7 +944,7 @@ static int native_send(CandoVM *vm, int argc, CandoValue *args)
         smtp_throw(vm, 0, "", "mail.send: opts object required");
         return -1;
     }
-    CdoObject *o = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[0]));
 
     const char *from = NULL; size_t froml = 0;
     if (!obj_get_string(o, "from", &from, &froml) || froml == 0) {
@@ -1340,7 +1340,7 @@ static int native_send(CandoVM *vm, int argc, CandoValue *args)
 
     /* Build result object. */
     CandoValue out_v = cando_bridge_new_object(vm);
-    CdoObject *out   = cando_bridge_resolve(vm, out_v.as.handle);
+    CdoObject *out   = cando_bridge_resolve(vm, cando_as_handle(out_v));
     /* Extract Message-ID from the message header. */
     const char *msgid_start = NULL; size_t msgid_len = 0;
     for (size_t i = 0; i + 12 < msg_len; i++) {
@@ -1359,7 +1359,7 @@ static int native_send(CandoVM *vm, int argc, CandoValue *args)
                    (u32)(msgid_start ? msgid_len : 0));
     /* accepted = all rcpts (we threw on partial failure). */
     CandoValue acc_v = cando_bridge_new_array(vm);
-    CdoObject *acc   = cando_bridge_resolve(vm, acc_v.as.handle);
+    CdoObject *acc   = cando_bridge_resolve(vm, cando_as_handle(acc_v));
     for (size_t i = 0; i < ru.n; i++) {
         CdoString *cs = cdo_string_intern(rcpts[i], (u32)strlen(rcpts[i]));
         cdo_array_push(acc, cdo_string_value(cs));
@@ -1401,7 +1401,7 @@ static void put_attachment_array(CandoVM *vm, const mime_part_t *root,
         strncmp(root->content_type, "multipart/", 10) != 0) is_attach = true;
     if (!is_attach) return;
     CandoValue av = cando_bridge_new_object(vm);
-    CdoObject *ao = cando_bridge_resolve(vm, av.as.handle);
+    CdoObject *ao = cando_bridge_resolve(vm, cando_as_handle(av));
     if (root->filename)     obj_set_string(ao, "filename",     root->filename,     (u32)strlen(root->filename));
     if (root->content_type) obj_set_string(ao, "contentType",  root->content_type, (u32)strlen(root->content_type));
     if (root->content_id)   obj_set_string(ao, "contentId",    root->content_id,   (u32)strlen(root->content_id));
@@ -1449,14 +1449,14 @@ static int native_parse(CandoVM *vm, int argc, CandoValue *args)
         smtp_throw(vm, 0, "", "mail.parse: string required");
         return -1;
     }
-    mime_part_t *p = mime_parse((const uint8_t *)args[0].as.string->data,
-                                args[0].as.string->length);
+    mime_part_t *p = mime_parse((const uint8_t *)cando_as_string(args[0])->data,
+                                cando_as_string(args[0])->length);
     if (!p) {
         smtp_throw(vm, 0, "", "mail.parse: out of memory");
         return -1;
     }
     CandoValue v = cando_bridge_new_object(vm);
-    CdoObject *out = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *out = cando_bridge_resolve(vm, cando_as_handle(v));
     put_part_object(vm, p, out);
     mime_part_free(p);
     cando_vm_push(vm, v);
@@ -1469,7 +1469,7 @@ static int native_build(CandoVM *vm, int argc, CandoValue *args)
         smtp_throw(vm, 0, "", "mail.build: opts object required");
         return -1;
     }
-    CdoObject *o = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     const char *from = NULL; size_t froml = 0;
     obj_get_string(o, "from", &from, &froml);
 
@@ -1525,11 +1525,11 @@ static int native_parseAddress(CandoVM *vm, int argc, CandoValue *args)
 {
     const char *s = libutil_arg_cstr_at(args, argc, 0);
     if (!s) { smtp_throw(vm, 0, "", "mail.parseAddress: string required"); return -1; }
-    size_t L = args[0].as.string->length;
+    size_t L = cando_as_string(args[0])->length;
     char name[256], addr[256];
     bool ok = parse_one_address(s, L, name, sizeof(name), addr, sizeof(addr));
     CandoValue v = cando_bridge_new_object(vm);
-    CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(v));
     obj_set_string(o, "name",    ok ? name : "", (u32)strlen(ok ? name : ""));
     obj_set_string(o, "address", ok ? addr : "", (u32)strlen(ok ? addr : ""));
     if (ok) {
@@ -1566,9 +1566,9 @@ static int native_parseAddressList(CandoVM *vm, int argc, CandoValue *args)
 {
     const char *s = libutil_arg_cstr_at(args, argc, 0);
     if (!s) { smtp_throw(vm, 0, "", "mail.parseAddressList: string required"); return -1; }
-    size_t L = args[0].as.string->length;
+    size_t L = cando_as_string(args[0])->length;
     CandoValue v = cando_bridge_new_array(vm);
-    CdoObject *a = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *a = cando_bridge_resolve(vm, cando_as_handle(v));
     split_addr_list(s, L, parselist_cb, a);
     cando_vm_push(vm, v);
     return 1;
@@ -1579,7 +1579,7 @@ static int native_formatAddress(CandoVM *vm, int argc, CandoValue *args)
     if (argc < 1 || !cando_is_object(args[0])) {
         smtp_throw(vm, 0, "", "mail.formatAddress: object required"); return -1;
     }
-    CdoObject *o = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     const char *name = NULL; size_t nl = 0;
     const char *addr = NULL; size_t al = 0;
     obj_get_string(o, "name",    &name, &nl);
@@ -1617,7 +1617,7 @@ static int native_encodeHeader(CandoVM *vm, int argc, CandoValue *args)
 {
     const char *s = libutil_arg_cstr_at(args, argc, 0);
     if (!s) { smtp_throw(vm, 0, "", "mail.encodeHeader: string required"); return -1; }
-    size_t L = args[0].as.string->length;
+    size_t L = cando_as_string(args[0])->length;
     sb_t out; sb_init(&out);
     rfc2047_encode_q(s, L, &out);
     libutil_push_str(vm, out.data ? out.data : "", (u32)out.len);
@@ -1629,7 +1629,7 @@ static int native_decodeHeader(CandoVM *vm, int argc, CandoValue *args)
 {
     const char *s = libutil_arg_cstr_at(args, argc, 0);
     if (!s) { smtp_throw(vm, 0, "", "mail.decodeHeader: string required"); return -1; }
-    size_t L = args[0].as.string->length;
+    size_t L = cando_as_string(args[0])->length;
     sb_t out; sb_init(&out);
     rfc2047_decode(s, L, &out);
     libutil_push_str(vm, out.data ? out.data : "", (u32)out.len);
@@ -1648,7 +1648,7 @@ static int native_mx(CandoVM *vm, int argc, CandoValue *args)
     dns_mx_record_t mx[DNS_MAX_MX];
     int n = dns_lookup_mx(name, mx, DNS_MAX_MX);
     CandoValue v = cando_bridge_new_array(vm);
-    CdoObject *a = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *a = cando_bridge_resolve(vm, cando_as_handle(v));
     for (int i = 0; i < n; i++) {
         CdoObject *e = cdo_object_new();
         obj_set_number(e, "priority", (f64)mx[i].priority);
@@ -1666,7 +1666,7 @@ static int native_txt(CandoVM *vm, int argc, CandoValue *args)
     dns_txt_record_t txt[DNS_MAX_TXT];
     int n = dns_lookup_txt(name, txt, DNS_MAX_TXT);
     CandoValue v = cando_bridge_new_array(vm);
-    CdoObject *a = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *a = cando_bridge_resolve(vm, cando_as_handle(v));
     for (int i = 0; i < n; i++) {
         CdoString *s = cdo_string_intern(txt[i].text, (u32)strlen(txt[i].text));
         cdo_array_push(a, cdo_string_value(s));
@@ -1683,7 +1683,7 @@ static int native_ptr(CandoVM *vm, int argc, CandoValue *args)
     dns_ptr_record_t ptr[DNS_MAX_PTR];
     int n = dns_lookup_ptr(ip, ptr, DNS_MAX_PTR);
     CandoValue v = cando_bridge_new_array(vm);
-    CdoObject *a = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *a = cando_bridge_resolve(vm, cando_as_handle(v));
     for (int i = 0; i < n; i++) {
         CdoString *s = cdo_string_intern(ptr[i].host, (u32)strlen(ptr[i].host));
         cdo_array_push(a, cdo_string_value(s));
@@ -1707,7 +1707,7 @@ static int native_spfCheck(CandoVM *vm, int argc, CandoValue *args)
     }
     const char *r = spf_check(sender, ip);
     CandoValue v = cando_bridge_new_object(vm);
-    CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(v));
     obj_set_string(o, "result", r, (u32)strlen(r));
     cando_vm_push(vm, v);
     return 1;
@@ -1723,7 +1723,7 @@ static int native_dkimSign(CandoVM *vm, int argc, CandoValue *args)
         smtp_throw(vm, 0, "", "mail.dkimSign: (raw_message, opts) required");
         return -1;
     }
-    CdoObject *o = cando_bridge_resolve(vm, args[1].as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[1]));
     const char *sel = NULL; size_t selL = 0;
     const char *dom = NULL; size_t domL = 0;
     const char *key = NULL; size_t keyL = 0;
@@ -1739,14 +1739,14 @@ static int native_dkimSign(CandoVM *vm, int argc, CandoValue *args)
     snprintf(dom_z, sizeof(dom_z), "%.*s", (int)domL, dom);
     dkim_sign_in_t din = { .selector = sel_z, .domain = dom_z,
                            .key_pem = key, .key_pem_len = keyL };
-    char *hdr = dkim_sign(args[0].as.string->data, args[0].as.string->length, &din);
+    char *hdr = dkim_sign(cando_as_string(args[0])->data, cando_as_string(args[0])->length, &din);
     if (!hdr) {
         smtp_throw(vm, 0, "", "mail.dkimSign: signing failed");
         return -1;
     }
     sb_t out; sb_init(&out);
     sb_puts(&out, hdr);
-    sb_append(&out, args[0].as.string->data, args[0].as.string->length);
+    sb_append(&out, cando_as_string(args[0])->data, cando_as_string(args[0])->length);
     free(hdr);
     libutil_push_str(vm, out.data, (u32)out.len);
     sb_free(&out);
@@ -1757,10 +1757,10 @@ static int native_dkimVerify(CandoVM *vm, int argc, CandoValue *args)
 {
     const char *raw = libutil_arg_cstr_at(args, argc, 0);
     if (!raw) { smtp_throw(vm, 0, "", "mail.dkimVerify: string required"); return -1; }
-    size_t L = args[0].as.string->length;
+    size_t L = cando_as_string(args[0])->length;
     dkim_verify_result_t r = dkim_verify(raw, L);
     CandoValue v = cando_bridge_new_object(vm);
-    CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(v));
     obj_set_bool  (o, "pass",     r.pass);
     obj_set_string(o, "domain",   r.domain,   (u32)strlen(r.domain));
     obj_set_string(o, "selector", r.selector, (u32)strlen(r.selector));
@@ -1783,7 +1783,7 @@ static int native_deliverMaildir(CandoVM *vm, int argc, CandoValue *args)
         return -1;
     }
     if (maildir_deliver(dir, (const uint8_t *)raw,
-                        args[0].as.string->length) != 0) {
+                        cando_as_string(args[0])->length) != 0) {
         smtp_throw(vm, 0, "", "mail.deliverMaildir: write failed");
         return -1;
     }
@@ -1802,7 +1802,7 @@ static int native_deliverMbox(CandoVM *vm, int argc, CandoValue *args)
     }
     if (mbox_deliver(path, env ? env : "MAILER-DAEMON",
                      (const uint8_t *)raw,
-                     args[0].as.string->length) != 0) {
+                     cando_as_string(args[0])->length) != 0) {
         smtp_throw(vm, 0, "", "mail.deliverMbox: write failed");
         return -1;
     }
@@ -1861,7 +1861,7 @@ static int native_popConnect(CandoVM *vm, int argc, CandoValue *args)
     if (argc < 1 || !cando_is_object(args[0])) {
         smtp_throw(vm, 0, "", "mail.popConnect: opts object required"); return -1;
     }
-    CdoObject *o = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     SmtpSlot *s = open_line_session(vm, o, SMTP_KIND_POP3, "mail.popConnect", 995);
     if (!s) return -1;
 
@@ -1918,7 +1918,7 @@ static int native_popList(CandoVM *vm, int argc, CandoValue *args)
     }
     sb_free(&status);
     CandoValue v = cando_bridge_new_array(vm);
-    CdoObject *a = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *a = cando_bridge_resolve(vm, cando_as_handle(v));
     while (1) {
         sb_t l; sb_init(&l);
         if (slot_read_line(s, &l) != 0) { sb_free(&l); break; }
@@ -1943,7 +1943,7 @@ static int native_popRetr(CandoVM *vm, int argc, CandoValue *args)
     }
     SmtpSlot *s = handle_unwrap(vm, args[0], SMTP_KIND_POP3, "mail.popRetr");
     if (!s) return -1;
-    int n = (int)args[1].as.number;
+    int n = (int)cando_as_number(args[1]);
     char cmd[64]; snprintf(cmd, sizeof(cmd), "RETR %d\r\n", n);
     slot_send_all(s, cmd, strlen(cmd));
     sb_t status; sb_init(&status);
@@ -1975,7 +1975,7 @@ static int native_popDele(CandoVM *vm, int argc, CandoValue *args)
     }
     SmtpSlot *s = handle_unwrap(vm, args[0], SMTP_KIND_POP3, "mail.popDele");
     if (!s) return -1;
-    int n = (int)args[1].as.number;
+    int n = (int)cando_as_number(args[1]);
     char cmd[64]; snprintf(cmd, sizeof(cmd), "DELE %d\r\n", n);
     slot_send_all(s, cmd, strlen(cmd));
     sb_t l; sb_init(&l);
@@ -2041,7 +2041,7 @@ static int native_imapConnect(CandoVM *vm, int argc, CandoValue *args)
     if (argc < 1 || !cando_is_object(args[0])) {
         smtp_throw(vm, 0, "", "mail.imapConnect: opts required"); return -1;
     }
-    CdoObject *o = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     SmtpSlot *s = open_line_session(vm, o, SMTP_KIND_IMAP, "mail.imapConnect", 993);
     if (!s) return -1;
     /* Greeting "* OK ..." */
@@ -2086,7 +2086,7 @@ static int native_imapSelect(CandoVM *vm, int argc, CandoValue *args)
     if (!s) return -1;
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "SELECT \"%.*s\"",
-             (int)args[1].as.string->length, args[1].as.string->data);
+             (int)cando_as_string(args[1])->length, cando_as_string(args[1])->data);
     char tag[16]; imap_send(s, cmd, tag);
     sb_t r; sb_init(&r);
     int rc = imap_read_until(s, tag, &r);
@@ -2105,14 +2105,14 @@ static int native_imapSearch(CandoVM *vm, int argc, CandoValue *args)
     if (!s) return -1;
     char cmd[1024];
     snprintf(cmd, sizeof(cmd), "UID SEARCH %.*s",
-             (int)args[1].as.string->length, args[1].as.string->data);
+             (int)cando_as_string(args[1])->length, cando_as_string(args[1])->data);
     char tag[16]; imap_send(s, cmd, tag);
     sb_t r; sb_init(&r);
     int rc = imap_read_until(s, tag, &r);
     if (rc != 0) { sb_free(&r); smtp_throw(vm, 0, "", "mail.imapSearch: failed"); return -1; }
     /* Untagged responses look like "* SEARCH 1 2 3 4". */
     CandoValue v = cando_bridge_new_array(vm);
-    CdoObject *a = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *a = cando_bridge_resolve(vm, cando_as_handle(v));
     const char *p = r.data ? r.data : "";
     while ((p = strstr(p, "* SEARCH"))) {
         p += 8;
@@ -2138,7 +2138,7 @@ static int native_imapFetch(CandoVM *vm, int argc, CandoValue *args)
     }
     SmtpSlot *s = handle_unwrap(vm, args[0], SMTP_KIND_IMAP, "mail.imapFetch");
     if (!s) return -1;
-    int uid = (int)args[1].as.number;
+    int uid = (int)cando_as_number(args[1]);
     const char *item = libutil_arg_cstr_at(args, argc, 2);
     if (!item) item = "RFC822";
     char cmd[256];
@@ -2197,7 +2197,7 @@ static int imap_simple(CandoVM *vm, int argc, CandoValue *args, const char *fn,
     char cmd[1024];
     if (argc >= 2 && cando_is_string(args[1])) {
         snprintf(cmd, sizeof(cmd), cmd_fmt,
-                 (int)args[1].as.string->length, args[1].as.string->data);
+                 (int)cando_as_string(args[1])->length, cando_as_string(args[1])->data);
     } else {
         snprintf(cmd, sizeof(cmd), "%s", cmd_fmt);
     }
@@ -2217,10 +2217,10 @@ static int native_imapMove(CandoVM *vm, int argc, CandoValue *args)
     }
     SmtpSlot *s = handle_unwrap(vm, args[0], SMTP_KIND_IMAP, "mail.imapMove");
     if (!s) return -1;
-    int uid = (int)args[1].as.number;
+    int uid = (int)cando_as_number(args[1]);
     char cmd[1024];
     snprintf(cmd, sizeof(cmd), "UID MOVE %d \"%.*s\"", uid,
-             (int)args[2].as.string->length, args[2].as.string->data);
+             (int)cando_as_string(args[2])->length, cando_as_string(args[2])->data);
     char tag[16]; imap_send(s, cmd, tag);
     sb_t r; sb_init(&r);
     int rc = imap_read_until(s, tag, &r);
@@ -2228,7 +2228,7 @@ static int native_imapMove(CandoVM *vm, int argc, CandoValue *args)
     if (rc != 0) {
         /* Fallback: COPY + STORE \Deleted + EXPUNGE for servers without MOVE. */
         snprintf(cmd, sizeof(cmd), "UID COPY %d \"%.*s\"", uid,
-                 (int)args[2].as.string->length, args[2].as.string->data);
+                 (int)cando_as_string(args[2])->length, cando_as_string(args[2])->data);
         imap_send(s, cmd, tag);
         sb_t r2; sb_init(&r2); rc = imap_read_until(s, tag, &r2); sb_free(&r2);
         if (rc != 0) { smtp_throw(vm, 0, "", "mail.imapMove: COPY failed"); return -1; }
@@ -2330,7 +2330,7 @@ static const LibutilMethodEntry smtp_methods[] = {
 static CandoValue build_module_table(CandoVM *vm)
 {
     CandoValue tbl = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(tbl));
     libutil_register_methods(vm, obj, smtp_methods,
                               sizeof(smtp_methods)/sizeof(*smtp_methods));
     register_constants(obj);

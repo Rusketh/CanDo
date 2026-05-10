@@ -37,7 +37,7 @@ int native_set_multiline(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setMultiline");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TEXTBOX) {
         if (on) edit_toggle_style(s,
@@ -56,7 +56,7 @@ int native_set_readonly(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setReadOnly");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TEXTBOX) {
         SendMessageW(s->hwnd, EM_SETREADONLY, (WPARAM)(on ? TRUE : FALSE), 0);
@@ -96,14 +96,14 @@ int native_set_password_char(CandoVM *vm, int argc, CandoValue *args)
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     wchar_t pc = L'\0';
     if (argc >= 2) {
-        if (args[1].tag == CDO_NUMBER) pc = (wchar_t)(int)args[1].as.number;
-        else if (args[1].tag == CDO_STRING && args[1].as.string &&
-                 args[1].as.string->length > 0) {
-            wchar_t *w = utf8_to_wide(args[1].as.string->data,
-                                      (int)args[1].as.string->length);
+        if (cando_is_number(args[1])) pc = (wchar_t)(int)cando_as_number(args[1]);
+        else if (cando_is_string(args[1]) && cando_as_string(args[1]) &&
+                 cando_as_string(args[1])->length > 0) {
+            wchar_t *w = utf8_to_wide(cando_as_string(args[1])->data,
+                                      (int)cando_as_string(args[1])->length);
             if (w) { pc = w[0]; free(w); }
         }
-        else if (args[1].tag == CDO_BOOL && args[1].as.boolean) pc = L'*';
+        else if (cando_is_bool(args[1]) && cando_as_bool(args[1])) pc = L'*';
     }
     if (s->hwnd && s->kind == KIND_TEXTBOX) {
         SendMessageW(s->hwnd, EM_SETPASSWORDCHAR, (WPARAM)pc, 0);
@@ -118,7 +118,7 @@ int native_set_max_length(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setMaxLength");
     if (!s) return -1;
-    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
+    int n = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : 0;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TEXTBOX) {
         SendMessageW(s->hwnd, EM_SETLIMITTEXT, (WPARAM)(n > 0 ? n : 0), 0);
@@ -136,15 +136,15 @@ int native_set_text_alignment(CandoVM *vm, int argc, CandoValue *args)
     if (!s) return -1;
     int align = 0;          /* 0 = left, 1 = center, 2 = right */
     if (argc >= 2) {
-        if (args[1].tag == CDO_STRING && args[1].as.string) {
-            const char *t = args[1].as.string->data;
-            u32 n = args[1].as.string->length;
+        if (cando_is_string(args[1]) && cando_as_string(args[1])) {
+            const char *t = cando_as_string(args[1])->data;
+            u32 n = cando_as_string(args[1])->length;
             if (n == 4 && memcmp(t, "left", 4) == 0) align = 0;
             else if (n == 6 && (memcmp(t, "center", 6) == 0 ||
                                 memcmp(t, "centre", 6) == 0)) align = 1;
             else if (n == 5 && memcmp(t, "right", 5) == 0) align = 2;
-        } else if (args[1].tag == CDO_NUMBER) {
-            int v = (int)args[1].as.number;
+        } else if (cando_is_number(args[1])) {
+            int v = (int)cando_as_number(args[1]);
             if (v >= 0 && v <= 2) align = v;
         }
     }

@@ -40,8 +40,8 @@ int native_set_opacity(CandoVM *vm, int argc, CandoValue *args)
     /* Accept 0..1 (float) or 0..255 (integer).  WinForms uses 0.0-1.0;
      * we honour both for ergonomic reasons.  >=1 is opaque. */
     int alpha = 255;
-    if (argc >= 2 && args[1].tag == CDO_NUMBER) {
-        double v = args[1].as.number;
+    if (argc >= 2 && cando_is_number(args[1])) {
+        double v = cando_as_number(args[1]);
         if (v <= 1.0) alpha = (int)(v * 255.0 + 0.5);
         else          alpha = (int)v;
         if (alpha < 0)   alpha = 0;
@@ -74,7 +74,7 @@ int native_set_topmost(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setTopMost");
     if (!s) return -1;
-    bool top = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool top = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
     s->topmost = top ? 1 : 0;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_FORM) {
@@ -116,8 +116,8 @@ int native_set_min_size(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setMinSize");
     if (!s) return -1;
-    int w = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
-    int h = (argc >= 3 && args[2].tag == CDO_NUMBER) ? (int)args[2].as.number : 0;
+    int w = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : 0;
+    int h = (argc >= 3 && cando_is_number(args[2])) ? (int)cando_as_number(args[2]) : 0;
     s->min_w = w; s->min_h = h;
     s->has_min_size = (w > 0 || h > 0) ? 1 : 0;
     cando_vm_push(vm, args[0]);
@@ -128,8 +128,8 @@ int native_set_max_size(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setMaxSize");
     if (!s) return -1;
-    int w = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
-    int h = (argc >= 3 && args[2].tag == CDO_NUMBER) ? (int)args[2].as.number : 0;
+    int w = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : 0;
+    int h = (argc >= 3 && cando_is_number(args[2])) ? (int)cando_as_number(args[2]) : 0;
     s->max_w = w; s->max_h = h;
     s->has_max_size = (w > 0 || h > 0) ? 1 : 0;
     cando_vm_push(vm, args[0]);
@@ -142,9 +142,9 @@ int native_set_icon(CandoVM *vm, int argc, CandoValue *args)
     if (!s) return -1;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_FORM && argc >= 2 &&
-        args[1].tag == CDO_STRING && args[1].as.string) {
-        wchar_t *w = utf8_to_wide(args[1].as.string->data,
-                                  (int)args[1].as.string->length);
+        cando_is_string(args[1]) && cando_as_string(args[1])) {
+        wchar_t *w = utf8_to_wide(cando_as_string(args[1])->data,
+                                  (int)cando_as_string(args[1])->length);
         if (w) {
             HICON small = (HICON)LoadImageW(NULL, w, IMAGE_ICON, 16, 16,
                                             LR_LOADFROMFILE | LR_DEFAULTSIZE);
@@ -178,8 +178,8 @@ int native_flash(CandoVM *vm, int argc, CandoValue *args)
         fi.cbSize = sizeof(fi);
         fi.hwnd   = s->hwnd;
         fi.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
-        fi.uCount  = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-                     (UINT)(int)args[1].as.number : 3;
+        fi.uCount  = (argc >= 2 && cando_is_number(args[1])) ?
+                     (UINT)(int)cando_as_number(args[1]) : 3;
         fi.dwTimeout = 0;
         FlashWindowEx(&fi);
     }
@@ -194,17 +194,17 @@ int native_set_window_state(CandoVM *vm, int argc, CandoValue *args)
     if (!s) return -1;
     int cmd = -1;
     if (argc >= 2) {
-        if (args[1].tag == CDO_STRING && args[1].as.string) {
-            const char *t = args[1].as.string->data;
-            u32 n = args[1].as.string->length;
+        if (cando_is_string(args[1]) && cando_as_string(args[1])) {
+            const char *t = cando_as_string(args[1])->data;
+            u32 n = cando_as_string(args[1])->length;
             if      (n == 6 && memcmp(t, "normal",   6) == 0) cmd = 0;
             else if (n == 8 && memcmp(t, "maximize", 8) == 0) cmd = 1;
             else if (n == 9 && memcmp(t, "maximized",9) == 0) cmd = 1;
             else if (n == 8 && memcmp(t, "minimize", 8) == 0) cmd = 2;
             else if (n == 9 && memcmp(t, "minimized",9) == 0) cmd = 2;
             else if (n == 8 && memcmp(t, "restored", 8) == 0) cmd = 0;
-        } else if (args[1].tag == CDO_NUMBER) {
-            cmd = (int)args[1].as.number;
+        } else if (cando_is_number(args[1])) {
+            cmd = (int)cando_as_number(args[1]);
         }
     }
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
@@ -275,7 +275,7 @@ int native_set_resizable(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setResizable");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_FORM) {
         if (on) form_toggle_style(s, WS_THICKFRAME | WS_MAXIMIZEBOX, 0, 0, 0);
@@ -292,7 +292,7 @@ int native_set_minimize_box(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setMinimizeBox");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_FORM) {
         if (on) form_toggle_style(s, WS_MINIMIZEBOX, 0, 0, 0);
@@ -309,7 +309,7 @@ int native_set_maximize_box(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setMaximizeBox");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_FORM) {
         if (on) form_toggle_style(s, WS_MAXIMIZEBOX, 0, 0, 0);
@@ -326,7 +326,7 @@ int native_set_show_in_taskbar(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setShowInTaskbar");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_FORM) {
         if (on) form_toggle_style(s, 0, 0, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW);
