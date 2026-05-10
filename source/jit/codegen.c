@@ -405,20 +405,28 @@ static void emit_call_rax(CG *cg) {
  *   mov  rbp, rsp         ; 48 89 e5
  *   push rbx              ; 53
  *   push r12              ; 41 54
+ *   push r13              ; 41 55
  *   push r14              ; 41 56
  *   push r15              ; 41 57
+ *   sub  rsp, 8           ; 48 83 ec 08         -- 16-align stack
  *   mov  rbx, rdi         ; 48 89 fb            -- vm
  *   mov  r12, rsi         ; 49 89 f4            -- t
+ *   mov  r13b, dl         ; 41 88 d5            -- skip_invariant
  *   mov  r15, rcx         ; 49 89 cf            -- frame_slots
  *   mov  r14, r8          ; 4d 89 c6            -- vals
  *
  * Stack discipline: caller aligns RSP to 16 before `call mcode_fn`,
- * which pushes the return address (RSP -> aligned-8).  Five pushes
- * (rbp, rbx, r12, r14, r15) bring us back to aligned (5*8=40, plus
- * the 8 from the return address = 48 bytes from caller_rsp).  We
- * deliberately don't sub rsp by 8 here: if we did, the side-exit's
- * `call rax` to the snapshot helper would land on a misaligned
- * stack and the helper's internal SSE ops could fault.
+ * which pushes the return address (RSP -> aligned-8).  Six pushes
+ * (rbp, rbx, r12, r13, r14, r15) bring us to aligned-56, so we sub
+ * an extra 8 to land at aligned-64 = 16-aligned.  This keeps the
+ * side-exit's `call rax` to the snapshot helper on an aligned
+ * stack so the helper's internal SSE ops can't fault.
+ *
+ * Phase 6.6: r13b mirrors the skip_invariant arg byte.  We can't
+ * read DL directly during the body because emit_sload (and other
+ * ops) clobber RDX with intermediate computation -- caching in a
+ * callee-saved register keeps the LICM-skip prefix's `test r13b,
+ * r13b` correct for the lifetime of the trace iteration.
  */
 static void emit_prologue(CG *cg) {
     static const u8 b[] = {
@@ -426,10 +434,13 @@ static void emit_prologue(CG *cg) {
         0x48, 0x89, 0xE5,
         0x53,
         0x41, 0x54,
+        0x41, 0x55,
         0x41, 0x56,
         0x41, 0x57,
+        0x48, 0x83, 0xEC, 0x08,
         0x48, 0x89, 0xFB,
         0x49, 0x89, 0xF4,
+        0x41, 0x88, 0xD5,
         0x49, 0x89, 0xCF,
         0x4D, 0x89, 0xC6,
     };
@@ -439,8 +450,10 @@ static void emit_prologue(CG *cg) {
 /* Epilogue restoring callee-saveds and returning.  Caller has set EAX. */
 static void emit_epilogue(CG *cg) {
     static const u8 b[] = {
+        0x48, 0x83, 0xC4, 0x08,    /* add rsp, 8     */
         0x41, 0x5F,                /* pop r15        */
         0x41, 0x5E,                /* pop r14        */
+        0x41, 0x5D,                /* pop r13        */
         0x41, 0x5C,                /* pop r12        */
         0x5B,                      /* pop rbx        */
         0x5D,                      /* pop rbp        */
@@ -720,9 +733,29 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
 
     emit_prologue(&cg);
 
-    /* Per-IR-op emit. */
+    /* Per-IR-op emit.  LICM-aware: ops marked IRF_INVARIANT get a
+     * `test dl, dl; jnz +op_size` prefix so iter-2+ calls
+     * (skip_invariant=true, DL=1) jump over them.  vals[i] is reused
+     * from iter 1 in that case -- same contract as the IR-interp.
+     * Disp8 caps the per-op size at 127 bytes; if any single op
+     * doesn't fit (it shouldn't with the v1 op set), codegen bails. */
     for (u32 i = 1; i < t->ir.ir_count && !cg.failed; i++) {
         const IRIns *in = &t->ir.ir[i];
+
+        bool is_inv = (in->flags & IRF_INVARIANT) &&
+                      in->op != IR_NOP && in->op != IR_LOOP;
+        u32 skip_disp_off = 0;
+        if (is_inv) {
+            /* test r13b, r13b -- 45 84 ED.  Tests our cached
+             * skip_invariant byte (Phase 6.6); body emits clobber
+             * RDX/DL freely, so we can't read DL directly here. */
+            static const u8 prefix[] = { 0x45, 0x84, 0xED, 0x75 };
+            cg_emit_bytes(&cg, prefix, 4);   /* test r13b,r13b ; jnz disp8 */
+            skip_disp_off = cg_off(&cg);
+            cg_emit_u8(&cg, 0);
+        }
+        u32 op_start = cg_off(&cg);
+
         switch (in->op) {
         case IR_NOP:
             /* Skip silently; DSE/DCE may have left these. */
@@ -782,6 +815,18 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             /* Op not yet handled by codegen v1.  Bail. */
             cg.failed = true;
             break;
+        }
+
+        if (is_inv && !cg.failed) {
+            u32 op_size = cg_off(&cg) - op_start;
+            if (op_size > 127) {
+                /* Disp8 can't reach; falling back to disp32 here
+                 * complicates patching with no existing v1 op
+                 * exceeding 80 bytes -- bail conservatively. */
+                cg.failed = true;
+            } else {
+                cg.base[skip_disp_off] = (u8)op_size;
+            }
         }
     }
 
