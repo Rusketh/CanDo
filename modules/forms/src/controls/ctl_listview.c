@@ -126,10 +126,12 @@ int native_lv_add_item(CandoVM *vm, int argc, CandoValue *args)
                 memcpy(tmp, cando_as_string(args[1])->data, n);
                 tmp[n] = 0;
                 lv_set_text(s->hwnd, index, 0, tmp);
-            } else if (args[1].tag == CDO_ARRAY && cando_as_handle(args[1])) {
-                /* Array form: each element -> matching column. */
+            } else if (cando_is_object(args[1])) {
+                /* Array form: each element -> matching column.  Post
+                 * NaN-box, "is array" requires resolving the handle
+                 * and checking obj->kind. */
                 CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(args[1]));
-                if (arr) {
+                if (arr && arr->kind == OBJ_ARRAY) {
                     u32 len  = cdo_array_len(arr);
                     u32 cols = (u32)SendMessageW(s->hwnd, LVM_GETCOLUMNCOUNT, 0, 0);
                     for (u32 i = 0; i < len && i < cols; i++) {
