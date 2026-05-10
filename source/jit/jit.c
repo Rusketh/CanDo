@@ -615,6 +615,18 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
                 /* op2 is the loop-variant index in v1 traces. */
                 inv = false;
                 break;
+            case IR_NEW_ARRAY:
+            case IR_ARRAY_APPEND:
+            case IR_INDEX_GET:
+                /* Phase 4.4a-c: allocations and array reads/writes
+                 * are NEVER invariant.  IR_NEW_ARRAY produces a
+                 * fresh handle each time; hoisting it would alias
+                 * iterations to the same array.  IR_ARRAY_APPEND
+                 * mutates that array.  IR_INDEX_GET reads a slot
+                 * whose contents may have changed via APPEND or
+                 * external mutation. */
+                inv = false;
+                break;
             case IR_CALL_F1: {
                 /* op1 is the native registry index (NOT an IRRef);
                  * only op2 is an IRRef.  Invariant iff op2 is.
@@ -1761,6 +1773,43 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             break;
         }
 
+        case OP_GET_INDEX: {
+            /* Phase 4.4c: read array[idx] where the array is a script
+             * object (IRT_OBJ on stack_map) and the index is numeric.
+             * Other shapes (string-keyed indexing, non-OBJ container)
+             * abort. */
+            if (sp < 2) {
+                cando_recorder_abort(vm,
+                    "OP_GET_INDEX with too few stack slots");
+                return;
+            }
+            IRRef idx_ref = r->stack_map[sp - 1];
+            IRRef arr_ref = r->stack_map[sp - 2];
+            if (idx_ref == IRREF_NIL || arr_ref == IRREF_NIL) {
+                cando_recorder_abort(vm,
+                    "OP_GET_INDEX: operand not in stack_map");
+                return;
+            }
+            const IRIns *idx_in = cando_ir_get_ins(&r->ir, idx_ref);
+            const IRIns *arr_in = cando_ir_get_ins(&r->ir, arr_ref);
+            if (!arr_in || arr_in->type != IRT_OBJ) {
+                cando_recorder_abort(vm,
+                    "OP_GET_INDEX: container is not a recorded object");
+                return;
+            }
+            if (idx_in && idx_in->type != IRT_NUM) {
+                cando_recorder_abort(vm,
+                    "OP_GET_INDEX: index is non-numeric (string keys "
+                    "land in a future phase)");
+                return;
+            }
+            IRRef e = cando_ir_emit(&r->ir, IR_INDEX_GET, IRT_NUM, 0,
+                                    arr_ref, idx_ref);
+            /* Stack effect: pop idx + obj, push result.  Land at sp-2. */
+            rec_push(r, e, sp - 2);
+            break;
+        }
+
         case OP_NEW_ARRAY: {
             /* Phase 4.4a: pop `count` numeric IRRefs, emit IR_NEW_ARRAY
              * + count IR_ARRAY_APPENDs.  The result is an OBJ-typed
@@ -2202,6 +2251,27 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                  * currently ignore). */
                 CandoValue arr = cando_bridge_new_array(vm);
                 vals[i].u = arr.u;
+                break;
+            }
+            case IR_INDEX_GET: {
+                /* Phase 4.4c: vals[op1] is an OBJ-handle u64.
+                 * Resolve, verify OBJ_ARRAY, fetch element by index,
+                 * require numeric.  Side-exit on any failure. */
+                CandoValue arr_val; arr_val.u = vals[in->op1].u;
+                CdoObject *arr = cando_bridge_resolve(vm,
+                                                      cando_as_handle(arr_val));
+                if (!arr || arr->kind != OBJ_ARRAY) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
+                u32 idx = (u32)vals[in->op2].d;
+                CdoValue cv = cdo_null();
+                if (!cdo_array_rawget_idx(arr, idx, &cv) ||
+                    !cdo_is_number(cv)) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
+                vals[i].d = cv.as.number;
                 break;
             }
             case IR_ARRAY_APPEND: {

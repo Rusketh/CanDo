@@ -182,6 +182,16 @@ typedef enum {
                               cdo_array_push.  Always emitted in
                               groups immediately after IR_NEW_ARRAY by
                               the recorder.                                */
+    IR_INDEX_GET,          /* op1: array IRRef (IRT_OBJ).  op2: index
+                              IRRef (IRT_NUM).  Returns IRT_NUM.
+                              IR-interp resolves the handle, calls
+                              cdo_array_rawget_idx, requires the
+                              element be numeric.  Side-exits on bad
+                              array, out-of-range, or non-numeric
+                              element via cur_snap.  v1 only handles
+                              numeric arrays; string-keyed indexing
+                              and non-array containers abort the
+                              recorder upstream.                         */
 
     /* ===== Band 7: Trace control ======================================== */
     IR_LOOP,               /* head-of-loop marker; the trace closes here    */

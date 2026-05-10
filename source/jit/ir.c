@@ -192,6 +192,7 @@ static const char *const s_op_names[IR__COUNT] = {
     [IR_CALL_F1]     = "IR_CALL_F1",
     [IR_NEW_ARRAY]   = "IR_NEW_ARRAY",
     [IR_ARRAY_APPEND]= "IR_ARRAY_APPEND",
+    [IR_INDEX_GET]   = "IR_INDEX_GET",
     [IR_LOOP]        = "IR_LOOP",
 };
 

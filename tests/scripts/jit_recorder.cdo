@@ -363,4 +363,18 @@ FUNCTION square_sum() {
 }
 print(square_sum());                    /* sum of i*i for i=1..100 = 338350 */
 
+/* Phase 4.4a-c: allocate an array literal in a hot loop, store it
+ * to a local, read element 0.  Trace records IR_NEW_ARRAY +
+ * IR_ARRAY_APPEND + IR_SSTORE(OBJ) + IR_SLOAD(OBJ) + IR_INDEX_GET.
+ * Codegen bails (no codegen for these yet -- Phase 4.4g) so the
+ * trace runs through the IR-interpreter; the result must match
+ * the bytecode-only path.  Allocations are NOT marked invariant
+ * by LICM (see mark_loop_invariants special case). */
+VAR arr_sum = 0;
+FOR k IN 1 -> 200 {
+    VAR a = [k, k * 2];
+    arr_sum = arr_sum + a[0];
+}
+print(arr_sum);                         /* 1+2+...+200 = 20100 */
+
 print("DONE");
