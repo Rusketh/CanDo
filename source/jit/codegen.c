@@ -50,16 +50,27 @@ void cando_jit_replay_snapshot_for_mcode(struct CandoVM *vm,
                                           CandoValue *frame_slots,
                                           u32 snap_idx);
 
-#define CG_MAX_GUARDS  128
-#define CG_MAX_SUNK    16
-#define CG_BUF_SIZE    4096u    /* one page; bail if a trace needs more */
+#define CG_MAX_GUARDS     128
+#define CG_MAX_SUNK       16
+#define CG_MAX_OBJ_FIELDS 8       /* per-sunk-object field cap */
+#define CG_BUF_SIZE       4096u   /* one page; bail if a trace needs more */
 
-/* Phase 4.4k sunk-allocation tracking. */
+/* Phase 4.4k / v1: sunk-allocation tracking.  Either:
+ *   IS_ARRAY=true  -- backing buffer indexed 0..capacity-1; APPEND
+ *                     uses cursor++; INDEX_GET/SET uses constant idx.
+ *   IS_ARRAY=false -- backing buffer indexed by field-name slot
+ *                     assigned in field_kref[] order; FIELD_SET
+ *                     registers a new slot if the name is unseen,
+ *                     FIELD_GET requires a previously-set name.
+ * Both share stack_off = base offset of slot 0 from rbp. */
 typedef struct {
-    u32 ref;            /* IRRef of the IR_NEW_ARRAY (with IRF_SUNK)    */
-    u32 capacity;       /* op1 of the NEW_ARRAY -- max appends          */
-    u32 cursor;         /* current append index, increments per APPEND  */
-    i32 stack_off;      /* negative offset from rbp to slot 0           */
+    u32 ref;            /* IRRef of the IR_NEW_ARRAY/IR_NEW_OBJECT     */
+    u32 capacity;       /* slots reserved (array: op1; object: max #f) */
+    u32 cursor;         /* array: append index.  object: # discovered  */
+    i32 stack_off;      /* negative offset from rbp to slot 0          */
+    bool is_array;      /* false for sunk IR_NEW_OBJECT                */
+    /* Object only: KIDX of each known field name in slot order.       */
+    u32 field_kref[CG_MAX_OBJ_FIELDS];
 } CGSunk;
 
 typedef struct {
@@ -213,35 +224,65 @@ static CGSunk *cg_find_sunk(CG *cg, u32 ref) {
     return NULL;
 }
 
-/* Pre-pass: scan IR for IRF_SUNK IR_NEW_ARRAY ops and assign each
- * a stack offset.  Total bytes go in cg->sunk_total_bytes which the
- * prologue uses to size its sub rsp.  Per-alloc base offset = -56 -
- * (running total) -- below the 5 callee-saved pushes (40 bytes) and
- * the 16-alignment pad (8 bytes).  The +8 from the pad is rolled
- * into the running offset to make slot accesses 8-byte aligned. */
+/* Pre-pass: scan IR for IRF_SUNK IR_NEW_ARRAY / IR_NEW_OBJECT ops
+ * and assign each a stack offset + capacity.
+ *
+ * For arrays the capacity is the IR's op1 (the OP_NEW_ARRAY count
+ * argument) -- known at recording time.
+ *
+ * For objects we scan forward and count UNIQUE field-name KIDX
+ * values across all IR_FIELD_SET ops referencing this alloc.  That
+ * gives the object's slot count.  Bails (drops SUNK) if more than
+ * CG_MAX_OBJ_FIELDS unique fields. */
 static void cg_assign_sunk_offsets(CG *cg, const CandoTraceIR *ir) {
     u32 running = 0;
     for (u32 i = 1; i < ir->ir_count; i++) {
         const IRIns *in = &ir->ir[i];
-        if (in->op != IR_NEW_ARRAY || !(in->flags & IRF_SUNK)) continue;
+        bool is_array  = (in->op == IR_NEW_ARRAY);
+        bool is_object = (in->op == IR_NEW_OBJECT);
+        if ((!is_array && !is_object) || !(in->flags & IRF_SUNK)) continue;
         if (cg->sunk_count >= CG_MAX_SUNK) {
-            /* Drop the SUNK flag so codegen falls back to the
-             * regular helper-call path for this alloc.  Doesn't
-             * affect correctness; just no perf win for it. */
             ((IRIns *)in)->flags &= (u8)~IRF_SUNK;
             continue;
         }
-        cg->sunk[cg->sunk_count].ref       = i;
-        cg->sunk[cg->sunk_count].capacity  = in->op1;
-        cg->sunk[cg->sunk_count].cursor    = 0;
-        /* Slot 0 lives at rbp - 56 - cumulative_prev_alloc_bytes.
-         * Element K of this alloc is at stack_off - 8*K. */
-        cg->sunk[cg->sunk_count].stack_off = -(i32)(56 + running);
-        running += in->op1 * 8;
-        cg->sunk_count++;
+
+        u32 capacity;
+        u32 field_count = 0;
+        u32 fields[CG_MAX_OBJ_FIELDS];
+
+        if (is_array) {
+            capacity = in->op1;
+        } else {
+            /* Object: scan forward for FIELD_SET ops on this alloc. */
+            bool overflowed = false;
+            for (u32 j = i + 1; j < ir->ir_count && !overflowed; j++) {
+                const IRIns *u = &ir->ir[j];
+                if (u->op != IR_FIELD_SET || u->op1 != i) continue;
+                /* Is u->op2 already in fields[]? */
+                bool seen = false;
+                for (u32 f = 0; f < field_count; f++)
+                    if (fields[f] == u->op2) { seen = true; break; }
+                if (seen) continue;
+                if (field_count >= CG_MAX_OBJ_FIELDS) { overflowed = true; break; }
+                fields[field_count++] = u->op2;
+            }
+            if (overflowed || field_count == 0) {
+                ((IRIns *)in)->flags &= (u8)~IRF_SUNK;
+                continue;
+            }
+            capacity = field_count;
+        }
+
+        CGSunk *s = &cg->sunk[cg->sunk_count++];
+        s->ref       = i;
+        s->capacity  = capacity;
+        s->cursor    = 0;
+        s->is_array  = is_array;
+        s->stack_off = -(i32)(56 + running);
+        for (u32 f = 0; f < field_count; f++) s->field_kref[f] = fields[f];
+        running += capacity * 8;
     }
     cg->sunk_total_bytes = running;
-    /* The prologue rounds (8 + sunk_total_bytes) up to 16-aligned. */
 }
 
 /* mov rax, [r15 + 8*slot]   -- load 8 bytes from frame_slots[slot]. */
@@ -1272,11 +1313,31 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             break;
         }
         case IR_NEW_OBJECT:
+            /* Sunk objects skip the helper call -- their backing
+             * memory is in the prologue's stack reservation. */
+            if (in->flags & IRF_SUNK) break;
             emit_new_object(&cg, i);
             break;
-        case IR_FIELD_GET:
+        case IR_FIELD_GET: {
+            CGSunk *s = cg_find_sunk(&cg, in->op1);
+            if (s && !s->is_array) {
+                /* Look up the field name (op2 KREF) in s->field_kref[]. */
+                u32 slot = (u32)-1;
+                for (u32 f = 0; f < s->capacity; f++)
+                    if (s->field_kref[f] == in->op2) { slot = f; break; }
+                if (slot == (u32)-1) {
+                    /* Field never SET on this sunk obj; bail. */
+                    cg.failed = true; break;
+                }
+                i32 disp = s->stack_off - (i32)(8 * slot);
+                emit_movsd_xmm0_rbp(&cg, disp);
+                emit_movsd_vals_xmm(&cg, i, 0);
+                cg.xmm0_holds = i;
+                break;
+            }
             emit_field_get(&cg, in->op1, in->op2, i, &t->ir);
             break;
+        }
         case IR_FIELD_SET_VAL:
             /* Pair-prefix no-op; FIELD_SET reads from i-1. */
             break;
@@ -1285,6 +1346,20 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
                 cg.failed = true; break;
             }
             u32 val_ref = t->ir.ir[i - 1].op1;
+            CGSunk *s = cg_find_sunk(&cg, in->op1);
+            if (s && !s->is_array) {
+                /* Find the slot for this field name (pre-pass already
+                 * populated s->field_kref[]). */
+                u32 slot = (u32)-1;
+                for (u32 f = 0; f < s->capacity; f++)
+                    if (s->field_kref[f] == in->op2) { slot = f; break; }
+                if (slot == (u32)-1) { cg.failed = true; break; }
+                i32 disp = s->stack_off - (i32)(8 * slot);
+                emit_load_xmm0(&cg, val_ref);
+                emit_movsd_rbp_xmm0(&cg, disp);
+                cg_invalidate_xmm0(&cg);
+                break;
+            }
             emit_field_set(&cg, in->op1, in->op2, val_ref, &t->ir);
             break;
         }
