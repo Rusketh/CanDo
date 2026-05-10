@@ -327,4 +327,15 @@ FUNCTION sqrt_local_native() {
 }
 print(sqrt_local_native());             /* 100 * 2 = 200 */
 
+/* Phase 6.4: IR_GLOAD + IR_GSTORE codegen.  A top-level loop that
+ * reads/writes globals every iteration goes through the JIT helpers
+ * cando_jit_gload_for_mcode / cando_jit_gstore_for_mcode emitted as
+ * direct calls.  The trace's bad-type side-exit reuses the per-
+ * guard stub mechanism with cur_snap from the latest guard. */
+VAR g_cnt = 0;
+WHILE g_cnt < 200 {
+    g_cnt = g_cnt + 1;
+}
+print(g_cnt);                           /* 200 */
+
 print("DONE");

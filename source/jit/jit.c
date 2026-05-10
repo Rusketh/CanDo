@@ -2144,3 +2144,29 @@ void cando_jit_replay_snapshot_for_mcode(struct CandoVM *vm,
                                           u32 snap_idx) {
     trace_replay_snapshot(vm, t, vals, frame_slots, (u16)snap_idx);
 }
+
+/* IR_GLOAD helper: read a numeric global by name.  Returns 0 on
+ * success and writes the f64 to *out; returns 1 on missing or
+ * non-numeric so the caller can side-exit and resume in bytecode.
+ *
+ * `name` is a CandoString* (pointer to the heap object, not its
+ * char data) -- the codegen embeds the pointer as an immediate
+ * resolved at trace-record time from the IR's constant pool. */
+int cando_jit_gload_for_mcode(struct CandoVM *vm, struct CandoString *name,
+                              double *out) {
+    CandoValue v;
+    if (!cando_vm_get_global(vm, ((CandoString *)name)->data, &v))
+        return 1;
+    if (!cando_is_number(v)) return 1;
+    *out = cando_as_number(v);
+    return 0;
+}
+
+/* IR_GSTORE helper: write a numeric value to a global by name.
+ * Returns 0 on success, 1 on failure (e.g. the name is bound to a
+ * const-protected global). */
+int cando_jit_gstore_for_mcode(struct CandoVM *vm, struct CandoString *name,
+                               double value) {
+    return cando_vm_set_global(vm, ((CandoString *)name)->data,
+                                cando_number(value), false) ? 0 : 1;
+}

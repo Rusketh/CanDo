@@ -59,6 +59,9 @@ typedef struct {
     u8  *end;           /* one past the last writable byte */
     bool failed;        /* set on overflow or unsupported op */
     struct CandoVM *vm; /* threaded through for fast-native lookup */
+    u16 cur_snap;       /* most-recent guard's snapshot index, used by
+                           IR_GLOAD/IR_GSTORE bad-type side-exits to
+                           match the IR-interpreter's behaviour */
 
     /* Patch table for per-guard side-exit jumps.  Each entry is the
      * offset (relative to base) of a 4-byte placeholder displacement
@@ -171,6 +174,26 @@ static void emit_movabs_rcx(CG *cg, u64 imm) {
     cg_emit_u8(cg, 0x48);
     cg_emit_u8(cg, 0xB9);
     cg_emit_u64(cg, imm);
+}
+/* movabs rsi, imm64          -- 48 BE imm64. */
+static void emit_movabs_rsi(CG *cg, u64 imm) {
+    cg_emit_u8(cg, 0x48);
+    cg_emit_u8(cg, 0xBE);
+    cg_emit_u64(cg, imm);
+}
+/* lea rdx, [r14 + 8*idx]     -- compute address of vals[idx].
+ * REX = 0x49 (W=1 R=0 X=0 B=1 -- B for r14 base).
+ * Opcode 8D /r.  ModR/M = 10 010 110 = 0x96 (mod=disp32, reg=rdx,
+ * r/m=110 since R14&7=110 needs no SIB). */
+static void emit_lea_rdx_vals(CG *cg, u32 idx) {
+    static const u8 prefix[] = { 0x49, 0x8D, 0x96 };
+    cg_emit_bytes(cg, prefix, 3);
+    cg_emit_u32(cg, idx * 8);
+}
+/* test eax, eax              -- 85 C0.  Sets ZF=1 iff eax==0. */
+static void emit_test_eax_eax(CG *cg) {
+    static const u8 b[] = { 0x85, 0xC0 };
+    cg_emit_bytes(cg, b, 2);
 }
 
 /* and rax, rcx               -- 48 21 c8. */
@@ -471,6 +494,67 @@ static void emit_neg(CG *cg, u32 op1, u32 i) {
     emit_movsd_vals_xmm(cg, i, 1);
 }
 
+/* Emit the per-guard JNE that targets a placeholder side-exit
+ * stub.  Caller has already emitted the comparison whose ZF the
+ * branch depends on.  Returns by appending a (je_disp_off,
+ * snap_idx) entry to cg->guards so the post-body patch pass can
+ * fill in the stub address. */
+static void emit_jne_to_stub(CG *cg, u16 snap_idx) {
+    if (cg->guard_count >= CG_MAX_GUARDS) { cg->failed = true; return; }
+    cg_emit_u8(cg, 0x0F); cg_emit_u8(cg, 0x85);    /* JNE rel32 */
+    u32 disp_off = cg_off(cg);
+    cg_emit_u32(cg, 0);
+    cg->guards[cg->guard_count].je_disp_off = disp_off;
+    cg->guards[cg->guard_count].snap_idx    = snap_idx;
+    cg->guards[cg->guard_count].stub_off    = 0;
+    cg->guard_count++;
+}
+
+/* IR_GLOAD: vals[i] = global_by_name (numeric).  Calls the JIT
+ * helper which returns 0 on success (writes f64 to *out) or 1 on
+ * missing/non-numeric.  On non-zero return we side-exit to roll
+ * back any in-flight stores via cur_snap (matches the IR-interp).
+ *
+ * `name_str` is the trace's interned name -- the codegen looks it
+ * up in t->ir.constants[] at emit time and embeds the pointer as
+ * an immediate.  Argument layout (SysV):
+ *   rdi = vm    rsi = name    rdx = &vals[i]   rax = helper       */
+extern int cando_jit_gload_for_mcode(struct CandoVM *vm,
+                                     struct CandoString *name,
+                                     double *out);
+extern int cando_jit_gstore_for_mcode(struct CandoVM *vm,
+                                      struct CandoString *name,
+                                      double value);
+
+static void emit_gload(CG *cg, const CandoTraceIR *ir, IRRef name_ref, u32 i) {
+    if (!IRREF_IS_K(name_ref)) { cg->failed = true; return; }
+    CandoValue cv = cando_ir_get_const(ir, name_ref);
+    if (!cando_is_string(cv)) { cg->failed = true; return; }
+    CandoString *name = cando_as_string(cv);
+    emit_mov_rdi_rbx(cg);                         /* arg1: vm        */
+    emit_movabs_rsi(cg, (u64)(uintptr_t)name);    /* arg2: name      */
+    emit_lea_rdx_vals(cg, i);                     /* arg3: &vals[i]  */
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_gload_for_mcode);
+    emit_call_rax(cg);
+    emit_test_eax_eax(cg);
+    emit_jne_to_stub(cg, cg->cur_snap);
+}
+
+static void emit_gstore(CG *cg, const CandoTraceIR *ir, IRRef name_ref,
+                        u32 op2) {
+    if (!IRREF_IS_K(name_ref)) { cg->failed = true; return; }
+    CandoValue cv = cando_ir_get_const(ir, name_ref);
+    if (!cando_is_string(cv)) { cg->failed = true; return; }
+    CandoString *name = cando_as_string(cv);
+    emit_mov_rdi_rbx(cg);                         /* arg1: vm        */
+    emit_movabs_rsi(cg, (u64)(uintptr_t)name);    /* arg2: name      */
+    emit_movsd_xmm_vals(cg, 0, op2);              /* arg3 (f64 in xmm0) */
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_gstore_for_mcode);
+    emit_call_rax(cg);
+    emit_test_eax_eax(cg);
+    emit_jne_to_stub(cg, cg->cur_snap);
+}
+
 /* IR_CALL_F1: vals[i] = fast_native(vals[op2]).  op1 is the index
  * into vm->fast_natives_f1[].  We resolve the function pointer at
  * codegen time and embed it as an immediate -- registrations are
@@ -596,6 +680,13 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             break;
         case IR_GUARD_TRUE: case IR_GUARD_FALSE:
             emit_guard_bool(&cg, (IROp)in->op, in->op1, (u16)in->op2);
+            cg.cur_snap = (u16)in->op2;
+            break;
+        case IR_GLOAD:
+            emit_gload(&cg, &t->ir, in->op1, i);
+            break;
+        case IR_GSTORE:
+            emit_gstore(&cg, &t->ir, in->op1, in->op2);
             break;
         case IR_LOOP:
             /* Trace-close marker; we'll emit the LOOP_DONE epilogue
