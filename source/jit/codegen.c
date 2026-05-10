@@ -238,6 +238,18 @@ static void emit_mulsd(CG *cg) {
     static const u8 b[] = { 0xF2, 0x0F, 0x59, 0xC1 };
     cg_emit_bytes(cg, b, 4);
 }
+/* divsd xmm0, xmm1   -- F2 0F 5E C1. */
+static void emit_divsd(CG *cg) {
+    static const u8 b[] = { 0xF2, 0x0F, 0x5E, 0xC1 };
+    cg_emit_bytes(cg, b, 4);
+}
+/* subsd xmm1, xmm0   -- F2 0F 5C C8.  Used to compute -x via 0 - x:
+ * caller zeroes xmm1 with xorpd, loads x into xmm0, then this
+ * leaves -x in xmm1. */
+static void emit_subsd_xmm1_xmm0(CG *cg) {
+    static const u8 b[] = { 0xF2, 0x0F, 0x5C, 0xC8 };
+    cg_emit_bytes(cg, b, 4);
+}
 
 /* setb al            -- 0F 92 C0 (CF=1).  For LT after ucomisd. */
 static void emit_setb_al(CG *cg) {
@@ -314,7 +326,10 @@ static void emit_mov_rdx_r14(CG *cg) {
     static const u8 b[] = { 0x4C, 0x89, 0xF2 }; cg_emit_bytes(cg, b, 3);
 }
 static void emit_mov_rcx_r15(CG *cg) {
-    static const u8 b[] = { 0x4C, 0x89, 0xFF }; cg_emit_bytes(cg, b, 3);
+    /* ModR/M = 11 111 001: reg=r15&7=111, r/m=rcx=001.  An earlier
+     * draft had 0xFF (encodes mov rdi, r15) which silently clobbered
+     * vm at the side-exit, sending garbage into the snapshot helper. */
+    static const u8 b[] = { 0x4C, 0x89, 0xF9 }; cg_emit_bytes(cg, b, 3);
 }
 static void emit_mov_r8_r9(CG *cg) {
     static const u8 b[] = { 0x4D, 0x89, 0xC8 }; cg_emit_bytes(cg, b, 3);
@@ -336,11 +351,18 @@ static void emit_call_rax(CG *cg) {
  *   push r12              ; 41 54
  *   push r14              ; 41 56
  *   push r15              ; 41 57
- *   sub  rsp, 8           ; 48 83 ec 08          (16-align stack)
  *   mov  rbx, rdi         ; 48 89 fb            -- vm
  *   mov  r12, rsi         ; 49 89 f4            -- t
  *   mov  r15, rcx         ; 49 89 cf            -- frame_slots
  *   mov  r14, r8          ; 4d 89 c6            -- vals
+ *
+ * Stack discipline: caller aligns RSP to 16 before `call mcode_fn`,
+ * which pushes the return address (RSP -> aligned-8).  Five pushes
+ * (rbp, rbx, r12, r14, r15) bring us back to aligned (5*8=40, plus
+ * the 8 from the return address = 48 bytes from caller_rsp).  We
+ * deliberately don't sub rsp by 8 here: if we did, the side-exit's
+ * `call rax` to the snapshot helper would land on a misaligned
+ * stack and the helper's internal SSE ops could fault.
  */
 static void emit_prologue(CG *cg) {
     static const u8 b[] = {
@@ -350,7 +372,6 @@ static void emit_prologue(CG *cg) {
         0x41, 0x54,
         0x41, 0x56,
         0x41, 0x57,
-        0x48, 0x83, 0xEC, 0x08,
         0x48, 0x89, 0xFB,
         0x49, 0x89, 0xF4,
         0x49, 0x89, 0xCF,
@@ -362,7 +383,6 @@ static void emit_prologue(CG *cg) {
 /* Epilogue restoring callee-saveds and returning.  Caller has set EAX. */
 static void emit_epilogue(CG *cg) {
     static const u8 b[] = {
-        0x48, 0x83, 0xC4, 0x08,    /* add rsp, 8     */
         0x41, 0x5F,                /* pop r15        */
         0x41, 0x5E,                /* pop r14        */
         0x41, 0x5C,                /* pop r12        */
@@ -422,7 +442,10 @@ static void emit_kbool(CG *cg, u32 imm, u32 i) {
     emit_mov_vals_rax(cg, i);
 }
 
-/* Two-operand SSE2 arithmetic: vals[a] OP vals[b] -> vals[i]. */
+/* Two-operand SSE2 arithmetic: vals[a] OP vals[b] -> vals[i].  IR_DIV
+ * is recorded with a NEZ guard immediately preceding it (see OP_DIV
+ * in cando_recorder_observe), so the divisor is provably nonzero by
+ * the time control reaches divsd here.  No runtime check needed. */
 static void emit_arith(CG *cg, IROp op, u32 a, u32 b, u32 i) {
     emit_movsd_xmm_vals(cg, 0, a);
     emit_movsd_xmm_vals(cg, 1, b);
@@ -430,9 +453,20 @@ static void emit_arith(CG *cg, IROp op, u32 a, u32 b, u32 i) {
     case IR_ADD: emit_addsd(cg); break;
     case IR_SUB: emit_subsd(cg); break;
     case IR_MUL: emit_mulsd(cg); break;
+    case IR_DIV: emit_divsd(cg); break;
     default:     cg->failed = true; return;
     }
     emit_movsd_vals_xmm(cg, i, 0);
+}
+
+/* IR_NEG: vals[i] = -vals[op1].  Computed as 0 - vals[op1] using the
+ * existing subsd-with-zero idiom -- avoids encoding a 64-bit
+ * sign-bit-mask constant. */
+static void emit_neg(CG *cg, u32 op1, u32 i) {
+    emit_xorpd_xmm1_xmm1(cg);                /* xmm1 = 0.0           */
+    emit_movsd_xmm_vals(cg, 0, op1);         /* xmm0 = vals[op1]     */
+    emit_subsd_xmm1_xmm0(cg);                /* xmm1 = xmm1 - xmm0   */
+    emit_movsd_vals_xmm(cg, i, 1);
 }
 
 /* Comparisons: vals[a] CMP vals[b] -> vals[i] as 1.0 or 0.0.
@@ -518,8 +552,11 @@ bool cando_jit_codegen_trace(CandoTrace *t) {
         case IR_SSTORE:
             emit_sstore(&cg, in->op1, in->op2);
             break;
-        case IR_ADD: case IR_SUB: case IR_MUL:
+        case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
             emit_arith(&cg, (IROp)in->op, in->op1, in->op2, i);
+            break;
+        case IR_NEG:
+            emit_neg(&cg, in->op1, i);
             break;
         case IR_EQ: case IR_NEQ: case IR_LT: case IR_LE:
         case IR_GT: case IR_GE:
