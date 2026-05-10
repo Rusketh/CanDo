@@ -17,8 +17,8 @@
 #ifndef CDO_OBJECT_H
 #define CDO_OBJECT_H
 
-#include "common.h"
-#include "lock.h"
+#include "../core/common.h"
+#include "../core/lock.h"
 #include "string.h"
 #include "value.h"
 #include "../core/value.h"   /* HandleIndex / CANDO_INVALID_HANDLE */
