@@ -83,6 +83,23 @@ static void rec_push_aux(CandoRecorder *r, u32 sp_after,
     }
 }
 
+/* Phase 4.4d: lift an AUX_OBJECT_GLOBAL marker at `abs_pos` into a
+ * real IRT_OBJ IRRef so ops needing the array handle (OP_GET_INDEX,
+ * OP_SET_INDEX) have something to point at.  The aux marker stays
+ * (other consumers like OP_GET_FIELD's fast-native lookup still
+ * use it).  No-op if stack_map already has a real IRRef there. */
+static IRRef rec_materialize_obj_irref(CandoRecorder *r, u32 abs_pos) {
+    if (abs_pos >= r->stack_map_cap) return IRREF_NIL;
+    IRRef existing = r->stack_map[abs_pos];
+    if (existing != IRREF_NIL) return existing;
+    u32 ax = r->stack_aux[abs_pos];
+    if (CANDO_AUX_KIND(ax) != AUX_OBJECT_GLOBAL) return IRREF_NIL;
+    u32 ki = CANDO_AUX_DATA(ax);
+    IRRef e = cando_ir_emit(&r->ir, IR_GLOAD, IRT_OBJ, 0, IRREF_K(ki), 0);
+    r->stack_map[abs_pos] = e;
+    return e;
+}
+
 /* Helper: append IR_GUARD_NUM unless `ref` is already known IRT_NUM.
  * Returns the (possibly new) ref to use as the operand.  Pure ops
  * (KNUM, ADD, SUB, MUL with both operands NUM) yield IRT_NUM, so the
@@ -618,13 +635,14 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
             case IR_NEW_ARRAY:
             case IR_ARRAY_APPEND:
             case IR_INDEX_GET:
-                /* Phase 4.4a-c: allocations and array reads/writes
+            case IR_INDEX_SET:
+            case IR_INDEX_SET_VAL:
+                /* Phase 4.4a-d: allocations and array reads/writes
                  * are NEVER invariant.  IR_NEW_ARRAY produces a
                  * fresh handle each time; hoisting it would alias
-                 * iterations to the same array.  IR_ARRAY_APPEND
-                 * mutates that array.  IR_INDEX_GET reads a slot
-                 * whose contents may have changed via APPEND or
-                 * external mutation. */
+                 * iterations to the same array.  APPEND/SET mutate;
+                 * GET reads possibly-mutated state.  SET_VAL is the
+                 * pinned-pair partner of SET. */
                 inv = false;
                 break;
             case IR_CALL_F1: {
@@ -1773,6 +1791,59 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             break;
         }
 
+        case OP_SET_INDEX: {
+            /* Phase 4.4d: array[idx] = val.  Stack: [..., obj, idx, val].
+             * obj stays on the stack (PEEKed by bytecode); we pop val
+             * + idx.  Three operands need encoding -- IR has only two
+             * op slots, so we emit a PINNED pair: IR_INDEX_SET_VAL
+             * (op1=val) followed by IR_INDEX_SET (op1=array, op2=idx)
+             * which reads the value from the preceding op via the
+             * i-1 convention. */
+            if (sp < 3) {
+                cando_recorder_abort(vm,
+                    "OP_SET_INDEX with too few stack slots");
+                return;
+            }
+            IRRef val_ref = r->stack_map[sp - 1];
+            IRRef idx_ref = r->stack_map[sp - 2];
+            IRRef arr_ref = r->stack_map[sp - 3];
+            if (arr_ref == IRREF_NIL) {
+                /* Phase 4.4d: lift global-object aux marker into a
+                 * real IRT_OBJ IRRef so we have something to point at. */
+                arr_ref = rec_materialize_obj_irref(r, sp - 3);
+            }
+            if (val_ref == IRREF_NIL || idx_ref == IRREF_NIL ||
+                arr_ref == IRREF_NIL) {
+                cando_recorder_abort(vm,
+                    "OP_SET_INDEX: operand not in stack_map");
+                return;
+            }
+            const IRIns *val_in = cando_ir_get_ins(&r->ir, val_ref);
+            const IRIns *idx_in = cando_ir_get_ins(&r->ir, idx_ref);
+            const IRIns *arr_in = cando_ir_get_ins(&r->ir, arr_ref);
+            if (!arr_in || arr_in->type != IRT_OBJ) {
+                cando_recorder_abort(vm,
+                    "OP_SET_INDEX: container is not a recorded object");
+                return;
+            }
+            if (idx_in && idx_in->type != IRT_NUM) {
+                cando_recorder_abort(vm,
+                    "OP_SET_INDEX: index is non-numeric (v1)");
+                return;
+            }
+            if (val_in && val_in->type != IRT_NUM) {
+                cando_recorder_abort(vm,
+                    "OP_SET_INDEX: value is non-numeric (v1)");
+                return;
+            }
+            cando_ir_emit(&r->ir, IR_INDEX_SET_VAL, IRT_VOID,
+                          IRF_PINNED, val_ref, 0);
+            cando_ir_emit(&r->ir, IR_INDEX_SET, IRT_VOID,
+                          IRF_PINNED, arr_ref, idx_ref);
+            /* Stack effect: pop val + idx (obj stays).  No push. */
+            break;
+        }
+
         case OP_GET_INDEX: {
             /* Phase 4.4c: read array[idx] where the array is a script
              * object (IRT_OBJ on stack_map) and the index is numeric.
@@ -1785,6 +1856,11 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             }
             IRRef idx_ref = r->stack_map[sp - 1];
             IRRef arr_ref = r->stack_map[sp - 2];
+            if (arr_ref == IRREF_NIL) {
+                /* Phase 4.4d: lift global-object aux marker into a
+                 * real IRT_OBJ IRRef. */
+                arr_ref = rec_materialize_obj_irref(r, sp - 2);
+            }
             if (idx_ref == IRREF_NIL || arr_ref == IRREF_NIL) {
                 cando_recorder_abort(vm,
                     "OP_GET_INDEX: operand not in stack_map");
@@ -2140,7 +2216,10 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                 return TRACE_RANGE_ERROR;
 
             case IR_GLOAD: {
-                /* op1: const-pool ref of the name string. */
+                /* op1: const-pool ref of the name string.  Phase 4.4d:
+                 * the IR's type field selects the runtime check just
+                 * like SLOAD -- IRT_NUM expects a number, IRT_OBJ
+                 * expects an object handle. */
                 CandoValue name = cando_ir_get_const(&t->ir, in->op1);
                 if (!cando_is_string(name)) {
                     trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
@@ -2148,8 +2227,19 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                 }
                 CandoValue out;
                 if (!cando_vm_get_global(vm, cando_as_string(name)->data,
-                                          &out) ||
-                    !cando_is_number(out)) {
+                                          &out)) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
+                if (in->type == IRT_OBJ) {
+                    if (!cando_is_object(out)) {
+                        trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                        return TRACE_BAD_TYPE;
+                    }
+                    vals[i].u = out.u;
+                    break;
+                }
+                if (!cando_is_number(out)) {
                     trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
                     return TRACE_BAD_TYPE;
                 }
@@ -2272,6 +2362,32 @@ CandoTraceStatus cando_trace_run(struct CandoVM *vm, CandoTrace *t,
                     return TRACE_BAD_TYPE;
                 }
                 vals[i].d = cv.as.number;
+                break;
+            }
+            case IR_INDEX_SET_VAL:
+                /* Phase 4.4d: no-op.  The value lives in vals[op1].d
+                 * already; the immediately-following IR_INDEX_SET
+                 * picks it up via the i-1 convention. */
+                break;
+            case IR_INDEX_SET: {
+                /* Phase 4.4d: array[idx] = value.  Reads value from
+                 * the preceding IR_INDEX_SET_VAL's op1 (i-1 in IR
+                 * order; recorder emits the pair atomically). */
+                if (i == 0 || t->ir.ir[i - 1].op != IR_INDEX_SET_VAL) {
+                    /* Malformed -- pair must precede. */
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_RANGE_ERROR;
+                }
+                IRRef val_ref = t->ir.ir[i - 1].op1;
+                CandoValue arr_val; arr_val.u = vals[in->op1].u;
+                CdoObject *arr = cando_bridge_resolve(vm,
+                                                      cando_as_handle(arr_val));
+                if (!arr || arr->kind != OBJ_ARRAY) {
+                    trace_replay_snapshot(vm, t, vals, frame_slots, cur_snap);
+                    return TRACE_BAD_TYPE;
+                }
+                u32 idx = (u32)vals[in->op2].d;
+                cdo_array_rawset_idx(arr, idx, cdo_number(vals[val_ref].d));
                 break;
             }
             case IR_ARRAY_APPEND: {

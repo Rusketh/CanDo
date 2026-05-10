@@ -192,6 +192,18 @@ typedef enum {
                               numeric arrays; string-keyed indexing
                               and non-array containers abort the
                               recorder upstream.                         */
+    IR_INDEX_SET_VAL,      /* op1: value IRRef.  No-op at trace_run
+                              time -- carries the value into the
+                              immediately-following IR_INDEX_SET via
+                              the PINNED-pair convention.  PINNED
+                              flag prevents DCE from killing it. */
+    IR_INDEX_SET,          /* op1: array IRRef.  op2: index IRRef.
+                              Reads its value operand from the
+                              preceding IR_INDEX_SET_VAL (via i-1).
+                              IR-interp resolves the array, calls
+                              cdo_array_rawset_idx with the value as
+                              a CdoValue number.  Side-exits on
+                              non-array via cur_snap. */
 
     /* ===== Band 7: Trace control ======================================== */
     IR_LOOP,               /* head-of-loop marker; the trace closes here    */

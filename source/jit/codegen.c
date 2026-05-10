@@ -880,6 +880,10 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             cg.cur_snap = (u16)in->op2;
             break;
         case IR_GLOAD:
+            /* Phase 4.4d: only IRT_NUM globals are codegen'd today;
+             * IRT_OBJ globals (script object handles) need a different
+             * type-check encoding that lands with Phase 4.4g. */
+            if (in->type != IRT_NUM) { cg.failed = true; break; }
             emit_gload(&cg, &t->ir, in->op1, i);
             break;
         case IR_GSTORE:

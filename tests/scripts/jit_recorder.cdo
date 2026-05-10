@@ -377,4 +377,18 @@ FOR k IN 1 -> 200 {
 }
 print(arr_sum);                         /* 1+2+...+200 = 20100 */
 
+/* Phase 4.4d: index-write inside a hot loop.  `a` is a global
+ * object so the recorder must lift its AUX_OBJECT_GLOBAL aux
+ * marker into a real IRT_OBJ IRRef via rec_materialize_obj_irref
+ * before IR_SET_INDEX can use it.  Result must match bytecode. */
+VAR ix_a = [0, 0, 0];
+VAR ix_sum = 0;
+FOR k IN 1 -> 200 {
+    ix_a[0] = k;
+    ix_a[1] = k * 2;
+    ix_sum = ix_sum + ix_a[0] + ix_a[1];
+}
+print(ix_sum);                          /* sum(3k for k=1..200) = 60300 */
+print(ix_a[0]);                         /* last write was k=200 */
+
 print("DONE");
