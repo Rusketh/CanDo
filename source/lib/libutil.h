@@ -29,7 +29,7 @@
  */
 static inline const char *libutil_arg_cstr(CandoValue v)
 {
-    return cando_is_string(v) ? v.as.string->data : NULL;
+    return cando_is_string(v) ? cando_as_string(v)->data : NULL;
 }
 
 /*
@@ -38,7 +38,7 @@ static inline const char *libutil_arg_cstr(CandoValue v)
  */
 static inline CandoString *libutil_arg_str(CandoValue v)
 {
-    return cando_is_string(v) ? v.as.string : NULL;
+    return cando_is_string(v) ? cando_as_string(v) : NULL;
 }
 
 /*
@@ -47,7 +47,7 @@ static inline CandoString *libutil_arg_str(CandoValue v)
  */
 static inline f64 libutil_arg_num(CandoValue v, f64 def)
 {
-    return cando_is_number(v) ? v.as.number : def;
+    return cando_is_number(v) ? cando_as_number(v) : def;
 }
 
 /* =========================================================================
@@ -62,7 +62,7 @@ static inline const char *libutil_arg_cstr_at(CandoValue *args, int argc,
                                                int idx)
 {
     if (idx >= argc || !cando_is_string(args[idx])) return NULL;
-    return args[idx].as.string->data;
+    return cando_as_string(args[idx])->data;
 }
 
 /*
@@ -73,7 +73,7 @@ static inline CandoString *libutil_arg_str_at(CandoValue *args, int argc,
                                                int idx)
 {
     if (idx >= argc || !cando_is_string(args[idx])) return NULL;
-    return args[idx].as.string;
+    return cando_as_string(args[idx]);
 }
 
 /*
@@ -84,7 +84,7 @@ static inline f64 libutil_arg_num_at(CandoValue *args, int argc,
                                      int idx, f64 def)
 {
     if (idx >= argc || !cando_is_number(args[idx])) return def;
-    return args[idx].as.number;
+    return cando_as_number(args[idx]);
 }
 
 /* =========================================================================

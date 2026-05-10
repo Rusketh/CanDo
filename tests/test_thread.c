@@ -88,8 +88,8 @@ TEST(test_thread_set_results) {
     EXPECT_EQ((int)atomic_load(&t->state), (int)CDO_THREAD_DONE);
     EXPECT_TRUE(cdo_thread_is_done(t));
     EXPECT_EQ(t->result_count, 2u);
-    EXPECT_EQ(t->results[0].as.number, 1.0);
-    EXPECT_EQ(t->results[1].as.number, 2.0);
+    EXPECT_EQ(cando_as_number(t->results[0]), 1.0);
+    EXPECT_EQ(cando_as_number(t->results[1]), 2.0);
 
     cdo_thread_destroy(t);
 }
@@ -103,7 +103,7 @@ TEST(test_thread_set_error) {
 
     EXPECT_EQ((int)atomic_load(&t->state), (int)CDO_THREAD_ERROR);
     EXPECT_TRUE(cdo_thread_is_done(t));
-    EXPECT_EQ(t->error.as.number, 404.0);
+    EXPECT_EQ(cando_as_number(t->error), 404.0);
 
     cdo_thread_destroy(t);
 }
@@ -163,7 +163,7 @@ TEST(test_thread_wait_blocks_until_done) {
 
     EXPECT_EQ((int)atomic_load(&t->state), (int)CDO_THREAD_DONE);
     EXPECT_EQ(t->result_count, 1u);
-    EXPECT_EQ(t->results[0].as.number, 42.0);
+    EXPECT_EQ(cando_as_number(t->results[0]), 42.0);
 
     cando_os_thread_join(os_t);
     cdo_thread_destroy(t);
@@ -246,8 +246,8 @@ TEST(test_concurrent_result_set) {
 TEST(test_then_fn_initialises_null) {
     CandoValue fn = cando_null();
     CdoThread *t  = cdo_thread_new(fn);
-    EXPECT_TRUE(t->then_fn.tag == TYPE_NULL);
-    EXPECT_TRUE(t->catch_fn.tag == TYPE_NULL);
+    EXPECT_TRUE(cando_is_null(t->then_fn));
+    EXPECT_TRUE(cando_is_null(t->catch_fn));
     cdo_thread_destroy(t);
 }
 
@@ -260,7 +260,7 @@ TEST(test_then_fn_stored_and_released) {
     cando_value_release(t->then_fn);
     t->then_fn = cando_value_copy(fake_fn);
 
-    EXPECT_EQ(t->then_fn.as.number, 1.0);
+    EXPECT_EQ(cando_as_number(t->then_fn), 1.0);
     /* cdo_thread_destroy must release then_fn without crashing. */
     cdo_thread_destroy(t);
 }
@@ -335,7 +335,7 @@ TEST(test_then_fn_survives_set_results) {
     cando_os_thread_join(os_t);
 
     /* then_fn was set before set_results; object layer preserves it. */
-    EXPECT_EQ(t->then_fn.as.number, 99.0);
+    EXPECT_EQ(cando_as_number(t->then_fn), 99.0);
     EXPECT_EQ(atomic_load(&g_cb_fire_count), 1);
 
     cdo_thread_destroy(t);

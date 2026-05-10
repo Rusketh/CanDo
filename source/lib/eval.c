@@ -89,7 +89,7 @@ static int native_eval(CandoVM *vm, int argc, CandoValue *args)
     bool        sandbox    = false;
 
     if (argc >= 2 && cando_is_object(args[1])) {
-        CdoObject *opts = cando_bridge_resolve(vm, args[1].as.handle);
+        CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[1]));
 
         /* options.name: string → chunk name for error messages */
         CdoString *name_key = cdo_string_intern("name", 4);

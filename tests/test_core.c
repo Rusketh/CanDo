@@ -115,8 +115,8 @@ TEST(test_bool_value) {
     CandoValue f = cando_bool(false);
 
     EXPECT_TRUE(cando_is_bool(t));
-    EXPECT_TRUE(t.as.boolean);
-    EXPECT_FALSE(f.as.boolean);
+    EXPECT_TRUE(cando_as_bool(t));
+    EXPECT_FALSE(cando_as_bool(f));
 
     char *st = cando_value_tostring(t);
     char *sf = cando_value_tostring(f);
@@ -131,7 +131,7 @@ TEST(test_number_value) {
     CandoValue n2 = cando_number(3.14);
 
     EXPECT_TRUE(cando_is_number(n1));
-    EXPECT_EQ(n1.as.number, 42.0);
+    EXPECT_EQ(cando_as_number(n1), 42.0);
 
     char *s1 = cando_value_tostring(n1);
     EXPECT_STR(s1, "42");
@@ -167,7 +167,7 @@ TEST(test_string_value) {
 TEST(test_object_value) {
     CandoValue v = cando_object_value(7);
     EXPECT_TRUE(cando_is_object(v));
-    EXPECT_EQ(v.as.handle, 7u);
+    EXPECT_EQ(cando_as_handle(v), 7u);
 
     char *s = cando_value_tostring(v);
     EXPECT_TRUE(strstr(s, "object") != NULL);

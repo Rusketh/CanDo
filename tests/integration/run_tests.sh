@@ -73,6 +73,12 @@ run_test "while" "$SCRIPTS/while.cdo" \
 run_test "for_loops" "$SCRIPTS/for_loops.cdo" \
     "$(printf '1\n2\n3\n4\n3\n2\n1\n100\n200\n300\n15\n11\n12\n21\n22\n1\n4\n9')"
 
+run_test "for_loops_extra" "$SCRIPTS/for_loops_extra.cdo" \
+    "$(printf 'x\ny\nz\n10\n20\n30\nok\n3\n0\n0\n1:1\n2:1\n3:1')"
+
+run_test "jit_recorder" "$SCRIPTS/jit_recorder.cdo" \
+    "$(printf '19900\n1\n0\n1\n1\n1\n1\ntrue\ntrue\n200\n1\ntrue\nfalse\ncaught\n20100\n19900\ntrue\n100\n0\ntrue\ntrue\n20500\ntrue\n40200\n1275\ntrue\n1000\nOP_CALL: recursion detected\n600\nloop inside inlined call (v1 limitation)\n100500\n20100\n40200\n20100\n10000\n200\n200\n20100\n338350\n20100\n60300\n200\n60300\n1000\n120600\n200\nDONE')"
+
 run_test "for_over" "$SCRIPTS/for_over.cdo" \
     "$(printf -- '--- Array iteration ---\n0 10\n1 20\n2 30\n--- Triple variable iteration ---\n0 10 20\n1 20 40\n2 30 60\n--- Short variables (padding with null) ---\n0\n1\n2\n--- Extra variables (filling with null) ---\n0 10 null\n1 20 null\n2 30 null\n--- Single return iterator ---\n10\n20\n30\n--- Many return values (16 limit) ---\n1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16\n--- Multi-return padding ---\nonly_one null null\nDONE')"
 

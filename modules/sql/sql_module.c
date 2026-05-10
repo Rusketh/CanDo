@@ -317,7 +317,7 @@ static void register_method(CandoVM *vm, CdoObject *mod_obj,
                             MethodTarget target)
 {
     CandoValue sentinel = cando_vm_add_native(vm, fn);
-    f64 s = cando_is_number(sentinel) ? sentinel.as.number : 0.0;
+    f64 s = cando_is_number(sentinel) ? cando_as_number(sentinel) : 0.0;
     obj_set_number(mod_obj, name, s);
     if (g_method_count < MAX_METHOD_ENTRIES) {
         g_methods[g_method_count].name     = name;
@@ -343,7 +343,7 @@ static void attach_methods_for(CdoObject *handle, MethodTarget target)
 static CandoValue make_db_handle(CandoVM *vm, int slot, SqlDriverKind drv)
 {
     CandoValue v   = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     obj_set_number(obj, SQL_DB_SLOT_KEY, (f64)slot);
     obj_set_string(obj, "driver",
                    drv == SQL_DRIVER_POSTGRES ? "postgres" : "mysql",
@@ -355,7 +355,7 @@ static CandoValue make_db_handle(CandoVM *vm, int slot, SqlDriverKind drv)
 static int db_handle_slot(CandoVM *vm, CandoValue v)
 {
     if (!cando_is_object(v)) return -1;
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     f64 idx = -1.0;
     if (!obj_get_number(obj, SQL_DB_SLOT_KEY, &idx)) return -1;
     int i = (int)idx;
@@ -378,7 +378,7 @@ static CandoValue make_stmt_handle(CandoVM *vm, int slot,
                                    const char *sql, u32 sql_len)
 {
     CandoValue v   = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     obj_set_number(obj, SQL_STMT_SLOT_KEY, (f64)slot);
     obj_set_string(obj, SQL_STMT_SQL_KEY, sql, sql_len);
     attach_methods_for(obj, METHOD_ON_STMT);
@@ -388,7 +388,7 @@ static CandoValue make_stmt_handle(CandoVM *vm, int slot,
 static int stmt_handle_slot(CandoVM *vm, CandoValue v)
 {
     if (!cando_is_object(v)) return -1;
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     f64 idx = -1.0;
     if (!obj_get_number(obj, SQL_STMT_SLOT_KEY, &idx)) return -1;
     int i = (int)idx;
@@ -521,11 +521,11 @@ static bool param_from_cando(CandoVM *vm, CandoValue v, SqlParam *out,
     if (cando_is_null(v)) { out->kind = SQL_PARAM_NULL; return true; }
     if (cando_is_bool(v)) {
         out->kind = SQL_PARAM_BOOL;
-        out->i64  = v.as.boolean ? 1 : 0;
+        out->i64  = cando_as_bool(v) ? 1 : 0;
         return true;
     }
     if (cando_is_number(v)) {
-        f64 d = v.as.number;
+        f64 d = cando_as_number(v);
         if (isfinite(d) && fabs(d) <= INTEGER_SAFE_MAX && d == (f64)(int64_t)d) {
             out->kind = SQL_PARAM_INT64;
             out->i64  = (int64_t)d;
@@ -537,12 +537,12 @@ static bool param_from_cando(CandoVM *vm, CandoValue v, SqlParam *out,
     }
     if (cando_is_string(v)) {
         out->kind = SQL_PARAM_TEXT;
-        out->data = v.as.string->data;
-        out->len  = v.as.string->length;
+        out->data = cando_as_string(v)->data;
+        out->len  = cando_as_string(v)->length;
         return true;
     }
     if (cando_is_object(v)) {
-        CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(v));
         const char *bd = NULL; size_t bl = 0;
         if (obj_get_string(o, "blob", &bd, &bl)) {
             out->kind = SQL_PARAM_BLOB;
@@ -566,7 +566,7 @@ static int collect_params(CandoVM *vm, int argc, CandoValue *args, int start,
     int n_provided = argc - start;
     /* Single-arg array shape. */
     if (n_provided == 1 && cando_is_object(args[start])) {
-        CdoObject *o = cando_bridge_resolve(vm, args[start].as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[start]));
         if (o->kind == OBJ_ARRAY) {
             u32 n = cdo_array_len(o);
             SqlParam *arr = (SqlParam *)calloc(n > 0 ? n : 1, sizeof(SqlParam));
@@ -617,7 +617,7 @@ static void fill_opts(CandoVM *vm, CandoValue v, SqlConnectOpts *out,
     out->port               = is_pg ? 5432 : 3306;
 
     if (!cando_is_object(v)) return;
-    CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(v));
     const char *s; size_t sl; bool b; f64 n;
     if (obj_get_string(o, "host",     &s, &sl)) out->host     = s;
     if (obj_get_string(o, "user",     &s, &sl)) out->user     = s;
@@ -738,7 +738,7 @@ static int native_sql_close(CandoVM *vm, int argc, CandoValue *args)
 
     db_pool_release(slot);
     if (cando_is_object(args[0])) {
-        CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+        CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
         obj_set_number(obj, SQL_DB_SLOT_KEY, -1.0);
     }
     cando_vm_push(vm, cando_bool(true));
@@ -803,7 +803,7 @@ static int native_sql_exec(CandoVM *vm, int argc, CandoValue *args)
     SQL_MUTEX_UNLOCK(&slot->lock);
 
     CandoValue rv  = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, rv.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(rv));
     obj_set_number(obj, "affected", (f64)affected);
     obj_set_number(obj, "insertId", (f64)insert_id);
     if (tag && tag[0]) obj_set_string(obj, "tag", tag, (u32)strlen(tag));
@@ -820,7 +820,7 @@ static CandoValue build_row_pg(CandoVM *vm, PgResult *res, int row_idx,
 {
     PgRow *r = &res->rows[row_idx];
     CandoValue ov = cando_bridge_new_object(vm);
-    CdoObject *o  = cando_bridge_resolve(vm, ov.as.handle);
+    CdoObject *o  = cando_bridge_resolve(vm, cando_as_handle(ov));
     for (int c = 0; c < r->ncols && c < res->ncols; c++) {
         const char *name = res->columns[c].name;
         CandoValue cv = cell_to_cando_pg(vm, &r->cells[c],
@@ -838,7 +838,7 @@ static CandoValue build_row_my(CandoVM *vm, MyResult *res, int row_idx,
 {
     MyRow *r = &res->rows[row_idx];
     CandoValue ov = cando_bridge_new_object(vm);
-    CdoObject *o  = cando_bridge_resolve(vm, ov.as.handle);
+    CdoObject *o  = cando_bridge_resolve(vm, cando_as_handle(ov));
     for (int c = 0; c < r->ncols && c < res->ncols; c++) {
         const char *name = res->columns[c].name;
         CandoValue cv = cell_to_cando_my(vm, &r->cells[c], bigint_string);
@@ -993,7 +993,7 @@ static int native_sql_run(CandoVM *vm, int argc, CandoValue *args)
     free(params);
 
     CandoValue rv  = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, rv.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(rv));
     obj_set_number(obj, "affected", (f64)affected);
     obj_set_number(obj, "insertId", (f64)insert_id);
     cando_vm_push(vm, rv);
@@ -1083,7 +1083,7 @@ static int native_sql_all(CandoVM *vm, int argc, CandoValue *args)
     if (nparams < 0) return -1;
 
     CandoValue av = cando_bridge_new_array(vm);
-    CdoObject *a  = cando_bridge_resolve(vm, av.as.handle);
+    CdoObject *a  = cando_bridge_resolve(vm, cando_as_handle(av));
 
     if (slot->driver == SQL_DRIVER_POSTGRES) {
         PgResult res;
@@ -1143,7 +1143,7 @@ static int native_sql_finalize(CandoVM *vm, int argc, CandoValue *args)
     }
     stmt_pool_release(idx);
     if (cando_is_object(args[0])) {
-        CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+        CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
         obj_set_number(obj, SQL_STMT_SLOT_KEY, -1.0);
     }
     cando_vm_push(vm, cando_bool(true));
@@ -1432,15 +1432,15 @@ static int native_sql_escape(CandoVM *vm, int argc, CandoValue *args)
         out = strdup("NULL");
     } else if (cando_is_bool(v)) {
         if (slot->driver == SQL_DRIVER_POSTGRES) {
-            out = strdup(v.as.boolean ? "TRUE" : "FALSE");
+            out = strdup(cando_as_bool(v) ? "TRUE" : "FALSE");
         } else {
-            out = strdup(v.as.boolean ? "1" : "0");
+            out = strdup(cando_as_bool(v) ? "1" : "0");
         }
     } else if (cando_is_number(v)) {
-        out = escape_number(v.as.number);
+        out = escape_number(cando_as_number(v));
     } else if (cando_is_string(v)) {
-        const char *s = v.as.string->data;
-        size_t       n = v.as.string->length;
+        const char *s = cando_as_string(v)->data;
+        size_t       n = cando_as_string(v)->length;
         if (slot->driver == SQL_DRIVER_POSTGRES)
             out = sql_escape_pg_literal(s, n);
         else
@@ -1481,7 +1481,7 @@ static int native_sql_escape_identifier(CandoVM *vm, int argc, CandoValue *args)
             "sql.escapeIdentifier: name must be a string");
         return -1;
     }
-    size_t n = args[1].as.string->length;
+    size_t n = cando_as_string(args[1])->length;
     char *out = (slot->driver == SQL_DRIVER_POSTGRES)
               ? sql_escape_pg_identifier(s, n)
               : sql_escape_my_identifier(s, n);
@@ -1510,7 +1510,7 @@ CandoValue cando_module_init(CandoVM *vm)
     g_method_count = 0;
 
     CandoValue tbl = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(tbl));
 
     /* Module-only entry points. */
     register_method(vm, obj, "open",          native_sql_open,

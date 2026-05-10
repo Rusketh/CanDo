@@ -83,7 +83,7 @@ static int str_char(CandoVM *vm, int argc, CandoValue *args) {
 static int str_chars(CandoVM *vm, int argc, CandoValue *args) {
     CandoString *s = libutil_arg_str_at(args, argc,0);
     CandoValue arr_val = cando_bridge_new_array(vm);
-    CdoObject *arr = cando_bridge_resolve(vm, arr_val.as.handle);
+    CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(arr_val));
     if (s) {
         for (u32 i = 0; i < s->length; i++) {
             CdoString *cs = cdo_string_new(s->data + i, 1);
@@ -190,7 +190,7 @@ static int str_find(CandoVM *vm, int argc, CandoValue *args) {
     CandoString *pat = libutil_arg_str_at(args, argc,1);
     if (!s || !pat) { cando_vm_push(vm, cando_null()); return 1; }
 
-    bool no_regex = (argc >= 3 && cando_is_bool(args[2]) && args[2].as.boolean);
+    bool no_regex = (argc >= 3 && cando_is_bool(args[2]) && cando_as_bool(args[2]));
 
     if (no_regex) {
         /* Plain substring search. */
@@ -223,7 +223,7 @@ static int str_split(CandoVM *vm, int argc, CandoValue *args) {
     CandoString *pat = libutil_arg_str_at(args, argc,1);
 
     CandoValue arr_val = cando_bridge_new_array(vm);
-    CdoObject *arr = cando_bridge_resolve(vm, arr_val.as.handle);
+    CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(arr_val));
 
     if (!s || !pat || pat->length == 0) {
         if (s) {
@@ -235,7 +235,7 @@ static int str_split(CandoVM *vm, int argc, CandoValue *args) {
         return 1;
     }
 
-    bool no_regex = (argc >= 3 && cando_is_bool(args[2]) && args[2].as.boolean);
+    bool no_regex = (argc >= 3 && cando_is_bool(args[2]) && cando_as_bool(args[2]));
 
     if (no_regex) {
         /* Plain literal split. */
@@ -303,7 +303,7 @@ static int str_replace(CandoVM *vm, int argc, CandoValue *args) {
         return 1;
     }
 
-    bool no_regex = (argc >= 4 && cando_is_bool(args[3]) && args[3].as.boolean);
+    bool no_regex = (argc >= 4 && cando_is_bool(args[3]) && cando_as_bool(args[3]));
 
     if (no_regex) {
         /* Plain literal replacement (replaces all occurrences). */
@@ -522,7 +522,7 @@ static int str_match(CandoVM *vm, int argc, CandoValue *args) {
     regfree(&re);
 
     CandoValue arr_val = cando_bridge_new_array(vm);
-    CdoObject *arr = cando_bridge_resolve(vm, arr_val.as.handle);
+    CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(arr_val));
 
     if (r == REG_NOMATCH) {
         if (own_buf) cando_free(slice);
@@ -586,7 +586,7 @@ static const LibutilMethodEntry string_methods[] = {
 void cando_lib_string_register(CandoVM *vm)
 {
     CandoValue proto_val = cando_bridge_new_object(vm);
-    CdoObject *proto     = cando_bridge_resolve(vm, proto_val.as.handle);
+    CdoObject *proto     = cando_bridge_resolve(vm, cando_as_handle(proto_val));
 
     libutil_register_methods(vm, proto, string_methods,
                              CANDO_ARRAY_LEN(string_methods));

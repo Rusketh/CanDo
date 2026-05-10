@@ -31,7 +31,7 @@ const char *libutil_require_cstr_at(CandoVM *vm, CandoValue *args,
         libutil_arg_error(vm, fn_name, idx, "string");
         return NULL;
     }
-    return args[idx].as.string->data;
+    return cando_as_string(args[idx])->data;
 }
 
 CandoString *libutil_require_str_at(CandoVM *vm, CandoValue *args,
@@ -42,7 +42,7 @@ CandoString *libutil_require_str_at(CandoVM *vm, CandoValue *args,
         libutil_arg_error(vm, fn_name, idx, "string");
         return NULL;
     }
-    return args[idx].as.string;
+    return cando_as_string(args[idx]);
 }
 
 bool libutil_require_num_at(CandoVM *vm, CandoValue *args,
@@ -53,7 +53,7 @@ bool libutil_require_num_at(CandoVM *vm, CandoValue *args,
         libutil_arg_error(vm, fn_name, idx, "number");
         return false;
     }
-    *out = args[idx].as.number;
+    *out = cando_as_number(args[idx]);
     return true;
 }
 
@@ -66,7 +66,7 @@ bool libutil_require_object_at(CandoVM *vm, CandoValue *args,
         libutil_arg_error(vm, fn_name, idx, "object");
         return false;
     }
-    *out_obj = cando_bridge_resolve(vm, args[idx].as.handle);
+    *out_obj = cando_bridge_resolve(vm, cando_as_handle(args[idx]));
     return true;
 }
 
@@ -100,7 +100,7 @@ void libutil_set_method(CandoVM *vm, CdoObject *obj,
     CANDO_ASSERT(cando_is_number(sentinel) &&
                  "native registry allocation failed");
     CdoString *key      = cdo_string_intern(name, (u32)strlen(name));
-    cdo_object_rawset(obj, key, cdo_number(sentinel.as.number), FIELD_NONE);
+    cdo_object_rawset(obj, key, cdo_number(cando_as_number(sentinel)), FIELD_NONE);
     cdo_string_release(key);
 }
 

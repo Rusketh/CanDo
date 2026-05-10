@@ -254,17 +254,17 @@ static void yl_tokenise(YParser *p)
 
 static CdoValue yp_to_cdo(YParser *p, CandoValue v)
 {
-    switch ((TypeTag)v.tag) {
+    switch (cando_value_tag(v)) {
         case TYPE_NULL:   return cdo_null();
-        case TYPE_BOOL:   return cdo_bool(v.as.boolean);
-        case TYPE_NUMBER: return cdo_number(v.as.number);
+        case TYPE_BOOL:   return cdo_bool(cando_as_bool(v));
+        case TYPE_NUMBER: return cdo_number(cando_as_number(v));
         case TYPE_STRING: {
-            CdoString *s = cdo_string_new(v.as.string->data,
-                                           v.as.string->length);
+            CandoString *vs = cando_as_string(v);
+            CdoString   *s  = cdo_string_new(vs->data, vs->length);
             return cdo_string_value(s);
         }
         case TYPE_OBJECT: {
-            CdoObject *obj = cando_bridge_resolve(p->vm, v.as.handle);
+            CdoObject *obj = cando_bridge_resolve(p->vm, cando_as_handle(v));
             return (obj->kind == OBJ_ARRAY)
                    ? cdo_array_value(obj)
                    : cdo_object_value(obj);
@@ -609,7 +609,7 @@ static CandoValue yp_parse_flow_seq(YParser *p, const char *s, u32 *i, u32 n)
 {
     (*i)++;                              /* consume '[' */
     CandoValue arr_val = cando_bridge_new_array(p->vm);
-    CdoObject *arr     = cando_bridge_resolve(p->vm, arr_val.as.handle);
+    CdoObject *arr     = cando_bridge_resolve(p->vm, cando_as_handle(arr_val));
 
     yp_skip_flow_ws(s, i, n);
     if (*i < n && s[*i] == ']') { (*i)++; return arr_val; }
@@ -635,7 +635,7 @@ static CandoValue yp_parse_flow_map(YParser *p, const char *s, u32 *i, u32 n)
 {
     (*i)++;                              /* consume '{' */
     CandoValue obj_val = cando_bridge_new_object(p->vm);
-    CdoObject *obj     = cando_bridge_resolve(p->vm, obj_val.as.handle);
+    CdoObject *obj     = cando_bridge_resolve(p->vm, cando_as_handle(obj_val));
 
     yp_skip_flow_ws(s, i, n);
     if (*i < n && s[*i] == '}') { (*i)++; return obj_val; }
@@ -663,7 +663,7 @@ static CandoValue yp_parse_flow_map(YParser *p, const char *s, u32 *i, u32 n)
         /* Coerce the key to a string. */
         CandoString *kstr = NULL;
         if (cando_is_string(key_val)) {
-            kstr = key_val.as.string;
+            kstr = cando_as_string(key_val);
         } else {
             char *tmp = cando_value_tostring(key_val);
             u32 tn = (u32)strlen(tmp);
@@ -970,7 +970,7 @@ static u32 yp_split_map_key(const char *s, u32 len)
 static CandoValue yp_parse_block_seq(YParser *p, u32 indent)
 {
     CandoValue arr_val = cando_bridge_new_array(p->vm);
-    CdoObject *arr     = cando_bridge_resolve(p->vm, arr_val.as.handle);
+    CdoObject *arr     = cando_bridge_resolve(p->vm, cando_as_handle(arr_val));
 
     while (!p->has_error) {
         yp_skip_blanks(p);
@@ -1055,7 +1055,7 @@ static CandoValue yp_parse_block_seq(YParser *p, u32 indent)
 static CandoValue yp_parse_block_map(YParser *p, u32 indent)
 {
     CandoValue obj_val = cando_bridge_new_object(p->vm);
-    CdoObject *obj     = cando_bridge_resolve(p->vm, obj_val.as.handle);
+    CdoObject *obj     = cando_bridge_resolve(p->vm, cando_as_handle(obj_val));
 
     while (!p->has_error) {
         yp_skip_blanks(p);
@@ -1090,7 +1090,7 @@ static CandoValue yp_parse_block_map(YParser *p, u32 indent)
         /* Coerce key to a string if it parsed to bool/number/null. */
         CandoString *kstr;
         if (cando_is_string(key_val)) {
-            kstr = key_val.as.string;
+            kstr = cando_as_string(key_val);
         } else {
             char *tmp = cando_value_tostring(key_val);
             u32 tn = (u32)strlen(tmp);
@@ -1285,8 +1285,8 @@ static int yaml_parse(CandoVM *vm, int argc, CandoValue *args)
     }
     CandoValue result = cando_null();
     if (!cando_lib_yaml_parse_buffer(vm,
-                                     args[0].as.string->data,
-                                     (usize)args[0].as.string->length,
+                                     cando_as_string(args[0])->data,
+                                     (usize)cando_as_string(args[0])->length,
                                      "yaml.parse",
                                      &result)) {
         return -1;
@@ -1571,7 +1571,7 @@ static int yaml_stringify(CandoVM *vm, int argc, CandoValue *args)
 
     int indent = 2;
     if (argc >= 2 && cando_is_number(args[1])) {
-        indent = (int)args[1].as.number;
+        indent = (int)cando_as_number(args[1]);
         if (indent < 1)  indent = 1;
         if (indent > 16) indent = 16;
     }
@@ -1582,19 +1582,20 @@ static int yaml_stringify(CandoVM *vm, int argc, CandoValue *args)
     w.vm       = vm;
 
     CandoValue val = args[0];
-    switch ((TypeTag)val.tag) {
+    switch (cando_value_tag(val)) {
         case TYPE_NULL:
             ybuf_push(&w.buf, "null", 4); break;
         case TYPE_BOOL:
-            ybuf_push_cstr(&w.buf, val.as.boolean ? "true" : "false"); break;
+            ybuf_push_cstr(&w.buf, cando_as_bool(val) ? "true" : "false"); break;
         case TYPE_NUMBER:
-            yw_write_number(&w, val.as.number); break;
-        case TYPE_STRING:
-            yw_write_string_scalar(&w, val.as.string->data,
-                                   val.as.string->length);
+            yw_write_number(&w, cando_as_number(val)); break;
+        case TYPE_STRING: {
+            CandoString *vs = cando_as_string(val);
+            yw_write_string_scalar(&w, vs->data, vs->length);
             break;
+        }
         case TYPE_OBJECT: {
-            CdoObject *obj = cando_bridge_resolve(vm, val.as.handle);
+            CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(val));
             if (obj->kind == OBJ_ARRAY)
                 yw_write_array(&w, obj, 0);
             else
@@ -1619,7 +1620,7 @@ static int yaml_stringify(CandoVM *vm, int argc, CandoValue *args)
 void cando_lib_yaml_register(CandoVM *vm)
 {
     CandoValue yaml_val = cando_bridge_new_object(vm);
-    CdoObject *yaml_obj = cando_bridge_resolve(vm, yaml_val.as.handle);
+    CdoObject *yaml_obj = cando_bridge_resolve(vm, cando_as_handle(yaml_val));
 
     libutil_set_method(vm, yaml_obj, "parse",     yaml_parse);
     libutil_set_method(vm, yaml_obj, "stringify", yaml_stringify);

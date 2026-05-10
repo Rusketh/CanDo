@@ -78,8 +78,41 @@ HandleIndex cando_handle_alloc(CandoHandleTable *t, void *ptr);
 /*
  * cando_handle_get -- return the pointer stored at `idx`.
  * Asserts that idx is valid and live.
+ *
+ * Inlined here so the interpreter dispatch loop and the JIT-recorder
+ * lookup helpers can resolve a handle without a function call.  The
+ * read-lock acquire/release is retained because the slot array can be
+ * relocated by cando_handle_alloc -> handle_table_grow on a parallel
+ * thread; readers must observe a stable t->slots pointer.
+ *
+ * For JIT-emitted machine code that has already proven the handle is
+ * live and the table generation hasn't changed, use CANDO_HANDLE_DEREF
+ * below to skip the lock and bounds check entirely.
  */
-void *cando_handle_get(CandoHandleTable *t, HandleIndex idx);
+CANDO_INLINE void *cando_handle_get(CandoHandleTable *t, HandleIndex idx) {
+    CANDO_ASSERT(idx < t->capacity);
+    CANDO_ASSERT(t->slots[idx].live);
+
+    cando_lock_read_acquire(&t->lock);
+    void *result = t->slots[idx].ptr;
+    cando_lock_read_release(&t->lock);
+    return result;
+}
+
+/*
+ * CANDO_HANDLE_DEREF -- single-load handle dereference.
+ *
+ * Reads the slot pointer with no lock, no bounds check, no liveness
+ * check.  Intended for JIT-emitted code that has already verified
+ * (a) the handle index is in range and (b) no concurrent
+ * cando_handle_alloc is racing with the read.  See docs/jit-plan.md
+ * §4.3 / §9.9 for the trace-entry generation guard that makes this
+ * safe inside compiled traces.
+ *
+ * Don't use this from interpreter or library code -- prefer
+ * cando_handle_get there.
+ */
+#define CANDO_HANDLE_DEREF(t, h)  ((t)->slots[(h)].ptr)
 
 /*
  * cando_handle_set -- overwrite the pointer at `idx`.

@@ -39,7 +39,7 @@ static CdoObject *resolve_object(CandoVM *vm, CandoValue *args, int argc,
 {
     if (idx >= argc || !cando_is_object(args[idx]))
         return NULL;
-    CdoObject *obj = cando_bridge_resolve(vm, args[idx].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[idx]));
     if (!obj || obj->kind != OBJ_OBJECT)
         return NULL;
     return obj;
@@ -58,7 +58,7 @@ static int obj_lock(CandoVM *vm, int argc, CandoValue *args) {
         cando_vm_push(vm, cando_null());
         return 1;
     }
-    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (!obj) {
         cando_vm_push(vm, cando_null());
         return 1;
@@ -100,7 +100,7 @@ static int obj_locked(CandoVM *vm, int argc, CandoValue *args) {
         cando_vm_push(vm, cando_bool(false));
         return 1;
     }
-    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (!obj) {
         cando_vm_push(vm, cando_bool(false));
         return 1;
@@ -122,7 +122,7 @@ static int obj_unlock(CandoVM *vm, int argc, CandoValue *args) {
         cando_vm_push(vm, cando_null());
         return 1;
     }
-    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (!obj) {
         cando_vm_push(vm, cando_null());
         return 1;
@@ -170,7 +170,7 @@ static int obj_copy(CandoVM *vm, int argc, CandoValue *args) {
     }
 
     CandoValue dest_val = cando_bridge_new_object(vm);
-    CdoObject *dest_obj = cando_bridge_resolve(vm, dest_val.as.handle);
+    CdoObject *dest_obj = cando_bridge_resolve(vm, cando_as_handle(dest_val));
 
     CopyCtx ctx = { dest_obj };
     cdo_object_foreach(src, copy_field, &ctx);
@@ -230,7 +230,7 @@ static int obj_apply(CandoVM *vm, int argc, CandoValue *args) {
     }
 
     CandoValue dest_val = cando_bridge_new_object(vm);
-    CdoObject *dest_obj = cando_bridge_resolve(vm, dest_val.as.handle);
+    CdoObject *dest_obj = cando_bridge_resolve(vm, cando_as_handle(dest_val));
 
     /* Copy base fields. */
     CopyCtx base_ctx = { dest_obj };
@@ -260,7 +260,7 @@ static int obj_get(CandoVM *vm, int argc, CandoValue *args) {
         return 1;
     }
 
-    CdoString *key = cando_bridge_intern_key(args[1].as.string);
+    CdoString *key = cando_bridge_intern_key(cando_as_string(args[1]));
     CdoValue   out;
     bool found = cdo_object_rawget(obj, key, &out);
     cdo_string_release(key);
@@ -285,7 +285,7 @@ static int obj_set(CandoVM *vm, int argc, CandoValue *args) {
         return 1;
     }
 
-    CdoString *key = cando_bridge_intern_key(args[1].as.string);
+    CdoString *key = cando_bridge_intern_key(cando_as_string(args[1]));
     CdoValue   val = cando_bridge_to_cdo(vm, args[2]);
     bool ok = cdo_object_rawset(obj, key, val, FIELD_NONE);
     cdo_string_release(key);
@@ -368,7 +368,7 @@ static int obj_keys(CandoVM *vm, int argc, CandoValue *args) {
     }
 
     CandoValue arr_val = cando_bridge_new_array(vm);
-    CdoObject *arr_obj = cando_bridge_resolve(vm, arr_val.as.handle);
+    CdoObject *arr_obj = cando_bridge_resolve(vm, cando_as_handle(arr_val));
 
     KeysCtx ctx = { arr_obj };
     cdo_object_foreach(obj, collect_key, &ctx);
@@ -404,7 +404,7 @@ static int obj_values(CandoVM *vm, int argc, CandoValue *args) {
     }
 
     CandoValue arr_val = cando_bridge_new_array(vm);
-    CdoObject *arr_obj = cando_bridge_resolve(vm, arr_val.as.handle);
+    CdoObject *arr_obj = cando_bridge_resolve(vm, cando_as_handle(arr_val));
 
     ValsCtx ctx = { arr_obj };
     cdo_object_foreach(obj, collect_val, &ctx);
@@ -435,7 +435,7 @@ static const LibutilMethodEntry object_methods[] = {
 void cando_lib_object_register(CandoVM *vm)
 {
     CandoValue proto_val = cando_bridge_new_object(vm);
-    CdoObject *proto     = cando_bridge_resolve(vm, proto_val.as.handle);
+    CdoObject *proto     = cando_bridge_resolve(vm, cando_as_handle(proto_val));
 
     libutil_register_methods(vm, proto, object_methods,
                              CANDO_ARRAY_LEN(object_methods));

@@ -137,15 +137,15 @@ static CandoValue csv_parse_field(CsvParser *p)
 static CandoValue csv_parse_row(CsvParser *p)
 {
     CandoValue arr_val = cando_bridge_new_array(p->vm);
-    CdoObject *arr     = cando_bridge_resolve(p->vm, arr_val.as.handle);
+    CdoObject *arr     = cando_bridge_resolve(p->vm, cando_as_handle(arr_val));
 
     while (true) {
         CandoValue field = csv_parse_field(p);
 
         /* Store the field string as a CdoValue */
         if (cando_is_string(field)) {
-            CdoString *ds = cdo_string_new(field.as.string->data,
-                                            field.as.string->length);
+            CandoString *fs = cando_as_string(field);
+            CdoString   *ds = cdo_string_new(fs->data, fs->length);
             CdoValue   dv = cdo_string_value(ds);
             cdo_array_push(arr, dv);
             cdo_value_release(dv);
@@ -193,7 +193,7 @@ bool cando_lib_csv_parse_buffer(CandoVM *vm,
 
     /* Result is an array of rows */
     CandoValue result_val = cando_bridge_new_array(vm);
-    CdoObject *result     = cando_bridge_resolve(vm, result_val.as.handle);
+    CdoObject *result     = cando_bridge_resolve(vm, cando_as_handle(result_val));
 
     /* Parse header row first if needed */
     CandoValue header_row_val = cando_null();
@@ -202,7 +202,7 @@ bool cando_lib_csv_parse_buffer(CandoVM *vm,
 
     if (header_mode && p.pos < p.len) {
         header_row_val = csv_parse_row(&p);
-        header_row     = cando_bridge_resolve(vm, header_row_val.as.handle);
+        header_row     = cando_bridge_resolve(vm, cando_as_handle(header_row_val));
         header_count   = cdo_array_len(header_row);
     }
 
@@ -212,15 +212,15 @@ bool cando_lib_csv_parse_buffer(CandoVM *vm,
 
         if (!header_mode) {
             /* Plain mode: push the array directly */
-            CdoObject *row = cando_bridge_resolve(vm, row_val.as.handle);
+            CdoObject *row = cando_bridge_resolve(vm, cando_as_handle(row_val));
             cdo_array_push(result, cdo_array_value(row));
         } else {
             /* Header mode: convert row array → object using header keys */
-            CdoObject *row     = cando_bridge_resolve(vm, row_val.as.handle);
+            CdoObject *row     = cando_bridge_resolve(vm, cando_as_handle(row_val));
             u32        row_len = cdo_array_len(row);
 
             CandoValue obj_val = cando_bridge_new_object(vm);
-            CdoObject *obj     = cando_bridge_resolve(vm, obj_val.as.handle);
+            CdoObject *obj     = cando_bridge_resolve(vm, cando_as_handle(obj_val));
 
             u32 count = (row_len < header_count) ? row_len : header_count;
             for (u32 i = 0; i < count; i++) {
@@ -257,20 +257,20 @@ static int csv_parse(CandoVM *vm, int argc, CandoValue *args)
 
     /* delimiter (default ',') */
     char delim = ',';
-    if (argc >= 2 && cando_is_string(args[1]) && args[1].as.string->length > 0) {
-        delim = args[1].as.string->data[0];
+    if (argc >= 2 && cando_is_string(args[1]) && cando_as_string(args[1])->length > 0) {
+        delim = cando_as_string(args[1])->data[0];
     }
 
     /* header mode (defaults to true: first row is keys → array of objects) */
     bool header_mode = true;
     if (argc >= 3 && cando_is_bool(args[2])) {
-        header_mode = args[2].as.boolean;
+        header_mode = cando_as_bool(args[2]);
     }
 
     CandoValue result = cando_null();
     if (!cando_lib_csv_parse_buffer(vm,
-                                    args[0].as.string->data,
-                                    (usize)args[0].as.string->length,
+                                    cando_as_string(args[0])->data,
+                                    (usize)cando_as_string(args[0])->length,
                                     delim, header_mode,
                                     "csv.parse",
                                     &result)) {
@@ -395,15 +395,15 @@ static int csv_stringify(CandoVM *vm, int argc, CandoValue *args)
 
     /* delimiter */
     char delim = ',';
-    if (argc >= 2 && cando_is_string(args[1]) && args[1].as.string->length > 0) {
-        delim = args[1].as.string->data[0];
+    if (argc >= 2 && cando_is_string(args[1]) && cando_as_string(args[1])->length > 0) {
+        delim = cando_as_string(args[1])->data[0];
     }
 
     /* headers (optional array of strings) */
     CdoObject *hdr_arr   = NULL;
     bool       has_hdrs  = false;
     if (argc >= 3 && cando_is_object(args[2])) {
-        hdr_arr  = cando_bridge_resolve(vm, args[2].as.handle);
+        hdr_arr  = cando_bridge_resolve(vm, cando_as_handle(args[2]));
         has_hdrs = (hdr_arr->kind == OBJ_ARRAY);
     }
 
@@ -538,7 +538,7 @@ static int csv_stringify(CandoVM *vm, int argc, CandoValue *args)
 void cando_lib_csv_register(CandoVM *vm)
 {
     CandoValue csv_val = cando_bridge_new_object(vm);
-    CdoObject *csv_obj = cando_bridge_resolve(vm, csv_val.as.handle);
+    CdoObject *csv_obj = cando_bridge_resolve(vm, cando_as_handle(csv_val));
 
     libutil_set_method(vm, csv_obj, "parse",     csv_parse);
     libutil_set_method(vm, csv_obj, "stringify", csv_stringify);

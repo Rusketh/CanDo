@@ -320,7 +320,7 @@ static const LibutilMethodEntry math_methods[] = {
 void cando_lib_math_register(CandoVM *vm)
 {
     CandoValue math_val = cando_bridge_new_object(vm);
-    CdoObject *math_obj = cando_bridge_resolve(vm, math_val.as.handle);
+    CdoObject *math_obj = cando_bridge_resolve(vm, cando_as_handle(math_val));
 
     libutil_register_methods(vm, math_obj, math_methods,
                              CANDO_ARRAY_LEN(math_methods));
@@ -331,4 +331,18 @@ void cando_lib_math_register(CandoVM *vm)
     set_const(math_obj, "huge", HUGE_VAL);
 
     cando_vm_set_global(vm, "math", math_val, true);
+
+    /* Phase 4.2: register f64->f64 fast paths so the JIT can compile
+     * `math.sqrt(x)` and friends to a direct function-pointer call.
+     * Order doesn't matter -- the registry looks up natives by their
+     * slow C function pointer. */
+    cando_vm_register_fast_native_f1(vm, math_sqrt,  sqrt);
+    cando_vm_register_fast_native_f1(vm, math_abs,   fabs);
+    cando_vm_register_fast_native_f1(vm, math_floor, floor);
+    cando_vm_register_fast_native_f1(vm, math_ceil,  ceil);
+    cando_vm_register_fast_native_f1(vm, math_log,   log);
+    cando_vm_register_fast_native_f1(vm, math_log10, log10);
+    cando_vm_register_fast_native_f1(vm, math_exp,   exp);
+    cando_vm_register_fast_native_f1(vm, math_sinh,  sinh);
+    cando_vm_register_fast_native_f1(vm, math_cosh,  cosh);
 }

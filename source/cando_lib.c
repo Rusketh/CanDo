@@ -40,6 +40,7 @@
 
 /* Library registration headers */
 #include "lib/gc.h"
+#include "lib/jit.h"
 #include "lib/math.h"
 #include "lib/file.h"
 #include "lib/eval.h"
@@ -189,6 +190,7 @@ CANDO_API void cando_openlibs(CandoVM *vm)
     cando_lib_meta_register(vm);
 
     cando_lib_gc_register(vm);
+    cando_lib_jit_register(vm);
     cando_lib_math_register(vm);
     cando_lib_file_register(vm);
     cando_lib_eval_register(vm);
@@ -368,7 +370,7 @@ CANDO_API void cando_set_args(CandoVM *vm, int argc, const char *const *argv)
     if (!vm) return;
 
     CandoValue arr_val = cando_bridge_new_array(vm);
-    CdoObject *arr     = cando_bridge_resolve(vm, arr_val.as.handle);
+    CdoObject *arr     = cando_bridge_resolve(vm, cando_as_handle(arr_val));
 
     for (int i = 0; i < argc; i++) {
         const char *s = (argv && argv[i]) ? argv[i] : "";

@@ -20,8 +20,8 @@ int native_set_step(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setStep");
     if (!s) return -1;
-    int step = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-               (int)args[1].as.number : 1;
+    int step = (argc >= 2 && cando_is_number(args[1])) ?
+               (int)cando_as_number(args[1]) : 1;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_PROGRESS) {
         SendMessageW(s->hwnd, PBM_SETSTEP, (WPARAM)step, 0);
@@ -50,9 +50,9 @@ int native_set_marquee(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setMarquee");
     if (!s) return -1;
-    bool active = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
-    int  speed  = (argc >= 3 && args[2].tag == CDO_NUMBER) ?
-                  (int)args[2].as.number : 30;
+    bool active = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
+    int  speed  = (argc >= 3 && cando_is_number(args[2])) ?
+                  (int)cando_as_number(args[2]) : 30;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_PROGRESS) {
         SendMessageW(s->hwnd, PBM_SETMARQUEE,
@@ -71,11 +71,11 @@ int native_set_state(CandoVM *vm, int argc, CandoValue *args)
     if (!s) return -1;
     int state = 1;  /* PBST_NORMAL */
     if (argc >= 2) {
-        if (args[1].tag == CDO_NUMBER) {
-            state = (int)args[1].as.number;
-        } else if (args[1].tag == CDO_STRING && args[1].as.string) {
-            const char *t = args[1].as.string->data;
-            u32 n = args[1].as.string->length;
+        if (cando_is_number(args[1])) {
+            state = (int)cando_as_number(args[1]);
+        } else if (cando_is_string(args[1]) && cando_as_string(args[1])) {
+            const char *t = cando_as_string(args[1])->data;
+            u32 n = cando_as_string(args[1])->length;
             #define MATCH(name, val) \
                 if (n == sizeof(name)-1 && memcmp(t, name, sizeof(name)-1) == 0) state = val
             MATCH("normal",  1);  /* PBST_NORMAL */

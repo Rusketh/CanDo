@@ -173,18 +173,19 @@ void cando_chunk_emit_loop(CandoChunk *chunk, u32 loop_start, u32 line) {
 u16 cando_chunk_add_const(CandoChunk *chunk, CandoValue val) {
     /* Dedup numbers and strings to keep the pool compact. */
     if (cando_is_number(val)) {
+        f64 vn = cando_as_number(val);
         for (u32 i = 0; i < chunk->const_count; i++) {
             if (cando_is_number(chunk->constants[i]) &&
-                chunk->constants[i].as.number == val.as.number) {
+                cando_as_number(chunk->constants[i]) == vn) {
                 cando_value_release(val);
                 return (u16)i;
             }
         }
     } else if (cando_is_string(val)) {
+        CandoString *b = cando_as_string(val);
         for (u32 i = 0; i < chunk->const_count; i++) {
             if (cando_is_string(chunk->constants[i])) {
-                CandoString *a = chunk->constants[i].as.string;
-                CandoString *b = val.as.string;
+                CandoString *a = cando_as_string(chunk->constants[i]);
                 if (a->length == b->length &&
                     memcmp(a->data, b->data, a->length) == 0) {
                     cando_value_release(val);
@@ -216,7 +217,7 @@ u16 cando_chunk_intern_string(CandoChunk *chunk, const char *str, u32 len) {
     for (u32 i = 0; i < chunk->const_count; i++) {
         CandoValue v = chunk->constants[i];
         if (!cando_is_string(v)) continue;
-        CandoString *s = v.as.string;
+        CandoString *s = cando_as_string(v);
         if (s->length == len && memcmp(s->data, str, len) == 0)
             return (u16)i;
     }

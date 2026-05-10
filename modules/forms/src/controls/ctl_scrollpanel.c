@@ -46,7 +46,7 @@ int native_set_auto_scroll(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setAutoScroll");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
     s->auto_scroll = on ? 1 : 0;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->kind == KIND_SCROLLPANEL) {
@@ -66,8 +66,8 @@ int native_set_scroll_size(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setScrollSize");
     if (!s) return -1;
-    int w = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
-    int h = (argc >= 3 && args[2].tag == CDO_NUMBER) ? (int)args[2].as.number : 0;
+    int w = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : 0;
+    int h = (argc >= 3 && cando_is_number(args[2])) ? (int)cando_as_number(args[2]) : 0;
     if (w < 0) w = 0;
     if (h < 0) h = 0;
     s->scroll_w = w;
@@ -83,8 +83,8 @@ int native_scroll_to(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "scrollTo");
     if (!s) return -1;
-    int x = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : s->scroll_x;
-    int y = (argc >= 3 && args[2].tag == CDO_NUMBER) ? (int)args[2].as.number : s->scroll_y;
+    int x = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : s->scroll_x;
+    int y = (argc >= 3 && cando_is_number(args[2])) ? (int)cando_as_number(args[2]) : s->scroll_y;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_SCROLLPANEL) {
         RECT rc; GetClientRect(s->hwnd, &rc);

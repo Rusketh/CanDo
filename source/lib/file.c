@@ -240,7 +240,7 @@ static int file_lines(CandoVM *vm, int argc, CandoValue *args)
     if (!f) { cando_vm_push(vm, cando_null()); return 1; }
 
     CandoValue arr_val = cando_bridge_new_array(vm);
-    CdoObject *arr    = cando_bridge_resolve(vm, arr_val.as.handle);
+    CdoObject *arr    = cando_bridge_resolve(vm, cando_as_handle(arr_val));
 
     char   *line = NULL;
     usize   cap  = 0;
@@ -288,7 +288,7 @@ static int file_list(CandoVM *vm, int argc, CandoValue *args)
     if (!d) { cando_vm_push(vm, cando_null()); return 1; }
 
     CandoValue arr_val = cando_bridge_new_array(vm);
-    CdoObject *arr    = cando_bridge_resolve(vm, arr_val.as.handle);
+    CdoObject *arr    = cando_bridge_resolve(vm, cando_as_handle(arr_val));
 
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
@@ -494,7 +494,7 @@ static int file_open(CandoVM *vm, int argc, CandoValue *args)
 void cando_lib_file_register(CandoVM *vm)
 {
     CandoValue file_val = cando_bridge_new_object(vm);
-    CdoObject *file_obj = cando_bridge_resolve(vm, file_val.as.handle);
+    CdoObject *file_obj = cando_bridge_resolve(vm, cando_as_handle(file_val));
 
     libutil_set_method(vm, file_obj, "read",   file_read);
     libutil_set_method(vm, file_obj, "write",  file_write);

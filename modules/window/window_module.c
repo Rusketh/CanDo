@@ -277,7 +277,7 @@ static void dispatch_call(WindowSlot *s, const char *name,
 {
     if (!g_dispatch_vm_inited || !s->inst_val_held) return;
 
-    CdoObject *inst = cando_bridge_resolve(&g_dispatch_vm, s->inst_val.as.handle);
+    CdoObject *inst = cando_bridge_resolve(&g_dispatch_vm, cando_as_handle(s->inst_val));
     if (!inst) {
         fprintf(stderr, "[wnd] dispatch %s: no inst\n", name);
         return;
@@ -1185,7 +1185,7 @@ static WindowSlot *resolve_window(CandoVM *vm, CandoValue val,
         window_throw(vm, "%s: expected window instance", fn_name);
         return NULL;
     }
-    CdoObject *obj = cando_bridge_resolve(vm, val.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(val));
     f64 fslot = -1.0, fgen = -1.0;
     if (!obj_get_number(obj, WINDOW_SLOT_KEY, &fslot) ||
         !obj_get_number(obj, WINDOW_GEN_KEY,  &fgen)) {
@@ -1232,7 +1232,7 @@ static int native_window_create(CandoVM *vm, int argc, CandoValue *args)
 
     /* Two call shapes: positional or single-options-table. */
     if (argc >= 1 && cando_is_object(args[0])) {
-        CdoObject *opts = cando_bridge_resolve(vm, args[0].as.handle);
+        CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[0]));
         CdoString *k_title  = cdo_string_intern("title",  5);
         CdoString *k_width  = cdo_string_intern("width",  5);
         CdoString *k_height = cdo_string_intern("height", 6);
@@ -1255,18 +1255,18 @@ static int native_window_create(CandoVM *vm, int argc, CandoValue *args)
         cdo_string_release(k_width);
         cdo_string_release(k_height);
     } else {
-        if (argc >= 1 && args[0].tag == CDO_STRING && args[0].as.string) {
-            const char *s = args[0].as.string->data;
-            u32 n = args[0].as.string->length;
+        if (argc >= 1 && cando_is_string(args[0]) && cando_as_string(args[0])) {
+            const char *s = cando_as_string(args[0])->data;
+            u32 n = cando_as_string(args[0])->length;
             if (n >= sizeof(title)) n = sizeof(title) - 1;
             memcpy(title, s, n);
             title[n] = '\0';
         }
-        if (argc >= 2 && args[1].tag == CDO_NUMBER) {
-            width = (int)args[1].as.number;
+        if (argc >= 2 && cando_is_number(args[1])) {
+            width = (int)cando_as_number(args[1]);
         }
-        if (argc >= 3 && args[2].tag == CDO_NUMBER) {
-            height = (int)args[2].as.number;
+        if (argc >= 3 && cando_is_number(args[2])) {
+            height = (int)cando_as_number(args[2]);
         }
     }
     if (width  < 1) width  = 1;
@@ -1333,7 +1333,7 @@ static int native_window_create(CandoVM *vm, int argc, CandoValue *args)
     /* Build the script-side instance.  Stamp the slot index + generation
      * so subsequent method calls can locate the C-side state. */
     CandoValue inst_val = cando_bridge_new_object(vm);
-    CdoObject *inst = cando_bridge_resolve(vm, inst_val.as.handle);
+    CdoObject *inst = cando_bridge_resolve(vm, cando_as_handle(inst_val));
 
     obj_set_number(inst, WINDOW_SLOT_KEY, (f64)slot);
     obj_set_number(inst, WINDOW_GEN_KEY,  (f64)generation);
@@ -1398,7 +1398,7 @@ static int native_window_is_open(CandoVM *vm, int argc, CandoValue *args)
         cando_vm_push(vm, cando_bool(false));
         return 1;
     }
-    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     f64 fslot = -1.0, fgen = -1.0;
     if (!obj_get_number(obj, WINDOW_SLOT_KEY, &fslot) ||
         !obj_get_number(obj, WINDOW_GEN_KEY,  &fgen)) {
@@ -1455,21 +1455,21 @@ static int native_window_set_title(CandoVM *vm, int argc, CandoValue *args)
     }
     WindowSlot *s = resolve_window(vm, args[0], "window.setTitle");
     if (!s) return -1;
-    if (args[1].tag != CDO_STRING || !args[1].as.string) {
+    if (!cando_is_string(args[1]) || !cando_as_string(args[1])) {
         window_throw(vm, "window.setTitle: title must be a string");
         return -1;
     }
     Command cmd; memset(&cmd, 0, sizeof(cmd));
     cmd.type = CMD_SET_TITLE;
     cmd.slot = (int)(s - g_slots);
-    u32 n = args[1].as.string->length;
+    u32 n = cando_as_string(args[1])->length;
     if (n >= sizeof(cmd.title)) n = sizeof(cmd.title) - 1;
-    memcpy(cmd.title, args[1].as.string->data, n);
+    memcpy(cmd.title, cando_as_string(args[1])->data, n);
     cmd.title[n] = '\0';
     if (!post_or_throw(vm, cmd, "window.setTitle", NULL)) return -1;
 
     /* Mirror onto the script-side instance so `w.title` stays current. */
-    CdoObject *inst = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *inst = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     inst_update_string(inst, "title", cmd.title, (u32)strlen(cmd.title));
 
     cando_vm_push(vm, cando_bool(true));
@@ -1494,7 +1494,7 @@ static int native_window_get_title(CandoVM *vm, int argc, CandoValue *args)
 
 static int native_window_set_size(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 3 || args[1].tag != CDO_NUMBER || args[2].tag != CDO_NUMBER) {
+    if (argc < 3 || !cando_is_number(args[1]) || !cando_is_number(args[2])) {
         window_throw(vm, "window.setSize: (window, width, height) required");
         return -1;
     }
@@ -1503,13 +1503,13 @@ static int native_window_set_size(CandoVM *vm, int argc, CandoValue *args)
     Command cmd; memset(&cmd, 0, sizeof(cmd));
     cmd.type   = CMD_SET_SIZE;
     cmd.slot   = (int)(s - g_slots);
-    cmd.width  = (int)args[1].as.number;
-    cmd.height = (int)args[2].as.number;
+    cmd.width  = (int)cando_as_number(args[1]);
+    cmd.height = (int)cando_as_number(args[2]);
     if (cmd.width  < 1) cmd.width  = 1;
     if (cmd.height < 1) cmd.height = 1;
     if (!post_or_throw(vm, cmd, "window.setSize", NULL)) return -1;
 
-    CdoObject *inst = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *inst = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     inst_update_number(inst, "width",  (f64)cmd.width);
     inst_update_number(inst, "height", (f64)cmd.height);
 
@@ -1541,7 +1541,7 @@ static int native_window_get_size(CandoVM *vm, int argc, CandoValue *args)
 
 static int native_window_set_position(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc < 3 || args[1].tag != CDO_NUMBER || args[2].tag != CDO_NUMBER) {
+    if (argc < 3 || !cando_is_number(args[1]) || !cando_is_number(args[2])) {
         window_throw(vm, "window.setPosition: (window, x, y) required");
         return -1;
     }
@@ -1550,8 +1550,8 @@ static int native_window_set_position(CandoVM *vm, int argc, CandoValue *args)
     Command cmd; memset(&cmd, 0, sizeof(cmd));
     cmd.type = CMD_SET_POSITION;
     cmd.slot = (int)(s - g_slots);
-    cmd.ix   = (int)args[1].as.number;
-    cmd.iy   = (int)args[2].as.number;
+    cmd.ix   = (int)cando_as_number(args[1]);
+    cmd.iy   = (int)cando_as_number(args[2]);
     if (!post_or_throw(vm, cmd, "window.setPosition", NULL)) return -1;
     cando_vm_push(vm, cando_bool(true));
     return 1;
@@ -1621,7 +1621,7 @@ static int native_window_set_visible(CandoVM *vm, int argc, CandoValue *args)
     }
     WindowSlot *s = resolve_window(vm, args[0], "window.setVisible");
     if (!s) return -1;
-    bool show = (args[1].tag == CDO_BOOL) ? args[1].as.boolean : true;
+    bool show = (cando_is_bool(args[1])) ? cando_as_bool(args[1]) : true;
     Command cmd; memset(&cmd, 0, sizeof(cmd));
     cmd.type = CMD_SET_VISIBLE;
     cmd.slot = (int)(s - g_slots);
@@ -1720,7 +1720,7 @@ static int native_window_set_vsync(CandoVM *vm, int argc, CandoValue *args)
     }
     WindowSlot *s = resolve_window(vm, args[0], "window.setVSync");
     if (!s) return -1;
-    bool on = (args[1].tag == CDO_BOOL) ? args[1].as.boolean : true;
+    bool on = (cando_is_bool(args[1])) ? cando_as_bool(args[1]) : true;
     Command cmd; memset(&cmd, 0, sizeof(cmd));
     cmd.type = CMD_SET_VSYNC;
     cmd.slot = (int)(s - g_slots);
@@ -1758,7 +1758,7 @@ CandoValue cando_module_init(CandoVM *vm)
     cando_lib_meta_define(vm, meta, "setVSync",           native_window_set_vsync);
 
     CandoValue tbl = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(tbl));
 
     obj_set_string(obj, "VERSION",
                    WINDOW_MODULE_VERSION,
@@ -1775,7 +1775,7 @@ CandoValue cando_module_init(CandoVM *vm)
      * `window.keys.escape`, `window.keys.left`, etc. */
     {
         CandoValue keys_val = cando_bridge_new_object(vm);
-        CdoObject *keys     = cando_bridge_resolve(vm, keys_val.as.handle);
+        CdoObject *keys     = cando_bridge_resolve(vm, cando_as_handle(keys_val));
 
         /* Letters */
         for (int c = 0; c < 26; c++) {
@@ -1839,7 +1839,7 @@ CandoValue cando_module_init(CandoVM *vm)
     /* window.mouse -- mouse-button constants. */
     {
         CandoValue mouse_val = cando_bridge_new_object(vm);
-        CdoObject *mouse     = cando_bridge_resolve(vm, mouse_val.as.handle);
+        CdoObject *mouse     = cando_bridge_resolve(vm, cando_as_handle(mouse_val));
         obj_set_number(mouse, "left",   (f64)GLFW_MOUSE_BUTTON_LEFT);
         obj_set_number(mouse, "right",  (f64)GLFW_MOUSE_BUTTON_RIGHT);
         obj_set_number(mouse, "middle", (f64)GLFW_MOUSE_BUTTON_MIDDLE);

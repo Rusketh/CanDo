@@ -1,0 +1,13 @@
+/* loops.cdo -- pure loop-overhead micro-benchmark.
+ *
+ * Stresses: backedge dispatch, local variable load/store, integer
+ * arithmetic.  Useful as a sanity check that the JIT is recording the
+ * smallest possible loop -- if this doesn't speed up, something is
+ * wrong with hot-path detection.
+ */
+
+VAR sum = 0;
+FOR i IN 1 -> 1000000 {
+    sum = sum + i;
+}
+print(sum);

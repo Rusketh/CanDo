@@ -99,10 +99,18 @@ typedef struct CandoVM CandoVM;
 
 typedef int (*CandoNativeFn)(CandoVM *vm, int argc, CandoValue *args);
 
+/* JIT fast-path signature for f64 -> f64 natives (math.sqrt, etc).
+ * Registered via cando_vm_register_fast_native_f1; if present, the JIT
+ * recorder emits IR_CALL_F1 instead of going through the slow native
+ * dispatch path. */
+typedef double (*CandoFastFn1)(double);
+
 /* IS_NATIVE_FN -- true when a value is a native-function sentinel.
- * NATIVE_INDEX -- extract 0-based index from a native-function sentinel. */
-#define IS_NATIVE_FN(v)  (cando_is_number(v) && (v).as.number < 0.0)
-#define NATIVE_INDEX(v)  ((u32)(-(v).as.number - 1.0))
+ * NATIVE_INDEX -- extract 0-based index from a native-function sentinel.
+ * Both forward to the accessors in value.h so the encoding stays
+ * isolated. */
+#define IS_NATIVE_FN(v)  cando_is_native_fn(v)
+#define NATIVE_INDEX(v)  cando_native_index(v)
 
 /* =========================================================================
  * CandoUpvalue -- a captured variable.
@@ -146,6 +154,11 @@ typedef struct CandoCallFrame {
     u8           *ip;        /* instruction pointer into closure->chunk   */
     CandoValue   *slots;     /* base of this frame's window in vm->stack  */
     u32           ret_count; /* expected return-value count (0 = any)     */
+    u32           loop_save; /* loop-stack depth at frame entry; OP_RETURN
+                                restores vm->loop_depth to this so any
+                                loops the function left open (e.g. via
+                                an early RETURN inside a FOR-IN body)
+                                do not leak frames into the caller       */
     bool           is_fluent; /* return receiver instead of result         */
 } CandoCallFrame;
 
@@ -191,6 +204,11 @@ typedef struct CandoGlobalEnv {
     CandoGlobalEntry *entries;
     u32               capacity;  /* always a power of two                 */
     u32               count;
+    /* Phase 8.7: bumped whenever entries[] is reallocated (rehash on
+     * NEW key insertion).  JIT traces cache entry pointers at codegen
+     * time and verify this version at trace entry; on mismatch the
+     * trace bails to bytecode (the cached ptrs may be dangling). */
+    u32               version;
 } CandoGlobalEnv;
 
 /* =========================================================================
@@ -207,6 +225,48 @@ typedef struct CandoThreadRegistry {
     int           quit_requested;
     int           exit_code;
 } CandoThreadRegistry;
+
+/* =========================================================================
+ * CandoJitStats -- profiling counters maintained while CandoVM.jit_enabled
+ * is true.
+ *
+ * Phase 2 introduced the aggregate hit counters; Phase 3.2 adds the
+ * trace-trigger bookkeeping that the per-PC hot table feeds.  Phase
+ * 4+ will add traces_compiled / side_exits / mcode_bytes_used.
+ *
+ * The script-level `jit.stats()` native (source/lib/jit.c) exposes these
+ * with shorter keys: backedge_hits → "backedges", func_entry_hits →
+ * "func_entries", iter_next_hits → "iter_next", trace_starts →
+ * "trace_starts", trace_aborts → "trace_aborts", hot_pcs → "hot_pcs",
+ * blacklisted_pcs → "blacklisted_pcs".
+ * ===================================================================== */
+typedef struct CandoJitStats {
+    u64 backedge_hits;    /* OP_LOOP fires                                  */
+    u64 func_entry_hits;  /* every successful vm_push_frame, which includes
+                             OP_CALL, OP_TAIL_CALL, OP_METHOD_CALL, eval
+                             re-entry, thread spawn, and metamethod
+                             dispatch -- intentionally broad so the
+                             recorder sees every chunk-entry boundary       */
+    u64 iter_next_hits;   /* OP_FOR_NEXT / OP_FOR_OVER_NEXT / OP_PIPE_NEXT
+                             / OP_FILTER_NEXT advances by one element
+                             (the loop-exhaustion exit does not count)      */
+
+    /* Phase 3.2/3.3/3.4 -- snapshotted from CandoJit at read time. */
+    u32 trace_starts;     /* hot-counter triggers that entered the recorder */
+    u32 trace_aborts;     /* of those, how many aborted before close        */
+    u32 traces_compiled;  /* of those, how many closed successfully         */
+    u64 trace_iters;      /* iterations the IR-interpreter executed cleanly */
+    u32 trace_exits;      /* guard exits / type bails returning to bytecode */
+    u32 hot_pcs;          /* distinct PCs the hot table is tracking         */
+    u32 blacklisted_pcs;  /* of those, how many are blacklisted             */
+    u32 traces_evicted;   /* approximate-LRU evictions when the trace cache
+                             reached CANDO_JIT_MAX_TRACES                  */
+} CandoJitStats;
+
+/* Forward declaration -- the full type is defined in source/jit/jit.h.
+ * CandoVM stores a CandoJit* by pointer so this header doesn't need to
+ * pull in the JIT module's internals. */
+typedef struct CandoJit CandoJit;
 
 /* =========================================================================
  * CandoVM -- the interpreter state.
@@ -253,6 +313,14 @@ struct CandoVM {
     CandoNativeFn *native_fns;
     u32            native_count;
     u32            native_cap;
+
+    /* JIT fast-native registry: parallel to native_fns[].  When entry
+     * fast_natives_f1[i] is non-NULL, the JIT may emit IR_CALL_F1 for
+     * a recorded call to native i, invoking the f64 (*)(f64) directly
+     * instead of going through the VM-stack-passing convention.  Lazily
+     * grown by cando_vm_register_fast_native_f1. */
+    CandoFastFn1  *fast_natives_f1;
+    u32            fast_natives_f1_cap;
 
     /* Memory controller (may be NULL for unit tests) ------------------- */
     CandoMemCtrl  *mem;
@@ -309,6 +377,18 @@ struct CandoVM {
     /* Root VM owns the registry; child VMs share it via pointer.          */
     CandoThreadRegistry *thread_registry;       /* shared pointer           */
     CandoThreadRegistry *thread_registry_owned; /* non-NULL only on root VM */
+
+    /* JIT profiling ---------------------------------------------------- */
+    /* When jit_enabled is true the dispatch loop bumps the counters in
+     * jit_stats on every loop backedge, function entry, and iterator
+     * NEXT, and consults vm->jit (lazy-allocated by cando_jit_enable)
+     * for per-PC hot-counter tracking.  No machine code is emitted yet
+     * -- counters are visible via `cando --jit-stats` and via the
+     * script-level `jit.stats()` native.  See docs/jit-plan.md §5.       */
+    bool          jit_enabled;
+    CandoJitStats jit_stats;
+    CandoJit     *jit;          /* NULL until first cando_jit_enable;
+                                   then owned by this VM's lifetime      */
 };
 
 /* =========================================================================
@@ -331,6 +411,35 @@ CANDO_API void cando_vm_init_child(CandoVM *child, const CandoVM *parent);
 
 /* cando_vm_destroy -- release all VM-owned resources. */
 CANDO_API void cando_vm_destroy(CandoVM *vm);
+
+/* =========================================================================
+ * JIT profiling (Phase 2 of docs/jit-plan.md)
+ *
+ * The JIT itself does not exist yet -- these entry points only manage
+ * the profiling counters.  Enabling counts every loop backedge,
+ * function entry, and iterator-NEXT through the dispatch loop;
+ * disabling makes the counters cold (single predictable branch in the
+ * hot path).  Read the counters via cando_jit_get_stats; reset them
+ * via cando_jit_reset_stats.
+ * ===================================================================== */
+
+CANDO_API void          cando_jit_enable(CandoVM *vm);
+CANDO_API void          cando_jit_disable(CandoVM *vm);
+CANDO_API bool          cando_jit_is_enabled(const CandoVM *vm);
+CANDO_API CandoJitStats cando_jit_get_stats(const CandoVM *vm);
+CANDO_API void          cando_jit_reset_stats(CandoVM *vm);
+
+/* cando_jit_last_abort -- the most recent recorder abort reason, or
+ * NULL if the recorder has never aborted (or the JIT has never been
+ * enabled).  Pointer is owned by the VM and stays valid until the
+ * next abort. */
+CANDO_API const char *  cando_jit_last_abort(const CandoVM *vm);
+
+/* cando_jit_dump_traces -- write a human-readable listing of every
+ * compiled trace to `out`.  No-op when JIT is unavailable or no
+ * traces have been compiled.  Format is the same as cando_ir_dump
+ * (one block per trace). */
+CANDO_API void          cando_jit_dump_traces(const CandoVM *vm, FILE *out);
 
 /* =========================================================================
  * Closure helpers
@@ -490,6 +599,16 @@ CANDO_API u32 cando_vm_stack_depth(const CandoVM *vm);
 CANDO_API bool cando_vm_register_native(CandoVM *vm, const char *name,
                                CandoNativeFn fn);
 
+/* cando_vm_register_fast_native_f1 -- register a JIT fast path for an
+ * already-registered f64->f64 native (math.sqrt etc).  Scans
+ * vm->native_fns to find `slow`; on hit, sets vm->fast_natives_f1[idx]
+ * = `fast` so a recorded call to that native compiles to IR_CALL_F1
+ * instead of the slow stack-passing dispatch.  No-op if `slow` isn't
+ * registered.  Safe to call before or after JIT enable. */
+CANDO_API void cando_vm_register_fast_native_f1(CandoVM *vm,
+                                                 CandoNativeFn slow,
+                                                 CandoFastFn1 fast);
+
 /*
  * cando_vm_add_native -- register a native without exposing it as a global.
  * Returns the sentinel CandoValue that represents this function, or
@@ -509,6 +628,14 @@ CANDO_API bool cando_vm_set_global(CandoVM *vm, const char *name, CandoValue val
 /* cando_vm_get_global -- look up a global; returns false if not found. */
 CANDO_API bool cando_vm_get_global(const CandoVM *vm, const char *name,
                           CandoValue *out);
+
+/* Phase 8.7: cando_vm_get_global_entry -- look up a global's
+ * underlying CandoGlobalEntry*.  Used by the JIT to cache the
+ * entry pointer (via the entry's value field) at codegen time
+ * and skip the per-iter hash lookup.  Validity is gated on
+ * vm->globals->version. */
+CANDO_API CandoGlobalEntry *cando_vm_get_global_entry(CandoVM *vm,
+                                                       const char *name);
 
 /* =========================================================================
  * Meta-method dispatch helper

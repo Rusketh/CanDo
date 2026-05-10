@@ -19,31 +19,31 @@
 void parse_quad_args(int argc, CandoValue *args,
                      int *l, int *t, int *r, int *b)
 {
-    int v0 = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
-    if (argc < 3 || args[2].tag != CDO_NUMBER) {
+    int v0 = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : 0;
+    if (argc < 3 || !cando_is_number(args[2])) {
         *l = *t = *r = *b = v0;
         return;
     }
-    int v1 = (int)args[2].as.number;
-    if (argc < 4 || args[3].tag != CDO_NUMBER) {
+    int v1 = (int)cando_as_number(args[2]);
+    if (argc < 4 || !cando_is_number(args[3])) {
         *l = *r = v0; *t = *b = v1;
         return;
     }
-    int v2 = (int)args[3].as.number;
-    int v3 = (argc >= 5 && args[4].tag == CDO_NUMBER) ? (int)args[4].as.number : v2;
+    int v2 = (int)cando_as_number(args[3]);
+    int v3 = (argc >= 5 && cando_is_number(args[4])) ? (int)cando_as_number(args[4]) : v2;
     *l = v0; *t = v1; *r = v2; *b = v3;
 }
 
 int parse_dock_arg(CandoValue v)
 {
-    if (v.tag == CDO_NUMBER) {
-        int n = (int)v.as.number;
+    if (cando_is_number(v)) {
+        int n = (int)cando_as_number(v);
         if (n < FORMS_DOCK_NONE || n > FORMS_DOCK_FILL) return FORMS_DOCK_NONE;
         return n;
     }
-    if (v.tag == CDO_STRING && v.as.string) {
-        const char *s = v.as.string->data;
-        u32 n = v.as.string->length;
+    if (cando_is_string(v) && cando_as_string(v)) {
+        const char *s = cando_as_string(v)->data;
+        u32 n = cando_as_string(v)->length;
         #define CHECK(name, val) \
             if (n == sizeof(name)-1 && memcmp(s, name, sizeof(name)-1) == 0) return val
         CHECK("none",   FORMS_DOCK_NONE);
@@ -59,10 +59,10 @@ int parse_dock_arg(CandoValue v)
 
 int parse_anchor_arg(CandoValue v)
 {
-    if (v.tag == CDO_NUMBER) return (int)v.as.number;
-    if (v.tag != CDO_STRING || !v.as.string) return FORMS_ANCHOR_DEFAULT;
-    const char *str = v.as.string->data;
-    u32 n = v.as.string->length;
+    if (cando_is_number(v)) return (int)cando_as_number(v);
+    if (!cando_is_string(v) || !cando_as_string(v)) return FORMS_ANCHOR_DEFAULT;
+    const char *str = cando_as_string(v)->data;
+    u32 n = cando_as_string(v)->length;
     int mask = 0;
     u32 i = 0;
     while (i < n) {
@@ -86,14 +86,14 @@ int parse_anchor_arg(CandoValue v)
 
 int parse_border_style(CandoValue v)
 {
-    if (v.tag == CDO_NUMBER) {
-        int n = (int)v.as.number;
+    if (cando_is_number(v)) {
+        int n = (int)cando_as_number(v);
         if (n < 1 || n > 3) return 0;
         return n;
     }
-    if (v.tag == CDO_STRING && v.as.string) {
-        const char *s = v.as.string->data;
-        u32 n = v.as.string->length;
+    if (cando_is_string(v) && cando_as_string(v)) {
+        const char *s = cando_as_string(v)->data;
+        u32 n = cando_as_string(v)->length;
         if (n == 4 && memcmp(s, "none",   4) == 0) return 1;
         if (n == 6 && memcmp(s, "single", 6) == 0) return 2;
         if (n == 2 && memcmp(s, "3d",     2) == 0) return 3;

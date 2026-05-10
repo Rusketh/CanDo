@@ -35,8 +35,8 @@
 
 static int app_quit(CandoVM *vm, int argc, CandoValue *args)
 {
-    int code = (argc >= 1 && args[0].tag == CDO_NUMBER)
-               ? (int)args[0].as.number : 0;
+    int code = (argc >= 1 && cando_is_number(args[0]))
+               ? (int)cando_as_number(args[0]) : 0;
     cando_vm_request_quit(vm, code);
     cando_vm_push(vm, cando_null());
     return 1;
@@ -52,8 +52,8 @@ static int app_quit(CandoVM *vm, int argc, CandoValue *args)
 
 static int app_exit(CandoVM *vm, int argc, CandoValue *args)
 {
-    int code = (argc >= 1 && args[0].tag == CDO_NUMBER)
-               ? (int)args[0].as.number : 0;
+    int code = (argc >= 1 && cando_is_number(args[0]))
+               ? (int)cando_as_number(args[0]) : 0;
     cando_vm_request_quit(vm, code);
     /* Skip atexit hooks and stdio flushes -- there's no portable way
      * to guarantee a child render thread isn't mid-GL call.  exit(3)
@@ -91,8 +91,8 @@ static int app_holds(CandoVM *vm, int argc, CandoValue *args)
 
 static int app_exit_code(CandoVM *vm, int argc, CandoValue *args)
 {
-    if (argc >= 1 && args[0].tag == CDO_NUMBER) {
-        cando_vm_set_exit_code(vm, (int)args[0].as.number);
+    if (argc >= 1 && cando_is_number(args[0])) {
+        cando_vm_set_exit_code(vm, (int)cando_as_number(args[0]));
     }
     cando_vm_push(vm, cando_number((f64)cando_vm_get_exit_code(vm)));
     return 1;
@@ -105,7 +105,7 @@ static int app_exit_code(CandoVM *vm, int argc, CandoValue *args)
 void cando_lib_app_register(CandoVM *vm)
 {
     CandoValue val = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, val.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(val));
 
     libutil_set_method(vm, obj, "quit",       app_quit);
     libutil_set_method(vm, obj, "exit",       app_exit);

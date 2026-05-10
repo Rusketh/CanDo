@@ -48,13 +48,13 @@ void cdo_thread_destroy(CdoThread *t) {
      * the error -- no `await`, no `thread.catch`, no `thread.error()` --
      * surface it on stderr now so the failure isn't silently swallowed. */
     if (atomic_load(&t->state) == CDO_THREAD_ERROR && !t->error_observed) {
-        if (t->error.tag == TYPE_STRING && t->error.as.string) {
+        if (cando_is_string(t->error) && cando_as_string(t->error)) {
+            CandoString *es = cando_as_string(t->error);
             fprintf(stderr, "cando: uncaught error in thread: %.*s\n",
-                    (int)t->error.as.string->length,
-                    t->error.as.string->data);
+                    (int)es->length, es->data);
         } else {
             fprintf(stderr, "cando: uncaught error in thread: <%s>\n",
-                    cando_value_type_name((TypeTag)t->error.tag));
+                    cando_value_type_name(cando_value_tag(t->error)));
         }
         fflush(stderr);
     }

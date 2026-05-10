@@ -15,8 +15,8 @@ int native_set_tick_frequency(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setTickFrequency");
     if (!s) return -1;
-    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-            (int)args[1].as.number : 1;
+    int n = (argc >= 2 && cando_is_number(args[1])) ?
+            (int)cando_as_number(args[1]) : 1;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TRACKBAR) {
         SendMessageW(s->hwnd, TBM_SETTICFREQ, (WPARAM)n, 0);
@@ -32,8 +32,8 @@ int native_set_small_step(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setSmallStep");
     if (!s) return -1;
-    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-            (int)args[1].as.number : 1;
+    int n = (argc >= 2 && cando_is_number(args[1])) ?
+            (int)cando_as_number(args[1]) : 1;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TRACKBAR) {
         SendMessageW(s->hwnd, TBM_SETLINESIZE, 0, (LPARAM)n);
@@ -49,8 +49,8 @@ int native_set_large_step(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setLargeStep");
     if (!s) return -1;
-    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-            (int)args[1].as.number : 5;
+    int n = (argc >= 2 && cando_is_number(args[1])) ?
+            (int)cando_as_number(args[1]) : 5;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_TRACKBAR) {
         SendMessageW(s->hwnd, TBM_SETPAGESIZE, 0, (LPARAM)n);

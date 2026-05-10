@@ -101,14 +101,14 @@ void flowlayout_arrange(int parent_slot, int client_w, int client_h)
 
 static int parse_flow_direction(CandoValue v)
 {
-    if (v.tag == CDO_NUMBER) {
-        int n = (int)v.as.number;
+    if (cando_is_number(v)) {
+        int n = (int)cando_as_number(v);
         if (n < 0 || n > 3) return 0;
         return n;
     }
-    if (v.tag == CDO_STRING && v.as.string) {
-        const char *t = v.as.string->data;
-        u32 n = v.as.string->length;
+    if (cando_is_string(v) && cando_as_string(v)) {
+        const char *t = cando_as_string(v)->data;
+        u32 n = cando_as_string(v)->length;
         if (n == 11 && memcmp(t, "leftToRight", 11) == 0) return 0;
         if (n == 11 && memcmp(t, "rightToLeft", 11) == 0) return 1;
         if (n == 7  && memcmp(t, "topDown",      7) == 0) return 2;
@@ -153,7 +153,7 @@ int native_set_wrap_contents(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setWrapContents");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
     s->wrap_contents = on ? 1 : 0;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_FLOWLAYOUT) {

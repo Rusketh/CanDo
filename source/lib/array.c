@@ -21,7 +21,7 @@ static int arr_length(CandoVM *vm, int argc, CandoValue *args) {
         cando_vm_push(vm, cando_number(0));
         return 1;
     }
-    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (obj->kind != OBJ_ARRAY) {
         cando_vm_push(vm, cando_number(0));
         return 1;
@@ -39,7 +39,7 @@ static int arr_push(CandoVM *vm, int argc, CandoValue *args) {
         cando_vm_push(vm, cando_bool(false));
         return 1;
     }
-    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (obj->kind != OBJ_ARRAY) {
         cando_vm_push(vm, cando_bool(false));
         return 1;
@@ -47,7 +47,7 @@ static int arr_push(CandoVM *vm, int argc, CandoValue *args) {
 
     if (argc >= 3 && cando_is_number(args[1])) {
         /* Insert at index. */
-        u32 idx = (u32)(i64)args[1].as.number;
+        u32 idx = (u32)(i64)cando_as_number(args[1]);
         CdoValue cv = cando_bridge_to_cdo(vm, args[2]);
         bool res = cdo_array_insert(obj, idx, cv);
         cando_vm_push(vm, cando_bool(res));
@@ -68,7 +68,7 @@ static int arr_pop(CandoVM *vm, int argc, CandoValue *args) {
         cando_vm_push(vm, cando_null());
         return 1;
     }
-    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (obj->kind != OBJ_ARRAY || obj->items_len == 0) {
         cando_vm_push(vm, cando_null());
         return 1;
@@ -91,7 +91,7 @@ static int arr_map(CandoVM *vm, int argc, CandoValue *args) {
         cando_vm_push(vm, cando_null());
         return 1;
     }
-    CdoObject *src = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *src = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (src->kind != OBJ_ARRAY) {
         cando_vm_push(vm, cando_null());
         return 1;
@@ -99,7 +99,7 @@ static int arr_map(CandoVM *vm, int argc, CandoValue *args) {
     CandoValue fn = args[1];
 
     CandoValue res_val = cando_bridge_new_array(vm);
-    CdoObject *res_obj = cando_bridge_resolve(vm, res_val.as.handle);
+    CdoObject *res_obj = cando_bridge_resolve(vm, cando_as_handle(res_val));
 
     u32 len = cdo_array_len(src);
     for (u32 i = 0; i < len; i++) {
@@ -135,7 +135,7 @@ static int arr_filter(CandoVM *vm, int argc, CandoValue *args) {
         cando_vm_push(vm, cando_null());
         return 1;
     }
-    CdoObject *src = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *src = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (src->kind != OBJ_ARRAY) {
         cando_vm_push(vm, cando_null());
         return 1;
@@ -143,7 +143,7 @@ static int arr_filter(CandoVM *vm, int argc, CandoValue *args) {
     CandoValue fn = args[1];
 
     CandoValue res_val = cando_bridge_new_array(vm);
-    CdoObject *res_obj = cando_bridge_resolve(vm, res_val.as.handle);
+    CdoObject *res_obj = cando_bridge_resolve(vm, cando_as_handle(res_val));
 
     u32 len = cdo_array_len(src);
     for (u32 i = 0; i < len; i++) {
@@ -161,7 +161,7 @@ static int arr_filter(CandoVM *vm, int argc, CandoValue *args) {
             CandoValue ret = cando_vm_pop(vm);
             /* Simple truthiness check: not null and not false. */
             bool keep = true;
-            if (cando_is_null(ret) || (cando_is_bool(ret) && !ret.as.boolean))
+            if (cando_is_null(ret) || (cando_is_bool(ret) && !cando_as_bool(ret)))
                 keep = false;
 
             if (keep) {
@@ -184,7 +184,7 @@ static int arr_reduce(CandoVM *vm, int argc, CandoValue *args) {
         cando_vm_push(vm, cando_null());
         return 1;
     }
-    CdoObject *src = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *src = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (src->kind != OBJ_ARRAY) {
         cando_vm_push(vm, cando_null());
         return 1;
@@ -229,7 +229,7 @@ static int arr_splice(CandoVM *vm, int argc, CandoValue *args) {
         cando_vm_push(vm, cando_null());
         return 1;
     }
-    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (obj->kind != OBJ_ARRAY) {
         cando_vm_push(vm, cando_null());
         return 1;
@@ -237,12 +237,12 @@ static int arr_splice(CandoVM *vm, int argc, CandoValue *args) {
 
     u32 arr_len = cdo_array_len(obj);
     u32 start   = (argc >= 2 && cando_is_number(args[1]))
-                  ? (u32)(i64)args[1].as.number : 0;
+                  ? (u32)(i64)cando_as_number(args[1]) : 0;
     if (start > arr_len) start = arr_len;
 
     u32 count;
     if (argc >= 3 && cando_is_number(args[2])) {
-        count = (u32)(i64)args[2].as.number;
+        count = (u32)(i64)cando_as_number(args[2]);
         if (count > arr_len - start) count = arr_len - start;
     } else {
         count = arr_len - start;
@@ -250,7 +250,7 @@ static int arr_splice(CandoVM *vm, int argc, CandoValue *args) {
 
     /* Collect removed elements into a new array. */
     CandoValue result_val = cando_bridge_new_array(vm);
-    CdoObject *result_obj = cando_bridge_resolve(vm, result_val.as.handle);
+    CdoObject *result_obj = cando_bridge_resolve(vm, cando_as_handle(result_val));
 
     for (u32 i = 0; i < count; i++) {
         CdoValue removed;
@@ -273,12 +273,12 @@ static int arr_remove(CandoVM *vm, int argc, CandoValue *args) {
         cando_vm_push(vm, cando_null());
         return 1;
     }
-    CdoObject *obj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (obj->kind != OBJ_ARRAY) {
         cando_vm_push(vm, cando_null());
         return 1;
     }
-    u32 idx = (u32)(i64)args[1].as.number;
+    u32 idx = (u32)(i64)cando_as_number(args[1]);
     CdoValue removed;
     if (!cdo_array_remove(obj, idx, &removed)) {
         cando_vm_push(vm, cando_null());
@@ -297,14 +297,14 @@ static int arr_copy(CandoVM *vm, int argc, CandoValue *args) {
         cando_vm_push(vm, cando_null());
         return 1;
     }
-    CdoObject *src = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *src = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     if (src->kind != OBJ_ARRAY) {
         cando_vm_push(vm, cando_null());
         return 1;
     }
 
     CandoValue copy_val = cando_bridge_new_array(vm);
-    CdoObject *copy_obj = cando_bridge_resolve(vm, copy_val.as.handle);
+    CdoObject *copy_obj = cando_bridge_resolve(vm, cando_as_handle(copy_val));
 
     u32 len = cdo_array_len(src);
     for (u32 i = 0; i < len; i++) {
@@ -336,7 +336,7 @@ static const LibutilMethodEntry array_methods[] = {
 void cando_lib_array_register(CandoVM *vm)
 {
     CandoValue proto_val = cando_bridge_new_object(vm);
-    CdoObject *proto     = cando_bridge_resolve(vm, proto_val.as.handle);
+    CdoObject *proto     = cando_bridge_resolve(vm, cando_as_handle(proto_val));
 
     libutil_register_methods(vm, proto, array_methods,
                              CANDO_ARRAY_LEN(array_methods));

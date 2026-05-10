@@ -39,12 +39,12 @@ static int https_get_fn(CandoVM *vm, int argc, CandoValue *args)
     /* Build a minimal options object with method=GET and let the workhorse
      * handle TLS and redirect (scheme will be https regardless). */
     CandoValue opts_val = cando_bridge_new_object(vm);
-    CdoObject *opts     = cando_bridge_resolve(vm, opts_val.as.handle);
+    CdoObject *opts     = cando_bridge_resolve(vm, cando_as_handle(opts_val));
 
     CdoString *kurl = cdo_string_intern("url", 3);
     cdo_object_rawset(opts, kurl,
-                      cdo_string_value(cdo_string_new(args[0].as.string->data,
-                                                      args[0].as.string->length)),
+                      cdo_string_value(cdo_string_new(cando_as_string(args[0])->data,
+                                                      cando_as_string(args[0])->length)),
                       FIELD_NONE);
     cdo_string_release(kurl);
 
@@ -85,7 +85,7 @@ static int https_create_server_fn(CandoVM *vm, int argc, CandoValue *args)
         cando_vm_error(vm, "https.createServer: opts must be an object with cert/key");
         return -1;
     }
-    CdoObject *opts = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     CdoString *cert = opts_get_string_field(opts, "cert");
     CdoString *key  = opts_get_string_field(opts, "key");
     if (!cert || !key) {
@@ -120,7 +120,7 @@ void cando_lib_https_register(CandoVM *vm)
     http_one_time_init();
 
     CandoValue https_val = cando_bridge_new_object(vm);
-    CdoObject *https_obj = cando_bridge_resolve(vm, https_val.as.handle);
+    CdoObject *https_obj = cando_bridge_resolve(vm, cando_as_handle(https_val));
 
     libutil_set_method(vm, https_obj, "request",      https_request_fn);
     libutil_set_method(vm, https_obj, "get",          https_get_fn);

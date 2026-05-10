@@ -15,8 +15,8 @@ int native_set_increment(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setIncrement");
     if (!s) return -1;
-    int n = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-            (int)args[1].as.number : 1;
+    int n = (argc >= 2 && cando_is_number(args[1])) ?
+            (int)cando_as_number(args[1]) : 1;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_NUMERIC) {
         /* For NumericUpDown the spinner is a sibling msctls_updown32; the

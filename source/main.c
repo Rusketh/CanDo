@@ -6,10 +6,29 @@
  * main.c only handles command-line argument parsing and exit codes.
  *
  * Usage:
- *   cando <file.cdo> [--disasm] [args...]
+ *   cando <file.cdo> [interpreter-flags] [args...]
  *
- * Anything after the script path that is not the `--disasm` switch is
- * forwarded to the script via the global `args` array.
+ * Interpreter flags (consumed here, not forwarded to the script):
+ *   --disasm        disassemble the chunk before execution
+ *   --jit           enable JIT profiling counters + recorder (no
+ *                   machine code yet -- traces are constructed in
+ *                   IR and stored for inspection; see Phase 4+ of
+ *                   docs/jit-plan.md for codegen).
+ *   --no-jit        force-disable the JIT.  Wins over --jit,
+ *                   --jit-stats, --jit-dump, and CANDO_JIT.
+ *   --jit-stats     print a one-line summary of profiling counters at
+ *                   exit.  Always implies --jit (otherwise the output
+ *                   is meaningless); use --no-jit if you want to
+ *                   suppress the print without disabling globally.
+ *   --jit-dump      after stats, print the IR of every compiled
+ *                   trace.  Implies --jit.
+ *
+ * Environment variables:
+ *   CANDO_JIT=1     equivalent to --jit when no CLI flag overrides.
+ *                   Any other value (including 0 or empty) is ignored.
+ *
+ * Anything else after the script path is forwarded to the script via
+ * the global `args` array.
  *
  * Must compile with gcc -std=c11.
  */
@@ -19,20 +38,27 @@
 #include <stdlib.h>
 
 #include "cando.h"
+#include "vm/vm.h"
 
 int main(int argc, char *argv[])
 {
     if (argc < 2) {
         fprintf(stderr, "CanDo %s\n", CANDO_VERSION);
-        fprintf(stderr, "usage: %s <file.cdo> [--disasm] [args...]\n", argv[0]);
+        fprintf(stderr, "usage: %s <file.cdo> "
+                        "[--disasm] [--jit|--no-jit] [--jit-stats] "
+                        "[args...]\n", argv[0]);
         return 1;
     }
 
-    const char *path   = argv[1];
-    bool        disasm = false;
+    const char *path        = argv[1];
+    bool        disasm      = false;
+    bool        jit_stats   = false;
+    bool        jit_request = false;
+    bool        jit_disable = false;
+    bool        jit_dump    = false;
 
-    /* Collect script args: everything after argv[1] except the --disasm
-     * switch (which is consumed by the interpreter, not the script). */
+    /* Collect script args: everything after argv[1] that isn't an
+     * interpreter flag. */
     const char **script_argv = NULL;
     int          script_argc = 0;
     if (argc > 2) {
@@ -44,6 +70,14 @@ int main(int argc, char *argv[])
         for (int i = 2; i < argc; i++) {
             if (strcmp(argv[i], "--disasm") == 0) {
                 disasm = true;
+            } else if (strcmp(argv[i], "--jit") == 0) {
+                jit_request = true;
+            } else if (strcmp(argv[i], "--no-jit") == 0) {
+                jit_disable = true;
+            } else if (strcmp(argv[i], "--jit-stats") == 0) {
+                jit_stats = true;
+            } else if (strcmp(argv[i], "--jit-dump") == 0) {
+                jit_dump = true;
             } else {
                 script_argv[script_argc++] = argv[i];
             }
@@ -59,6 +93,21 @@ int main(int argc, char *argv[])
     }
     cando_openlibs(vm);
     cando_set_args(vm, script_argc, script_argv);
+
+    /* JIT profiling state.  Resolution order:
+     *   1. --no-jit on the CLI wins over everything (force off).
+     *   2. --jit / --jit-stats on the CLI enable counters.
+     *   3. CANDO_JIT=1 in the environment enables counters.
+     *   4. Default: off. */
+    if (jit_disable) {
+        cando_jit_disable(vm);
+    } else if (jit_request || jit_stats || jit_dump) {
+        cando_jit_enable(vm);
+    } else {
+        const char *env = getenv("CANDO_JIT");
+        if (env && env[0] && env[0] != '0')
+            cando_jit_enable(vm);
+    }
 
     int rc = 0;
 
@@ -107,7 +156,41 @@ int main(int argc, char *argv[])
         }
     }
 
+    if (jit_stats) {
+        /* Always prints, even with --no-jit -- in that case the counters
+         * are zero by construction, which is itself useful information
+         * (e.g. "did this run actually trigger anything?"). */
+        CandoJitStats st = cando_jit_get_stats(vm);
+        fprintf(stderr,
+            "jit: backedges=%llu func_entries=%llu iter_next=%llu "
+            "trace_starts=%u traces_compiled=%u trace_aborts=%u "
+            "trace_iters=%llu trace_exits=%u "
+            "hot_pcs=%u blacklisted=%u traces_evicted=%u",
+            (unsigned long long)st.backedge_hits,
+            (unsigned long long)st.func_entry_hits,
+            (unsigned long long)st.iter_next_hits,
+            st.trace_starts,
+            st.traces_compiled,
+            st.trace_aborts,
+            (unsigned long long)st.trace_iters,
+            st.trace_exits,
+            st.hot_pcs,
+            st.blacklisted_pcs,
+            st.traces_evicted);
+        if (st.trace_aborts > 0 && cando_jit_is_enabled(vm)) {
+            const char *reason = cando_jit_last_abort(vm);
+            if (reason && reason[0])
+                fprintf(stderr, " last_abort=\"%s\"", reason);
+        }
+        fputc('\n', stderr);
+    }
+
+    if (jit_dump) {
+        cando_jit_dump_traces(vm, stderr);
+    }
+
     cando_close(vm);
     free(script_argv);
+
     return rc;
 }

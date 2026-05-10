@@ -35,7 +35,7 @@ static int net_lookup(CandoVM *vm, int argc, CandoValue *args)
     }
 
     CandoValue arr_val = cando_bridge_new_array(vm);
-    CdoObject *arr     = cando_bridge_resolve(vm, arr_val.as.handle);
+    CdoObject *arr     = cando_bridge_resolve(vm, cando_as_handle(arr_val));
 
     for (int i = 0; server->h_addr_list[i] != NULL; i++) {
         char ip[INET_ADDRSTRLEN];
@@ -56,7 +56,7 @@ void cando_lib_net_register(CandoVM *vm)
     WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
     CandoValue net_val = cando_bridge_new_object(vm);
-    CdoObject *net_obj = cando_bridge_resolve(vm, net_val.as.handle);
+    CdoObject *net_obj = cando_bridge_resolve(vm, cando_as_handle(net_val));
 
     libutil_set_method(vm, net_obj, "lookup", net_lookup);
 

@@ -45,8 +45,8 @@ int native_lv_add_column(CandoVM *vm, int argc, CandoValue *args)
     if (!s) return -1;
     char buf[256] = {0};
     if (argc >= 2) parse_text_arg(vm, args[1], buf, sizeof(buf));
-    int width = (argc >= 3 && args[2].tag == CDO_NUMBER) ?
-                (int)args[2].as.number : 100;
+    int width = (argc >= 3 && cando_is_number(args[2])) ?
+                (int)cando_as_number(args[2]) : 100;
     int index = -1;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_LISTVIEW) {
@@ -74,8 +74,8 @@ int native_lv_set_column_width(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setColumnWidth");
     if (!s) return -1;
-    int col = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
-    int w   = (argc >= 3 && args[2].tag == CDO_NUMBER) ? (int)args[2].as.number : 100;
+    int col = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : 0;
+    int w   = (argc >= 3 && cando_is_number(args[2])) ? (int)cando_as_number(args[2]) : 100;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_LISTVIEW) {
         SendMessageW(s->hwnd, LVM_SETCOLUMNWIDTH, (WPARAM)col, (LPARAM)w);
@@ -118,18 +118,20 @@ int native_lv_add_item(CandoVM *vm, int argc, CandoValue *args)
         index = (int)SendMessageW(s->hwnd, LVM_INSERTITEMW, 0, (LPARAM)&it);
 
         if (index >= 0) {
-            if (args[1].tag == CDO_STRING && args[1].as.string) {
+            if (cando_is_string(args[1]) && cando_as_string(args[1])) {
                 /* Single-string form: column 0 only. */
                 char tmp[1024] = {0};
-                u32 n = args[1].as.string->length;
+                u32 n = cando_as_string(args[1])->length;
                 if (n > sizeof(tmp) - 1) n = sizeof(tmp) - 1;
-                memcpy(tmp, args[1].as.string->data, n);
+                memcpy(tmp, cando_as_string(args[1])->data, n);
                 tmp[n] = 0;
                 lv_set_text(s->hwnd, index, 0, tmp);
-            } else if (args[1].tag == CDO_ARRAY && args[1].as.handle) {
-                /* Array form: each element -> matching column. */
-                CdoObject *arr = cando_bridge_resolve(vm, args[1].as.handle);
-                if (arr) {
+            } else if (cando_is_object(args[1])) {
+                /* Array form: each element -> matching column.  Post
+                 * NaN-box, "is array" requires resolving the handle
+                 * and checking obj->kind. */
+                CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(args[1]));
+                if (arr && arr->kind == OBJ_ARRAY) {
                     u32 len  = cdo_array_len(arr);
                     u32 cols = (u32)SendMessageW(s->hwnd, LVM_GETCOLUMNCOUNT, 0, 0);
                     for (u32 i = 0; i < len && i < cols; i++) {
@@ -157,8 +159,8 @@ int native_lv_set_subitem(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setSubItem");
     if (!s) return -1;
-    int row = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : -1;
-    int col = (argc >= 3 && args[2].tag == CDO_NUMBER) ? (int)args[2].as.number : 0;
+    int row = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : -1;
+    int col = (argc >= 3 && cando_is_number(args[2])) ? (int)cando_as_number(args[2]) : 0;
     char buf[1024] = {0};
     if (argc >= 4) parse_text_arg(vm, args[3], buf, sizeof(buf));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
@@ -176,8 +178,8 @@ int native_lv_get_item_text(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "getItemText");
     if (!s) return -1;
-    int row = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : -1;
-    int col = (argc >= 3 && args[2].tag == CDO_NUMBER) ? (int)args[2].as.number : 0;
+    int row = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : -1;
+    int col = (argc >= 3 && cando_is_number(args[2])) ? (int)cando_as_number(args[2]) : 0;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_LISTVIEW && row >= 0) {
         wchar_t buf[512] = {0};
@@ -205,7 +207,7 @@ int native_lv_remove_item(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "removeItem");
     if (!s) return -1;
-    int row = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : -1;
+    int row = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : -1;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_LISTVIEW && row >= 0) {
         SendMessageW(s->hwnd, LVM_DELETEITEM, (WPARAM)row, 0);
@@ -263,7 +265,7 @@ int native_lv_set_selected_index(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setSelectedIndex");
     if (!s) return -1;
-    int idx = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : -1;
+    int idx = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : -1;
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_LISTVIEW && idx >= 0) {
         LVITEMW it; memset(&it, 0, sizeof(it));
@@ -284,7 +286,7 @@ int native_lv_get_selected_indices(CandoVM *vm, int argc, CandoValue *args)
     FormsSlot *s = arg_self(vm, argc, args, "getSelectedIndices");
     if (!s) return -1;
     CandoValue arr = cando_bridge_new_array(vm);
-    CdoObject *a   = cando_bridge_resolve(vm, arr.as.handle);
+    CdoObject *a   = cando_bridge_resolve(vm, cando_as_handle(arr));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_LISTVIEW && a) {
         int idx = -1;
@@ -307,16 +309,16 @@ int native_lv_set_view(CandoVM *vm, int argc, CandoValue *args)
     FormsSlot *s = arg_self(vm, argc, args, "setView");
     if (!s) return -1;
     int view = 1;   /* LV_VIEW_DETAILS */
-    if (argc >= 2 && args[1].tag == CDO_STRING && args[1].as.string) {
-        const char *t = args[1].as.string->data;
-        u32 n = args[1].as.string->length;
+    if (argc >= 2 && cando_is_string(args[1]) && cando_as_string(args[1])) {
+        const char *t = cando_as_string(args[1])->data;
+        u32 n = cando_as_string(args[1])->length;
         if      (n == 7 && memcmp(t, "details",   7) == 0) view = 1;
         else if (n == 4 && memcmp(t, "list",      4) == 0) view = 2;
         else if (n == 9 && memcmp(t, "smallIcon", 9) == 0) view = 3;
         else if (n == 9 && memcmp(t, "largeIcon", 9) == 0) view = 0;
         else if (n == 4 && memcmp(t, "tile",      4) == 0) view = 4;
-    } else if (argc >= 2 && args[1].tag == CDO_NUMBER) {
-        view = (int)args[1].as.number;
+    } else if (argc >= 2 && cando_is_number(args[1])) {
+        view = (int)cando_as_number(args[1]);
     }
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_LISTVIEW) {
@@ -342,7 +344,7 @@ int native_lv_set_full_row_select(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setFullRowSelect");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_LISTVIEW)
         lv_toggle_ex_style(s->hwnd, LVS_EX_FULLROWSELECT, on);
@@ -357,7 +359,7 @@ int native_lv_set_grid_lines(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setGridLines");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_LISTVIEW)
         lv_toggle_ex_style(s->hwnd, LVS_EX_GRIDLINES, on);
@@ -372,7 +374,7 @@ int native_lv_set_multi_select(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setMultiSelect");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
 #if defined(CANDO_PLATFORM_WINDOWS) || defined(_WIN32) || defined(_WIN64)
     if (s->hwnd && s->kind == KIND_LISTVIEW) {
         LONG st = GetWindowLongW(s->hwnd, GWL_STYLE);

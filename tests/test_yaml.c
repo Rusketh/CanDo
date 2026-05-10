@@ -69,7 +69,7 @@ TEST(test_parse_null_via_buffer)
     CandoValue out = cando_null();
     bool ok = cando_lib_yaml_parse_buffer(vm, "", 0, "test", &out);
     EXPECT_TRUE(ok);
-    EXPECT_EQ((int)out.tag, (int)TYPE_NULL);
+    EXPECT_EQ((int)cando_value_tag(out), (int)TYPE_NULL);
     cando_value_release(out);
 }
 
@@ -78,8 +78,8 @@ TEST(test_parse_scalar_int)
     CandoValue out = cando_null();
     bool ok = cando_lib_yaml_parse_buffer(vm, "42", 2, "test", &out);
     EXPECT_TRUE(ok);
-    EXPECT_EQ((int)out.tag, (int)TYPE_NUMBER);
-    EXPECT_EQ((int)out.as.number, 42);
+    EXPECT_EQ((int)cando_value_tag(out), (int)TYPE_NUMBER);
+    EXPECT_EQ((int)cando_as_number(out), 42);
     cando_value_release(out);
 }
 
@@ -88,8 +88,8 @@ TEST(test_parse_scalar_bool)
     CandoValue out = cando_null();
     bool ok = cando_lib_yaml_parse_buffer(vm, "yes", 3, "test", &out);
     EXPECT_TRUE(ok);
-    EXPECT_EQ((int)out.tag, (int)TYPE_BOOL);
-    EXPECT_TRUE(out.as.boolean);
+    EXPECT_EQ((int)cando_value_tag(out), (int)TYPE_BOOL);
+    EXPECT_TRUE(cando_as_bool(out));
     cando_value_release(out);
 }
 
@@ -99,7 +99,7 @@ TEST(test_parse_block_map)
     CandoValue out = cando_null();
     bool ok = cando_lib_yaml_parse_buffer(vm, src, strlen(src), "test", &out);
     EXPECT_TRUE(ok);
-    EXPECT_EQ((int)out.tag, (int)TYPE_OBJECT);
+    EXPECT_EQ((int)cando_value_tag(out), (int)TYPE_OBJECT);
     cando_value_release(out);
 }
 
@@ -109,7 +109,7 @@ TEST(test_parse_error_message)
     CandoValue out;
     bool ok = cando_lib_yaml_parse_buffer(vm, "[1, 2", 5, "test", &out);
     EXPECT_FALSE(ok);
-    EXPECT_EQ((int)out.tag, (int)TYPE_NULL);
+    EXPECT_EQ((int)cando_value_tag(out), (int)TYPE_NULL);
     EXPECT_TRUE(strstr(cando_errmsg(vm), "test") != NULL);
     /* Clear VM error so subsequent tests start clean. */
     vm->has_error = false;

@@ -353,7 +353,7 @@ static void register_method(CandoVM *vm, CdoObject *mod_obj,
     CandoValue sentinel = cando_vm_add_native(vm, fn);
     /* libutil_set_method asserts on full table; mirror that behaviour
      * by trusting the module author to keep the table small enough. */
-    f64 s = cando_is_number(sentinel) ? sentinel.as.number : 0.0;
+    f64 s = cando_is_number(sentinel) ? cando_as_number(sentinel) : 0.0;
     obj_set_number(mod_obj, name, s);
 
     if (g_method_count < MAX_METHOD_ENTRIES) {
@@ -380,7 +380,7 @@ static void attach_methods_for(CdoObject *handle, MethodTarget target)
 static CandoValue make_db_handle(CandoVM *vm, int slot)
 {
     CandoValue v   = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     obj_set_number(obj, SQLITE_DB_SLOT_KEY, (f64)slot);
     attach_methods_for(obj, METHOD_ON_DB);
     return v;
@@ -389,7 +389,7 @@ static CandoValue make_db_handle(CandoVM *vm, int slot)
 static int db_handle_slot(CandoVM *vm, CandoValue v)
 {
     if (!cando_is_object(v)) return -1;
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     f64 idx = -1.0;
     if (!obj_get_number(obj, SQLITE_DB_SLOT_KEY, &idx)) return -1;
     int i = (int)idx;
@@ -419,7 +419,7 @@ static void db_handle_mark_closed(CandoVM *vm, CandoValue v)
     int slot = db_handle_slot(vm, v);
     if (slot >= 0) db_pool_release(slot);
     if (cando_is_object(v)) {
-        CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+        CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
         obj_set_number(obj, SQLITE_DB_SLOT_KEY, -1.0);
     }
 }
@@ -431,7 +431,7 @@ static void db_handle_mark_closed(CandoVM *vm, CandoValue v)
 static CandoValue make_stmt_handle(CandoVM *vm, int slot, const char *sql, u32 sql_len)
 {
     CandoValue v   = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     obj_set_number(obj, SQLITE_STMT_SLOT_KEY, (f64)slot);
     obj_set_string(obj, SQLITE_STMT_SQL_KEY,  sql, sql_len);
     attach_methods_for(obj, METHOD_ON_STMT);
@@ -441,7 +441,7 @@ static CandoValue make_stmt_handle(CandoVM *vm, int slot, const char *sql, u32 s
 static int stmt_handle_slot(CandoVM *vm, CandoValue v)
 {
     if (!cando_is_object(v)) return -1;
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     f64 idx = -1.0;
     if (!obj_get_number(obj, SQLITE_STMT_SLOT_KEY, &idx)) return -1;
     int i = (int)idx;
@@ -478,7 +478,7 @@ static void stmt_handle_mark_finalised(CandoVM *vm, CandoValue v)
     int slot = stmt_handle_slot(vm, v);
     if (slot >= 0) stmt_pool_release(slot);
     if (cando_is_object(v)) {
-        CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+        CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
         obj_set_number(obj, SQLITE_STMT_SLOT_KEY, -1.0);
     }
 }
@@ -514,11 +514,11 @@ static bool bind_one_value(CandoVM *vm, sqlite3_stmt *st, int idx,
         return true;
     }
     if (cando_is_bool(v)) {
-        sqlite3_bind_int(st, idx, v.as.boolean ? 1 : 0);
+        sqlite3_bind_int(st, idx, cando_as_bool(v) ? 1 : 0);
         return true;
     }
     if (cando_is_number(v)) {
-        f64 d = v.as.number;
+        f64 d = cando_as_number(v);
         if (isfinite(d) && fabs(d) <= INTEGER_SAFE_MAX && d == (f64)(int64_t)d) {
             sqlite3_bind_int64(st, idx, (sqlite3_int64)d);
         } else {
@@ -527,13 +527,13 @@ static bool bind_one_value(CandoVM *vm, sqlite3_stmt *st, int idx,
         return true;
     }
     if (cando_is_string(v)) {
-        const char *s = v.as.string->data;
-        u32         n = v.as.string->length;
+        const char *s = cando_as_string(v)->data;
+        u32         n = cando_as_string(v)->length;
         sqlite3_bind_text(st, idx, s, (int)n, SQLITE_TRANSIENT);
         return true;
     }
     if (cando_is_object(v)) {
-        CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(v));
         /* { blob: <string> } -> bind as BLOB */
         CdoString *kblob = cdo_string_intern("blob", 4);
         CdoValue   bv;
@@ -568,7 +568,7 @@ static bool bind_params(CandoVM *vm, sqlite3_stmt *st,
 
     /* Single-arg array -> positional from array elements. */
     if (n_provided == 1 && cando_is_object(args[start])) {
-        CdoObject *o = cando_bridge_resolve(vm, args[start].as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[start]));
         if (o->kind == OBJ_ARRAY) {
             u32 n = cdo_array_len(o);
             for (u32 i = 0; i < n; i++) {
@@ -666,7 +666,7 @@ static CandoValue build_row(CandoVM *vm, sqlite3_stmt *st, bool bigint_string)
 {
     int ncols = sqlite3_column_count(st);
     CandoValue rowv = cando_bridge_new_object(vm);
-    CdoObject *row  = cando_bridge_resolve(vm, rowv.as.handle);
+    CdoObject *row  = cando_bridge_resolve(vm, cando_as_handle(rowv));
     for (int c = 0; c < ncols; c++) {
         const char *name = sqlite3_column_name(st, c);
         if (!name) name = "?";
@@ -826,7 +826,7 @@ static int native_sqlite_run(CandoVM *vm, int argc, CandoValue *args)
 
     /* Build { lastInsertRowid, changes } */
     CandoValue rv  = cando_bridge_new_object(vm);
-    CdoObject *o   = cando_bridge_resolve(vm, rv.as.handle);
+    CdoObject *o   = cando_bridge_resolve(vm, cando_as_handle(rv));
     obj_set_number(o, "lastInsertRowid", (f64)rowid);
     obj_set_number(o, "changes",         (f64)changes);
 
@@ -892,7 +892,7 @@ static int native_sqlite_all(CandoVM *vm, int argc, CandoValue *args)
     bool bigint_string = g_db_pool[s->db_slot].bigint_string;
 
     CandoValue av = cando_bridge_new_array(vm);
-    CdoObject *a  = cando_bridge_resolve(vm, av.as.handle);
+    CdoObject *a  = cando_bridge_resolve(vm, cando_as_handle(av));
 
     int rc;
     while ((rc = sqlite3_step(s->st)) == SQLITE_ROW) {
@@ -966,7 +966,7 @@ static int native_sqlite_set_read_bigints(CandoVM *vm, int argc, CandoValue *arg
             "sqlite.setReadBigInts: invalid database handle");
         return -1;
     }
-    bool on = cando_is_bool(args[1]) && args[1].as.boolean;
+    bool on = cando_is_bool(args[1]) && cando_as_bool(args[1]);
     g_db_pool[slot].bigint_string = on;
     cando_vm_push(vm, cando_bool(true));
     return 1;
@@ -1000,7 +1000,7 @@ static int native_sqlite_open(CandoVM *vm, int argc, CandoValue *args)
     bool   opt_enable_load_ext = false;
 
     if (argc >= 2 && cando_is_object(args[1])) {
-        CdoObject *o = cando_bridge_resolve(vm, args[1].as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[1]));
         bool b; f64 n;
         if (obj_get_bool   (o, "readonly",            &b)) opt_readonly       = b;
         if (obj_get_bool   (o, "create",              &b)) opt_create         = b;
@@ -1173,11 +1173,11 @@ static int native_sqlite_columns(CandoVM *vm, int argc, CandoValue *args)
 
     int n = sqlite3_column_count(s->st);
     CandoValue av = cando_bridge_new_array(vm);
-    CdoObject *a  = cando_bridge_resolve(vm, av.as.handle);
+    CdoObject *a  = cando_bridge_resolve(vm, cando_as_handle(av));
 
     for (int i = 0; i < n; i++) {
         CandoValue ov = cando_bridge_new_object(vm);
-        CdoObject *o  = cando_bridge_resolve(vm, ov.as.handle);
+        CdoObject *o  = cando_bridge_resolve(vm, cando_as_handle(ov));
 
         const char *name = sqlite3_column_name(s->st, i);
         if (name) obj_set_string(o, "name", name, (u32)strlen(name));
@@ -1216,7 +1216,7 @@ static int native_sqlite_columns(CandoVM *vm, int argc, CandoValue *args)
 static CandoValue make_iterator(CandoVM *vm, int stmt_slot)
 {
     CandoValue v   = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     obj_set_number(obj, SQLITE_ITER_STMT_KEY, (f64)stmt_slot);
     obj_set_bool_field(obj, SQLITE_ITER_DONE_KEY, false);
     attach_methods_for(obj, METHOD_ON_ITER);
@@ -1244,7 +1244,7 @@ static int native_sqlite_iter_next(CandoVM *vm, int argc, CandoValue *args)
         sqlite_throw(vm, NULL, 0, "sqlite.next: (iterator) required");
         return -1;
     }
-    CdoObject *iobj = cando_bridge_resolve(vm, args[0].as.handle);
+    CdoObject *iobj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
     f64 fslot = -1.0;
     if (!obj_get_number(iobj, SQLITE_ITER_STMT_KEY, &fslot)) {
         sqlite_throw(vm, NULL, 0, "sqlite.next: not an iterator handle");
@@ -1556,9 +1556,9 @@ static int native_sqlite_pragma(CandoVM *vm, int argc, CandoValue *args)
         char value_buf[64];
         if (cando_is_bool(args[2])) {
             snprintf(value_buf, sizeof(value_buf),
-                     args[2].as.boolean ? "ON" : "OFF");
+                     cando_as_bool(args[2]) ? "ON" : "OFF");
         } else if (cando_is_number(args[2])) {
-            f64 d = args[2].as.number;
+            f64 d = cando_as_number(args[2]);
             if (d == (f64)(int64_t)d) {
                 snprintf(value_buf, sizeof(value_buf), "%lld",
                          (long long)d);
@@ -1566,8 +1566,8 @@ static int native_sqlite_pragma(CandoVM *vm, int argc, CandoValue *args)
                 snprintf(value_buf, sizeof(value_buf), "%g", d);
             }
         } else if (cando_is_string(args[2])) {
-            const char *vs = args[2].as.string->data;
-            size_t      vn = args[2].as.string->length;
+            const char *vs = cando_as_string(args[2])->data;
+            size_t      vn = cando_as_string(args[2])->length;
             if (!pragma_value_safe(vs, vn) || vn >= sizeof(value_buf)) {
                 sqlite_throw(vm, NULL, 0,
                     "sqlite.pragma: value must be alphanumeric / underscore");
@@ -1595,7 +1595,7 @@ static int native_sqlite_pragma(CandoVM *vm, int argc, CandoValue *args)
     }
 
     CandoValue av = cando_bridge_new_array(vm);
-    CdoObject *a  = cando_bridge_resolve(vm, av.as.handle);
+    CdoObject *a  = cando_bridge_resolve(vm, cando_as_handle(av));
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         cdo_array_push(a, cando_bridge_to_cdo(vm,
             build_row(vm, st, bigint_string)));
@@ -1677,9 +1677,9 @@ static CandoValue value_to_cando(sqlite3_value *v, bool bigint_string)
 static void cando_to_result(CandoVM *vm, sqlite3_context *ctx, CandoValue v)
 {
     if (cando_is_null(v))  { sqlite3_result_null(ctx); return; }
-    if (cando_is_bool(v))  { sqlite3_result_int(ctx, v.as.boolean ? 1 : 0); return; }
+    if (cando_is_bool(v))  { sqlite3_result_int(ctx, cando_as_bool(v) ? 1 : 0); return; }
     if (cando_is_number(v)) {
-        f64 d = v.as.number;
+        f64 d = cando_as_number(v);
         if (isfinite(d) && fabs(d) <= INTEGER_SAFE_MAX && d == (f64)(int64_t)d) {
             sqlite3_result_int64(ctx, (sqlite3_int64)d);
         } else {
@@ -1688,12 +1688,12 @@ static void cando_to_result(CandoVM *vm, sqlite3_context *ctx, CandoValue v)
         return;
     }
     if (cando_is_string(v)) {
-        sqlite3_result_text(ctx, v.as.string->data,
-                            (int)v.as.string->length, SQLITE_TRANSIENT);
+        sqlite3_result_text(ctx, cando_as_string(v)->data,
+                            (int)cando_as_string(v)->length, SQLITE_TRANSIENT);
         return;
     }
     if (cando_is_object(v)) {
-        CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(v));
         CdoString *kblob = cdo_string_intern("blob", 4);
         CdoValue   bv;
         bool has = cdo_object_rawget(o, kblob, &bv);
@@ -1797,9 +1797,11 @@ static void udf_agg_step(sqlite3_context *ctx,
         sqlite3_result_error_nomem(ctx);
         return;
     }
-    /* SQLite zero-fills the buffer on first allocation; tag 0 is
-     * TYPE_NULL so an uninitialised acc reads as null. */
-    if (cando_is_null(*acc)) {
+    /* SQLite zero-fills the buffer on first allocation.  Old API:
+     * `tag == 0` was TYPE_NULL.  Post-NaN-box flip a zero-initialised
+     * CandoValue has `.u == 0` (which is NOT the canonical null tag),
+     * so detect first-call via the raw bit pattern instead. */
+    if (acc->u == 0) {
         *acc = cando_value_copy(u->start);
     }
 
@@ -1852,7 +1854,10 @@ static void udf_agg_final(sqlite3_context *ctx)
         return;
     }
     CandoValue *acc = (CandoValue *)sqlite3_aggregate_context(ctx, 0);
-    CandoValue value = (acc && !cando_is_null(*acc))
+    /* Same zero-init quirk as udf_agg_step: post-NaN-box, an unused
+     * accumulator buffer has .u == 0 (raw zero-fill), not the
+     * canonical NB_TAG_NULL.  Treat both as "no rows seen". */
+    CandoValue value = (acc && acc->u != 0 && !cando_is_null(*acc))
                        ? cando_value_copy(*acc)
                        : cando_value_copy(u->start);
 
@@ -1963,7 +1968,7 @@ static int native_sqlite_aggregate(CandoVM *vm, int argc, CandoValue *args)
         return -1;
     }
 
-    CdoObject *opts = cando_bridge_resolve(vm, args[2].as.handle);
+    CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[2]));
     CdoValue   v;
 
     /* start: any value (defaults to null). */
@@ -2099,7 +2104,7 @@ static int native_sqlite_backup(CandoVM *vm, int argc, CandoValue *args)
     const char  *src_name   = "main";
     const char  *dest_name  = "main";
     if (argc >= 3 && cando_is_object(args[2])) {
-        CdoObject *o = cando_bridge_resolve(vm, args[2].as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[2]));
         f64 n;
         if (obj_get_number(o, "step", &n))       step_pages = (int)n;
         if (obj_get_number(o, "pages", &n))      max_pages  = (int)n;
@@ -2151,7 +2156,7 @@ static int native_sqlite_backup(CandoVM *vm, int argc, CandoValue *args)
     }
 
     CandoValue ov = cando_bridge_new_object(vm);
-    CdoObject *o  = cando_bridge_resolve(vm, ov.as.handle);
+    CdoObject *o  = cando_bridge_resolve(vm, cando_as_handle(ov));
     obj_set_number(o, "pages",      (f64)pages_done);
     obj_set_number(o, "totalPages", (f64)total_pages);
     cando_vm_push(vm, ov);
@@ -2181,11 +2186,11 @@ static int native_sqlite_escape(CandoVM *vm, int argc, CandoValue *args)
         return 1;
     }
     if (cando_is_bool(v)) {
-        libutil_push_cstr(vm, v.as.boolean ? "1" : "0");
+        libutil_push_cstr(vm, cando_as_bool(v) ? "1" : "0");
         return 1;
     }
     if (cando_is_number(v)) {
-        f64 d = v.as.number;
+        f64 d = cando_as_number(v);
         int n;
         if (isfinite(d) && d == (f64)(sqlite3_int64)d
             && fabs(d) <= INTEGER_SAFE_MAX) {
@@ -2197,8 +2202,8 @@ static int native_sqlite_escape(CandoVM *vm, int argc, CandoValue *args)
         return 1;
     }
     if (cando_is_string(v)) {
-        const char *s = v.as.string->data;
-        u32         n = v.as.string->length;
+        const char *s = cando_as_string(v)->data;
+        u32         n = cando_as_string(v)->length;
         /* sqlite3_mprintf("%Q", ...) handles NULL specially and
          * doubles `'`.  Use it directly so the output matches what
          * SQLite itself would produce. */
@@ -2257,7 +2262,7 @@ CandoValue cando_module_init(CandoVM *vm)
     g_method_count = 0;
 
     CandoValue tbl = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(tbl));
 
     /* `open` lives only on the module -- there's no handle to attach
      * it to, since the caller is creating one. */

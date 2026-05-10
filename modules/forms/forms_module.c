@@ -1470,7 +1470,7 @@ static void dispatch_one(FormsEvent ev)
     const char *name = event_callback_name(ev.kind);
     if (!name) return;
 
-    CdoObject *inst = cando_bridge_resolve(&g_dispatch_vm, s->inst_val.as.handle);
+    CdoObject *inst = cando_bridge_resolve(&g_dispatch_vm, cando_as_handle(s->inst_val));
     if (!inst) {
         fprintf(stderr, "[forms] dispatch %s: no inst for slot %d\n",
                 name, ev.slot);
@@ -1651,7 +1651,7 @@ static CandoValue build_instance(CandoVM *vm, int slot, ControlKind kind,
                                  int x, int y, int w, int h)
 {
     CandoValue v = cando_bridge_new_object(vm);
-    CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(v));
 
     /* Native identity fields -- FIELD_STATIC so script code cannot
      * silently overwrite them and de-sync from the slot table.  Phase
@@ -1743,7 +1743,7 @@ static int generic_create(CandoVM *vm, ControlKind kind, int argc, CandoValue *a
     }
     /* Optional second-arg options object {x=, y=, width=, height=, text=}. */
     if (argc > arg0 && cando_is_object(args[arg0])) {
-        CdoObject *opts = cando_bridge_resolve(vm, args[arg0].as.handle);
+        CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[arg0]));
         struct { const char *k; int *v; } ints[] = {
             {"x", &x}, {"y", &y}, {"width", &w}, {"height", &h},
         };
@@ -1794,7 +1794,7 @@ static int generic_create(CandoVM *vm, ControlKind kind, int argc, CandoValue *a
             style_extra |= 16;
         }
         cdo_string_release(ksm);
-    } else if (argc > arg0 && args[arg0].tag == CDO_STRING) {
+    } else if (argc > arg0 && cando_is_string(args[arg0])) {
         parse_text_arg(vm, args[arg0], text, sizeof(text));
     }
 
@@ -1925,7 +1925,7 @@ static int native_set_interval(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setInterval");
     if (!s) return -1;
-    int ms = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 1000;
+    int ms = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : 1000;
     if (ms < 1) ms = 1;
     s->timer_interval = ms;
 #if FORMS_HAVE_WIN32
@@ -2003,9 +2003,9 @@ static int native_notify_set_icon(CandoVM *vm, int argc, CandoValue *args)
     if (!s) return -1;
 #if FORMS_HAVE_WIN32
     if (s->kind == KIND_NOTIFYICON && argc >= 2 &&
-        args[1].tag == CDO_STRING && args[1].as.string) {
-        wchar_t *w = utf8_to_wide(args[1].as.string->data,
-                                  (int)args[1].as.string->length);
+        cando_is_string(args[1]) && cando_as_string(args[1])) {
+        wchar_t *w = utf8_to_wide(cando_as_string(args[1])->data,
+                                  (int)cando_as_string(args[1])->length);
         if (w) {
             HICON ic = (HICON)LoadImageW(NULL, w, IMAGE_ICON, 16, 16,
                                          LR_LOADFROMFILE | LR_DEFAULTSIZE);
@@ -2221,7 +2221,7 @@ static int native_menuitem_set_enabled(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setEnabled");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
     s->enabled = on;
 #if FORMS_HAVE_WIN32
     if (s->kind == KIND_MENUITEM) {
@@ -2294,8 +2294,8 @@ static int native_contextmenu_show(CandoVM *vm, int argc, CandoValue *args)
         FormsSlot *ctl = slot_from_inst(vm, args[1]);
         if (ctl) owner = ctl->hwnd;
     }
-    if (argc >= 3 && args[2].tag == CDO_NUMBER) x = (int)args[2].as.number;
-    if (argc >= 4 && args[3].tag == CDO_NUMBER) y = (int)args[3].as.number;
+    if (argc >= 3 && cando_is_number(args[2])) x = (int)cando_as_number(args[2]);
+    if (argc >= 4 && cando_is_number(args[3])) y = (int)cando_as_number(args[3]);
     if (!s->hmenu) { cando_vm_push(vm, args[0]); return 1; }
     /* If x/y are 0 (default), use the cursor position. */
     if (x == 0 && y == 0) {
@@ -2425,7 +2425,7 @@ static int native_dpi_for(CandoVM *vm, int argc, CandoValue *args)
     int dpi = 96;
 #if FORMS_HAVE_WIN32
     HWND target = NULL;
-    if (argc >= 1 && args[0].tag == CDO_OBJECT) {
+    if (argc >= 1 && cando_is_object(args[0])) {
         FormsSlot *s = slot_from_inst(vm, args[0]);
         if (s) target = s->hwnd;
     }
@@ -2455,7 +2455,7 @@ static int native_dpi_for(CandoVM *vm, int argc, CandoValue *args)
 static int native_dark_mode(CandoVM *vm, int argc, CandoValue *args)
 {
     if (!require_supported(vm, "forms.darkMode")) return -1;
-    bool on = !(argc >= 1 && args[0].tag == CDO_BOOL && !args[0].as.boolean);
+    bool on = !(argc >= 1 && cando_is_bool(args[0]) && !cando_as_bool(args[0]));
 #if FORMS_HAVE_WIN32
     typedef HRESULT (WINAPI *DwmSetFn)(HWND, DWORD, LPCVOID, DWORD);
     HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
@@ -2529,10 +2529,10 @@ static int native_messagebox(CandoVM *vm, int argc, CandoValue *args)
     int  buttons     = 0;     /* 0=ok 1=okCancel 2=yesNo 3=yesNoCancel 4=abortRetryIgnore */
     int  icon        = 0;     /* 0=none 1=info 2=warning 3=error 4=question */
     if (argc >= 1) parse_text_arg(vm, args[0], text,  sizeof(text));
-    if (argc >= 2 && args[1].tag == CDO_STRING)
+    if (argc >= 2 && cando_is_string(args[1]))
         parse_text_arg(vm, args[1], title, sizeof(title));
-    if (argc >= 3 && args[2].tag == CDO_OBJECT && args[2].as.handle) {
-        CdoObject *opts = cando_bridge_resolve(vm, args[2].as.handle);
+    if (argc >= 3 && cando_is_object(args[2]) && cando_as_handle(args[2])) {
+        CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[2]));
         if (opts) {
             CdoValue v;
             CdoString *kb = cdo_string_intern("buttons", 7);
@@ -2606,8 +2606,8 @@ static int native_filedialog(CandoVM *vm, int argc, CandoValue *args, int save)
     char filter[1024] = "All files (*.*)|*.*|";
     char initial[512] = {0};
     char fname[1024]  = {0};
-    if (argc >= 1 && args[0].tag == CDO_OBJECT && args[0].as.handle) {
-        CdoObject *opts = cando_bridge_resolve(vm, args[0].as.handle);
+    if (argc >= 1 && cando_is_object(args[0]) && cando_as_handle(args[0])) {
+        CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[0]));
         if (opts) {
             CdoValue v;
 #define GETSTR(name, dst) do { \
@@ -2673,8 +2673,8 @@ static int native_folder_dialog(CandoVM *vm, int argc, CandoValue *args)
 {
     if (!require_supported(vm, "forms.FolderBrowserDialog")) return -1;
     char title[256] = "Select folder";
-    if (argc >= 1 && args[0].tag == CDO_OBJECT && args[0].as.handle) {
-        CdoObject *opts = cando_bridge_resolve(vm, args[0].as.handle);
+    if (argc >= 1 && cando_is_object(args[0]) && cando_as_handle(args[0])) {
+        CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[0]));
         if (opts) {
             CdoValue v;
             CdoString *k = cdo_string_intern("title", 5);
@@ -2718,13 +2718,13 @@ static int native_color_dialog(CandoVM *vm, int argc, CandoValue *args)
     unsigned int initial = 0;
     if (argc >= 1) {
         unsigned int rgb = 0;
-        if (args[0].tag == CDO_NUMBER) {
-            initial = ((unsigned)args[0].as.number) & 0xFFFFFFu;
-        } else if (args[0].tag == CDO_STRING && args[0].as.string) {
-            if (parse_hex_color(args[0].as.string->data,
-                                args[0].as.string->length, &rgb) ||
-                lookup_named_color(args[0].as.string->data,
-                                   args[0].as.string->length, &rgb)) {
+        if (cando_is_number(args[0])) {
+            initial = ((unsigned)cando_as_number(args[0])) & 0xFFFFFFu;
+        } else if (cando_is_string(args[0]) && cando_as_string(args[0])) {
+            if (parse_hex_color(cando_as_string(args[0])->data,
+                                cando_as_string(args[0])->length, &rgb) ||
+                lookup_named_color(cando_as_string(args[0])->data,
+                                   cando_as_string(args[0])->length, &rgb)) {
                 initial = rgb;
             }
         }
@@ -2770,7 +2770,7 @@ static int native_font_dialog(CandoVM *vm, int argc, CandoValue *args)
     }
     /* Build a {face, size, bold, italic, underline, strikeout} object. */
     CandoValue v = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
     char *face = wide_to_utf8(lf.lfFaceName);
     if (face) {
         obj_set_string(obj, "face", face, (u32)strlen(face));
@@ -2804,9 +2804,9 @@ static int native_notify_balloon(CandoVM *vm, int argc, CandoValue *args)
     char body[256] = {0};
     if (argc >= 2) parse_text_arg(vm, args[1], body, sizeof(body));
     int icon_kind = 0; /* NIIF_NONE = 0; NIIF_INFO = 1; NIIF_WARNING = 2; NIIF_ERROR = 3 */
-    if (argc >= 3 && args[2].tag == CDO_STRING && args[2].as.string) {
-        const char *t = args[2].as.string->data;
-        u32 n = args[2].as.string->length;
+    if (argc >= 3 && cando_is_string(args[2]) && cando_as_string(args[2])) {
+        const char *t = cando_as_string(args[2])->data;
+        u32 n = cando_as_string(args[2])->length;
         if      (n == 4 && memcmp(t, "info",    4) == 0) icon_kind = 1;
         else if (n == 7 && memcmp(t, "warning", 7) == 0) icon_kind = 2;
         else if (n == 5 && memcmp(t, "error",   5) == 0) icon_kind = 3;
@@ -2850,7 +2850,7 @@ static int native_set_text(CandoVM *vm, int argc, CandoValue *args)
     /* Mirror onto the script-side instance so getText without a round-trip
      * still returns the latest value. */
     if (s->inst_val_held) {
-        CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(s->inst_val));
         if (o) obj_set_string(o, "text", buf, (u32)strlen(buf));
     }
     autosize_apply(s);
@@ -2887,15 +2887,15 @@ static int native_set_size(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setSize");
     if (!s) return -1;
-    int w = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : s->w;
-    int h = (argc >= 3 && args[2].tag == CDO_NUMBER) ? (int)args[2].as.number : s->h;
+    int w = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : s->w;
+    int h = (argc >= 3 && cando_is_number(args[2])) ? (int)cando_as_number(args[2]) : s->h;
     s->w = w; s->h = h;
 #if FORMS_HAVE_WIN32
     if (s->hwnd) SetWindowPos(s->hwnd, NULL, 0, 0, w, h,
                               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 #endif
     if (s->inst_val_held) {
-        CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(s->inst_val));
         if (o) { obj_set_number(o, "width", (f64)w); obj_set_number(o, "height", (f64)h); }
     }
     cando_vm_push(vm, args[0]);
@@ -2906,15 +2906,15 @@ static int native_set_location(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setLocation");
     if (!s) return -1;
-    int x = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : s->x;
-    int y = (argc >= 3 && args[2].tag == CDO_NUMBER) ? (int)args[2].as.number : s->y;
+    int x = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : s->x;
+    int y = (argc >= 3 && cando_is_number(args[2])) ? (int)cando_as_number(args[2]) : s->y;
     s->x = x; s->y = y;
 #if FORMS_HAVE_WIN32
     if (s->hwnd) SetWindowPos(s->hwnd, NULL, x, y, 0, 0,
                               SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 #endif
     if (s->inst_val_held) {
-        CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(s->inst_val));
         if (o) { obj_set_number(o, "x", (f64)x); obj_set_number(o, "y", (f64)y); }
     }
     cando_vm_push(vm, args[0]);
@@ -2962,14 +2962,14 @@ static int native_set_width(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setWidth");
     if (!s) return -1;
-    int w = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : s->w;
+    int w = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : s->w;
     s->w = w;
 #if FORMS_HAVE_WIN32
     if (s->hwnd) SetWindowPos(s->hwnd, NULL, 0, 0, w, s->h,
                               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 #endif
     if (s->inst_val_held) {
-        CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(s->inst_val));
         if (o) obj_set_number(o, "width", (f64)w);
     }
     cando_vm_push(vm, args[0]);
@@ -2980,14 +2980,14 @@ static int native_set_height(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setHeight");
     if (!s) return -1;
-    int h = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : s->h;
+    int h = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : s->h;
     s->h = h;
 #if FORMS_HAVE_WIN32
     if (s->hwnd) SetWindowPos(s->hwnd, NULL, 0, 0, s->w, h,
                               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 #endif
     if (s->inst_val_held) {
-        CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(s->inst_val));
         if (o) obj_set_number(o, "height", (f64)h);
     }
     cando_vm_push(vm, args[0]);
@@ -3056,7 +3056,7 @@ static int native_set_visible(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setVisible");
     if (!s) return -1;
-    bool visible = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool visible = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
     s->visible = visible;
 #if FORMS_HAVE_WIN32
     if (s->hwnd) ShowWindow(s->hwnd, visible ? SW_SHOWNORMAL : SW_HIDE);
@@ -3069,7 +3069,7 @@ static int native_set_enabled(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setEnabled");
     if (!s) return -1;
-    bool enabled = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool enabled = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
     s->enabled = enabled;
 #if FORMS_HAVE_WIN32
     if (s->hwnd) EnableWindow(s->hwnd, enabled ? TRUE : FALSE);
@@ -3146,7 +3146,7 @@ static int native_set_value(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setValue");
     if (!s) return -1;
-    int v = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
+    int v = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : 0;
 #if FORMS_HAVE_WIN32
     if (s->hwnd) {
         if (s->kind == KIND_PROGRESS) {
@@ -3203,23 +3203,23 @@ static unsigned int parse_color_args(CandoValue *args, int argc, int start,
 {
     if (argc <= start) return default_colorref;
     /* Single string-arg: "#RRGGBB", "#RGB" or named colour. */
-    if (argc == start + 1 && args[start].tag == CDO_STRING && args[start].as.string) {
-        const char *s = args[start].as.string->data;
-        u32 n = args[start].as.string->length;
+    if (argc == start + 1 && cando_is_string(args[start]) && cando_as_string(args[start])) {
+        const char *s = cando_as_string(args[start])->data;
+        u32 n = cando_as_string(args[start])->length;
         unsigned int rgb;
         if (parse_hex_color(s, n, &rgb))   return rgb_to_colorref(rgb);
         if (lookup_named_color(s, n, &rgb)) return rgb_to_colorref(rgb);
         return default_colorref;
     }
     /* Single-arg packed 0xRRGGBB */
-    if (argc == start + 1 && args[start].tag == CDO_NUMBER) {
-        unsigned int rgb = (unsigned int)args[start].as.number & 0xFFFFFFu;
+    if (argc == start + 1 && cando_is_number(args[start])) {
+        unsigned int rgb = (unsigned int)cando_as_number(args[start]) & 0xFFFFFFu;
         return rgb_to_colorref(rgb);
     }
     /* Three-arg (r, g, b) -- match WinForms Color.FromArgb. */
-    int r = (argc > start     && args[start].tag     == CDO_NUMBER) ? (int)args[start].as.number     : 0;
-    int g = (argc > start + 1 && args[start + 1].tag == CDO_NUMBER) ? (int)args[start + 1].as.number : 0;
-    int b = (argc > start + 2 && args[start + 2].tag == CDO_NUMBER) ? (int)args[start + 2].as.number : 0;
+    int r = (argc > start     && cando_is_number(args[start])) ? (int)cando_as_number(args[start])     : 0;
+    int g = (argc > start + 1 && cando_is_number(args[start + 1])) ? (int)cando_as_number(args[start + 1]) : 0;
+    int b = (argc > start + 2 && cando_is_number(args[start + 2])) ? (int)cando_as_number(args[start + 2]) : 0;
     if (r < 0) r = 0;
     if (g < 0) g = 0;
     if (b < 0) b = 0;
@@ -3490,26 +3490,26 @@ static int native_set_font(CandoVM *vm, int argc, CandoValue *args)
      */
     if (argc >= 2) {
         if (cando_is_object(args[1])) {
-            CdoObject *opts = cando_bridge_resolve(vm, args[1].as.handle);
+            CdoObject *opts = cando_bridge_resolve(vm, cando_as_handle(args[1]));
             font_options_into_slot(vm, opts, s);
         } else {
             int idx = 1;
-            if (args[idx].tag == CDO_STRING && args[idx].as.string) {
-                u32 n = args[idx].as.string->length;
+            if (cando_is_string(args[idx]) && cando_as_string(args[idx])) {
+                u32 n = cando_as_string(args[idx])->length;
                 if (n >= sizeof(s->font_face)) n = sizeof(s->font_face) - 1;
-                memcpy(s->font_face, args[idx].as.string->data, n);
+                memcpy(s->font_face, cando_as_string(args[idx])->data, n);
                 s->font_face[n] = 0;
                 idx++;
             }
-            if (argc > idx && args[idx].tag == CDO_NUMBER) {
-                int sz = (int)args[idx].as.number;
+            if (argc > idx && cando_is_number(args[idx])) {
+                int sz = (int)cando_as_number(args[idx]);
                 if (sz > 0) s->font_size = sz;
                 idx++;
             }
             /* Optional trailing style string: "bold", "italic", "bold italic", ... */
-            if (argc > idx && args[idx].tag == CDO_STRING && args[idx].as.string) {
-                const char *t = args[idx].as.string->data;
-                u32 n = args[idx].as.string->length;
+            if (argc > idx && cando_is_string(args[idx]) && cando_as_string(args[idx])) {
+                const char *t = cando_as_string(args[idx])->data;
+                u32 n = cando_as_string(args[idx])->length;
                 s->font_bold = s->font_italic = s->font_underline = 0;
                 if (n >= 4 && strstr((const char *)t, "bold"))      s->font_bold      = 1;
                 if (n >= 6 && strstr((const char *)t, "italic"))    s->font_italic    = 1;
@@ -3529,7 +3529,7 @@ static int native_set_font_size(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setFontSize");
     if (!s) return -1;
-    int sz = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
+    int sz = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : 0;
     if (sz > 0) s->font_size = sz;
     s->has_font = 1;
     font_ensure_defaults(s);
@@ -3542,7 +3542,7 @@ static int native_set_bold(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setBold");
     if (!s) return -1;
-    bool b = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool b = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
     s->font_bold = b ? 1 : 0;
     s->has_font  = 1;
     font_ensure_defaults(s);
@@ -3555,7 +3555,7 @@ static int native_set_italic(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setItalic");
     if (!s) return -1;
-    bool b = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool b = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
     s->font_italic = b ? 1 : 0;
     s->has_font    = 1;
     font_ensure_defaults(s);
@@ -3568,7 +3568,7 @@ static int native_set_underline(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setUnderline");
     if (!s) return -1;
-    bool b = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool b = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
     s->font_underline = b ? 1 : 0;
     s->has_font       = 1;
     font_ensure_defaults(s);
@@ -3581,7 +3581,7 @@ static int native_set_strikeout(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setStrikeout");
     if (!s) return -1;
-    bool b = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool b = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
     s->font_strikeout = b ? 1 : 0;
     s->has_font       = 1;
     font_ensure_defaults(s);
@@ -3630,7 +3630,7 @@ static int native_get_font(CandoVM *vm, int argc, CandoValue *args)
     if (!s) return -1;
     if (!s->has_font) { cando_vm_push(vm, cando_null()); return 1; }
     CandoValue v = cando_bridge_new_object(vm);
-    CdoObject *o = cando_bridge_resolve(vm, v.as.handle);
+    CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(v));
     obj_set_string(o, "face", s->font_face,
                    (u32)strlen(s->font_face[0] ? s->font_face : ""));
     obj_set_number(o, "size", (f64)s->font_size);
@@ -4066,7 +4066,7 @@ static int native_size_to_content(CandoVM *vm, int argc, CandoValue *args)
     if (s->hwnd) SetWindowPos(s->hwnd, NULL, 0, 0, w, h,
                               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     if (s->inst_val_held) {
-        CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(s->inst_val));
         if (o) {
             obj_set_number(o, "width",  (f64)w);
             obj_set_number(o, "height", (f64)h);
@@ -4089,7 +4089,7 @@ static int native_size_to_content_width(CandoVM *vm, int argc, CandoValue *args)
     if (s->hwnd) SetWindowPos(s->hwnd, NULL, 0, 0, w, s->h,
                               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     if (s->inst_val_held) {
-        CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(s->inst_val));
         if (o) obj_set_number(o, "width", (f64)w);
     }
     if (s->parent_slot > 0) layout_dock_children(s->parent_slot);
@@ -4109,7 +4109,7 @@ static int native_size_to_content_height(CandoVM *vm, int argc, CandoValue *args
     if (s->hwnd) SetWindowPos(s->hwnd, NULL, 0, 0, s->w, h,
                               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     if (s->inst_val_held) {
-        CdoObject *o = cando_bridge_resolve(vm, s->inst_val.as.handle);
+        CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(s->inst_val));
         if (o) obj_set_number(o, "height", (f64)h);
     }
     if (s->parent_slot > 0) layout_dock_children(s->parent_slot);
@@ -4179,7 +4179,7 @@ static int native_set_autosize(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setAutoSize");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
     s->autosize = on ? 1 : 0;
 #if FORMS_HAVE_WIN32
     autosize_apply(s);
@@ -4202,13 +4202,13 @@ static int native_set_autosize_mode(CandoVM *vm, int argc, CandoValue *args)
     if (!s) return -1;
     int mode = FORMS_AUTOSIZE_GROW_SHRINK;
     if (argc >= 2) {
-        if (args[1].tag == CDO_NUMBER) {
-            int n = (int)args[1].as.number;
+        if (cando_is_number(args[1])) {
+            int n = (int)cando_as_number(args[1]);
             if (n == FORMS_AUTOSIZE_GROW || n == FORMS_AUTOSIZE_GROW_SHRINK)
                 mode = n;
-        } else if (args[1].tag == CDO_STRING && args[1].as.string) {
-            const char *t = args[1].as.string->data;
-            u32 n = args[1].as.string->length;
+        } else if (cando_is_string(args[1]) && cando_as_string(args[1])) {
+            const char *t = cando_as_string(args[1])->data;
+            u32 n = cando_as_string(args[1])->length;
             if (n == 4 && memcmp(t, "grow", 4) == 0) mode = FORMS_AUTOSIZE_GROW;
             else if (n == 10 && memcmp(t, "growshrink", 10) == 0)
                 mode = FORMS_AUTOSIZE_GROW_SHRINK;
@@ -4421,11 +4421,11 @@ static int native_set_cursor(CandoVM *vm, int argc, CandoValue *args)
     if (!s) return -1;
     int kind = FORMS_CURSOR_DEFAULT;
     if (argc >= 2) {
-        if (args[1].tag == CDO_NUMBER) {
-            kind = (int)args[1].as.number;
-        } else if (args[1].tag == CDO_STRING && args[1].as.string) {
-            const char *t = args[1].as.string->data;
-            u32 n = args[1].as.string->length;
+        if (cando_is_number(args[1])) {
+            kind = (int)cando_as_number(args[1]);
+        } else if (cando_is_string(args[1]) && cando_as_string(args[1])) {
+            const char *t = cando_as_string(args[1])->data;
+            u32 n = cando_as_string(args[1])->length;
             #define CCURSOR(name, val) \
                 if (n == sizeof(name)-1 && memcmp(t, name, sizeof(name)-1) == 0) kind = val
             CCURSOR("default",     FORMS_CURSOR_DEFAULT);
@@ -4506,12 +4506,12 @@ static int native_get_children(CandoVM *vm, int argc, CandoValue *args)
     if (!s) return -1;
     int slot = (int)(s - g_slots);
     CandoValue arr = cando_bridge_new_array(vm);
-    CdoObject *a   = cando_bridge_resolve(vm, arr.as.handle);
+    CdoObject *a   = cando_bridge_resolve(vm, cando_as_handle(arr));
     for (int i = 1; i < FORMS_MAX_SLOTS; i++) {
         FormsSlot *c = &g_slots[i];
         if (!c->alive || c->parent_slot != slot) continue;
         if (!c->inst_val_held) continue;
-        CdoObject *co = cando_bridge_resolve(vm, c->inst_val.as.handle);
+        CdoObject *co = cando_bridge_resolve(vm, cando_as_handle(c->inst_val));
         if (co) cdo_array_push(a, cdo_object_value(co));
     }
     cando_vm_push(vm, arr);
@@ -4550,8 +4550,8 @@ static int native_set_tab_index(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setTabIndex");
     if (!s) return -1;
-    s->tab_index = (argc >= 2 && args[1].tag == CDO_NUMBER) ?
-                   (int)args[1].as.number : -1;
+    s->tab_index = (argc >= 2 && cando_is_number(args[1])) ?
+                   (int)cando_as_number(args[1]) : -1;
     cando_vm_push(vm, args[0]);
     return 1;
 }
@@ -4568,7 +4568,7 @@ static int native_set_tab_stop(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setTabStop");
     if (!s) return -1;
-    bool on = !(argc >= 2 && args[1].tag == CDO_BOOL && !args[1].as.boolean);
+    bool on = !(argc >= 2 && cando_is_bool(args[1]) && !cando_as_bool(args[1]));
     s->tab_stop = on ? 1 : 0;
 #if FORMS_HAVE_WIN32
     if (s->hwnd) {
@@ -4652,8 +4652,8 @@ static int native_set_range(CandoVM *vm, int argc, CandoValue *args)
 {
     FormsSlot *s = arg_self(vm, argc, args, "setRange");
     if (!s) return -1;
-    int lo = (argc >= 2 && args[1].tag == CDO_NUMBER) ? (int)args[1].as.number : 0;
-    int hi = (argc >= 3 && args[2].tag == CDO_NUMBER) ? (int)args[2].as.number : 100;
+    int lo = (argc >= 2 && cando_is_number(args[1])) ? (int)cando_as_number(args[1]) : 0;
+    int hi = (argc >= 3 && cando_is_number(args[2])) ? (int)cando_as_number(args[2]) : 100;
 #if FORMS_HAVE_WIN32
     if (s->hwnd) {
         if (s->kind == KIND_PROGRESS) {
@@ -5153,7 +5153,7 @@ CandoValue cando_module_init(CandoVM *vm)
     }
 
     CandoValue tbl = cando_bridge_new_object(vm);
-    CdoObject *obj = cando_bridge_resolve(vm, tbl.as.handle);
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(tbl));
 
     obj_set_string(obj, "VERSION",
                    FORMS_MODULE_VERSION,
@@ -5223,33 +5223,33 @@ CandoValue cando_module_init(CandoVM *vm)
      * per call) and gives editors a discoverable namespace. */
     {
         CandoValue cv = cando_bridge_new_object(vm);
-        CdoObject *cobj = cando_bridge_resolve(vm, cv.as.handle);
+        CdoObject *cobj = cando_bridge_resolve(vm, cando_as_handle(cv));
         for (const NamedColor *p = g_named_colors; p->name; p++) {
             obj_set_number(cobj, p->name, (f64)p->rgb);
         }
         CdoString *kc = cdo_string_intern("Color", 5);
         cdo_object_rawset(obj, kc, cdo_object_value(
-            cando_bridge_resolve(vm, cv.as.handle)), FIELD_NONE);
+            cando_bridge_resolve(vm, cando_as_handle(cv))), FIELD_NONE);
         cdo_string_release(kc);
     }
 
     /* forms.BorderStyle -- enum for setBorderStyle(). */
     {
         CandoValue bv = cando_bridge_new_object(vm);
-        CdoObject *bobj = cando_bridge_resolve(vm, bv.as.handle);
+        CdoObject *bobj = cando_bridge_resolve(vm, cando_as_handle(bv));
         obj_set_number(bobj, "none",    1.0);
         obj_set_number(bobj, "single",  2.0);
         obj_set_number(bobj, "fixed3D", 3.0);
         CdoString *kb = cdo_string_intern("BorderStyle", 11);
         cdo_object_rawset(obj, kb, cdo_object_value(
-            cando_bridge_resolve(vm, bv.as.handle)), FIELD_NONE);
+            cando_bridge_resolve(vm, cando_as_handle(bv))), FIELD_NONE);
         cdo_string_release(kb);
     }
 
     /* forms.Dock -- DockStyle constants for setDock(). */
     {
         CandoValue dv = cando_bridge_new_object(vm);
-        CdoObject *d  = cando_bridge_resolve(vm, dv.as.handle);
+        CdoObject *d  = cando_bridge_resolve(vm, cando_as_handle(dv));
         obj_set_number(d, "none",   (f64)FORMS_DOCK_NONE);
         obj_set_number(d, "top",    (f64)FORMS_DOCK_TOP);
         obj_set_number(d, "bottom", (f64)FORMS_DOCK_BOTTOM);
@@ -5258,14 +5258,14 @@ CandoValue cando_module_init(CandoVM *vm)
         obj_set_number(d, "fill",   (f64)FORMS_DOCK_FILL);
         CdoString *kd = cdo_string_intern("Dock", 4);
         cdo_object_rawset(obj, kd, cdo_object_value(
-            cando_bridge_resolve(vm, dv.as.handle)), FIELD_NONE);
+            cando_bridge_resolve(vm, cando_as_handle(dv))), FIELD_NONE);
         cdo_string_release(kd);
     }
 
     /* forms.Anchor -- bitmask constants for setAnchor(). */
     {
         CandoValue av = cando_bridge_new_object(vm);
-        CdoObject *a  = cando_bridge_resolve(vm, av.as.handle);
+        CdoObject *a  = cando_bridge_resolve(vm, cando_as_handle(av));
         obj_set_number(a, "none",   (f64)FORMS_ANCHOR_NONE);
         obj_set_number(a, "left",   (f64)FORMS_ANCHOR_LEFT);
         obj_set_number(a, "top",    (f64)FORMS_ANCHOR_TOP);
@@ -5274,26 +5274,26 @@ CandoValue cando_module_init(CandoVM *vm)
         obj_set_number(a, "all",    (f64)FORMS_ANCHOR_ALL);
         CdoString *ka = cdo_string_intern("Anchor", 6);
         cdo_object_rawset(obj, ka, cdo_object_value(
-            cando_bridge_resolve(vm, av.as.handle)), FIELD_NONE);
+            cando_bridge_resolve(vm, cando_as_handle(av))), FIELD_NONE);
         cdo_string_release(ka);
     }
 
     /* forms.AutoSizeMode -- enum for setAutoSizeMode(). */
     {
         CandoValue mv = cando_bridge_new_object(vm);
-        CdoObject *m  = cando_bridge_resolve(vm, mv.as.handle);
+        CdoObject *m  = cando_bridge_resolve(vm, cando_as_handle(mv));
         obj_set_number(m, "grow",       (f64)FORMS_AUTOSIZE_GROW);
         obj_set_number(m, "growShrink", (f64)FORMS_AUTOSIZE_GROW_SHRINK);
         CdoString *km = cdo_string_intern("AutoSizeMode", 12);
         cdo_object_rawset(obj, km, cdo_object_value(
-            cando_bridge_resolve(vm, mv.as.handle)), FIELD_NONE);
+            cando_bridge_resolve(vm, cando_as_handle(mv))), FIELD_NONE);
         cdo_string_release(km);
     }
 
     /* forms.Cursor -- friendly names for setCursor(). */
     {
         CandoValue cv = cando_bridge_new_object(vm);
-        CdoObject *c  = cando_bridge_resolve(vm, cv.as.handle);
+        CdoObject *c  = cando_bridge_resolve(vm, cando_as_handle(cv));
         obj_set_string(c, "default",     "default",     7);
         obj_set_string(c, "arrow",       "arrow",       5);
         obj_set_string(c, "hand",        "hand",        4);
@@ -5310,7 +5310,7 @@ CandoValue cando_module_init(CandoVM *vm)
         obj_set_string(c, "appStarting", "appstarting", 11);
         CdoString *kc = cdo_string_intern("Cursor", 6);
         cdo_object_rawset(obj, kc, cdo_object_value(
-            cando_bridge_resolve(vm, cv.as.handle)), FIELD_NONE);
+            cando_bridge_resolve(vm, cando_as_handle(cv))), FIELD_NONE);
         cdo_string_release(kc);
     }
 

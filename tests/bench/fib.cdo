@@ -1,0 +1,15 @@
+/* fib.cdo -- recursive Fibonacci benchmark.
+ *
+ * Stresses: function call overhead, integer arithmetic, comparison,
+ * branch prediction.  This is the canonical "interpreter overhead"
+ * micro-benchmark; a JIT trace through fib(n-1) + fib(n-2) is a small,
+ * tight, type-stable loop.
+ */
+
+FUNCTION fib(n) {
+    IF n < 2 { RETURN n; }
+    RETURN fib(n - 1) + fib(n - 2);
+}
+
+/* fib(30) = 832040.  Tunable via env var if we add CLI plumbing later. */
+print(fib(30));

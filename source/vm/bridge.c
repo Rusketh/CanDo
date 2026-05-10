@@ -75,17 +75,17 @@ CandoValue cando_bridge_to_cando(CandoVM *vm, CdoValue v) {
 }
 
 CdoValue cando_bridge_to_cdo(CandoVM *vm, CandoValue v) {
-    switch ((TypeTag)v.tag) {
+    switch (cando_value_tag(v)) {
         case TYPE_NULL:   return cdo_null();
-        case TYPE_BOOL:   return cdo_bool(v.as.boolean);
-        case TYPE_NUMBER: return cdo_number(v.as.number);
+        case TYPE_BOOL:   return cdo_bool(cando_as_bool(v));
+        case TYPE_NUMBER: return cdo_number(cando_as_number(v));
         case TYPE_STRING: {
-            CdoString *s = cdo_string_new(v.as.string->data,
-                                           v.as.string->length);
+            CandoString *cs = cando_as_string(v);
+            CdoString   *s  = cdo_string_new(cs->data, cs->length);
             return cdo_string_value(s);
         }
         case TYPE_OBJECT: {
-            CdoObject *obj = cando_bridge_resolve(vm, v.as.handle);
+            CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
             switch (obj->kind) {
                 case OBJ_ARRAY:    return cdo_array_value(obj);
                 case OBJ_FUNCTION: return cdo_function_value(obj);
