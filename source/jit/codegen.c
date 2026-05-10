@@ -379,6 +379,23 @@ static void emit_lea_r8_vals(CG *cg, u32 idx) {
     cg_emit_bytes(cg, prefix, 3);
     cg_emit_u32(cg, idx * 8);
 }
+/* Phase 8.9 helpers for IR_LOOP's internal back-jump. */
+/* inc DWORD [r12 + disp32]  -- 41 FF 84 24 disp32.  8 bytes. */
+static void emit_inc_dword_r12_off(CG *cg, i32 disp) {
+    static const u8 b[] = { 0x41, 0xFF, 0x84, 0x24 };
+    cg_emit_bytes(cg, b, 4);
+    cg_emit_u32(cg, (u32)disp);
+}
+/* mov r13b, 1              -- 41 B5 01.  3 bytes. */
+static void emit_mov_r13b_one(CG *cg) {
+    static const u8 b[] = { 0x41, 0xB5, 0x01 };
+    cg_emit_bytes(cg, b, 3);
+}
+/* jmp rel32                -- E9 disp32.  5 bytes. */
+static void emit_jmp_rel32(CG *cg, i32 disp) {
+    cg_emit_u8(cg, 0xE9);
+    cg_emit_u32(cg, (u32)disp);
+}
 /* test eax, eax              -- 85 C0.  Sets ZF=1 iff eax==0. */
 static void emit_test_eax_eax(CG *cg) {
     static const u8 b[] = { 0x85, 0xC0 };
@@ -1524,6 +1541,12 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
 
     emit_prologue(&cg);
 
+    /* Phase 8.9: capture body-start offset so IR_LOOP can emit a
+     * backwards jump (instead of falling off the end and returning
+     * to cando_trace_run for the next iter).  Saves ~30-50ns/iter
+     * of function-call dispatch overhead on hot loops. */
+    u32 body_start_off = cg_off(&cg);
+
     /* Per-IR-op emit.  LICM-aware: ops marked IRF_INVARIANT get a
      * `test dl, dl; jnz +op_size` prefix so iter-2+ calls
      * (skip_invariant=true, DL=1) jump over them.  vals[i] is reused
@@ -1798,10 +1821,36 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
         case IR_HLEN:
             emit_hlen(&cg, &t->ir, in->op1, i);
             break;
-        case IR_LOOP:
-            /* Trace-close marker; we'll emit the LOOP_DONE epilogue
-             * right after the body loop exits. */
+        case IR_LOOP: {
+            /* Phase 8.9: do the loop INTERNALLY in mcode rather than
+             * returning LOOP_DONE per-iter to cando_trace_run.  Saves
+             * ~30-50 ns/iter of dispatch overhead.
+             *
+             * Order matters: the LOOP_DONE epilogue's stack-to-shadow
+             * sync (Phase 4.4 v1d) is no longer reached via fall-
+             * through, so we replicate that here before jumping back.
+             * Also bump run_iter_count for jit-stats. */
+            if (cg.sunk_total_bytes > 0) {
+                emit_mov_rax_r12_off(&cg, (i32)offsetof(struct CandoTrace,
+                                                         sink_shadow));
+                u32 slots = cg.sunk_total_bytes / 8;
+                for (u32 si = 0; si < slots; si++) {
+                    emit_mov_rcx_rbp_off(&cg, -(i32)(56 + 8 * si));
+                    emit_mov_rax_off_rcx(&cg, (i32)(8 * si));
+                }
+                emit_mov_r12_off_byte_imm(&cg,
+                    (i32)offsetof(struct CandoTrace, sink_shadow_init), 1);
+            }
+            emit_inc_dword_r12_off(&cg,
+                (i32)offsetof(struct CandoTrace, run_iter_count));
+            emit_mov_r13b_one(&cg);
+            u32 here_after_jmp = cg_off(&cg) + 5;  /* end of jmp rel32 */
+            i32 disp = (i32)body_start_off - (i32)here_after_jmp;
+            emit_jmp_rel32(&cg, disp);
+            /* xmm0 cache state across the back-jump is unknown. */
+            cg_invalidate_xmm0(&cg);
             break;
+        }
         default:
             /* Op not yet handled by codegen v1.  Bail. */
             cg.failed = true;

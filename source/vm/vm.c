@@ -2912,23 +2912,37 @@ static CandoVMResult vm_run(CandoVM *vm) {
                                                       sizeof(traces[0]));
                     for (u32 ti = 0; ti < ntr; ti++) {
                         CandoTrace *t = traces[ti];
-                        bool succeeded_once = false;
-                        bool skip_inv = false;
-                        for (;;) {
-                            CandoTraceStatus s = cando_trace_run(vm, t,
-                                                                  skip_inv);
-                            if (s == TRACE_LOOP_DONE) {
-                                vm->jit_stats.trace_iters++;
-                                skip_inv = true;
-                                succeeded_once = true;
-                                t->consecutive_exits = 0;
-                                continue;
-                            }
-                            vm->jit_stats.trace_exits++;
-                            t->consecutive_exits++;
-                            break;
+                        /* Phase 8.9: mcode body's IR_LOOP loops
+                         * internally and only returns on side-exit
+                         * (TRACE_GUARD_FAILED) or trace-bail.  We
+                         * just call once; t->run_iter_count is bumped
+                         * inside mcode and harvested below. */
+                        t->run_iter_count = 0;
+                        CandoTraceStatus s = cando_trace_run(vm, t, false);
+                        vm->jit_stats.trace_iters += t->run_iter_count;
+                        if (t->run_iter_count > 0) {
+                            t->consecutive_exits = 0;
                         }
-                        if (succeeded_once) goto trace_done;
+                        if (s == TRACE_LOOP_DONE) {
+                            /* IR-interpreter path (mcode_fn==NULL):
+                             * old contract, returns LOOP_DONE per
+                             * iter.  Loop here to drain. */
+                            bool skip_inv = true;
+                            for (;;) {
+                                t->run_iter_count = 0;
+                                s = cando_trace_run(vm, t, skip_inv);
+                                vm->jit_stats.trace_iters += t->run_iter_count;
+                                if (s == TRACE_LOOP_DONE) {
+                                    vm->jit_stats.trace_iters++;
+                                    continue;
+                                }
+                                break;
+                            }
+                            goto trace_done;
+                        }
+                        vm->jit_stats.trace_exits++;
+                        t->consecutive_exits++;
+                        if (t->run_iter_count > 0) goto trace_done;
                     }
                     /* All siblings side-exited prematurely.  Cap
                      * sibling count at 8 per PC; if we're under the

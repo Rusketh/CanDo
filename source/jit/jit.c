@@ -1153,6 +1153,7 @@ static void cando_recorder_finish(struct CandoVM *vm) {
     t->mcode_fn   = NULL;
     t->consecutive_exits = 0;
     t->total_dispatch_misses = 0;
+    t->run_iter_count = 0;
     t->gload_entry_cache = NULL;
     t->gload_entry_cache_cap = 0;
     t->globals_version_seen = 0;

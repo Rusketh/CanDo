@@ -194,6 +194,12 @@ typedef struct CandoTrace {
                                  bool skip_invariant,
                                  CandoValue *frame_slots,
                                  TraceVal *vals);
+    /* Phase 8.9: per-trace_run iter counter, incremented at IR_LOOP
+     * by the mcode body's internal loop (instead of returning to
+     * cando_trace_run on every iteration).  Read out by vm.c after
+     * mcode_fn returns and added to vm->jit_stats.trace_iters.  Saves
+     * ~30-50ns/iter of function-call dispatch on hot loops. */
+    u32             run_iter_count;
     /* Phase 8.7: per-trace cached pointers to global hash-table
      * entries.  Indexed by const-pool kidx; populated lazily on
      * first IR_GLOAD / IR_GSTORE through the cached helper.  A
