@@ -338,4 +338,15 @@ WHILE g_cnt < 200 {
 }
 print(g_cnt);                           /* 200 */
 
+/* Phase 6.5: IR_HLOAD_SLOT + IR_AREF codegen.  FOR-IN over a range
+ * emits these to walk the source array without re-resolving the
+ * handle every iteration.  cando_jit_hload_slot_for_mcode and
+ * cando_jit_aref_for_mcode are the JIT helpers; bad-type side-exits
+ * use cur_snap. */
+VAR for_sum = 0;
+FOR i IN 1 -> 200 {
+    for_sum = for_sum + i;
+}
+print(for_sum);                         /* 1+...+200 = 20100 */
+
 print("DONE");

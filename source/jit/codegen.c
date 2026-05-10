@@ -195,6 +195,37 @@ static void emit_test_eax_eax(CG *cg) {
     static const u8 b[] = { 0x85, 0xC0 };
     cg_emit_bytes(cg, b, 2);
 }
+/* test rax, rax              -- 48 85 C0.  Sets ZF=1 iff rax==0. */
+static void emit_test_rax_rax(CG *cg) {
+    static const u8 b[] = { 0x48, 0x85, 0xC0 };
+    cg_emit_bytes(cg, b, 3);
+}
+/* mov rsi, r15               -- 4C 89 FE (src=r15, dst=rsi). */
+static void emit_mov_rsi_r15(CG *cg) {
+    static const u8 b[] = { 0x4C, 0x89, 0xFE };
+    cg_emit_bytes(cg, b, 3);
+}
+/* mov edx, imm32             -- BA imm32. */
+static void emit_mov_edx_imm(CG *cg, u32 imm) {
+    cg_emit_u8(cg, 0xBA);
+    cg_emit_u32(cg, imm);
+}
+/* mov rdi, [r14 + 8*idx]     -- read u64 from vals[idx] into rdi.
+ * REX = 0x49 (W=1 B=1 for r14 base).  Opcode 8B /r.  ModR/M:
+ *   mod=10 (disp32), reg=rdi=111, r/m=110 (r14&7) -> 10 111 110 = 0xBE */
+static void emit_mov_rdi_vals(CG *cg, u32 idx) {
+    static const u8 prefix[] = { 0x49, 0x8B, 0xBE };
+    cg_emit_bytes(cg, prefix, 3);
+    cg_emit_u32(cg, idx * 8);
+}
+/* cvttsd2si esi, xmm0        -- F2 0F 2C F0.  Truncate-toward-zero
+ * f64 in xmm0 to i32 in esi (which we treat as u32 idx for AREF). */
+static void emit_cvttsd2si_esi_xmm0(CG *cg) {
+    static const u8 b[] = { 0xF2, 0x0F, 0x2C, 0xF0 };
+    cg_emit_bytes(cg, b, 4);
+}
+/* je rel32 to a per-guard stub (mirror of emit_jne_to_stub). */
+static void emit_je_to_stub(CG *cg, u16 snap_idx);
 
 /* and rax, rcx               -- 48 21 c8. */
 static void emit_and_rax_rcx(CG *cg) {
@@ -509,6 +540,17 @@ static void emit_jne_to_stub(CG *cg, u16 snap_idx) {
     cg->guards[cg->guard_count].stub_off    = 0;
     cg->guard_count++;
 }
+/* Mirror for JE (used by IR_HLOAD_SLOT's NULL-pointer side-exit). */
+static void emit_je_to_stub(CG *cg, u16 snap_idx) {
+    if (cg->guard_count >= CG_MAX_GUARDS) { cg->failed = true; return; }
+    cg_emit_u8(cg, 0x0F); cg_emit_u8(cg, 0x84);    /* JE rel32 */
+    u32 disp_off = cg_off(cg);
+    cg_emit_u32(cg, 0);
+    cg->guards[cg->guard_count].je_disp_off = disp_off;
+    cg->guards[cg->guard_count].snap_idx    = snap_idx;
+    cg->guards[cg->guard_count].stub_off    = 0;
+    cg->guard_count++;
+}
 
 /* IR_GLOAD: vals[i] = global_by_name (numeric).  Calls the JIT
  * helper which returns 0 on success (writes f64 to *out) or 1 on
@@ -535,6 +577,44 @@ static void emit_gload(CG *cg, const CandoTraceIR *ir, IRRef name_ref, u32 i) {
     emit_movabs_rsi(cg, (u64)(uintptr_t)name);    /* arg2: name      */
     emit_lea_rdx_vals(cg, i);                     /* arg3: &vals[i]  */
     emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_gload_for_mcode);
+    emit_call_rax(cg);
+    emit_test_eax_eax(cg);
+    emit_jne_to_stub(cg, cg->cur_snap);
+}
+
+/* IR_HLOAD_SLOT: vals[i].p = cando_jit_hload_slot(vm, frame_slots, slot).
+ * The helper resolves the OBJECT handle at frame_slots[slot] to an
+ * OBJ_ARRAY CdoObject* (or NULL on bad type).  We side-exit on NULL
+ * via cur_snap. */
+extern void *cando_jit_hload_slot_for_mcode(struct CandoVM *vm,
+                                             CandoValue *frame_slots,
+                                             u32 slot);
+extern int   cando_jit_aref_for_mcode(void *arr, u32 idx, double *out);
+
+static void emit_hload_slot(CG *cg, u32 slot, u32 i) {
+    emit_mov_rdi_rbx(cg);                         /* arg1: vm        */
+    emit_mov_rsi_r15(cg);                         /* arg2: frame_slots */
+    emit_mov_edx_imm(cg, slot);                   /* arg3: slot      */
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_hload_slot_for_mcode);
+    emit_call_rax(cg);
+    emit_test_rax_rax(cg);
+    emit_je_to_stub(cg, cg->cur_snap);            /* NULL -> bad type */
+    emit_mov_vals_rax(cg, i);                     /* vals[i] = ptr   */
+}
+
+/* IR_AREF: vals[i].d = cando_jit_aref(vals[op1].p, (u32)vals[op2].d).
+ * Helper returns 0/f64-out on success, 1/bad-type on failure.
+ *
+ * Argument layout:
+ *   rdi = arr (loaded from vals[op1] as raw u64 pointer)
+ *   esi = idx (cvttsd2si of vals[op2])
+ *   rdx = &vals[i] (out pointer for the f64 result) */
+static void emit_aref(CG *cg, u32 op1, u32 op2, u32 i) {
+    emit_mov_rdi_vals(cg, op1);                   /* arr ptr         */
+    emit_movsd_xmm_vals(cg, 0, op2);              /* xmm0 = idx (f64) */
+    emit_cvttsd2si_esi_xmm0(cg);                  /* esi = (i32)xmm0 */
+    emit_lea_rdx_vals(cg, i);                     /* &vals[i]        */
+    emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_aref_for_mcode);
     emit_call_rax(cg);
     emit_test_eax_eax(cg);
     emit_jne_to_stub(cg, cg->cur_snap);
@@ -687,6 +767,12 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             break;
         case IR_GSTORE:
             emit_gstore(&cg, &t->ir, in->op1, in->op2);
+            break;
+        case IR_HLOAD_SLOT:
+            emit_hload_slot(&cg, in->op1, i);
+            break;
+        case IR_AREF:
+            emit_aref(&cg, in->op1, in->op2, i);
             break;
         case IR_LOOP:
             /* Trace-close marker; we'll emit the LOOP_DONE epilogue

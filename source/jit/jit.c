@@ -2170,3 +2170,31 @@ int cando_jit_gstore_for_mcode(struct CandoVM *vm, struct CandoString *name,
     return cando_vm_set_global(vm, ((CandoString *)name)->data,
                                 cando_number(value), false) ? 0 : 1;
 }
+
+/* IR_HLOAD_SLOT helper: read frame_slots[slot], require it's an
+ * OBJECT handle resolving to OBJ_ARRAY, return the resolved
+ * CdoObject*.  Returns NULL on bad type so the caller can side-exit.
+ *
+ * We don't expose this via CdoObject* in the public typedef --
+ * codegen treats it as an opaque pointer. */
+void *cando_jit_hload_slot_for_mcode(struct CandoVM *vm,
+                                      CandoValue *frame_slots,
+                                      u32 slot) {
+    CandoValue src = frame_slots[slot];
+    if (!cando_is_object(src)) return NULL;
+    CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(src));
+    if (!arr || arr->kind != OBJ_ARRAY) return NULL;
+    return arr;
+}
+
+/* IR_AREF helper: read array[idx] as f64.  Returns 0 on success
+ * (writes the f64 to *out); returns 1 on bad type / out-of-range
+ * so the caller can side-exit. */
+int cando_jit_aref_for_mcode(void *arr_ptr, u32 idx, double *out) {
+    CdoObject *arr = (CdoObject *)arr_ptr;
+    CdoValue cv;
+    if (!cdo_array_rawget_idx(arr, idx, &cv)) return 1;
+    if (!cdo_is_number(cv)) return 1;
+    *out = cv.as.number;
+    return 0;
+}
