@@ -62,6 +62,15 @@ typedef struct {
     u16 cur_snap;       /* most-recent guard's snapshot index, used by
                            IR_GLOAD/IR_GSTORE bad-type side-exits to
                            match the IR-interpreter's behaviour */
+    u32 xmm0_holds;     /* Phase 6.8: IRRef whose vals[] value is
+                           currently in xmm0 (0 = unknown).  Lets
+                           consecutive non-invariant ops skip a
+                           redundant `movsd xmm0, [vals+...]` load
+                           when the next op needs the same IRRef.
+                           Invalidated on C calls, on invariant-op
+                           emit (the LICM skip-prefix may bypass
+                           the producer at runtime), and at side-
+                           exit boundaries. */
 
     /* Patch table for per-guard side-exit jumps.  Each entry is the
      * offset (relative to base) of a 4-byte placeholder displacement
@@ -127,6 +136,17 @@ static void emit_mov_vals_rax(CG *cg, u32 idx) {
     cg_emit_u32(cg, idx * 8);
 }
 
+/* Phase 6.8: load vals[idx] into xmm0 unless it's already there.
+ * Caller is responsible for setting cg->xmm0_holds = idx after a
+ * successful op-result store (so the next op can hit the cache). */
+static void emit_load_xmm0(CG *cg, u32 idx);
+
+/* Invalidate the xmm0 cache.  Called after any op that clobbers
+ * xmm0 unpredictably (C calls, all four GLOAD/GSTORE/HLOAD_SLOT/
+ * AREF helpers).  Also called before/after invariant ops because
+ * the LICM skip-prefix may bypass the producer at runtime. */
+static void cg_invalidate_xmm0(CG *cg) { cg->xmm0_holds = 0; }
+
 /* movsd xmmN, [r14 + 8*idx]  for N in 0..1 (we only use 0/1). */
 static void emit_movsd_xmm_vals(CG *cg, u8 xmm, u32 idx) {
     /* F2 41 0F 10 /r [disp32], REX.B=1 (base R14).  ModR/M:
@@ -140,6 +160,12 @@ static void emit_movsd_xmm_vals(CG *cg, u8 xmm, u32 idx) {
     cg_emit_u32(cg, idx * 8);
 }
 /* movsd [r14 + 8*idx], xmmN. */
+static void emit_load_xmm0(CG *cg, u32 idx) {
+    if (cg->xmm0_holds == idx && idx != 0) return;
+    emit_movsd_xmm_vals(cg, 0, idx);
+    cg->xmm0_holds = idx;
+}
+
 static void emit_movsd_vals_xmm(CG *cg, u32 idx, u8 xmm) {
     cg_emit_u8(cg, 0xF2);
     cg_emit_u8(cg, 0x41);
@@ -541,7 +567,7 @@ static void emit_kbool(CG *cg, u32 imm, u32 i) {
  * movsd load.  Mandelbrot's hot loop has two such MULs (zr*zr,
  * zi*zi) per iteration. */
 static void emit_arith(CG *cg, IROp op, u32 a, u32 b, u32 i) {
-    emit_movsd_xmm_vals(cg, 0, a);
+    emit_load_xmm0(cg, a);
     if (a == b) {
         switch (op) {
         case IR_ADD: emit_addsd_self(cg); break;
@@ -561,6 +587,7 @@ static void emit_arith(CG *cg, IROp op, u32 a, u32 b, u32 i) {
         }
     }
     emit_movsd_vals_xmm(cg, i, 0);
+    cg->xmm0_holds = i;
 }
 
 /* IR_NEG: vals[i] = -vals[op1].  Computed as 0 - vals[op1] using the
@@ -568,9 +595,10 @@ static void emit_arith(CG *cg, IROp op, u32 a, u32 b, u32 i) {
  * sign-bit-mask constant. */
 static void emit_neg(CG *cg, u32 op1, u32 i) {
     emit_xorpd_xmm1_xmm1(cg);                /* xmm1 = 0.0           */
-    emit_movsd_xmm_vals(cg, 0, op1);         /* xmm0 = vals[op1]     */
+    emit_load_xmm0(cg, op1);                 /* xmm0 = vals[op1]     */
     emit_subsd_xmm1_xmm0(cg);                /* xmm1 = xmm1 - xmm0   */
     emit_movsd_vals_xmm(cg, i, 1);
+    /* xmm0 still holds op1; vals[i] holds -op1 (via xmm1). */
 }
 
 /* Emit the per-guard JNE that targets a placeholder side-exit
@@ -628,6 +656,7 @@ static void emit_gload(CG *cg, const CandoTraceIR *ir, IRRef name_ref, u32 i) {
     emit_call_rax(cg);
     emit_test_eax_eax(cg);
     emit_jne_to_stub(cg, cg->cur_snap);
+    cg_invalidate_xmm0(cg);                       /* call clobbered xmm0 */
 }
 
 /* IR_HLOAD_SLOT: vals[i].p = cando_jit_hload_slot(vm, frame_slots, slot).
@@ -648,6 +677,7 @@ static void emit_hload_slot(CG *cg, u32 slot, u32 i) {
     emit_test_rax_rax(cg);
     emit_je_to_stub(cg, cg->cur_snap);            /* NULL -> bad type */
     emit_mov_vals_rax(cg, i);                     /* vals[i] = ptr   */
+    cg_invalidate_xmm0(cg);                       /* call clobbered xmm0 */
 }
 
 /* IR_AREF: vals[i].d = cando_jit_aref(vals[op1].p, (u32)vals[op2].d).
@@ -659,13 +689,14 @@ static void emit_hload_slot(CG *cg, u32 slot, u32 i) {
  *   rdx = &vals[i] (out pointer for the f64 result) */
 static void emit_aref(CG *cg, u32 op1, u32 op2, u32 i) {
     emit_mov_rdi_vals(cg, op1);                   /* arr ptr         */
-    emit_movsd_xmm_vals(cg, 0, op2);              /* xmm0 = idx (f64) */
+    emit_load_xmm0(cg, op2);                      /* xmm0 = idx (f64) */
     emit_cvttsd2si_esi_xmm0(cg);                  /* esi = (i32)xmm0 */
     emit_lea_rdx_vals(cg, i);                     /* &vals[i]        */
     emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_aref_for_mcode);
     emit_call_rax(cg);
     emit_test_eax_eax(cg);
     emit_jne_to_stub(cg, cg->cur_snap);
+    cg_invalidate_xmm0(cg);                       /* call clobbered xmm0 */
 }
 
 static void emit_gstore(CG *cg, const CandoTraceIR *ir, IRRef name_ref,
@@ -676,11 +707,12 @@ static void emit_gstore(CG *cg, const CandoTraceIR *ir, IRRef name_ref,
     CandoString *name = cando_as_string(cv);
     emit_mov_rdi_rbx(cg);                         /* arg1: vm        */
     emit_movabs_rsi(cg, (u64)(uintptr_t)name);    /* arg2: name      */
-    emit_movsd_xmm_vals(cg, 0, op2);              /* arg3 (f64 in xmm0) */
+    emit_load_xmm0(cg, op2);                      /* arg3 (f64 in xmm0) */
     emit_movabs_rax(cg, (u64)(uintptr_t)&cando_jit_gstore_for_mcode);
     emit_call_rax(cg);
     emit_test_eax_eax(cg);
     emit_jne_to_stub(cg, cg->cur_snap);
+    cg_invalidate_xmm0(cg);                       /* call clobbered xmm0 */
 }
 
 /* IR_CALL_F1: vals[i] = fast_native(vals[op2]).  op1 is the index
@@ -697,17 +729,18 @@ static void emit_call_f1(CG *cg, u32 native_idx, u32 op2, u32 i) {
         return;
     }
     CandoFastFn1 fn = cg->vm->fast_natives_f1[native_idx];
-    emit_movsd_xmm_vals(cg, 0, op2);         /* xmm0 = vals[op2]     */
+    emit_load_xmm0(cg, op2);                 /* xmm0 = vals[op2]     */
     emit_movabs_rax(cg, (u64)(uintptr_t)fn);
     emit_call_rax(cg);
     emit_movsd_vals_xmm(cg, i, 0);           /* vals[i] = xmm0       */
+    cg->xmm0_holds = i;
 }
 
 /* Comparisons: vals[a] CMP vals[b] -> vals[i] as 1.0 or 0.0.
  * Mirrors the IR-interp's "(a CMP b) ? 1.0 : 0.0" semantics.  We
  * trust no NaN inputs in v1 (numeric IR by construction). */
 static void emit_compare(CG *cg, IROp op, u32 a, u32 b, u32 i) {
-    emit_movsd_xmm_vals(cg, 0, a);
+    emit_load_xmm0(cg, a);
     emit_movsd_xmm_vals(cg, 1, b);
     emit_ucomisd_xmm0_xmm1(cg);
     switch (op) {
@@ -722,13 +755,14 @@ static void emit_compare(CG *cg, IROp op, u32 a, u32 b, u32 i) {
     emit_movzx_eax_al(cg);
     emit_cvtsi2sd_xmm0_eax(cg);
     emit_movsd_vals_xmm(cg, i, 0);
+    cg->xmm0_holds = i;
 }
 
 /* IR_GUARD_TRUE / IR_GUARD_FALSE: load vals[op1] as f64, compare to
  * 0.0; if mismatch, jump to per-guard stub (which loads snap_idx and
  * jumps to side_exit_common). */
 static void emit_guard_bool(CG *cg, IROp op, u32 op1, u16 snap_idx) {
-    emit_movsd_xmm_vals(cg, 0, op1);
+    emit_load_xmm0(cg, op1);
     emit_xorpd_xmm1_xmm1(cg);
     emit_ucomisd_xmm0_xmm1(cg);
     /* ucomisd sets ZF=1 iff equal (or NaN; we trust no NaN).
@@ -788,6 +822,10 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             cg_emit_bytes(&cg, prefix, 4);   /* test r13b,r13b ; jnz disp8 */
             skip_disp_off = cg_off(&cg);
             cg_emit_u8(&cg, 0);
+            /* Phase 6.8: the JNZ may bypass the producer at runtime,
+             * so the xmm0 cache state across an invariant op is
+             * unknown.  Invalidate before AND after. */
+            cg_invalidate_xmm0(&cg);
         }
         u32 op_start = cg_off(&cg);
 
@@ -862,6 +900,8 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             } else {
                 cg.base[skip_disp_off] = (u8)op_size;
             }
+            /* Cache state across the skip is unknown -- see above. */
+            cg_invalidate_xmm0(&cg);
         }
     }
 
