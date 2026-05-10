@@ -3070,6 +3070,10 @@ static CandoVMResult vm_run(CandoVM *vm) {
 
             vm->spread_extra = 0;
             ip = vm->loop_stack[idx].break_ip;
+            /* Restore if-chain depth: BREAK from inside an IF body skips
+             * the chain's OP_IF_END, so without this each iteration leaks
+             * an if_stack frame and eventually corrupts adjacent VM state. */
+            vm->if_depth   = vm->loop_stack[idx].if_save;
             vm->loop_depth = idx;
             DISPATCH();
         }
@@ -3082,6 +3086,9 @@ static CandoVMResult vm_run(CandoVM *vm) {
             }
             u32 idx = vm->loop_depth - 1 - depth;
             ip      = vm->loop_stack[idx].cont_ip;
+            /* Same rationale as OP_BREAK: CONTINUE from inside an IF body
+             * bypasses OP_IF_END and would otherwise leak if_stack frames. */
+            vm->if_depth   = vm->loop_stack[idx].if_save;
             vm->loop_depth = idx; /* pop frame; LOOP_MARK will re-push on next iteration */
             DISPATCH();
         }
@@ -3100,6 +3107,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
             lf->break_ip  = ip + break_fwd;
             lf->cont_ip   = ip - cont_back;
             lf->stack_save = (u32)(vm->stack_top - vm->stack);
+            lf->if_save    = vm->if_depth;
             lf->loop_type  = loop_type;
             vm->loop_depth++;
             DISPATCH();

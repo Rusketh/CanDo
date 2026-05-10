@@ -186,6 +186,9 @@ typedef struct CandoLoopFrame {
     u8  *break_ip;    /* target for OP_BREAK   (end of loop)             */
     u8  *cont_ip;     /* target for OP_CONTINUE (next iteration check)   */
     u32  stack_save;  /* value-stack depth at loop body entry (for BREAK)*/
+    u32  if_save;     /* if-chain depth at loop body entry: BREAK and    *
+                       * CONTINUE bypass OP_IF_END, so they must restore *
+                       * vm->if_depth or the if_stack leaks each iter.   */
     u8   loop_type;   /* one of CANDO_LOOP_* above                       */
 } CandoLoopFrame;
 
