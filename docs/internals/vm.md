@@ -164,7 +164,13 @@ The high two bits of a `OP_LOOP_MARK` operand encode the loop type:
 `OP_RANGE_ASC`, `OP_RANGE_DESC`, `OP_FOR_INIT`, `OP_FOR_NEXT`,
 `OP_FOR_OVER_INIT`, `OP_FOR_OVER_NEXT`,
 `OP_PIPE_INIT`, `OP_PIPE_NEXT`, `OP_FILTER_NEXT`, `OP_PIPE_END`,
-`OP_PIPE_COLLECT`, `OP_FILTER_COLLECT`, `OP_COND_FILTER_COLLECT`
+`OP_PIPE_COLLECT`, `OP_FILTER_COLLECT`, `OP_COND_FILTER_COLLECT`,
+`OP_FOR_RANGE_INIT`, `OP_FOR_RANGE_NEXT`
+
+`OP_FOR_RANGE_INIT` and `OP_FOR_RANGE_NEXT` are physically placed
+after Band 19 in `opcodes.h` (added later in development) but belong
+to Band 13 logically — they specialise `FOR i IN N -> M` so the full
+range never has to be materialised as an array.
 
 ### Band 14 — error handling
 `OP_TRY_BEGIN`, `OP_TRY_END`, `OP_CATCH_BEGIN`, `OP_FINALLY_BEGIN`,

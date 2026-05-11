@@ -133,6 +133,58 @@ pointer as a short-lived temporary.
 
 The full treatment is in [value-system.md](value-system.md).
 
+## Runtime substructures
+
+A handful of runtime structures don't fit neatly into either the
+parser, VM, or library category, but a contributor needs to know they
+exist:
+
+- **IF-chain frames** (`CandoIfFrame` in `source/vm/vm.h`).  Every
+  active `IF` chain pushes a frame recording the post-chain
+  settlement IP and the stack depth at chain entry.  `OP_IF_MARK`
+  (vm.c:3242) pushes one, `OP_IF_END` (vm.c:3257) pops it, and
+  `OP_SETTLE n` (vm.c:3261) walks `n` levels up the stack, restores
+  the saved depth (releasing temporaries), clears `spread_extra`, and
+  jumps to the recorded IP.
+
+- **Module cache** (`CandoModuleEntry` in `source/vm/vm.h`,
+  `source/lib/include.c:277-299`).  `include(path)` canonicalises via
+  `realpath()` and looks up in the cache before parsing.  Entries
+  hold the canonical path, the cached export values, an optional
+  `dlopen` handle (for `.so` / `.dylib` / `.dll` modules), and the
+  chunk + closure keeping a compiled script alive.  Repeated
+  `include()` of the same absolute path returns the cached value.
+
+- **Multi-return spread state** (`spread_extra` / `array_extra` /
+  `last_ret_count` in `CandoVM`, `source/vm/vm.h:367-370`).
+  `OP_SPREAD_RET` (vm.c:4716) accumulates `last_ret_count - 1` into
+  `spread_extra`, used by `OP_CALL` to widen a call site.
+  `OP_ARRAY_SPREAD` (vm.c:4720) uses `array_extra` for
+  array-literal construction so the two spread paths don't interfere.
+  `OP_TRUNCATE_RET` (vm.c:4730) discards all but the first return
+  value when a multi-call is used in a single-value context.
+
+- **Thread registry** (`CandoThreadRegistry` in
+  `source/vm/vm.h:243-250`).  A root-owned struct shared by every
+  spawned thread.  `OP_THREAD` (vm.c:4526) increments `count` under
+  mutex before creating an OS thread; the trampoline decrements and
+  broadcasts on exit.  `cando_vm_request_quit()` sets
+  `quit_requested` to signal cooperative shutdown; running threads
+  poll the flag to drain cleanly.  `cando_vm_wait_all_threads()`
+  blocks the main thread until `count` returns to zero (and the
+  companion `cando_vm_wait_all_lifelines()` also waits on
+  subsystem-owned lifelines such as open HTTP servers).
+
+- **JIT hot-PC table** (`source/jit/hot.c`, `source/jit/hot.h`).  A
+  chained-hash table mapping bytecode PC → hit counter.
+  `cando_hot_hit(pc)` is called from loop back-edges, function
+  entries, and iterator advances; it bumps the counter and returns
+  `true` exactly once when the PC crosses
+  `CANDO_HOT_DEFAULT_THRESHOLD` (56 hits) — that's the signal for the
+  recorder to start a trace.  Triggered PCs are auto-blacklisted; the
+  recorder un-blacklists on successful compile or re-blacklists on
+  abort.
+
 ## File layout cheat-sheet
 
 | Question                                  | Look in |

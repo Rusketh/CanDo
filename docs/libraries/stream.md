@@ -51,7 +51,10 @@ await consumer;
 ### `stream.transform(fn) → stream`
 
 Pipes every chunk through `fn(chunk) → chunk`.  Returning `NULL` (or a
-non-string) drops the chunk.
+non-string) drops the chunk.  Errors thrown inside `fn` are **logged
+and swallowed**, not surfaced to the writer or reader — the offending
+chunk is simply dropped.  Use a regular function call (not
+`stream.transform`) if you need errors to propagate.
 
 ```cdo
 VAR upcase = stream.transform(FUNCTION(chunk) { RETURN chunk:toUpper(); });

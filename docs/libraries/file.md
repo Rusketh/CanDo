@@ -78,6 +78,8 @@ FOR name OF file.list(".") { print(name); }
 ### `file.mkdir(path) → bool`
 
 Create a directory.  **Non-recursive** — the parent must exist.
+Returns `TRUE` if the directory was created **or already existed**
+(`EEXIST` is treated as success); other failures return `FALSE`.
 
 ### `file.open(path, mode) → stream | null`
 
@@ -93,7 +95,7 @@ Returns a stream handle, or `NULL` on failure.
 
 ```cdo
 VAR f = file.open("data.bin", "wb");
-f:writeAll("\x00\x01\x02");
+f:writeAll(payload);             // payload is a string of bytes
 f:close();
 ```
 
@@ -126,7 +128,7 @@ FUNCTION walk(dir, fn) {
     }
 }
 
-walk(".", (p) => print(p));
+walk(".", FUNCTION(p) { print(p); });
 ```
 
 ### Streaming a large file
