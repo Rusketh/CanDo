@@ -32,13 +32,19 @@ Read an environment variable.  Returns `NULL` if unset.
 VAR home = os.getenv("HOME") || "/tmp";
 ```
 
-### `os.setenv(name, value) → bool`
+### `os.setenv(name, value, overwrite*) → bool`
 
-Set or overwrite an environment variable for the current process and
-its descendants.
+Set an environment variable for the current process and its
+descendants.  Returns `TRUE` on success, `FALSE` if `name` or `value`
+is not a string.
+
+If `overwrite` is omitted or truthy (the default), an existing value
+is replaced.  Pass `FALSE` (or `0`) to leave a pre-existing value
+untouched:
 
 ```cdo
-os.setenv("LANG", "C.UTF-8");
+os.setenv("LANG", "C.UTF-8");          // always overwrites
+os.setenv("LANG", "C.UTF-8", FALSE);   // only set if LANG is unset
 ```
 
 ### `os.execute(cmd) → number`

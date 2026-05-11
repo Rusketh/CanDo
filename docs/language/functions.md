@@ -32,18 +32,6 @@ value but no name — for example as a callback:
 arr:map(FUNCTION(x) { RETURN x * x; });
 ```
 
-### Lambda arrow
-
-For short one-expression callbacks:
-
-```cdo
-arr:map((x) => x * x);
-arr:filter((x) => x > 10);
-```
-
-The arrow form parses as `FUNCTION(args) { RETURN <expr>; }`.  Single
-parameter with no parens is **not** supported — write `(x)`.
-
 ## Parameters and arguments
 
 ### Default values
@@ -172,15 +160,12 @@ FUNCTION fact(n) {
 }
 ```
 
-For expression-form anonymous functions, name them when you need
-recursion:
-
-```cdo
-VAR fact = FUNCTION fact(n) {
-    IF n <= 1 { RETURN 1; }
-    RETURN n * fact(n - 1);
-};
-```
+Expression-form functions are anonymous — `FUNCTION` must be followed
+immediately by `(`, with no name token in between.  If you need
+recursion, use the statement form (which exposes the function's own
+name inside its body) or wrap the call site so the recursive
+reference resolves at call time rather than via the function's own
+binding.
 
 ## Mask selectors
 

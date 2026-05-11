@@ -6,13 +6,13 @@ never need to touch it manually.
 
 ## Reference
 
-### `gc.collect()`
+### `gc.collect() → number`
 
-Run a full GC cycle synchronously.  Returns when the cycle has
-finished.
+Run a full GC cycle synchronously.  Returns the number of objects
+swept during the cycle.
 
 ```cdo
-gc.collect();
+print(gc.collect());               // e.g. 47 — objects reclaimed
 ```
 
 Useful in tests that want deterministic finalization, or after a known
@@ -28,16 +28,16 @@ precise measurement.
 print(gc.count());                 // some integer
 ```
 
-### `gc.threshold(bytes*)`
+### `gc.threshold(count*) → number`
 
-With no argument, returns the current allocation threshold for an
-automatic minor GC.  With one numeric argument, sets the threshold.
-Setting it to `0` disables automatic GC (you must then call
-`gc.collect()` yourself).
+With no argument, returns the current **live-object count** threshold
+for automatic GC.  With one numeric argument, sets the threshold (in
+objects, not bytes).  Setting it to `0` disables automatic GC (you
+must then call `gc.collect()` yourself).
 
 ```cdo
 print(gc.threshold());             // current value
-gc.threshold(64 * 1024 * 1024);    // 64 MiB
+gc.threshold(100000);              // trigger when live count crosses 100k
 ```
 
 ## When to call this

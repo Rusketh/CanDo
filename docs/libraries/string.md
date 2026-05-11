@@ -103,33 +103,30 @@ print("price: $9.50":find("[0-9]+"));    // 8     (regex)
 print("a.b.c":find(".", TRUE));          // 1     (literal: first '.')
 ```
 
-### `s:split(sep) → array`
+### `s:split(pattern, no_regex*) → array`
 
-Split `s` on `sep`.  Returns an array of parts (the separator itself is
-excluded).  An empty `sep` splits into individual characters.
+Split `s` on `pattern`.  Returns an array of parts (the separator
+itself is excluded).  `pattern` is treated as a POSIX extended regex
+by default; pass `TRUE` as the optional second argument for a literal
+substring split.  An empty pattern returns a single-element array
+containing `s` unchanged.
 
 ```cdo
-print(inspect("a,b,c":split(",")));   // ["a", "b", "c"]
-print(inspect("hello":split("")));    // ["h", "e", "l", "l", "o"]
-print(inspect(",a,":split(",")));     // ["", "a", ""]
+print(inspect("a,b,c":split(",")));         // ["a", "b", "c"]
+print(inspect("a, b,  c":split(", *")));    // ["a", "b", "c"]   (regex)
+print(inspect("a.b.c":split(".", TRUE)));   // ["a", "b", "c"]   (literal)
 ```
 
-### `s:join(parts) → string`
+### `s:replace(pattern, repl, no_regex*) → string`
 
-Concatenate the `parts` array using `s` as a separator between elements.
-
-```cdo
-print(", ":join(["a", "b", "c"])); // a, b, c
-print("/":join(["usr", "local"])); // usr/local
-```
-
-### `s:replace(old, new) → string`
-
-Replace **every** occurrence of `old` with `new`.
+Replace **every** occurrence of `pattern` in `s` with `repl`.
+`pattern` is treated as a POSIX extended regex by default; pass
+`TRUE` as the optional fourth argument for literal replacement.
 
 ```cdo
-print("hello world":replace("o", "0"));   // hell0 w0rld
-print("a b c":replace(" ", "-"));         // a-b-c
+print("hello world":replace("o", "0"));         // hell0 w0rld
+print("hello 42":replace("[0-9]+", "N"));        // hello N        (regex)
+print("a.b.c":replace(".", "/", TRUE));          // a/b/c          (literal)
 ```
 
 ### `s:startsWith(prefix) → bool`, `s:endsWith(suffix) → bool`

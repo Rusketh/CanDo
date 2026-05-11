@@ -258,7 +258,7 @@ CONTINUE;                        // skip to the next iteration of the innermost 
 CONTINUE 2;                      // continue the loop two levels out
 
 SETTLE;                          // exit the innermost IF chain
-SETTLE 1;                        // exit two nested IF chains
+SETTLE 1;                        // exit two nested IF chains (innermost + one above)
 ```
 
 The optional numeric argument is the depth to skip (where 0 == innermost).

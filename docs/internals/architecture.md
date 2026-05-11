@@ -115,10 +115,16 @@ code that knows both.  Any new code that needs to operate on objects
 goes through the bridge:
 
 ```c
-CdoObject *o = bridge_resolve_object(vm, value);
-if (!o) cando_throw(vm, "expected object");
+if (!cando_is_object(value)) {
+    cando_vm_error(vm, "expected object");
+    return -1;
+}
+CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(value));
 
-CandoValue field = cdo_object_get(o, "name");
+CdoString *key = cdo_string_intern("name", 4);
+CdoValue   field;
+bool       found = cdo_object_get(o, key, &field);
+cdo_string_release(key);
 ```
 
 Storing the resolved `CdoObject *` across a call that might trigger

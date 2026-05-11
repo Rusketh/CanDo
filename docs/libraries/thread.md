@@ -27,15 +27,14 @@ Numeric ID of the current thread.  Useful for diagnostics and logging.
 
 Current thread handle, or `NULL` on the main thread.
 
-### `thread.spawn(fn, ...args) → thread`
-
-Spawn a new thread that calls `fn(...args)`.  Equivalent to
-`thread fn(...args)` at the language level; use the function form when
-the function is computed.
+Note that spawning is a **language construct**, not a library
+function — use `thread expr(args)` or `thread { … }` (see
+[../language/threading.md](../language/threading.md)).  When the
+function value is computed, just call it inside the language form:
 
 ```cdo
 VAR fn = workers[0];
-VAR t = thread.spawn(fn, payload);
+VAR t  = thread fn(payload);
 ```
 
 ### `thread.done(t) → bool`

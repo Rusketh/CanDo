@@ -30,9 +30,12 @@ TRY {
 }
 ```
 
-### `json.stringify(value) → string`
+### `json.stringify(value, indent*) → string`
 
-Encode a CanDo value as JSON text.
+Encode a CanDo value as JSON text.  The optional `indent` argument
+controls pretty-printing: `0` (the default) produces compact output;
+any value from `1` to `16` is taken as the number of spaces per
+nesting level.  Values outside that range are clamped.
 
 - Numbers use the shortest representation that round-trips.
 - Objects serialize in **FIFO insertion order**.
@@ -76,12 +79,15 @@ malformed JSON throws.
 
 ### Pretty printing
 
-`json.stringify` always produces compact output.  For indented JSON,
-use the YAML library instead, or implement formatting yourself:
+Pass `indent` to `json.stringify`:
 
 ```cdo
-FUNCTION pretty(v, indent) {
-    indent = indent || "  ";
-    // ... user implementation
-}
+print(json.stringify({ a: 1, b: [2, 3] }, 2));
+// {
+//   "a": 1,
+//   "b": [
+//     2,
+//     3
+//   ]
+// }
 ```

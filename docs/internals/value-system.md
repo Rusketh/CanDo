@@ -33,8 +33,8 @@ object owns:
 - a dense `values[]` array for integer-indexed storage (used by
   arrays),
 - an `ObjectKind` tag — one of `OBJ_OBJECT`, `OBJ_ARRAY`,
-  `OBJ_FUNCTION`, `OBJ_NATIVE`, `OBJ_THREAD` (classes use
-  `OBJ_OBJECT`; there is no dedicated `OBJ_CLASS`),
+  `OBJ_FUNCTION`, `OBJ_NATIVE`, `OBJ_THREAD`.  Classes use
+  `OBJ_OBJECT`; there is no dedicated `OBJ_CLASS`,
 - type-specific metadata (function bytecode, native pointer, thread
   state, …).
 
@@ -153,24 +153,29 @@ The `OP_NEW_CLASS`, `OP_BIND_METHOD`, `OP_INHERIT`, and
 ### Validate then operate
 
 ```c
-if (argc < 2 || !cando_value_is_string(argv[0])) {
-    cando_throw(vm, "first argument must be a string");
+if (argc < 2 || !cando_is_string(args[0])) {
+    cando_vm_error(vm, "first argument must be a string");
+    return -1;
 }
-CdoObject *o = bridge_resolve_object(vm, argv[1]);
-if (!o) cando_throw(vm, "second argument must be an object");
+if (!cando_is_object(args[1])) {
+    cando_vm_error(vm, "second argument must be an object");
+    return -1;
+}
+CdoObject *o = cando_bridge_resolve(vm, cando_as_handle(args[1]));
 ```
 
 ### Loop without holding pointers across calls
 
 ```c
-CdoObject *arr = bridge_resolve_object(vm, argv[0]);
-size_t n = cdo_array_length(arr);
+CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(args[0]));
+u32 n = cdo_array_len(arr);
 
-for (size_t i = 0; i < n; i++) {
-    CandoValue v = cdo_array_get(arr, i);
+for (u32 i = 0; i < n; i++) {
+    CdoValue v;
+    if (!cdo_array_rawget_idx(arr, i, &v)) continue;
     /* ... operate on v ... */
     /* if you must call back into the VM, re-resolve `arr` afterwards */
-    arr = bridge_resolve_object(vm, argv[0]);
+    arr = cando_bridge_resolve(vm, cando_as_handle(args[0]));
 }
 ```
 
