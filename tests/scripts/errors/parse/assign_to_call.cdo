@@ -1,0 +1,2 @@
+FUNCTION f() { RETURN 1; }
+f() = 5;

@@ -606,12 +606,26 @@ restart:
         return lex_ident(lex, start_pos, start_line, start_line_start);
     }
 
-    /* ---- Unrecognised character ---------------------------------------- */
+    /* ---- Unrecognised character ----------------------------------------
+     * For printable ASCII we name the character directly; for everything
+     * else (control bytes, non-ASCII high bytes) we fall back to the hex
+     * escape.  The parser's error_at() prefix already carries the line
+     * number, so we deliberately omit it here.                            */
     {
-        char msg[64];
-        snprintf(msg, sizeof(msg),
-                 "unexpected character '\\x%02X' (line %u)",
-                 (unsigned char)c, start_line);
+        char msg[96];
+        if (c >= 0x20 && c < 0x7F) {
+            snprintf(msg, sizeof(msg),
+                     "unexpected character '%c'", c);
+        } else if ((unsigned char)c >= 0x80) {
+            snprintf(msg, sizeof(msg),
+                     "unexpected non-ASCII character (byte 0x%02X) -- "
+                     "identifiers must be ASCII",
+                     (unsigned char)c);
+        } else {
+            snprintf(msg, sizeof(msg),
+                     "unexpected character '\\x%02X'",
+                     (unsigned char)c);
+        }
         return EMIT_ERR(msg);
     }
 

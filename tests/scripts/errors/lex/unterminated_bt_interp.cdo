@@ -1,0 +1,2 @@
+VAR s = `hello ${ 1 + 2 `;
+print(s);

@@ -1,0 +1,3 @@
+VAR x = 1;
+/* this comment never closes
+print(x);

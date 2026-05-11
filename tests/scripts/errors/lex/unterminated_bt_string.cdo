@@ -1,0 +1,2 @@
+VAR s = `template ${1 + 2} never closes
+print(s);

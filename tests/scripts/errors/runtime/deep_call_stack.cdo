@@ -1,0 +1,4 @@
+FUNCTION a() { b(); }
+FUNCTION b() { c(); }
+FUNCTION c() { THROW "error","kind","detail"; }
+a();

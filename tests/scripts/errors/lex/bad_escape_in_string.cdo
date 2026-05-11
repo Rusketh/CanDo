@@ -1,0 +1,2 @@
+VAR s = "stray backslash at end \";
+print(s);

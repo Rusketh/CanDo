@@ -1,0 +1,2 @@
+FUNCTION add(a, b) { RETURN a + b; }
+print(add(1));

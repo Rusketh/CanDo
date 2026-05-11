@@ -1,0 +1,3 @@
+VAR x = 1
+VAR y = 2;
+print(x + y);

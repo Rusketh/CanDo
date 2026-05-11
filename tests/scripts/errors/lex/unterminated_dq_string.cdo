@@ -1,0 +1,2 @@
+VAR s = "this string never closes;
+print(s);

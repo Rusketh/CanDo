@@ -1,0 +1,2 @@
+VAR IF = 5;
+print(IF);

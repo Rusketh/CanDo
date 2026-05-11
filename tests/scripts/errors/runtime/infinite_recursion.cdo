@@ -1,0 +1,2 @@
+FUNCTION recurse() { RETURN recurse(); }
+recurse();

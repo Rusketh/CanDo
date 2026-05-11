@@ -1,0 +1,6 @@
+FUNCTION f() {
+    VAR x = 1;
+    VAR x = 2;
+    RETURN x;
+}
+print(f());
