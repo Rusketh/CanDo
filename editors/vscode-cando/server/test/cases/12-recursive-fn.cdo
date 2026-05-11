@@ -1,0 +1,7 @@
+// EXPECT: number
+FUNCTION fact(n) {
+    IF n <= 1 { RETURN 1; }
+    RETURN n * fact(n - 1);
+}
+VAR r = fact(5);
+r|

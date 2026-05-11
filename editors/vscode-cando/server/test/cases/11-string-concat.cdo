@@ -1,0 +1,4 @@
+// EXPECT: string
+VAR a = "hi";
+VAR b = a + " " + "world";
+b|

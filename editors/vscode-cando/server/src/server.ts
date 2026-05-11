@@ -1,21 +1,9 @@
 /*
  * CanDo language server.
  *
- * Provides:
- *   - Diagnostics: unterminated strings/comments, stray characters, naive
- *                  bracket-balance check.
- *   - Completion:  keywords, global builtins, std-lib namespaces,
- *                  namespace member completion after `name.` or `name:`,
- *                  document symbols, cross-file member completion for
- *                  `include(...)` bindings, object-literal members,
- *                  filesystem path completion inside `include("...")`.
- *   - Hover:       short docs for keywords, builtins, namespace members,
- *                  document symbols, and resolved include paths.
- *   - Signature help: parameter list for the function call surrounding the
- *                  cursor (in-file functions and namespace methods).
- *   - Document symbols + go-to-definition for in-file functions, classes,
- *                  vars, constants, globals; goto for `include(...)` jumps
- *                  to the included file.
+ * Thin LSP shell over the analyze pipeline (analyze.ts). All language
+ * understanding lives in the parser / resolver / inferer; this file maps
+ * LSP requests to the analyzed document and renders the result.
  */
 
 import * as path from 'path';
@@ -43,47 +31,28 @@ import {
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 
-import { Lexer, Token, Range as LexRange } from './lexer';
-import { analyze, Symbol as CandoSymbol, IncludeBinding } from './analyzer';
+import { Range as LexRange, Token } from './lexer';
+import { analyzeDocument, AnalyzedDocument, clearDocument, resolveIncludePath } from './analyze';
 import {
-    KEYWORDS_UPPER,
-    PIPE_KEYWORD,
-    GLOBAL_BUILTINS,
-    NAMESPACES,
-    NamespaceInfo,
-    namespaceByName,
-    namespaceMemberDetail,
-    builtinByName
+    KEYWORDS_UPPER, PIPE_KEYWORD, GLOBAL_BUILTINS, NAMESPACES,
+    namespaceByName, namespaceMemberDetail, builtinByName
 } from './builtins';
+import { detectIncludeString, completeIncludePath } from './paths';
 import {
-    detectIncludeString,
-    completeIncludePath,
-    resolveIncludePath
-} from './paths';
-import { getIncludeExports } from './crossfile';
-import {
-    buildTypeEnv,
-    inferReceiverAt,
-    listMembers,
-    describeTypeForHover,
-    formatMemberDetail,
-    TypeEnv,
-    TypeRef
-} from './types';
-import { MemberSpec } from './manifest';
+    TypeRef, FunctionType, MemberType,
+    enumerateMembers, renderType
+} from './typesys';
+import { Node, Call, rangeContains, nodeAt, children as astChildren } from './ast';
+import { Scope, Binding, scopeAt } from './scope';
 
 interface CandoSettings {
-    diagnostics: { enable: boolean };
-    completion: {
-        includeBuiltins: boolean;
-        includePaths: boolean;
-        crossFile: boolean;
-    };
+    diagnostics: { enable: boolean; semantic: boolean };
+    completion: { includeBuiltins: boolean; includePaths: boolean; crossFile: boolean };
     keywordCase: 'upper' | 'lower';
 }
 
 const DEFAULT_SETTINGS: CandoSettings = {
-    diagnostics: { enable: true },
+    diagnostics: { enable: true, semantic: true },
     completion: { includeBuiltins: true, includePaths: true, crossFile: true },
     keywordCase: 'upper'
 };
@@ -93,18 +62,6 @@ let workspaceRoots: string[] = [];
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments<TextDocument>(TextDocument);
-
-interface CachedAnalysis {
-    tokens: Token[];
-    symbols: CandoSymbol[];
-    byName: Map<string, CandoSymbol>;
-    includes: Map<string, IncludeBinding>;
-    objectLiterals: Map<string, string[]>;
-    moduleExports: string[];
-    typeEnv: TypeEnv;
-    version: number;
-}
-const analysisCache = new Map<string, CachedAnalysis>();
 
 connection.onInitialize((params: InitializeParams): InitializeResult => {
     workspaceRoots = (params.workspaceFolders ?? [])
@@ -119,17 +76,12 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
             textDocumentSync: TextDocumentSyncKind.Incremental,
             completionProvider: {
                 resolveProvider: false,
-                /* `(`, `"`, `'`, `/` cover include() string completion;
-                 * `.` and `:` drive member access; space allows keyword
-                 * follow-ups (e.g. after `EXTENDS `). */
                 triggerCharacters: ['.', ':', '(', '"', '\'', '/']
             },
             hoverProvider: true,
             definitionProvider: true,
             documentSymbolProvider: true,
-            signatureHelpProvider: {
-                triggerCharacters: ['(', ',']
-            }
+            signatureHelpProvider: { triggerCharacters: ['(', ','] }
         }
     };
 });
@@ -137,7 +89,11 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
 connection.onDidChangeConfiguration(change => {
     const cfg = (change.settings as { cando?: Partial<CandoSettings> } | undefined)?.cando;
     globalSettings = {
-        diagnostics: { enable: cfg?.diagnostics?.enable ?? DEFAULT_SETTINGS.diagnostics.enable },
+        diagnostics: {
+            enable:   cfg?.diagnostics?.enable   ?? DEFAULT_SETTINGS.diagnostics.enable,
+            semantic: (cfg?.diagnostics as { semantic?: boolean } | undefined)?.semantic
+                       ?? DEFAULT_SETTINGS.diagnostics.semantic
+        },
         completion: {
             includeBuiltins: cfg?.completion?.includeBuiltins ?? DEFAULT_SETTINGS.completion.includeBuiltins,
             includePaths:    cfg?.completion?.includePaths    ?? DEFAULT_SETTINGS.completion.includePaths,
@@ -149,44 +105,35 @@ connection.onDidChangeConfiguration(change => {
 });
 
 documents.onDidChangeContent(e => refresh(e.document));
-documents.onDidClose(e => analysisCache.delete(e.document.uri));
+documents.onDidClose(e => clearDocument(e.document.uri));
 
 function refresh(doc: TextDocument): void {
-    const tokens = new Lexer(doc.getText()).tokenize();
-    const result = analyze(tokens);
-    const typeEnv = buildTypeEnv(tokens, result.symbols, doc.uri, workspaceRoots);
-    analysisCache.set(doc.uri, {
-        tokens,
-        symbols: result.symbols,
-        byName: result.byName,
-        includes: result.includes,
-        objectLiterals: result.objectLiterals,
-        moduleExports: result.moduleExports,
-        typeEnv,
-        version: doc.version
-    });
+    const analyzed = analyzeDocument(doc.uri, doc.getText(), doc.version, workspaceRoots);
     if (globalSettings.diagnostics.enable) {
-        connection.sendDiagnostics({ uri: doc.uri, diagnostics: makeDiagnostics(tokens) });
+        connection.sendDiagnostics({ uri: doc.uri, diagnostics: makeDiagnostics(analyzed) });
     } else {
         connection.sendDiagnostics({ uri: doc.uri, diagnostics: [] });
     }
 }
 
-/* -- Diagnostics ---------------------------------------------------------- */
-
-function toLsp(r: LexRange): LspRange {
-    return {
-        start: { line: r.start.line, character: r.start.character },
-        end: { line: r.end.line, character: r.end.character }
-    };
+function getAnalyzed(uri: string): AnalyzedDocument | null {
+    const doc = documents.get(uri);
+    if (!doc) return null;
+    return analyzeDocument(doc.uri, doc.getText(), doc.version, workspaceRoots);
 }
 
-function makeDiagnostics(tokens: Token[]): Diagnostic[] {
-    const out: Diagnostic[] = [];
-    const stack: { open: string; tok: Token }[] = [];
-    const matches: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
+/* ----------------------------------------------------------------------- */
+/* Diagnostics                                                             */
+/* ----------------------------------------------------------------------- */
 
-    for (const t of tokens) {
+function toLsp(r: LexRange): LspRange {
+    return { start: r.start, end: r.end };
+}
+
+function makeDiagnostics(a: AnalyzedDocument): Diagnostic[] {
+    const out: Diagnostic[] = [];
+    /* Lex errors. */
+    for (const t of a.tokens) {
         if (t.kind === 'error') {
             out.push({
                 severity: DiagnosticSeverity.Error,
@@ -194,38 +141,111 @@ function makeDiagnostics(tokens: Token[]): Diagnostic[] {
                 message: t.message ?? `Unexpected '${t.value}'`,
                 source: 'cando'
             });
-            continue;
         }
-        if (t.kind === 'punct') {
-            if (t.value in matches) {
-                stack.push({ open: t.value, tok: t });
-            } else if (t.value === ')' || t.value === ']' || t.value === '}') {
-                const top = stack.pop();
-                if (!top || matches[top.open] !== t.value) {
+    }
+    /* Parse errors. */
+    for (const e of a.parseErrors) {
+        out.push({
+            severity: DiagnosticSeverity.Error,
+            range: toLsp(e.range),
+            message: e.message,
+            source: 'cando'
+        });
+    }
+    /* Semantic diagnostics (opt-out via settings). */
+    if (globalSettings.diagnostics.semantic) {
+        for (const d of semanticDiagnostics(a)) out.push(d);
+    }
+    return out;
+}
+
+function semanticDiagnostics(a: AnalyzedDocument): Diagnostic[] {
+    const out: Diagnostic[] = [];
+    /* assign-to-const: scan AssignStmt targets where the binding is CONST. */
+    walkAst(a.program, (n) => {
+        if (n.kind === 'AssignStmt') {
+            for (const t of n.targets) {
+                if (t.kind === 'Ident') {
+                    const scope = a.resolved.scopeOf.get(t);
+                    const b = scope?.lookup(t.name);
+                    if (b && b.kind === 'const' && b.decl !== n) {
+                        out.push({
+                            severity: DiagnosticSeverity.Error,
+                            range: toLsp(t.range),
+                            message: `Cannot assign to CONST binding '${t.name}'`,
+                            source: 'cando'
+                        });
+                    }
+                }
+            }
+        }
+        if (n.kind === 'Call') {
+            const calleeT = a.inferred.nodeTypes.get(n.callee);
+            if (calleeT) {
+                if (calleeT.kind === 'function') {
+                    const required = calleeT.params.filter(p => !p.optional && !p.rest).length;
+                    const hasRest = calleeT.params.some(p => p.rest);
+                    const given = n.args.filter(arg => !arg.spread).length;
+                    const hasSpread = n.args.some(arg => arg.spread);
+                    if (!hasSpread && given < required) {
+                        out.push({
+                            severity: DiagnosticSeverity.Warning,
+                            range: toLsp(n.range),
+                            message: `Expected at least ${required} argument${required === 1 ? '' : 's'}, got ${given}`,
+                            source: 'cando'
+                        });
+                    }
+                    if (!hasSpread && !hasRest && given > calleeT.params.length) {
+                        out.push({
+                            severity: DiagnosticSeverity.Warning,
+                            range: toLsp(n.range),
+                            message: `Expected at most ${calleeT.params.length} argument${calleeT.params.length === 1 ? '' : 's'}, got ${given}`,
+                            source: 'cando'
+                        });
+                    }
+                } else if (calleeT.kind !== 'class' && !isCallableType(calleeT)) {
                     out.push({
-                        severity: DiagnosticSeverity.Error,
-                        range: toLsp(t.range),
-                        message: top
-                            ? `Mismatched bracket: expected '${matches[top.open]}'`
-                            : `Unexpected closing '${t.value}'`,
+                        severity: DiagnosticSeverity.Information,
+                        range: toLsp(n.range),
+                        message: `Calling a non-function value (${renderType(calleeT)})`,
                         source: 'cando'
                     });
                 }
             }
         }
-    }
-    for (const u of stack) {
-        out.push({
-            severity: DiagnosticSeverity.Error,
-            range: toLsp(u.tok.range),
-            message: `Unclosed '${u.open}'`,
-            source: 'cando'
-        });
-    }
+        if (n.kind === 'Ident') {
+            const scope = a.resolved.scopeOf.get(n);
+            const b = scope?.lookup(n.name);
+            if (!b && !isBuiltinIdent(n.name) && n.name !== 'self' && n.name !== 'pipe') {
+                out.push({
+                    severity: DiagnosticSeverity.Hint,
+                    range: toLsp(n.range),
+                    message: `'${n.name}' is not declared in this file (will be looked up as a global)`,
+                    source: 'cando'
+                });
+            }
+        }
+    });
     return out;
 }
 
-/* -- Completion ----------------------------------------------------------- */
+function isBuiltinIdent(name: string): boolean {
+    return !!(namespaceByName(name) || builtinByName(name));
+}
+
+function isCallableType(t: TypeRef): boolean {
+    if (t.kind === 'function' || t.kind === 'class' || t.kind === 'namespace') return true;
+    if (t.kind === 'prim' && (t.name === 'any' || t.name === 'unknown')) return true;
+    if (t.kind === 'union') return t.variants.every(isCallableType);
+    if (t.kind === 'optional') return isCallableType(t.inner);
+    /* Objects may have __call -- can't tell without walking. Allow. */
+    if (t.kind === 'object' || t.kind === 'manifest-exports' || t.kind === 'manifest-type') return true;
+    return false;
+}
+
+/* ----------------------------------------------------------------------- */
+/* Completion                                                              */
+/* ----------------------------------------------------------------------- */
 
 connection.onCompletion(params => {
     const doc = documents.get(params.textDocument.uri);
@@ -233,60 +253,33 @@ connection.onCompletion(params => {
     const text = doc.getText();
     const offset = doc.offsetAt(params.position);
 
-    /* 1. Path completion inside `include("...")`. */
+    /* 1. include() path completion. */
     if (globalSettings.completion.includePaths) {
         const ictx = detectIncludeString(text, offset);
-        if (ictx) {
-            return completeIncludePath(ictx, params.textDocument.uri, workspaceRoots);
-        }
+        if (ictx) return completeIncludePath(ictx, params.textDocument.uri, workspaceRoots);
     }
 
-    /* 2. Member access after `.` or `:`. We use the type tracker to walk
-     * back through the full receiver expression, so chains like
-     * `forms.createTextBox(parent).` resolve to the TextBox type. */
-    const dotIndex = receiverDotIndex(text, offset);
-    if (dotIndex !== null) {
-        const cached = analysisCache.get(params.textDocument.uri);
-        if (!cached) return [];
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return [];
 
-        const tokenIdx = tokenIndexAt(doc, cached.tokens, dotIndex);
-        if (tokenIdx === null) return [];
-
-        /* Try the type tracker first -- handles manifest types, in-file
-         * classes, anonymous records, and chained member calls. */
-        const ref = inferReceiverAt(cached.tokens, tokenIdx, cached.typeEnv, workspaceRoots);
-        const members = listMembers(ref, cached.typeEnv);
-        if (members.size > 0) return memberMapToCompletions(members);
-
-        /* Fallback path: handle the bare-name shapes the analyzer indexed
-         * directly, even if the type tracker bailed. */
-        const name = bareReceiverName(text, dotIndex);
-        if (name) {
-            const ns = namespaceByName(name);
-            if (ns) return namespaceMemberCompletions(ns);
-
-            /* Cross-file include with no manifest -> use the harvested
-             * exports list. */
-            const inc = cached.includes.get(name);
-            if (inc && globalSettings.completion.crossFile) {
-                const ex = getIncludeExports(inc.path, params.textDocument.uri, workspaceRoots);
-                if (ex && ex.members.length) {
-                    return ex.members.map<CompletionItem>(m => ({
-                        label: m,
-                        kind: CompletionItemKind.Field,
-                        detail: `${name} (from ${path.basename(ex.path)})`
-                    }));
-                }
-            }
-        }
-
-        return [];
+    /* 2. Member access after `.` or `:` or `?.`. */
+    const dotInfo = receiverDotAt(text, offset);
+    if (dotInfo) {
+        const tokIdx = tokenIndexBefore(a.tokens, dotInfo.dotOffset, doc);
+        if (tokIdx === null) return [];
+        const receiverRange = receiverRangeFromTokens(a.tokens, tokIdx);
+        if (!receiverRange) return [];
+        const node = nodeContainingRange(a.program, receiverRange);
+        if (!node) return [];
+        const t = a.inferred.nodeTypes.get(node) ?? null;
+        if (!t) return [];
+        const members = enumerateAt(t);
+        return memberMapToCompletions(members);
     }
 
-    /* 3. General completion: keywords + builtins + namespaces + symbols. */
+    /* 3. Bare identifier completion. */
     const items: CompletionItem[] = [];
     const kwCase = globalSettings.keywordCase;
-
     for (const k of KEYWORDS_UPPER) {
         const label = kwCase === 'lower' ? k.name.toLowerCase() : k.name;
         items.push({
@@ -327,69 +320,51 @@ connection.onCompletion(params => {
         }
     }
 
-    const cached = analysisCache.get(params.textDocument.uri);
-    if (cached) {
-        const seen = new Set<string>();
-        for (const s of cached.symbols) {
-            const item: CompletionItem = {
-                label: s.name,
-                kind: docSymbolKindToCompletion(s.kind),
-                detail: s.detail
-            };
-            if (s.parameters !== undefined && s.parameters.length === 0) {
-                item.insertText = `${s.name}()$0`;
-                item.insertTextFormat = InsertTextFormat.Snippet;
-            } else if (s.parameters !== undefined) {
-                const placeholders = s.parameters
-                    .map((p, i) => `\${${i + 1}:${p}}`)
-                    .join(', ');
-                item.insertText = `${s.name}(${placeholders})$0`;
-                item.insertTextFormat = InsertTextFormat.Snippet;
-            }
-            items.push(item);
-            seen.add(s.name);
-        }
-        /* Function-body locals -- the analyzer only records top-level
-         * symbols, but the type tracker walks every VAR / CONST / GLOBAL
-         * declaration in the file. Surface those here so identifier
-         * completion works inside `FUNCTION` bodies and class
-         * constructors. */
-        for (const [name, ref] of cached.typeEnv.bindings) {
+    /* Locals + globals visible at the cursor scope. */
+    const scope = scopeContaining(a, params.position.line, params.position.character);
+    const seen = new Set<string>();
+    for (let s: Scope | null = scope; s; s = s.parent) {
+        for (const [name, b] of s.bindings) {
             if (seen.has(name)) continue;
+            seen.add(name);
             items.push({
                 label: name,
-                kind: CompletionItemKind.Variable,
-                detail: describeTypeForHover(ref)
+                kind: bindingKindToCompletion(b),
+                detail: renderType(b.type),
+                documentation: b.kind === 'function'
+                    ? { kind: MarkupKind.Markdown, value: `Defined at line ${b.declRange.start.line + 1}.` }
+                    : undefined
             });
-            seen.add(name);
         }
     }
-
     return items;
 });
 
-function namespaceMemberCompletions(ns: NamespaceInfo): CompletionItem[] {
-    return ns.members.map<CompletionItem>(m => ({
-        label: m,
-        kind: CompletionItemKind.Function,
-        detail: namespaceMemberDetail(ns, m) ?? `${ns.name}.${m}`,
-        documentation: { kind: MarkupKind.Markdown, value: `Member of \`${ns.name}\`.` }
-    }));
+function bindingKindToCompletion(b: Binding): CompletionItemKind {
+    switch (b.kind) {
+        case 'function': return CompletionItemKind.Function;
+        case 'class':    return CompletionItemKind.Class;
+        case 'const':    return CompletionItemKind.Constant;
+        case 'param':    return CompletionItemKind.Variable;
+        case 'self':     return CompletionItemKind.Variable;
+        case 'pipe':     return CompletionItemKind.Variable;
+        case 'catch':    return CompletionItemKind.Variable;
+        case 'forvar':   return CompletionItemKind.Variable;
+        default:         return CompletionItemKind.Variable;
+    }
 }
 
-function memberMapToCompletions(members: Map<string, MemberSpec>): CompletionItem[] {
+function memberMapToCompletions(members: Map<string, MemberType>): CompletionItem[] {
     const out: CompletionItem[] = [];
-    for (const [name, spec] of members) {
+    for (const [name, m] of members) {
         const item: CompletionItem = {
             label: name,
-            kind: memberKindToCompletion(spec),
-            detail: formatMemberDetail(spec, name)
+            kind: memberCompletionKind(m),
+            detail: memberDetail(m, name)
         };
-        if (spec.doc) {
-            item.documentation = { kind: MarkupKind.Markdown, value: spec.doc };
-        }
-        if (spec.kind === 'function' && spec.params) {
-            const placeholders = spec.params
+        if (m.doc) item.documentation = { kind: MarkupKind.Markdown, value: m.doc };
+        if (m.type.kind === 'function' && m.type.params.length > 0) {
+            const placeholders = m.type.params
                 .filter(p => !p.optional && !p.rest)
                 .map((p, i) => `\${${i + 1}:${p.name}}`)
                 .join(', ');
@@ -401,139 +376,86 @@ function memberMapToCompletions(members: Map<string, MemberSpec>): CompletionIte
     return out;
 }
 
-function memberKindToCompletion(spec: MemberSpec): CompletionItemKind {
-    switch (spec.kind) {
-        case 'function': return CompletionItemKind.Method;
-        case 'event':    return CompletionItemKind.Event;
-        case 'constant': return CompletionItemKind.Constant;
-        case 'value':
-        default:         return CompletionItemKind.Field;
+function memberCompletionKind(m: MemberType): CompletionItemKind {
+    if (m.isEvent) return CompletionItemKind.Event;
+    if (m.readOnly) return CompletionItemKind.Constant;
+    if (m.type.kind === 'function') return CompletionItemKind.Method;
+    return CompletionItemKind.Field;
+}
+
+function memberDetail(m: MemberType, name: string): string {
+    if (m.type.kind === 'function') {
+        const ft = m.type;
+        const ps = ft.params.map(p => {
+            const sigil = p.rest ? '...' : '';
+            const opt = p.optional ? '?' : '';
+            return `${sigil}${p.name}${opt}: ${renderType(p.type)}`;
+        }).join(', ');
+        const ret = ft.returnsSelf
+            ? 'self'
+            : ft.returns.length === 1 ? renderType(ft.returns[0])
+            : ft.returns.map(r => renderType(r)).join(', ');
+        return `${name}(${ps}) -> ${ret}`;
     }
+    return `${name}: ${renderType(m.type)}`;
 }
 
-/* ----- Receiver-detection helpers --------------------------------------- */
-
-/**
- * Return the character offset of the trailing `.` or `:` before the cursor
- * if the user is typing a member-access expression, otherwise null.
- * Skips trailing identifier characters so `forms.cre|ate` still resolves to
- * the dot at `forms.`.
- */
-function receiverDotIndex(text: string, offset: number): number | null {
-    let i = offset;
-    while (i > 0 && /[A-Za-z0-9_]/.test(text[i - 1])) i--;
-    if (i <= 0) return null;
-    /* Allow whitespace between the dot and the partial member name. */
-    let j = i;
-    while (j > 0 && (text[j - 1] === ' ' || text[j - 1] === '\t')) j--;
-    if (j <= 0) return null;
-    const c = text[j - 1];
-    if (c !== '.' && c !== ':') return null;
-    return j - 1;
+function enumerateAt(t: TypeRef): Map<string, MemberType> {
+    return enumerateMembers(t);
 }
 
-/** If the receiver is a single bare identifier, return it. */
-function bareReceiverName(text: string, dotIndex: number): string | null {
-    let i = dotIndex;
-    while (i > 0 && (text[i - 1] === ' ' || text[i - 1] === '\t')) i--;
-    const end = i;
-    while (i > 0 && /[A-Za-z0-9_]/.test(text[i - 1])) i--;
-    if (i === end) return null;
-    return text.slice(i, end);
-}
-
-/**
- * Find the index of the first token whose start offset is greater than or
- * equal to `offset`. Returns null when no such token exists. Used to
- * locate the receiver expression preceding a `.` or `:` in the buffer.
- */
-function tokenIndexAt(doc: TextDocument, tokens: Token[], offset: number): number | null {
-    for (let i = 0; i < tokens.length; i++) {
-        const startOffset = doc.offsetAt(tokens[i].range.start);
-        if (startOffset >= offset) return i;
-    }
-    return null;
-}
-
-function docSymbolKindToCompletion(k: CandoSymbol['kind']): CompletionItemKind {
-    switch (k) {
-        case 'function':  return CompletionItemKind.Function;
-        case 'method':    return CompletionItemKind.Method;
-        case 'class':     return CompletionItemKind.Class;
-        case 'constant':  return CompletionItemKind.Constant;
-        case 'parameter': return CompletionItemKind.Variable;
-        case 'field':     return CompletionItemKind.Field;
-        default:          return CompletionItemKind.Variable;
-    }
-}
-
-/* -- Hover ---------------------------------------------------------------- */
+/* ----------------------------------------------------------------------- */
+/* Hover                                                                   */
+/* ----------------------------------------------------------------------- */
 
 connection.onHover((params): Hover | null => {
     const doc = documents.get(params.textDocument.uri);
     if (!doc) return null;
-    const text = doc.getText();
-    const offset = doc.offsetAt(params.position);
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return null;
 
-    const word = wordAt(text, offset);
+    const word = wordAt(doc.getText(), doc.offsetAt(params.position));
     if (!word) return null;
 
+    /* Keyword hover. */
     const kw = KEYWORDS_UPPER.find(k => k.name === word.value || k.name.toLowerCase() === word.value);
-    if (kw) {
-        return md(`**${kw.name}** -- ${kw.detail}\n\n${kw.doc}`);
-    }
-    if (word.value === 'pipe') {
-        return md(`**pipe** -- ${PIPE_KEYWORD.doc}`);
-    }
-    const bi = builtinByName(word.value);
-    if (bi) {
-        return md(`**${bi.name}** -- ${bi.detail}\n\n${bi.doc}`);
-    }
-    const ns = namespaceByName(word.value);
-    if (ns) {
-        return md(`**${ns.name}** (standard library)\n\n${ns.doc}\n\nMembers: ${ns.members.map(m => `\`${m}\``).join(', ') || '_(none registered)_'}`);
-    }
+    if (kw) return md(`**${kw.name}** -- ${kw.detail}\n\n${kw.doc}`);
+    if (word.value === 'pipe') return md(`**pipe** -- ${PIPE_KEYWORD.doc}`);
 
-    /* Member access hover: walk back through the receiver chain via the
-     * type tracker, then look the word up on the resolved type. */
-    const before = text.slice(Math.max(0, word.start - 64), word.start);
-    const dotMatch = /[.:]\s*$/.test(before);
-    if (dotMatch) {
-        const cached = analysisCache.get(params.textDocument.uri);
-        if (cached) {
-            const dotIdx = receiverDotIndex(text, word.start);
-            if (dotIdx !== null) {
-                const tokIdx = tokenIndexAt(doc, cached.tokens, dotIdx);
-                if (tokIdx !== null) {
-                    const ref = inferReceiverAt(cached.tokens, tokIdx, cached.typeEnv, workspaceRoots);
-                    const member = listMembers(ref, cached.typeEnv).get(word.value);
-                    if (member) {
-                        const ownerLabel = describeTypeForHover(ref);
-                        const detail = formatMemberDetail(member, word.value);
-                        const lines = [`**${ownerLabel}.${word.value}**`, '', '`' + detail + '`'];
-                        if (member.doc) { lines.push('', member.doc); }
-                        return md(lines.join('\n'));
-                    }
+    /* Find the AST node at the cursor; use its inferred type. */
+    const node = nodeAt(a.program, params.position.line, params.position.character);
+    if (node) {
+        if (node.kind === 'Member') {
+            const recvT = a.inferred.nodeTypes.get(node.object);
+            if (recvT) {
+                const members = enumerateMembers(recvT);
+                const m = members.get(node.property);
+                if (m) {
+                    const owner = renderType(recvT);
+                    const detail = memberDetail(m, node.property);
+                    const lines = [`**${owner}.${node.property}**`, '', '`' + detail + '`'];
+                    if (m.doc) { lines.push('', m.doc); }
+                    return md(lines.join('\n'));
                 }
             }
         }
-    }
-
-    const cached = analysisCache.get(params.textDocument.uri);
-    const sym = cached?.byName.get(word.value);
-    if (sym) {
-        const lines = [`**${sym.name}** -- ${sym.detail ?? sym.kind}`];
-        const inc = cached?.includes.get(sym.name);
-        if (inc) {
-            const resolved = resolveIncludePath(inc.path, params.textDocument.uri, workspaceRoots);
-            lines.push('');
-            lines.push(resolved
-                ? `Module: \`${inc.path}\` -> \`${resolved}\``
-                : `Module: \`${inc.path}\` *(not found)*`);
+        if (node.kind === 'Ident') {
+            const scope = a.resolved.scopeOf.get(node);
+            const b = scope?.lookup(node.name);
+            if (b) {
+                const t = a.inferred.bindingTypes.get(b) ?? b.type;
+                const lines = [`**${b.name}** -- \`${renderType(t)}\``];
+                if (b.captured) lines.push('', '_(captured upvalue)_');
+                return md(lines.join('\n'));
+            }
+            const ns = namespaceByName(node.name);
+            if (ns) {
+                return md(`**${ns.name}** (standard library)\n\n${ns.doc}\n\nMembers: ${ns.members.map(m => `\`${m}\``).join(', ') || '_(none)_'}`);
+            }
+            const bi = builtinByName(node.name);
+            if (bi) return md(`**${bi.name}** -- ${bi.detail}\n\n${bi.doc}`);
         }
-        return md(lines.join('\n'));
     }
-
     return null;
 });
 
@@ -541,169 +463,171 @@ function md(text: string): Hover {
     return { contents: { kind: MarkupKind.Markdown, value: text } };
 }
 
-/* -- Signature help ------------------------------------------------------- */
+/* ----------------------------------------------------------------------- */
+/* Signature help                                                          */
+/* ----------------------------------------------------------------------- */
 
 connection.onSignatureHelp((params): SignatureHelp | null => {
     const doc = documents.get(params.textDocument.uri);
     if (!doc) return null;
-    const text = doc.getText();
-    const offset = doc.offsetAt(params.position);
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return null;
 
-    const ctx = findEnclosingCall(text, offset);
-    if (!ctx) return null;
+    /* Find the enclosing Call node whose argument range covers the cursor. */
+    const target = findEnclosingCallNode(a.program, params.position.line, params.position.character);
+    if (!target) return null;
+    const calleeT = a.inferred.nodeTypes.get(target.call.callee);
+    if (!calleeT) return null;
 
-    /* Chained call: walk back from the function name through the receiver
-     * expression so `forms.createTextBox(parent).setText("|")` finds the
-     * TextBox.setText signature. */
-    const cached = analysisCache.get(params.textDocument.uri);
-    const headMatch = /([A-Za-z_][A-Za-z0-9_]*)$/.exec(text.slice(0, ctx.callerEnd));
-    if (cached && headMatch) {
-        const fnName = headMatch[1];
-        const fnStart = ctx.callerEnd - fnName.length;
-        const dotIdx = receiverDotIndex(text, fnStart);
-        if (dotIdx !== null) {
-            const tokIdx = tokenIndexAt(doc, cached.tokens, dotIdx);
-            if (tokIdx !== null) {
-                const ref = inferReceiverAt(cached.tokens, tokIdx, cached.typeEnv, workspaceRoots);
-                const spec = listMembers(ref, cached.typeEnv).get(fnName);
-                if (spec) {
-                    const sig = formatMemberDetail(spec, fnName);
-                    return makeSignature(sig, ctx.activeParameter);
-                }
-            }
-            /* Fall through to the std-library namespace heuristic. */
-            const dotName = /([A-Za-z_][A-Za-z0-9_]*)\s*[.:]\s*$/.exec(text.slice(0, dotIdx + 1));
-            if (dotName) {
-                const ns = namespaceByName(dotName[1]);
-                if (ns) {
-                    const sig = namespaceMemberDetail(ns, fnName) ?? `${ns.name}.${fnName}(...)`;
-                    return makeSignature(sig, ctx.activeParameter);
-                }
-            }
-        }
+    let fn: FunctionType | null = null;
+    if (calleeT.kind === 'function') fn = calleeT;
+    else if (calleeT.kind === 'class') {
+        fn = {
+            kind: 'function',
+            params: calleeT.ctorParams,
+            returns: [calleeT.instance],
+            name: calleeT.name
+        };
     }
+    if (!fn) return null;
 
-    /* Bare `name(` */
-    const bareMatch = /([A-Za-z_][A-Za-z0-9_]*)$/.exec(text.slice(0, ctx.callerEnd));
-    if (!bareMatch) return null;
-    const name = bareMatch[1];
-
-    const sym = cached?.byName.get(name);
-    if (sym && sym.parameters !== undefined) {
-        const sig = `${name}(${sym.parameters.join(', ')})`;
-        return makeSignature(sig, ctx.activeParameter);
-    }
-
-    const bi = builtinByName(name);
-    if (bi) return makeSignature(bi.detail, ctx.activeParameter);
-
-    return null;
+    const label = formatFunctionSignature(fn);
+    const sigParams: ParameterInformation[] = fn.params.map(p => ({
+        label: `${p.rest ? '...' : ''}${p.name}${p.optional ? '?' : ''}: ${renderType(p.type)}`,
+        documentation: p.doc ? { kind: MarkupKind.Markdown, value: p.doc } : undefined
+    }));
+    const sig: SignatureInformation = {
+        label,
+        parameters: sigParams,
+        documentation: fn.doc ? { kind: MarkupKind.Markdown, value: fn.doc } : undefined
+    };
+    const active = Math.min(target.activeParameter, Math.max(0, fn.params.length - 1));
+    return { signatures: [sig], activeSignature: 0, activeParameter: active };
 });
 
-interface CallContext {
-    /* Index of the character immediately before the opening `(`. */
-    callerEnd: number;
-    /* Zero-based index of the parameter the cursor is currently on. */
-    activeParameter: number;
+function formatFunctionSignature(fn: FunctionType): string {
+    const ps = fn.params.map(p => `${p.rest ? '...' : ''}${p.name}${p.optional ? '?' : ''}: ${renderType(p.type)}`).join(', ');
+    const ret = fn.returnsSelf
+        ? 'self'
+        : fn.returns.length === 1 ? renderType(fn.returns[0])
+        : fn.returns.map(r => renderType(r)).join(', ');
+    return `${fn.name ?? 'function'}(${ps}) -> ${ret}`;
 }
 
-function findEnclosingCall(text: string, offset: number): CallContext | null {
-    let depth = 0;
-    let commas = 0;
-    for (let i = offset - 1; i >= 0; i--) {
-        const c = text[i];
-        if (c === ')') depth++;
-        else if (c === '(') {
-            if (depth === 0) return { callerEnd: i, activeParameter: commas };
-            depth--;
-        } else if (c === ',' && depth === 0) {
-            commas++;
-        } else if (c === '"' || c === '\'') {
-            /* Skip a balanced string by walking backwards to its match. */
-            const quote = c;
-            i--;
-            while (i >= 0 && text[i] !== quote) i--;
+function findEnclosingCallNode(root: Node, line: number, character: number): { call: Call; activeParameter: number } | null {
+    /* Walk the AST and pick the deepest Call whose argument list contains
+     * the cursor. We treat the range *inside* the parens as the trigger
+     * range; if there are no args yet, anywhere inside the call range works. */
+    let best: { call: Call; activeParameter: number } | null = null;
+    const visit = (n: Node): void => {
+        if (n.kind === 'Call' && rangeContains(n.range, line, character)) {
+            /* Compute active parameter: index of the trailing arg whose
+             * range ends before the cursor, plus 1. */
+            let active = 0;
+            for (let i = 0; i < n.args.length; i++) {
+                const arg = n.args[i];
+                if (isBeforeOrAt(arg.range.end, line, character)) active = i + 1;
+            }
+            if (active > n.args.length) active = n.args.length;
+            best = { call: n, activeParameter: active };
         }
-    }
-    return null;
-}
-
-function makeSignature(label: string, activeParameter: number): SignatureHelp {
-    const params: ParameterInformation[] = [];
-    const open = label.indexOf('(');
-    const close = label.lastIndexOf(')');
-    if (open >= 0 && close > open) {
-        const inner = label.slice(open + 1, close);
-        if (inner.trim().length) {
-            for (const part of inner.split(',')) params.push({ label: part.trim() });
-        }
-    }
-    const sig: SignatureInformation = { label, parameters: params };
-    return {
-        signatures: [sig],
-        activeSignature: 0,
-        activeParameter: Math.min(activeParameter, Math.max(0, params.length - 1))
+        for (const c of astChildren(n)) visit(c);
     };
+    visit(root);
+    return best;
 }
 
-/* -- Definition + symbols ------------------------------------------------- */
+function isBeforeOrAt(p: { line: number; character: number }, line: number, character: number): boolean {
+    if (p.line < line) return true;
+    if (p.line > line) return false;
+    return p.character <= character;
+}
+
+/* ----------------------------------------------------------------------- */
+/* Definition + document symbols                                           */
+/* ----------------------------------------------------------------------- */
 
 connection.onDefinition(params => {
-    const doc = documents.get(params.textDocument.uri);
-    if (!doc) return null;
-    const word = wordAt(doc.getText(), doc.offsetAt(params.position));
-    if (!word) return null;
-    const cached = analysisCache.get(params.textDocument.uri);
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return null;
+    const node = nodeAt(a.program, params.position.line, params.position.character);
+    if (!node) return null;
 
-    /* Jump to the included file when the user invokes goto on a name bound
-     * to `include(...)`. */
-    const inc = cached?.includes.get(word.value);
-    if (inc) {
-        const resolved = resolveIncludePath(inc.path, params.textDocument.uri, workspaceRoots);
-        if (resolved) {
+    if (node.kind === 'Ident') {
+        const scope = a.resolved.scopeOf.get(node);
+        const b = scope?.lookup(node.name);
+        if (b) {
             return {
-                uri: fsPathToUri(resolved),
+                uri: params.textDocument.uri,
+                range: toLsp(b.nameRange)
+            } as Location;
+        }
+        /* Maybe an include binding: VAR foo = include("...") -- already
+         * resolved by the inferer; the binding's decl range is the VarDecl. */
+    }
+    if (node.kind === 'Call' && node.callee.kind === 'Ident' && node.callee.name === 'include'
+        && node.args.length >= 1 && node.args[0].expr.kind === 'StringLit') {
+        const target = resolveIncludePath(node.args[0].expr.value, params.textDocument.uri, workspaceRoots);
+        if (target) {
+            return {
+                uri: fsPathToUri(target),
                 range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }
             } as Location;
         }
     }
-
-    const sym = cached?.byName.get(word.value);
-    if (!sym) return null;
-    const loc: Location = { uri: params.textDocument.uri, range: toLsp(sym.range) };
-    return loc;
+    return null;
 });
 
 connection.onDocumentSymbol(params => {
-    const cached = analysisCache.get(params.textDocument.uri);
-    if (!cached) return [];
-    return cached.symbols.map(toDocumentSymbol);
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return [];
+    const out: DocumentSymbol[] = [];
+    for (const s of a.program.body) {
+        const ds = stmtToDocSymbol(s);
+        if (ds) out.push(ds);
+    }
+    return out;
 });
 
-function toDocumentSymbol(s: CandoSymbol): DocumentSymbol {
-    return {
-        name: s.name,
-        detail: s.detail,
-        kind: mapKind(s.kind),
-        range: toLsp(s.range),
-        selectionRange: toLsp(s.selectionRange),
-        children: s.children?.map(toDocumentSymbol)
-    };
-}
-
-function mapKind(k: CandoSymbol['kind']): LspSymbolKind {
-    switch (k) {
-        case 'function':  return LspSymbolKind.Function;
-        case 'method':    return LspSymbolKind.Method;
-        case 'class':     return LspSymbolKind.Class;
-        case 'constant':  return LspSymbolKind.Constant;
-        case 'parameter': return LspSymbolKind.Variable;
-        case 'field':     return LspSymbolKind.Field;
-        default:          return LspSymbolKind.Variable;
+function stmtToDocSymbol(s: Node): DocumentSymbol | null {
+    switch (s.kind) {
+        case 'FunctionDecl':
+            return {
+                name: s.name,
+                detail: `FUNCTION ${s.name}(${s.params.map(p => p.name).join(', ')})`,
+                kind: LspSymbolKind.Function,
+                range: toLsp(s.range),
+                selectionRange: toLsp(s.nameRange)
+            };
+        case 'ClassDecl': {
+            const ds: DocumentSymbol = {
+                name: s.name,
+                detail: `CLASS ${s.name}`,
+                kind: LspSymbolKind.Class,
+                range: toLsp(s.range),
+                selectionRange: toLsp(s.nameRange),
+                children: []
+            };
+            return ds;
+        }
+        case 'VarDecl': {
+            const first = s.targets[0];
+            if (!first) return null;
+            return {
+                name: first.name,
+                detail: s.keyword,
+                kind: s.keyword === 'CONST' ? LspSymbolKind.Constant : LspSymbolKind.Variable,
+                range: toLsp(s.range),
+                selectionRange: toLsp(first.range)
+            };
+        }
     }
+    return null;
 }
 
-/* -- Helpers -------------------------------------------------------------- */
+/* ----------------------------------------------------------------------- */
+/* Helpers                                                                 */
+/* ----------------------------------------------------------------------- */
 
 function wordAt(text: string, offset: number): { value: string; start: number; end: number } | null {
     const isIdentChar = (c: string): boolean => /[A-Za-z0-9_]/.test(c);
@@ -713,6 +637,99 @@ function wordAt(text: string, offset: number): { value: string; start: number; e
     while (e < text.length && isIdentChar(text[e])) e++;
     if (s === e) return null;
     return { value: text.slice(s, e), start: s, end: e };
+}
+
+/** Return the offset of the trailing `.` / `:` / `?.` before the cursor
+ *  if the user is mid-member-access. */
+function receiverDotAt(text: string, offset: number): { dotOffset: number; accessor: '.' | ':' | '?.' } | null {
+    let i = offset;
+    while (i > 0 && /[A-Za-z0-9_]/.test(text[i - 1])) i--;
+    let j = i;
+    while (j > 0 && (text[j - 1] === ' ' || text[j - 1] === '\t')) j--;
+    if (j <= 0) return null;
+    const c = text[j - 1];
+    if (c === '.' || c === ':') {
+        /* `?.` is two chars. */
+        if (j >= 2 && text[j - 2] === '?' && c === '.') {
+            return { dotOffset: j - 2, accessor: '?.' };
+        }
+        return { dotOffset: j - 1, accessor: c };
+    }
+    return null;
+}
+
+/** Find the token index at or just before `offset` (in document characters). */
+function tokenIndexBefore(tokens: Token[], offset: number, doc: TextDocument): number | null {
+    let result: number | null = null;
+    for (let i = 0; i < tokens.length; i++) {
+        const endOff = doc.offsetAt(tokens[i].range.end);
+        if (endOff <= offset) result = i;
+        else break;
+    }
+    return result;
+}
+
+/** Walk backwards from `endIdx` collecting tokens that form the contiguous
+ *  receiver expression (identifiers, member accessors, balanced calls /
+ *  indices). Returns the range from the first such token to the last. */
+function receiverRangeFromTokens(tokens: Token[], endIdx: number): LexRange | null {
+    if (endIdx < 0 || endIdx >= tokens.length) return null;
+    let i = endIdx;
+    let depthParen = 0;
+    let depthBracket = 0;
+    while (i >= 0) {
+        const t = tokens[i];
+        if (t.kind === 'eof') { i--; continue; }
+        if (t.kind === 'punct' && t.value === ')') { depthParen++; i--; continue; }
+        if (t.kind === 'punct' && t.value === '(') {
+            if (depthParen === 0) break;
+            depthParen--; i--; continue;
+        }
+        if (t.kind === 'punct' && t.value === ']') { depthBracket++; i--; continue; }
+        if (t.kind === 'punct' && t.value === '[') {
+            if (depthBracket === 0) break;
+            depthBracket--; i--; continue;
+        }
+        if (depthParen > 0 || depthBracket > 0) { i--; continue; }
+        if (t.kind === 'ident' || t.kind === 'keyword') { i--; continue; }
+        if (t.kind === 'op' && (t.value === '.' || t.value === ':' || t.value === '::' || t.value === '?.')) {
+            i--; continue;
+        }
+        break;
+    }
+    const start = tokens[i + 1];
+    const end = tokens[endIdx];
+    if (!start) return null;
+    return { start: start.range.start, end: end.range.end };
+}
+
+/** Find the deepest AST node whose range fully matches `r`. */
+function nodeContainingRange(root: Node, r: LexRange): Node | null {
+    let best: Node | null = null;
+    const startsAt = (n: Node): boolean =>
+        n.range.start.line === r.start.line && n.range.start.character === r.start.character;
+    const endsAt = (n: Node): boolean =>
+        n.range.end.line === r.end.line && n.range.end.character === r.end.character;
+    const visit = (n: Node): void => {
+        if (rangeContains(n.range, r.start.line, r.start.character)
+            && rangeContains(n.range, r.end.line, r.end.character)) {
+            if (startsAt(n) && endsAt(n)) best = n;
+            for (const c of astChildren(n)) visit(c);
+        }
+    };
+    visit(root);
+    /* If no exact match, fall back to the deepest containing node. */
+    if (best) return best;
+    return nodeAt(root, r.end.line, Math.max(0, r.end.character - 1));
+}
+
+function walkAst(n: Node, visit: (n: Node) => void): void {
+    visit(n);
+    for (const c of astChildren(n)) walkAst(c, visit);
+}
+
+function scopeContaining(a: AnalyzedDocument, line: number, character: number): Scope {
+    return scopeAt(a.resolved.fileScope, line, character);
 }
 
 function uriToFsPath(uri: string): string | null {
@@ -730,6 +747,9 @@ function fsPathToUri(p: string): string {
     if (!normalized.startsWith('/')) normalized = '/' + normalized;
     return 'file://' + encodeURI(normalized).replace(/[#?]/g, c => encodeURIComponent(c));
 }
+
+/* Reference imports retained for the public API surface. */
+void path; void namespaceMemberDetail;
 
 documents.listen(connection);
 connection.listen();

@@ -1,0 +1,4 @@
+// EXPECT: array<number>
+VAR ns = [1, 2, 3];
+VAR doubled = ns ~> pipe * 2;
+doubled|

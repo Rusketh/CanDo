@@ -1,0 +1,7 @@
+// EXPECT: number
+FUNCTION make() {
+    VAR n = 5;
+    RETURN n + 1;
+}
+VAR x = make();
+x|

@@ -3,6 +3,54 @@
 All notable changes to the **CanDo Language** VS Code extension are
 documented in this file.
 
+## 0.4.0 -- 2026-05-11
+
+### Rewritten
+
+- **Complete rewrite of the language server around a real parser + AST +
+  scope tree + type inferer.** The previous server walked the token
+  stream with shallow pattern matching; it never tracked function return
+  values, lost member writes through reassignment, and couldn't see
+  beyond first-occurrence symbol lookups. The new pipeline (parse →
+  resolve → infer) is structurally aware:
+  - **Function return types are tracked.** `VAR x = f(); x.|`
+    now lists `f`'s actual return-value members.
+  - **Multi-return distribution.** `VAR a, b = pair();` types `a` and
+    `b` positionally from `pair`'s return tuple.
+  - **Member-flow through reassignment.** `VAR x = {}; x.foo = 1;
+    VAR y = x; y.|` shows `foo`.
+  - **Indexing.** `arr[i]` now yields the array's element type.
+  - **Class / EXTENDS chains.** `Dog EXTENDS Animal` instance lookup
+    walks the prototype chain via the manifest- or in-file-defined
+    `__index` parent.
+  - **Fluent `::` calls.** Always type to the receiver, so chains
+    survive `obj::a()::b()`.
+  - **Pipes.** `arr ~> body` exposes `pipe: <element type>` in the
+    body scope; `~>` yields `array<bodyType>`, `~&>` / `~!>` yield
+    `array<sourceElement>`.
+  - **Flow narrowing.** `IF x { x.| }` drops the `null` variant of a
+    union so member completion shows the truthy side.
+  - **Closures and scoping.** Block / function / file scopes with
+    proper shadowing; upvalue captures are tracked.
+  - **Cross-file include.** `.cdo` modules are re-analyzed; their
+    top-level `RETURN value;` (or top-level binding bag) becomes the
+    include's value type. Binary modules fall through to their
+    `cando.api.json` manifest.
+
+### Added
+
+- **Semantic diagnostics** (on by default) flag `undefined-identifier`
+  (advisory), `wrong-arg-count`, `non-callable-call`, and
+  `assign-to-const`. Disable with `cando.diagnostics.semantic = false`.
+- **Headless test suite** at `server/test/cases/*.cdo` plus
+  `server/test/runner.js`. Run with `npm test`.
+
+### Removed
+
+- The legacy `analyzer.ts`, `types.ts`, and `crossfile.ts` modules
+  (replaced by `ast.ts`, `parser.ts`, `scope.ts`, `typesys.ts`,
+  `infer.ts`, and `analyze.ts`).
+
 ## 0.3.3 -- 2026-05-01
 
 ### Fixed

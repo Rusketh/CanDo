@@ -1,0 +1,3 @@
+// MEMBERS: Button, Form, Label, TextBox, VERSION
+VAR forms = include("../../../../../modules/forms/forms.so");
+forms.|

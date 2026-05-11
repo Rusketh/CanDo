@@ -1,0 +1,4 @@
+// EXPECT: number
+VAR add = (a, b) => a + b;
+VAR n = add(1, 2);
+n|

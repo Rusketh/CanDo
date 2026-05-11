@@ -1,0 +1,6 @@
+// MEMBERS: foo, bar
+VAR obj = {};
+obj.foo = FUNCTION(self) { RETURN self; };
+obj.bar = FUNCTION(self) { RETURN self; };
+VAR back = obj::foo()::bar();
+back.|

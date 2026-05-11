@@ -1,0 +1,6 @@
+// EXPECT: number
+VAR xs = [1, 2, 3];
+FOR v OF xs {
+    VAR x = v;
+    x|
+}
