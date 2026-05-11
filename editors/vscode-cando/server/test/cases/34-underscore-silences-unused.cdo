@@ -1,0 +1,6 @@
+// DIAG-COUNT: 0
+FUNCTION foo() {
+    VAR _scratch = 42;
+    RETURN 0;
+}
+foo()|;

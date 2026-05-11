@@ -130,6 +130,12 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
             documentHighlightProvider: true,
             codeLensProvider: { resolveProvider: false },
             documentFormattingProvider: true,
+            callHierarchyProvider: true,
+            workspace: {
+                fileOperations: {
+                    willRename: { filters: [{ pattern: { glob: '**/*.cdo' } }] }
+                }
+            },
             inlayHintProvider: { resolveProvider: false },
             foldingRangeProvider: true,
             selectionRangeProvider: true,
@@ -275,6 +281,24 @@ function semanticDiagnostics(a: AnalyzedDocument): Diagnostic[] {
                             source: 'cando'
                         });
                     }
+                    /* Argument-type check: every positional arg whose param
+                     * has a concrete declared type must be assignable. */
+                    for (let i = 0; i < n.args.length && i < calleeT.params.length; i++) {
+                        const arg = n.args[i];
+                        const p = calleeT.params[i];
+                        if (arg.spread || p.rest) continue;
+                        const argT = a.inferred.nodeTypes.get(arg.expr);
+                        if (!argT) continue;
+                        if (!isAssignable(argT, p.type)) {
+                            out.push({
+                                severity: DiagnosticSeverity.Warning,
+                                range: toLsp(arg.expr.range),
+                                message: `Argument type '${renderType(argT)}' is not assignable to parameter '${p.name}: ${renderType(p.type)}'`,
+                                source: 'cando',
+                                code: 'arg-type'
+                            });
+                        }
+                    }
                 } else if (calleeT.kind !== 'class' && !isCallableType(calleeT)) {
                     out.push({
                         severity: DiagnosticSeverity.Information,
@@ -289,16 +313,131 @@ function semanticDiagnostics(a: AnalyzedDocument): Diagnostic[] {
             const scope = a.resolved.scopeOf.get(n);
             const b = scope?.lookup(n.name);
             if (!b && !isBuiltinIdent(n.name) && n.name !== 'self' && n.name !== 'pipe') {
+                /* Did-you-mean suggestion: scan visible bindings for the
+                 * closest match by edit distance. Only emit when there's a
+                 * reasonably close hit (distance <= 2 or <= 1/3 of length). */
+                const suggestion = closestVisibleName(scope, n.name);
+                const detail = suggestion ? ` -- did you mean '${suggestion}'?` : '';
                 out.push({
                     severity: DiagnosticSeverity.Hint,
                     range: toLsp(n.range),
-                    message: `'${n.name}' is not declared in this file (will be looked up as a global)`,
-                    source: 'cando'
+                    message: `'${n.name}' is not declared in this file (will be looked up as a global)${detail}`,
+                    source: 'cando',
+                    code: suggestion ? `did-you-mean:${suggestion}` : 'undefined-ident',
+                    data: suggestion ? { suggestion } : undefined
                 });
             }
         }
     });
+
+    /* Unused binding detection. Skip names starting with `_`, function /
+     * class declarations (they're API surface that may be exported via
+     * the file's RETURN), `self`, `pipe`, CATCH params, and globals. */
+    for (const b of a.resolved.allBindings) {
+        if (b.name.startsWith('_')) continue;
+        if (b.name === 'self' || b.name === 'pipe') continue;
+        if (b.kind === 'self' || b.kind === 'pipe' || b.kind === 'catch') continue;
+        if (b.kind === 'function' || b.kind === 'class' || b.kind === 'global') continue;
+        if (b.references.length > 1) continue;  // declaration counts as 1
+        const tag = b.kind === 'param' ? 'parameter' : 'variable';
+        out.push({
+            severity: DiagnosticSeverity.Hint,
+            range: toLsp(b.nameRange),
+            message: `Unused ${tag} '${b.name}' (prefix with '_' to silence)`,
+            source: 'cando',
+            code: 'unused',
+            tags: [1]  // DiagnosticTag.Unnecessary -- editor renders faded
+        });
+    }
+
+    /* Dead code detection: any statement after a RETURN / THROW / BREAK /
+     * CONTINUE / SETTLE in the same block is unreachable. */
+    walkAst(a.program, (n) => {
+        if (n.kind !== 'BlockStmt') return;
+        let killed = false;
+        let killer: typeof n.body[number] | null = null;
+        for (const s of n.body) {
+            if (killed) {
+                out.push({
+                    severity: DiagnosticSeverity.Hint,
+                    range: toLsp(s.range),
+                    message: `Unreachable: code after ${killer?.kind === 'ReturnStmt' ? 'RETURN' : killer?.kind === 'ThrowStmt' ? 'THROW' : 'control-flow exit'}`,
+                    source: 'cando',
+                    code: 'unreachable',
+                    tags: [1]
+                });
+            }
+            if (s.kind === 'ReturnStmt' || s.kind === 'ThrowStmt' ||
+                s.kind === 'BreakStmt' || s.kind === 'ContinueStmt' ||
+                s.kind === 'SettleStmt') {
+                killed = true;
+                killer = s;
+            }
+        }
+    });
     return out;
+}
+
+/** Conservative assignability: is `from` an acceptable value for a slot
+ *  that wants `to`? Falls back to `true` whenever either side is `any` /
+ *  `unknown` so we don't flood diagnostics on under-typed code. */
+function isAssignable(from: TypeRef, to: TypeRef): boolean {
+    if (to.kind === 'prim' && (to.name === 'any' || to.name === 'unknown')) return true;
+    if (from.kind === 'prim' && (from.name === 'any' || from.name === 'unknown')) return true;
+    if (renderType(from) === renderType(to)) return true;
+    if (to.kind === 'union') return to.variants.some(v => isAssignable(from, v));
+    if (from.kind === 'union') return from.variants.every(v => isAssignable(v, to));
+    if (to.kind === 'optional') {
+        if (from.kind === 'prim' && from.name === 'null') return true;
+        return isAssignable(from, to.inner);
+    }
+    if (from.kind === 'optional') return false;  // can't pass a maybe-null where required
+    if (to.kind === 'array' && from.kind === 'array') return isAssignable(from.element, to.element);
+    if (to.kind === 'object' && from.kind === 'object') return true;  // structural; permissive
+    if (to.kind === 'manifest-type' && from.kind === 'manifest-type') return from.typeName === to.typeName;
+    /* Class instance is acceptable where the instance type is wanted. */
+    if (to.kind === 'object' && from.kind === 'class') return true;
+    return false;
+}
+
+function closestVisibleName(scope: Scope | undefined, name: string): string | null {
+    if (!scope) return null;
+    const candidates: string[] = [];
+    for (let s: Scope | null = scope; s; s = s.parent) {
+        for (const k of s.bindings.keys()) candidates.push(k);
+    }
+    for (const ns of NAMESPACES) candidates.push(ns.name);
+    for (const b of GLOBAL_BUILTINS) candidates.push(b.name);
+    let best: { name: string; dist: number } | null = null;
+    for (const c of candidates) {
+        const d = editDistance(name, c);
+        if (d > 2 && d > Math.floor(name.length / 3)) continue;
+        if (!best || d < best.dist) best = { name: c, dist: d };
+    }
+    return best?.name ?? null;
+}
+
+function editDistance(a: string, b: string): number {
+    /* Standard Damerau-Levenshtein bounded to 8 for performance. */
+    if (a === b) return 0;
+    const al = a.length, bl = b.length;
+    if (Math.abs(al - bl) > 8) return Infinity;
+    const prev = new Array(bl + 1).fill(0);
+    const cur = new Array(bl + 1).fill(0);
+    for (let j = 0; j <= bl; j++) prev[j] = j;
+    for (let i = 1; i <= al; i++) {
+        cur[0] = i;
+        for (let j = 1; j <= bl; j++) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            cur[j] = Math.min(
+                prev[j] + 1,
+                cur[j - 1] + 1,
+                prev[j - 1] + cost
+            );
+        }
+        for (let j = 0; j <= bl; j++) prev[j] = cur[j];
+    }
+    return prev[bl];
 }
 
 function isBuiltinIdent(name: string): boolean {
@@ -1265,7 +1404,42 @@ connection.onCodeAction(params => {
                 title: `Declare 'VAR ${name} = NULL;' above this line`,
                 kind: CodeActionKind.QuickFix,
                 diagnostics: [diag],
-                edit,
+                edit
+            });
+            /* Auto-include: if `<name>` matches a known native module under
+             * the workspace's modules/, suggest `VAR <name> = include(...)`
+             * at the top of the file. */
+            const candidate = findIncludableModule(name, params.textDocument.uri);
+            if (candidate) {
+                out.push({
+                    title: `Add: VAR ${name} = include("${candidate.relative}");`,
+                    kind: CodeActionKind.QuickFix,
+                    diagnostics: [diag],
+                    edit: {
+                        changes: {
+                            [params.textDocument.uri]: [{
+                                range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+                                newText: `VAR ${name} = include("${candidate.relative}");\n`
+                            }]
+                        }
+                    },
+                    isPreferred: true
+                });
+            }
+        }
+        /* Did-you-mean from the suggestion baked into the diagnostic code. */
+        const dym = typeof diag.code === 'string' && /^did-you-mean:(.+)$/.exec(diag.code);
+        if (dym) {
+            const suggestion = dym[1];
+            out.push({
+                title: `Change to '${suggestion}'`,
+                kind: CodeActionKind.QuickFix,
+                diagnostics: [diag],
+                edit: {
+                    changes: {
+                        [params.textDocument.uri]: [{ range: diag.range, newText: suggestion }]
+                    }
+                },
                 isPreferred: true
             });
         }
@@ -1503,6 +1677,237 @@ function scanTemplate(src: string, start: number): number {
         i++;
     }
     return i;
+}
+
+/* ----------------------------------------------------------------------- */
+/* Auto-include candidate finder                                           */
+/* ----------------------------------------------------------------------- */
+
+import * as fs from 'fs';
+import { findManifestFor } from './manifest';
+
+/** Scan workspace `modules/<name>/cando.api.json` files and return the
+ *  best relative-path candidate to `include()` for the binding name the
+ *  user typed. Currently matches by manifest `name` field exactly, then
+ *  by directory name, then by path containment. */
+function findIncludableModule(bindingName: string, documentUri: string):
+    { relative: string; absolute: string } | null {
+    const docPath = uriToFsPath(documentUri);
+    if (!docPath) return null;
+    for (const root of workspaceRoots) {
+        const modulesDir = path.join(root, 'modules');
+        if (!safeIsDir(modulesDir)) continue;
+        let entries: string[];
+        try { entries = fs.readdirSync(modulesDir); } catch { continue; }
+        for (const e of entries) {
+            const dir = path.join(modulesDir, e);
+            if (!safeIsDir(dir)) continue;
+            /* Look for the manifest. */
+            let absoluteCandidate = path.join(dir, e + '.so');
+            let manifest = findManifestFor(absoluteCandidate);
+            if (!manifest) {
+                /* Try a .cdo entry point. */
+                absoluteCandidate = path.join(dir, 'init.cdo');
+                if (!safeIsFile(absoluteCandidate)) absoluteCandidate = path.join(dir, e + '.cdo');
+                if (!safeIsFile(absoluteCandidate)) continue;
+            }
+            const matches = (manifest && manifest.name === bindingName) ||
+                            e === bindingName ||
+                            e === bindingName.toLowerCase();
+            if (!matches) continue;
+            const relative = path.relative(path.dirname(docPath), absoluteCandidate)
+                .replace(/\\/g, '/');
+            return {
+                relative: relative.startsWith('.') ? relative : './' + relative,
+                absolute: absoluteCandidate
+            };
+        }
+    }
+    return null;
+}
+
+function safeIsDir(p: string): boolean {
+    try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
+function safeIsFile(p: string): boolean {
+    try { return fs.statSync(p).isFile(); } catch { return false; }
+}
+
+/* ----------------------------------------------------------------------- */
+/* Workspace file watching                                                 */
+/* ----------------------------------------------------------------------- */
+
+connection.onDidChangeWatchedFiles(params => {
+    for (const change of params.changes) {
+        const fsPath = uriToFsPath(change.uri);
+        if (fsPath) invalidateIndex(fsPath);
+    }
+    /* Refresh open documents so their cross-file references reflect the
+     * just-changed file. */
+    for (const doc of documents.all()) refresh(doc);
+});
+
+connection.workspace.onWillRenameFiles(params => {
+    /* When a `.cdo` file is renamed we update every workspace include()
+     * call that referenced its old name. We compute textDocument edits
+     * only for files we have analyzed; the user can run a re-analyse if
+     * they have files we haven't opened. */
+    const edits: WorkspaceEdit = { changes: {} };
+    const renames = params.files.map(f => ({
+        oldPath: uriToFsPath(f.oldUri),
+        newPath: uriToFsPath(f.newUri)
+    })).filter(r => r.oldPath && r.newPath) as { oldPath: string; newPath: string }[];
+    if (renames.length === 0) return null;
+    for (const doc of documents.all()) {
+        const a = getAnalyzed(doc.uri);
+        if (!a) continue;
+        const docFsPath = uriToFsPath(doc.uri);
+        if (!docFsPath) continue;
+        const docDir = path.dirname(docFsPath);
+        const fileEdits: TextEdit[] = [];
+        walkAst(a.program, (n) => {
+            if (n.kind === 'Call' && n.callee.kind === 'Ident' && n.callee.name === 'include'
+                && n.args.length >= 1 && n.args[0].expr.kind === 'StringLit') {
+                const arg = n.args[0].expr;
+                const rawPath = arg.value;
+                const resolved = resolveIncludePath(rawPath, doc.uri, workspaceRoots);
+                if (!resolved) return;
+                for (const r of renames) {
+                    if (resolved !== r.oldPath) continue;
+                    const newRel = path.relative(docDir, r.newPath).replace(/\\/g, '/');
+                    const newPath = newRel.startsWith('.') ? newRel : './' + newRel;
+                    /* Replace just the string contents (preserve quotes). */
+                    const startCh = arg.range.start.character + 1;
+                    const endCh = arg.range.end.character - 1;
+                    fileEdits.push({
+                        range: {
+                            start: { line: arg.range.start.line, character: startCh },
+                            end: { line: arg.range.end.line, character: endCh }
+                        },
+                        newText: newPath
+                    });
+                }
+            }
+        });
+        if (fileEdits.length) edits.changes![doc.uri] = fileEdits;
+    }
+    return Object.keys(edits.changes ?? {}).length ? edits : null;
+});
+
+/* ----------------------------------------------------------------------- */
+/* Call hierarchy                                                          */
+/* ----------------------------------------------------------------------- */
+
+connection.languages.callHierarchy.onPrepare(params => {
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return null;
+    const node = nodeAt(a.program, params.position.line, params.position.character);
+    if (!node) return null;
+    const b = bindingAtNode(a, node);
+    if (!b || (b.kind !== 'function' && b.kind !== 'class')) return null;
+    return [{
+        name: b.name,
+        kind: b.kind === 'class' ? LspSymbolKind.Class : LspSymbolKind.Function,
+        uri: params.textDocument.uri,
+        range: toLsp(b.declRange),
+        selectionRange: toLsp(b.nameRange),
+        detail: renderType(b.type),
+        data: { name: b.name, kind: b.kind, uri: params.textDocument.uri }
+    }];
+});
+
+connection.languages.callHierarchy.onIncomingCalls(params => {
+    const item = params.item;
+    const targetName = item.name;
+    const out: { from: typeof item; fromRanges: LspRange[] }[] = [];
+    /* Find every reference to this binding across the workspace and group
+     * them by the enclosing function in the calling document. */
+    const wsHits = findReferencesAcrossWorkspace(
+        // build a synthetic binding to drive the search
+        { name: targetName, kind: 'function', references: [], scope: { kind: 'file' } } as unknown as Binding,
+        item.uri,
+        workspaceRoots
+    );
+    /* Group hits by (uri, enclosing function name). */
+    const grouped = new Map<string, { uri: string; fnName: string; fnRange: LspRange; ranges: LspRange[] }>();
+    for (const h of wsHits) {
+        const a = getAnalyzed(h.uri);
+        if (!a) continue;
+        const enclosing = enclosingFunctionAt(a, h.range.start.line, h.range.start.character);
+        if (!enclosing) continue;
+        const key = h.uri + '|' + enclosing.name;
+        let entry = grouped.get(key);
+        if (!entry) {
+            entry = { uri: h.uri, fnName: enclosing.name, fnRange: toLsp(enclosing.range), ranges: [] };
+            grouped.set(key, entry);
+        }
+        entry.ranges.push(toLsp(h.range));
+    }
+    for (const e of grouped.values()) {
+        out.push({
+            from: {
+                name: e.fnName,
+                kind: LspSymbolKind.Function,
+                uri: e.uri,
+                range: e.fnRange,
+                selectionRange: e.fnRange
+            },
+            fromRanges: e.ranges
+        });
+    }
+    return out;
+});
+
+connection.languages.callHierarchy.onOutgoingCalls(params => {
+    const item = params.item;
+    const a = getAnalyzed(item.uri);
+    if (!a) return [];
+    /* Find the function decl whose name matches the item; walk its body
+     * collecting Call expressions and grouping by callee binding. */
+    const fnNode = findFunctionDecl(a, item.name);
+    if (!fnNode) return [];
+    const grouped = new Map<string, { name: string; range: LspRange; ranges: LspRange[] }>();
+    walkAst(fnNode, (n) => {
+        if (n.kind !== 'Call') return;
+        let calleeName = '';
+        if (n.callee.kind === 'Ident') calleeName = n.callee.name;
+        else if (n.callee.kind === 'Member') calleeName = n.callee.property;
+        if (!calleeName) return;
+        const b = a.resolved.fileScope.bindings.get(calleeName);
+        const range = b ? toLsp(b.declRange) : toLsp(n.callee.range);
+        const entry = grouped.get(calleeName) ?? { name: calleeName, range, ranges: [] };
+        entry.ranges.push(toLsp(n.callee.range));
+        grouped.set(calleeName, entry);
+    });
+    return [...grouped.values()].map(e => ({
+        to: {
+            name: e.name,
+            kind: LspSymbolKind.Function,
+            uri: item.uri,
+            range: e.range,
+            selectionRange: e.range
+        },
+        fromRanges: e.ranges
+    }));
+});
+
+function enclosingFunctionAt(a: AnalyzedDocument, line: number, character: number): { name: string; range: LexRange } | null {
+    let best: { name: string; range: LexRange } | null = null;
+    walkAst(a.program, (n) => {
+        if (n.kind === 'FunctionDecl' && rangeContains(n.range, line, character)) {
+            best = { name: n.name, range: n.range };
+        } else if (n.kind === 'ClassDecl' && rangeContains(n.range, line, character)) {
+            best = { name: n.name, range: n.range };
+        }
+    });
+    return best;
+}
+
+function findFunctionDecl(a: AnalyzedDocument, name: string): Node | null {
+    for (const s of a.program.body) {
+        if ((s.kind === 'FunctionDecl' || s.kind === 'ClassDecl') && s.name === name) return s;
+    }
+    return null;
 }
 
 /* Reference imports retained for the public API surface. */

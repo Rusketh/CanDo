@@ -55,9 +55,9 @@ function findCursor(text) {
 function parseDirectives(text) {
     const out = {
         expect: null, members: [], nomembers: [], parseErrors: 0,
-        refs: null, docContains: null
+        refs: null, docContains: null, diagCode: null, diagCount: null
     };
-    const re = /\/\/\s*(EXPECT|MEMBERS|NOMEMBERS|PARSE_ERRORS|REFS|DOC-CONTAINS):\s*(.+)$/gm;
+    const re = /\/\/\s*(EXPECT|MEMBERS|NOMEMBERS|PARSE_ERRORS|REFS|DOC-CONTAINS|DIAG-CODE|DIAG-COUNT):\s*(.+)$/gm;
     let m;
     while ((m = re.exec(text))) {
         const tag = m[1].trim();
@@ -68,7 +68,72 @@ function parseDirectives(text) {
         else if (tag === 'PARSE_ERRORS') out.parseErrors = parseInt(val, 10) | 0;
         else if (tag === 'REFS') out.refs = parseInt(val, 10) | 0;
         else if (tag === 'DOC-CONTAINS') out.docContains = val;
+        else if (tag === 'DIAG-CODE') out.diagCode = val;
+        else if (tag === 'DIAG-COUNT') out.diagCount = parseInt(val, 10) | 0;
     }
+    return out;
+}
+
+/** Re-run the same semantic-diagnostic logic the LSP layer uses. We
+ *  duplicate a minimal version here to avoid pulling in the LSP server
+ *  module (which imports vscode-languageserver). */
+function semanticDiagnosticsFor(a) {
+    const { renderType, enumerateMembers } = require(path.join(OUT, 'typesys.js'));
+    const out = [];
+    const ast = require(path.join(OUT, 'ast.js'));
+    const NS = require(path.join(OUT, 'builtins.js'));
+
+    function walk(n, visit) {
+        visit(n);
+        for (const c of ast.children(n)) walk(c, visit);
+    }
+
+    walk(a.program, (n) => {
+        if (n.kind === 'AssignStmt') {
+            for (const t of n.targets) {
+                if (t.kind === 'Ident') {
+                    const scope = a.resolved.scopeOf.get(t);
+                    const b = scope ? scope.lookup(t.name) : null;
+                    if (b && b.kind === 'const' && b.decl !== n) {
+                        out.push({ code: 'assign-const', range: t.range });
+                    }
+                }
+            }
+        }
+        if (n.kind === 'Ident') {
+            const scope = a.resolved.scopeOf.get(n);
+            const b = scope ? scope.lookup(n.name) : null;
+            if (!b && !NS.namespaceByName(n.name) && !NS.builtinByName(n.name)
+                && n.name !== 'self' && n.name !== 'pipe') {
+                const suggestion = closestName(scope, n.name, NS);
+                out.push({
+                    code: suggestion ? `did-you-mean:${suggestion}` : 'undefined-ident',
+                    range: n.range,
+                    name: n.name
+                });
+            }
+        }
+    });
+    /* unused detection */
+    for (const b of a.resolved.allBindings) {
+        if (b.name.startsWith('_')) continue;
+        if (b.name === 'self' || b.name === 'pipe') continue;
+        if (b.kind === 'self' || b.kind === 'pipe' || b.kind === 'catch') continue;
+        if (b.kind === 'function' || b.kind === 'class' || b.kind === 'global') continue;
+        if (b.references.length > 1) continue;
+        out.push({ code: 'unused', range: b.nameRange, name: b.name });
+    }
+    /* dead code */
+    walk(a.program, (n) => {
+        if (n.kind !== 'BlockStmt') return;
+        let killed = false;
+        for (const s of n.body) {
+            if (killed) out.push({ code: 'unreachable', range: s.range });
+            if (s.kind === 'ReturnStmt' || s.kind === 'ThrowStmt' ||
+                s.kind === 'BreakStmt' || s.kind === 'ContinueStmt' ||
+                s.kind === 'SettleStmt') killed = true;
+        }
+    });
     return out;
 }
 
@@ -195,6 +260,26 @@ function runCase(filePath) {
             return;
         }
     }
+    /* Diagnostic checks. */
+    if (directives.diagCode !== null || directives.diagCount !== null) {
+        const diags = semanticDiagnosticsFor(a);
+        if (directives.diagCode !== null) {
+            const matches = diags.filter(d => d.code === directives.diagCode);
+            if (matches.length === 0) {
+                record(name, `DIAG-CODE: expected at least one '${directives.diagCode}', got [${diags.map(d => d.code).join(', ')}]`);
+                return;
+            }
+            if (directives.diagCount !== null && matches.length !== directives.diagCount) {
+                record(name, `DIAG-COUNT: expected ${directives.diagCount} of '${directives.diagCode}', got ${matches.length}`);
+                return;
+            }
+        } else if (directives.diagCount !== null) {
+            if (diags.length !== directives.diagCount) {
+                record(name, `DIAG-COUNT: expected ${directives.diagCount} diagnostics, got ${diags.length}`);
+                return;
+            }
+        }
+    }
     if (directives.members.length > 0 || directives.nomembers.length > 0) {
         const members = enumerateMembers(t);
         for (const want of directives.members) {
@@ -211,6 +296,41 @@ function runCase(filePath) {
         }
     }
     pass++;
+}
+
+function closestName(scope, name, NS) {
+    if (!scope) return null;
+    const candidates = [];
+    for (let s = scope; s; s = s.parent) {
+        for (const k of s.bindings.keys()) candidates.push(k);
+    }
+    for (const ns of NS.NAMESPACES) candidates.push(ns.name);
+    for (const b of NS.GLOBAL_BUILTINS) candidates.push(b.name);
+    let best = null;
+    for (const c of candidates) {
+        const d = editDistance(name, c);
+        if (d > 2 && d > Math.floor(name.length / 3)) continue;
+        if (!best || d < best.dist) best = { name: c, dist: d };
+    }
+    return best ? best.name : null;
+}
+
+function editDistance(a, b) {
+    if (a === b) return 0;
+    const al = a.length, bl = b.length;
+    if (Math.abs(al - bl) > 8) return Infinity;
+    const prev = new Array(bl + 1);
+    const cur = new Array(bl + 1);
+    for (let j = 0; j <= bl; j++) prev[j] = j;
+    for (let i = 1; i <= al; i++) {
+        cur[0] = i;
+        for (let j = 1; j <= bl; j++) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+        }
+        for (let j = 0; j <= bl; j++) prev[j] = cur[j];
+    }
+    return prev[bl];
 }
 
 function record(name, reason) {

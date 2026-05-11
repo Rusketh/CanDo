@@ -1,0 +1,7 @@
+// DIAG-CODE: unused
+// DIAG-COUNT: 1
+FUNCTION foo() {
+    VAR unused = 42;
+    RETURN 0;
+}
+foo()|;

@@ -1,0 +1,4 @@
+// DIAG-CODE: did-you-mean:foo
+VAR foo = 42;
+print(foo);
+print(fooo|);

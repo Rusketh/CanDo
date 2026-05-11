@@ -3,6 +3,36 @@
 All notable changes to the **CanDo Language** VS Code extension are
 documented in this file.
 
+## 0.7.0 -- 2026-05-11
+
+### Added
+
+- **Unused variable / parameter detection** -- locals and params with
+  no reads are flagged as unnecessary (rendered faded by the editor).
+  Names starting with `_` are silenced; functions / classes / globals
+  are exempt because they're API surface.
+- **Dead-code detection** -- statements after `RETURN`, `THROW`,
+  `BREAK`, `CONTINUE`, `SETTLE` in the same block are flagged
+  unreachable.
+- **Argument type checking** -- when a callee's parameter has a known
+  concrete type, mismatched argument types raise a warning. Permissive
+  on `any` / `unknown` to avoid noise on under-typed code.
+- **"Did you mean ...?" code action** -- undefined identifiers get a
+  Levenshtein-bounded suggestion plus a one-click rename to the
+  closest visible name (locals, scoped names, namespaces, builtins).
+- **Auto-include code action** -- typing `forms.x` with `forms`
+  unbound suggests adding `VAR forms = include("./forms.so");` at the
+  top of the file when a matching native module is found under
+  `<workspace>/modules/<name>/cando.api.json`.
+- **Call hierarchy** -- right-click on a function for "Show Call
+  Hierarchy". Incoming calls are aggregated by enclosing function
+  across the whole workspace; outgoing calls walk the body.
+- **`workspace/didChangeWatchedFiles`** -- external `.cdo` file
+  changes invalidate the workspace index and refresh open documents.
+- **`workspace/willRenameFiles`** -- renaming a `.cdo` file
+  rewrites every workspace `include("...")` argument that pointed at
+  it to the new relative path.
+
 ## 0.6.0 -- 2026-05-11
 
 ### Added
