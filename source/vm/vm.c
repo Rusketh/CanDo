@@ -1430,8 +1430,17 @@ static bool vm_push_frame(CandoVM *vm, CandoClosure *closure, u8 *ip,
         for (u32 i = 0; i < n_extra; i++)
             cando_vm_push(vm, cando_null());
     }
-    if (CANDO_UNLIKELY(vm->jit_enabled))
+    if (CANDO_UNLIKELY(vm->jit_enabled)) {
         vm->jit_stats.func_entry_hits++;
+        /* Function-entry hot detection.  Single-arg numeric functions
+         * are eligible for function-trace recording / dispatch.  The
+         * dispatch fast path lives in OP_CALL and runs BEFORE the
+         * frame is pushed -- reaching here means OP_CALL didn't take
+         * the fast path (no compiled trace yet) and we should bump
+         * the entry-PC's hot counter. */
+        if (arg_count == 1)
+            cando_jit_func_hot_hit(vm, frame->ip, arg_count);
+    }
     return true;
 }
 
@@ -3415,6 +3424,35 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * in the current chunk (parser emits cando_number((f64)fn_start)). */
             if (cando_is_number(callee)) {
                 u32 pc = (u32)cando_as_number(callee);
+                /* Function-trace fast path: when the callee has a
+                 * compiled function trace AND the call shape matches
+                 * (single numeric arg), invoke the mcode directly
+                 * without pushing a VM frame.  On status==0 we have
+                 * a numeric result; on guard failure (status==1) we
+                 * fall through to the standard frame-push + interp
+                 * path so the call's semantics are preserved.       */
+                if (vm->jit_enabled && arg_count == 1) {
+                    const u8 *entry_pc =
+                        frame->closure->chunk->code + pc;
+                    CandoTrace *ft = cando_jit_find_func_trace(vm, entry_pc);
+                    if (ft && ft->func_mcode_fn != NULL) {
+                        CandoValue arg_val = vm->stack_top[-1];
+                        if (cando_is_number(arg_val)) {
+                            double arg_d = cando_as_number(arg_val);
+                            SYNC_IP();
+                            CandoFuncTraceResult r =
+                                ft->func_mcode_fn(vm, ft, arg_d);
+                            if (r.status == 0) {
+                                /* Replace [callee, arg] with [result]. */
+                                DROP();
+                                DROP();
+                                PUSH(cando_number(r.value));
+                                vm->last_ret_count = 1;
+                                DISPATCH();
+                            }
+                        }
+                    }
+                }
                 SYNC_IP();
                 if (!vm_push_frame(vm, frame->closure,
                                    frame->closure->chunk->code + pc,
@@ -3440,6 +3478,31 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     CandoClosure *fn_closure =
                         (CandoClosure *)fn_obj->fn.script.bytecode;
                     u32 fn_pc = fn_obj->fn.script.param_count;
+
+                    /* Function-trace fast path -- mirror of the
+                     * cando_is_number branch above, see comment there. */
+                    if (vm->jit_enabled && arg_count == 1) {
+                        const u8 *entry_pc =
+                            fn_closure->chunk->code + fn_pc;
+                        CandoTrace *ft =
+                            cando_jit_find_func_trace(vm, entry_pc);
+                        if (ft && ft->func_mcode_fn != NULL) {
+                            CandoValue arg_val = vm->stack_top[-1];
+                            if (cando_is_number(arg_val)) {
+                                double arg_d = cando_as_number(arg_val);
+                                SYNC_IP();
+                                CandoFuncTraceResult r =
+                                    ft->func_mcode_fn(vm, ft, arg_d);
+                                if (r.status == 0) {
+                                    cando_value_release(POP()); /* arg */
+                                    cando_value_release(POP()); /* callee */
+                                    PUSH(cando_number(r.value));
+                                    vm->last_ret_count = 1;
+                                    DISPATCH();
+                                }
+                            }
+                        }
+                    }
 
                     SYNC_IP();
                     if (!vm_push_frame(vm, fn_closure,

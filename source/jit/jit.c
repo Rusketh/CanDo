@@ -385,8 +385,10 @@ void cando_recorder_begin(struct CandoVM *vm, const u8 *pc) {
     }
 
     cando_trace_ir_reset(&r->ir);
-    r->active   = true;
-    r->start_pc = pc;
+    r->active            = true;
+    r->is_function_trace = false;
+    r->func_param_count  = 0;
+    r->start_pc          = pc;
     r->trace_starts++;
 
     /* Capture the recording frame.  vm->frame_count >= 1 always when
@@ -1149,7 +1151,13 @@ static void cando_recorder_finish(struct CandoVM *vm) {
         return;
     }
 
-    cando_ir_emit(&r->ir, IR_LOOP, IRT_VOID, 0, 0, 0);
+    /* Function traces close at IR_RETURN (already emitted by the
+     * OP_RETURN handler) instead of IR_LOOP.  All optimization
+     * passes still apply, except invariance has no notion in a
+     * non-loop trace -- it's a single-shot body. */
+    if (!r->is_function_trace) {
+        cando_ir_emit(&r->ir, IR_LOOP, IRT_VOID, 0, 0, 0);
+    }
 
     /* Optimisation passes, in order:
      *   1. Phase 5h DSE -- drop SSTORE/GSTOREs overwritten before
@@ -1163,21 +1171,16 @@ static void cando_recorder_finish(struct CandoVM *vm) {
      *      invariance flag isn't applied to about-to-be-killed ops. */
     eliminate_dead_stores(&r->ir);
     eliminate_dead_code(&r->ir);
-    /* Phase 8.5: CSE.  Runs AFTER DSE/DCE so we don't waste work
-     * on already-NOPped ops, and BEFORE LICM so the invariance
-     * pass sees the deduped IR (no need to re-mark merged ops). */
     common_subexpression_elimination(&r->ir);
-    /* Re-DCE after CSE to clean up any newly-dead ops. */
     eliminate_dead_code(&r->ir);
-    mark_loop_invariants(&r->ir);
-    /* After invariance is settled, tag the loop-carried numeric
-     * SLOADs whose slot is provably re-stored as IRT_NUM in the
-     * same trace.  Codegen uses the flag to drop the per-iter type
-     * guard on the warm path. */
-    mark_known_num_sloads(&r->ir);
-    /* Phase 4.4j: must run AFTER DSE -- a NOPped store no longer
-     * counts as an escape, so escape analysis can mark allocations
-     * sinkable that DSE has unhooked from a dead SSTORE. */
+    if (!r->is_function_trace) {
+        /* Loop-specific passes -- LICM and pinning rely on a single
+         * iteration of a closed loop, which a function trace doesn't
+         * have.  Function traces execute their body once per call,
+         * with no notion of "next iter". */
+        mark_loop_invariants(&r->ir);
+        mark_known_num_sloads(&r->ir);
+    }
     escape_analysis(&r->ir);
     /* Phase 8.1 (REVERTED): mark_promoted_globals broke the Phase
      * 4.1 div_rollback snapshot semantics.  Snapshots record the
@@ -1211,12 +1214,15 @@ static void cando_recorder_finish(struct CandoVM *vm) {
     /* Move the IR (transfer ownership): copy the struct by value;
      * the pointers inside (ir, constants) move with it.  Re-init
      * the recorder's IR so subsequent traces start fresh. */
-    t->ir         = r->ir;
-    t->start_pc   = r->start_pc;
-    t->id         = j->next_trace_id++;
-    t->last_used  = j->next_use_tick++;
-    t->values_buf = NULL;   /* lazy-allocated by cando_trace_run */
-    t->values_cap = 0;
+    t->ir                = r->ir;
+    t->start_pc          = r->start_pc;
+    t->id                = j->next_trace_id++;
+    t->last_used         = j->next_use_tick++;
+    t->values_buf        = NULL;
+    t->values_cap        = 0;
+    t->is_function_trace = r->is_function_trace;
+    t->param_count       = r->func_param_count;
+    t->func_mcode_fn     = NULL;
     /* Phase 6: codegen is opt-in and starts with no native body.  A
      * later cando_jit_codegen_trace() call may install one.  Until
      * then, mcode_fn = NULL routes execution through the IR-interp. */
@@ -1970,6 +1976,19 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                     "loop inside inlined call (v1 limitation)");
                 return;
             }
+            /* Function traces don't model multi-iteration loops --
+             * the body would unroll and emit multiple IR_LOOP ops,
+             * which the function-trace codegen path can't handle. */
+            if (r->is_function_trace &&
+                (op == OP_LOOP || op == OP_LOOP_MARK ||
+                 op == OP_LOOP_END || op == OP_FOR_INIT ||
+                 op == OP_FOR_NEXT || op == OP_FOR_RANGE_INIT ||
+                 op == OP_FOR_RANGE_NEXT || op == OP_FOR_OVER_INIT ||
+                 op == OP_FOR_OVER_NEXT)) {
+                cando_recorder_abort(vm,
+                    "function trace: loop in body (v1 limitation)");
+                return;
+            }
             break;
         }
 
@@ -2596,24 +2615,68 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                     return;
                 break;
             }
+
+            /* Function-trace self-recursion: when we're recording a
+             * function trace and OP_CALL targets the SAME function
+             * (entry PC matches r->start_pc), emit IR_REC_CALL
+             * instead of inlining (which would unroll and quickly
+             * blow the depth cap or trace length).  v1 supports
+             * single-arg recursive calls only. */
+            if (r->is_function_trace && r->call_depth == 0 && argc == 1) {
+                CandoValue callee_val = vm->stack_top[-(int)argc - 1];
+                u32 callee_pc = 0;
+                if (cando_is_number(callee_val) &&
+                    cando_as_number(callee_val) > 0.0) {
+                    callee_pc = (u32)cando_as_number(callee_val);
+                } else if (cando_is_object(callee_val)) {
+                    CdoObject *fn_obj = cando_bridge_resolve(vm,
+                                            cando_as_handle(callee_val));
+                    if (fn_obj && fn_obj->kind == OBJ_FUNCTION &&
+                        fn_obj->fn.script.bytecode) {
+                        CandoClosure *cl = (CandoClosure *)
+                                            fn_obj->fn.script.bytecode;
+                        callee_pc = fn_obj->fn.script.param_count;
+                        if (cl->chunk != current_chunk(vm)) callee_pc = 0;
+                    }
+                }
+                if (callee_pc != 0) {
+                    const u8 *callee_entry = current_chunk(vm)->code +
+                                              callee_pc;
+                    if (callee_entry == r->start_pc) {
+                        IRRef arg_ref = r->stack_map[callee_pos + 1];
+                        if (arg_ref == IRREF_NIL) {
+                            cando_recorder_abort(vm,
+                                "OP_REC_CALL: arg not in stack_map");
+                            return;
+                        }
+                        const IRIns *ai = cando_ir_get_ins(&r->ir, arg_ref);
+                        if (ai && ai->type != IRT_NUM) {
+                            cando_recorder_abort(vm,
+                                "OP_REC_CALL: arg non-numeric (v1)");
+                            return;
+                        }
+                        IRRef result = cando_ir_emit(&r->ir, IR_REC_CALL,
+                                                      IRT_NUM, 0,
+                                                      arg_ref, 0);
+                        rec_push(r, result, callee_pos);
+                        break;
+                    }
+                }
+            }
+
             if (!rec_call_inline_user(vm, r, callee_pos, argc))
                 return;
             break;
         }
 
         case OP_RETURN: {
-            /* Inline-frame pop.  Only legal mid-trace when call_depth
-             * > 0 (the recording-start function returning is a trace
-             * boundary).  Bytecode places the return value at the
-             * caller's callee_pos and pops the frame; we mirror by
-             * stashing the return IRRef at stack_map[callee_pos].
-             *
-             * v1: only single-value returns supported. */
-            if (r->call_depth == 0) {
-                cando_recorder_abort(vm,
-                    "OP_RETURN at recording-frame boundary");
-                return;
-            }
+            /* Three flavours:
+             *   1. Inline-frame pop (call_depth > 0): mirror the
+             *      return value to the caller's callee_pos slot.
+             *   2. Function-trace recording-frame return (call_depth
+             *      == 0 AND r->is_function_trace): emit IR_RETURN
+             *      and finalise the function trace.
+             *   3. Otherwise: trace boundary, abort. */
             u16 ret_count = read_op_arg(ip);
             if (ret_count != 1) {
                 cando_recorder_abort(vm,
@@ -2635,6 +2698,21 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             if (src && src->type != IRT_NUM) {
                 cando_recorder_abort(vm,
                     "OP_RETURN non-numeric value (v1)");
+                return;
+            }
+            if (r->call_depth == 0) {
+                if (!r->is_function_trace) {
+                    cando_recorder_abort(vm,
+                        "OP_RETURN at recording-frame boundary");
+                    return;
+                }
+                /* Function trace close.  Emit IR_RETURN with the value
+                 * IRRef in op1; cando_recorder_finish notices the
+                 * is_function_trace flag and skips IR_LOOP / takes the
+                 * function-trace codegen path. */
+                cando_ir_emit(&r->ir, IR_RETURN, IRT_VOID, IRF_GUARD,
+                              ret_ref, 0);
+                cando_recorder_finish(vm);
                 return;
             }
             r->call_depth--;
@@ -3607,6 +3685,54 @@ bool cando_jit_hot_hit(struct CandoVM *vm, const u8 *pc) {
         return j->recorder.active;
     }
     return false;
+}
+
+/* Function-entry hot detection.  Called from vm_push_frame just
+ * after the new call frame has been installed -- vm->frame_count
+ * already reflects the callee, vm->frames[top] already points at
+ * the callee's frame (and entry_pc == frame->ip == chunk->code).
+ *
+ * arg_count must be 1 in v1 (single-numeric-arg traces); other
+ * arities are silently ignored without bumping the counter so
+ * non-traceable functions don't blacklist their entry PCs. */
+bool cando_jit_func_hot_hit(struct CandoVM *vm, const u8 *entry_pc,
+                            u32 arg_count) {
+    CandoJit *j = jit_of(vm);
+    if (!j) return false;
+    if (arg_count != 1) return false;
+    /* Skip if the recorder is already active (e.g. another trace's
+     * inlined call landed us here -- don't restart on top of that). */
+    if (j->recorder.active) return false;
+    /* Skip if a function trace already exists for this entry PC --
+     * the OP_CALL dispatcher would have used it instead of pushing
+     * a frame, so reaching vm_push_frame means it's still being
+     * recorded or it's not the right entry. */
+    if (cando_jit_find_func_trace(vm, entry_pc) != NULL) return false;
+    if (cando_hot_hit(&j->hot, entry_pc)) {
+        CandoRecorder *r = &j->recorder;
+        cando_recorder_begin(vm, entry_pc);
+        if (r->active) {
+            r->is_function_trace = true;
+            r->func_param_count  = (u8)arg_count;
+        }
+        return r->active;
+    }
+    return false;
+}
+
+CandoTrace *cando_jit_find_func_trace(struct CandoVM *vm,
+                                      const u8 *entry_pc) {
+    CandoJit *j = jit_of(vm);
+    if (!j || !entry_pc) return NULL;
+    for (u32 i = 0; i < j->trace_count; i++) {
+        CandoTrace *t = &j->traces[i];
+        if (t->is_function_trace && t->start_pc == entry_pc &&
+            t->func_mcode_fn != NULL) {
+            t->last_used = ++j->next_use_tick;
+            return t;
+        }
+    }
+    return NULL;
 }
 
 /* ============================================================ */

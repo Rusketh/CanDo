@@ -144,10 +144,36 @@ typedef struct CandoSinkRec {
     u32  field_kref[CANDO_SINK_MAX_FIELDS];
 } CandoSinkRec;
 
+/* Function-trace mcode entry signature.  Distinct from the loop-
+ * trace mcode_fn: the function-trace path takes one numeric arg in
+ * xmm0 and returns BOTH a status (rax / eax: 0 = OK, 1 = guard
+ * failed) and a numeric value (xmm0).  The SysV ABI classifies a
+ * struct { int; double; } as (INTEGER, SSE) so the return registers
+ * line up with the mcode without any glue.  Used by OP_CALL when
+ * dispatching to a compiled function trace and by IR_REC_CALL when
+ * a function trace recurses back into itself. */
+struct CandoTrace;
+typedef struct {
+    int    status;
+    double value;
+} CandoFuncTraceResult;
+typedef CandoFuncTraceResult (*CandoFuncTraceFn)(struct CandoVM *vm,
+                                                  struct CandoTrace *t,
+                                                  double arg0);
+
 typedef struct CandoTrace {
     CandoTraceIR    ir;            /* SSA instructions + constant pool */
     const u8       *start_pc;      /* head of the recorded loop */
     u32             id;            /* monotonic per-VM trace id */
+    /* Function-trace flag and metadata.  When is_function_trace is
+     * true, the trace is a callable function body (no IR_LOOP, IR_RETURN
+     * exits cleanly with a numeric return value).  func_mcode_fn is
+     * the entry point; OP_CALL dispatches into it directly when the
+     * callee's entry PC matches start_pc.  param_count records the
+     * number of positional args (currently capped at 1 for v1). */
+    bool             is_function_trace;
+    u8               param_count;
+    CandoFuncTraceFn func_mcode_fn;
     u64             last_used;     /* approximate-LRU tick: bumped on
                                       every cando_jit_find_trace hit;
                                       smallest value is evicted first
@@ -306,6 +332,14 @@ typedef enum {
  * --------------------------------------------------------------------- */
 typedef struct CandoRecorder {
     bool                  active;
+    /* When true the recorder is building a FUNCTION trace -- the
+     * trace closes on OP_RETURN at the recording-start frame depth
+     * (instead of at ip == start_pc), the codegen produces a callable
+     * mcode body (single arg via xmm0, return value via xmm0), and
+     * a same-function OP_CALL site emits IR_REC_CALL rather than
+     * inlining or aborting. */
+    bool                  is_function_trace;
+    u8                    func_param_count;
     const u8             *start_pc;
     CandoTraceIR          ir;
     /* stack_map[slot] = IRRef producing the value at vm->stack[slot].
@@ -444,5 +478,20 @@ void      cando_jit_destroy(CandoJit *j);
  * activates the recorder (which the next DISPATCH iteration will
  * pick up via cando_recorder_observe). */
 bool cando_jit_hot_hit(struct CandoVM *vm, const u8 *pc);
+
+/* cando_jit_func_hot_hit -- entry point from vm_push_frame for
+ * function-entry hot detection.  Bumps the per-PC counter on the
+ * function's entry PC; on threshold, activates the recorder in
+ * function-trace mode.  arg_count is captured for the recorder so
+ * the resulting trace knows its parameter arity (currently capped
+ * at 1; non-1-arg functions are silently skipped here). */
+bool cando_jit_func_hot_hit(struct CandoVM *vm, const u8 *entry_pc,
+                            u32 arg_count);
+
+/* cando_jit_find_func_trace -- lookup a compiled function trace by
+ * its entry PC.  Returns NULL on miss.  Used by OP_CALL to dispatch
+ * into the trace's mcode without pushing a VM frame. */
+struct CandoTrace *cando_jit_find_func_trace(struct CandoVM *vm,
+                                              const u8 *entry_pc);
 
 #endif /* CANDO_JIT_JIT_H */

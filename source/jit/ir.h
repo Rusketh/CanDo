@@ -272,6 +272,9 @@ typedef enum {
 
     /* ===== Band 7: Trace control ======================================== */
     IR_LOOP,               /* head-of-loop marker; the trace closes here    */
+    IR_RETURN,             /* function-trace return; op1 = numeric IRRef    */
+    IR_REC_CALL,           /* self-recursive call inside a function trace;
+                              op1 = arg IRRef (numeric); result IRT_NUM    */
 
     IR__COUNT
 } IROp;

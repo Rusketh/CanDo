@@ -2222,8 +2222,251 @@ static void emit_pinned_prologue(CG *cg) {
     (void)cold_start;
 }
 
+/* Function-trace codegen.  Different mcode signature from the loop
+ * trace path:
+ *
+ *   int func_mcode(CandoVM *vm, CandoTrace *t, double arg0)
+ *
+ * vm in rdi, t in rsi, arg0 in xmm0.  Returns 0 in eax and the
+ * function value in xmm0 on success; returns 1 in eax (xmm0
+ * undefined) on any guard failure -- the OP_CALL dispatcher then
+ * falls back to pushing a real VM frame and running the function
+ * via the bytecode interpreter.
+ *
+ * Layout: prologue stack-allocates a vals[] scratch area and a
+ * fake frame_slots area, stores arg0 to fake_slots[1] (slot 0 is
+ * reserved for the function-value sentinel, parameters start at 1
+ * per CanDo's call-frame convention).  Body codegen uses the
+ * existing per-IR emitters; r14 / r15 point at the stack-local
+ * vals[] / fake_slots[] so SLOAD/SSTORE/arith all work unchanged.
+ *
+ * IR_RETURN: load vals[op1] -> xmm0, xor eax,eax, jump to common
+ * epilogue.  IR_REC_CALL: spill, prepare arg, `call rel32 0` (back
+ * to start of this very mcode), check eax, propagate failure or
+ * read result from xmm0.
+ *
+ * No internal loop, no LICM -- the body executes once per call.
+ * Pinning is disabled (function-trace bodies don't have a loop edge
+ * that would benefit). */
+static bool cando_jit_codegen_func_trace(struct CandoVM *vm, CandoTrace *t) {
+    if (t->ir.ir_count == 0) return false;
+    if (!cando_mcode_alloc(&t->mcode, CG_BUF_SIZE)) return false;
+
+    CG cg = (CG){0};
+    cg.base = t->mcode.base;
+    cg.cur  = t->mcode.base;
+    cg.end  = t->mcode.base + t->mcode.size;
+    cg.vm   = vm;
+    /* Pinning intentionally off for function traces. */
+
+    /* Determine sizes for vals[] and fake frame_slots based on the
+     * highest IRRef and slot accessed. */
+    u32 vals_count = t->ir.ir_count;     /* one entry per IR_? */
+    u32 max_slot   = 4;                   /* room for slot 0..3 minimum */
+    for (u32 i = 1; i < t->ir.ir_count; i++) {
+        const IRIns *in = &t->ir.ir[i];
+        if ((in->op == IR_SLOAD || in->op == IR_SSTORE) &&
+            in->op1 + 1 > max_slot) {
+            max_slot = in->op1 + 1;
+        }
+    }
+    u32 vals_bytes  = vals_count * 8;
+    u32 slots_bytes = max_slot   * 8;
+    /* 16-byte align the total stack alloc. */
+    u32 alloc_total = vals_bytes + slots_bytes + 8;
+    if (alloc_total % 16 != 0) alloc_total = ((alloc_total + 15) / 16) * 16;
+
+    /* Prologue. */
+    static const u8 fixed1[] = {
+        0x55,                              /* push rbp           */
+        0x48, 0x89, 0xE5,                  /* mov rbp, rsp       */
+        0x53,                              /* push rbx           */
+        0x41, 0x54,                        /* push r12           */
+        0x41, 0x55,                        /* push r13           */
+        0x41, 0x56,                        /* push r14           */
+        0x41, 0x57,                        /* push r15           */
+    };
+    cg_emit_bytes(&cg, fixed1, sizeof(fixed1));
+    /* sub rsp, alloc_total. */
+    if (alloc_total < 0x80) {
+        cg_emit_u8(&cg, 0x48); cg_emit_u8(&cg, 0x83);
+        cg_emit_u8(&cg, 0xEC); cg_emit_u8(&cg, (u8)alloc_total);
+    } else {
+        cg_emit_u8(&cg, 0x48); cg_emit_u8(&cg, 0x81);
+        cg_emit_u8(&cg, 0xEC); cg_emit_u32(&cg, alloc_total);
+    }
+    /* mov rbx, rdi  (vm)            -- 48 89 FB
+     * mov r12, rsi  (t)             -- 49 89 F4
+     * mov r13b, 0   (skip_invariant unused but compat) -- 41 B5 00
+     *   Reuse emit_mov_r13b_one but set 0 -- inline 41 B5 00
+     * lea r14, [rsp]                -- 4C 8D 34 24
+     * lea r15, [rsp + vals_bytes]   -- 4D 8D BC 24 disp32
+     * movsd [r15 + 8], xmm0         -- store arg0 to fake_slots[1] */
+    static const u8 setup[] = {
+        0x48, 0x89, 0xFB,                  /* mov rbx, rdi  */
+        0x49, 0x89, 0xF4,                  /* mov r12, rsi  */
+        0x41, 0xB5, 0x00,                  /* mov r13b, 0   */
+        0x4C, 0x8D, 0x34, 0x24,            /* lea r14, [rsp] */
+    };
+    cg_emit_bytes(&cg, setup, sizeof(setup));
+    /* lea r15, [rsp + vals_bytes] -- 4D 8D BC 24 disp32 */
+    static const u8 lea_r15[] = { 0x4D, 0x8D, 0xBC, 0x24 };
+    cg_emit_bytes(&cg, lea_r15, 4);
+    cg_emit_u32(&cg, vals_bytes);
+    /* movsd [r15 + 8], xmm0  -- F2 41 0F 11 87 disp32  (offset 8 for slot 1) */
+    static const u8 store_arg[] = { 0xF2, 0x41, 0x0F, 0x11, 0x87,
+                                     0x08, 0x00, 0x00, 0x00 };
+    cg_emit_bytes(&cg, store_arg, sizeof(store_arg));
+
+    u32 mcode_entry_off = 0;   /* IR_REC_CALL targets the start (0) */
+
+    /* Body emit. */
+    for (u32 i = 1; i < t->ir.ir_count && !cg.failed; i++) {
+        const IRIns *in = &t->ir.ir[i];
+
+        switch (in->op) {
+        case IR_NOP:
+            break;
+        case IR_KNUM:
+            emit_knum(&cg, &t->ir, in->op1, i);
+            break;
+        case IR_KBOOL:
+            emit_kbool(&cg, in->op1, i);
+            break;
+        case IR_SLOAD:
+            if (in->type != IRT_NUM && in->type != IRT_OBJ) {
+                cg.failed = true; break;
+            }
+            emit_sload(&cg, in->op1, i, (IRType)in->type, false);
+            break;
+        case IR_SSTORE:
+            emit_sstore(&cg, in->op1, in->op2);
+            break;
+        case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
+            emit_arith(&cg, (IROp)in->op, in->op1, in->op2, i);
+            break;
+        case IR_NEG:
+            emit_neg(&cg, in->op1, i);
+            break;
+        case IR_EQ: case IR_NEQ: case IR_LT: case IR_LE:
+        case IR_GT: case IR_GE:
+            emit_compare(&cg, (IROp)in->op, in->op1, in->op2, i);
+            break;
+        case IR_GUARD_NUM:
+            break;
+        case IR_GUARD_TRUE: case IR_GUARD_FALSE:
+            emit_guard_bool(&cg, (IROp)in->op, in->op1, 0);
+            break;
+        case IR_REC_CALL: {
+            /* Compute arg into xmm0, then emit a near `call rel32 0`
+             * that jumps to the start of this same mcode buffer. */
+            emit_load_xmm0(&cg, in->op1);
+            /* mov rdi, rbx ; mov rsi, r12 */
+            emit_mov_rdi_rbx(&cg);
+            emit_mov_rsi_r12(&cg);
+            /* call rel32  -- E8 disp32 ; disp = mcode_entry - (here+5) */
+            cg_emit_u8(&cg, 0xE8);
+            u32 disp_off = cg_off(&cg);
+            i32 here_after = (i32)(disp_off + 4);
+            i32 disp = (i32)mcode_entry_off - here_after;
+            cg_emit_u32(&cg, (u32)disp);
+            /* test eax, eax ; jne side_exit */
+            emit_test_eax_eax(&cg);
+            if (cg.guard_count >= CG_MAX_GUARDS) { cg.failed = true; break; }
+            cg.guards[cg.guard_count].je_disp_off = emit_jne_rel32_placeholder(&cg);
+            cg.guards[cg.guard_count].snap_idx    = 0;
+            cg.guards[cg.guard_count].stub_off    = 0;
+            cg.guard_count++;
+            /* xmm0 has the result -- mirror to vals[i]. */
+            emit_movsd_vals_xmm(&cg, i, 0);
+            cg.xmm0_holds = i;
+            break;
+        }
+        case IR_RETURN: {
+            /* Load value to xmm0, set eax=0, jump to common epilogue. */
+            emit_load_xmm0(&cg, in->op1);
+            emit_xor_eax_eax(&cg);
+            /* jmp to common epilogue (we'll patch this disp32 after
+             * the body since we don't know the epilogue location yet).
+             * Use the guard table mechanism with a sentinel: we record
+             * a "return jump" with snap_idx=0xFFFE so the post-pass
+             * patches it to the success epilogue rather than a stub. */
+            if (cg.guard_count >= CG_MAX_GUARDS) { cg.failed = true; break; }
+            cg_emit_u8(&cg, 0xE9);   /* jmp rel32 */
+            cg.guards[cg.guard_count].je_disp_off = cg_off(&cg);
+            cg.guards[cg.guard_count].snap_idx    = 0xFFFE;
+            cg.guards[cg.guard_count].stub_off    = 0;
+            cg_emit_u32(&cg, 0);
+            cg.guard_count++;
+            break;
+        }
+        default:
+            cg.failed = true;
+            break;
+        }
+    }
+
+    if (cg.failed) {
+        cando_mcode_free(&t->mcode);
+        return false;
+    }
+
+    /* Common success epilogue: eax already 0 and xmm0 holds value
+     * before each IR_RETURN's jump lands here. */
+    u32 success_off = cg_off(&cg);
+    /* add rsp, alloc_total */
+    if (alloc_total < 0x80) {
+        cg_emit_u8(&cg, 0x48); cg_emit_u8(&cg, 0x83);
+        cg_emit_u8(&cg, 0xC4); cg_emit_u8(&cg, (u8)alloc_total);
+    } else {
+        cg_emit_u8(&cg, 0x48); cg_emit_u8(&cg, 0x81);
+        cg_emit_u8(&cg, 0xC4); cg_emit_u32(&cg, alloc_total);
+    }
+    static const u8 epi[] = {
+        0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D,
+        0x41, 0x5C, 0x5B, 0x5D, 0xC3,
+    };
+    cg_emit_bytes(&cg, epi, sizeof(epi));
+
+    /* Common failure epilogue: eax=1, same teardown. */
+    u32 fail_off = cg_off(&cg);
+    cg_emit_u8(&cg, 0xB8);              /* mov eax, 1 */
+    cg_emit_u32(&cg, 1);
+    if (alloc_total < 0x80) {
+        cg_emit_u8(&cg, 0x48); cg_emit_u8(&cg, 0x83);
+        cg_emit_u8(&cg, 0xC4); cg_emit_u8(&cg, (u8)alloc_total);
+    } else {
+        cg_emit_u8(&cg, 0x48); cg_emit_u8(&cg, 0x81);
+        cg_emit_u8(&cg, 0xC4); cg_emit_u32(&cg, alloc_total);
+    }
+    cg_emit_bytes(&cg, epi, sizeof(epi));
+
+    /* Patch each guard entry: success returns (snap=0xFFFE) point
+     * at success_off; everything else points at fail_off. */
+    for (u32 g = 0; g < cg.guard_count; g++) {
+        u32 target = (cg.guards[g].snap_idx == 0xFFFE)
+                     ? success_off : fail_off;
+        cg_patch_rel32(&cg, cg.guards[g].je_disp_off, target);
+    }
+
+    if (cg.failed) {
+        cando_mcode_free(&t->mcode);
+        return false;
+    }
+
+    cando_mcode_finalize(&t->mcode);
+    t->mcode.size = cg_off(&cg);
+    t->func_mcode_fn = (CandoFuncTraceFn)t->mcode.base;
+    return true;
+}
+
 bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
-    if (!t || t->mcode_fn != NULL) return t && t->mcode_fn != NULL;
+    if (!t) return false;
+    if (t->is_function_trace) {
+        if (t->func_mcode_fn != NULL) return true;
+        return cando_jit_codegen_func_trace(vm, t);
+    }
+    if (t->mcode_fn != NULL) return true;
     if (t->ir.ir_count == 0) return false;
 
     if (!cando_mcode_alloc(&t->mcode, CG_BUF_SIZE)) return false;
