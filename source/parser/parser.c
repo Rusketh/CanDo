@@ -65,15 +65,39 @@ static const ParseRule *get_rule(CandoTokenType t);
 /* ---- chunk shortcut --------------------------------------------------- */
 static CandoChunk *cur(CandoParser *p) { return p->chunk; }
 
-/* ---- error ------------------------------------------------------------- */
+/* ---- error -------------------------------------------------------------
+ * Format: "[line N] Error at '<lexeme>': <msg>".  For TOK_ERROR (lexer
+ * errors) and other multi-line tokens, the lexeme can span the entire
+ * source -- echoing it whole is noise -- so we clip at the first newline
+ * or 32 bytes, whichever comes first, and append a '...' continuation
+ * mark when truncated.                                                   */
 static void error_at(CandoParser *p, const CandoToken *tok, const char *msg)
 {
     if (p->panic_mode) return;
     p->panic_mode = true;
+    /* Retain the first error_msg only.  panic_mode is reset by
+     * synchronise(), so without this guard a follow-up error from
+     * recovery (e.g. "expected expression" on a stray '}' the recovery
+     * lands on) would overwrite the original, more useful diagnostic.   */
+    bool first = !p->had_error;
     p->had_error  = true;
+    if (!first) return;
+
+    u32 lex_len = tok->length;
+    const char *lex = tok->start;
+    bool clipped = false;
+    if (lex_len > 32) { lex_len = 32; clipped = true; }
+    for (u32 i = 0; i < lex_len; i++) {
+        if (lex[i] == '\n' || lex[i] == '\r') {
+            lex_len = i;
+            clipped = true;
+            break;
+        }
+    }
     snprintf(p->error_msg, sizeof(p->error_msg),
-             "[line %u] Error at '%.*s': %s",
-             tok->line, (int)tok->length, tok->start, msg);
+             "[line %u] Error at '%.*s%s': %s",
+             tok->line, (int)lex_len, lex,
+             clipped ? "..." : "", msg);
 }
 
 static void error(CandoParser *p, const char *msg)
@@ -1857,6 +1881,10 @@ static void parse_var_decl(CandoParser *p, bool is_const)
                 emit_op(p, OP_NULL);
         }
     } else {
+        if (is_const) {
+            error_current(p, "CONST declaration requires an initialiser");
+            return;
+        }
         /* No initialiser: push NULL for each variable */
         for (int i = 0; i < var_count; i++)
             emit_op(p, OP_NULL);
@@ -2749,6 +2777,22 @@ static void parse_statement(CandoParser *p)
         scope_end(p);
     } else if (match(p, TOK_SEMI)) {
         /* empty statement */
+    } else if (check(p, TOK_ELSE)) {
+        error_current(p, "ELSE without matching IF");
+        advance(p);
+    } else if (check(p, TOK_ALSO)) {
+        error_current(p, "ALSO without matching IF");
+        advance(p);
+    } else if (check(p, TOK_CATCH)) {
+        error_current(p, "CATCH without matching TRY");
+        advance(p);
+    } else if (check(p, TOK_FINALY)) {
+        error_current(p, "FINALY without matching TRY");
+        advance(p);
+    } else if (check(p, TOK_IN) || check(p, TOK_OF) ||
+               check(p, TOK_OVER)) {
+        error_current(p, "IN/OF/OVER may only appear in a FOR loop header");
+        advance(p);
     } else {
         parse_expr_stmt(p);
         this_was_expr = true;

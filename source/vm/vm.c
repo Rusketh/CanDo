@@ -2392,6 +2392,10 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 vm_runtime_error(vm, "operands must be numbers");
                 goto handle_error;
             }
+            if (cando_as_number(b) == 0.0) {
+                vm_runtime_error(vm, "modulo by zero");
+                goto handle_error;
+            }
             PUSH(cando_number(fmod(cando_as_number(a), cando_as_number(b))));
             DISPATCH();
         }
@@ -2865,9 +2869,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
             CandoValue idx_val = POP();
             CandoValue obj_val = POP();
             if (!cando_is_object(obj_val)) {
+                const char *tn =
+                    cando_value_type_name(cando_value_tag(obj_val));
                 cando_value_release(idx_val);
                 cando_value_release(obj_val);
-                vm_runtime_error(vm, "index access on non-object");
+                vm_runtime_error(vm,
+                    "index access on non-object (got %s)", tn);
                 goto handle_error;
             }
             CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(obj_val));
@@ -3420,51 +3427,17 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 DISPATCH();
             }
 
-            /* Positive number: user-defined function stored as PC offset
-             * in the current chunk (parser emits cando_number((f64)fn_start)). */
+            /* Positive number on the callee slot: cannot originate from a
+             * legitimate program path -- script functions are produced by
+             * OP_CLOSURE which wraps them in an OBJ_FUNCTION (handled
+             * below) and native sentinels are negative (handled above).
+             * Treating a user-supplied number as a PC offset would jump
+             * the dispatcher into arbitrary bytecode (memory-unsafe);
+             * reject it explicitly. */
             if (cando_is_number(callee)) {
-                u32 pc = (u32)cando_as_number(callee);
-                /* Function-trace fast path: iterate sibling function
-                 * traces at this entry PC (e.g. fib's leaf trace vs
-                 * its recursive trace, recorded as separate sibling
-                 * specialisations).  Each trace's guards either
-                 * accept the call (status=0, result in xmm0) or bail
-                 * (status=1, try next sibling).  When all siblings
-                 * fail we fall through to the standard frame-push +
-                 * interp path so the call's semantics are preserved. */
-                if (vm->jit_enabled && arg_count == 1) {
-                    const u8 *entry_pc =
-                        frame->closure->chunk->code + pc;
-                    CandoValue arg_val = vm->stack_top[-1];
-                    if (cando_is_number(arg_val)) {
-                        double arg_d = cando_as_number(arg_val);
-                        CandoTrace *fts[CANDO_FUNC_TRACE_MAX_VERSIONS];
-                        u32 nf = cando_jit_find_func_traces(vm, entry_pc,
-                                                              fts,
-                                                              CANDO_FUNC_TRACE_MAX_VERSIONS);
-                        for (u32 i = 0; i < nf; i++) {
-                            CandoTrace *ft = fts[i];
-                            if (!ft->func_mcode_fn) continue;
-                            SYNC_IP();
-                            CandoFuncTraceResult r =
-                                ft->func_mcode_fn(vm, ft, arg_d);
-                            if (r.status == 0) {
-                                DROP();
-                                DROP();
-                                PUSH(cando_number(r.value));
-                                vm->last_ret_count = 1;
-                                DISPATCH();
-                            }
-                        }
-                    }
-                }
-                SYNC_IP();
-                if (!vm_push_frame(vm, frame->closure,
-                                   frame->closure->chunk->code + pc,
-                                   arg_count, false))
-                    goto handle_error;
-                LOAD_FRAME();
-                DISPATCH();
+                vm_runtime_error(vm,
+                                 "can only call functions (got number)");
+                goto handle_error;
             }
 
             if (!cando_is_object(callee)) {
@@ -3618,8 +3591,18 @@ static CandoVMResult vm_run(CandoVM *vm) {
             }
 
             if (!callable) {
+                CandoValue name_val =
+                    frame->closure->chunk->constants[name_ci];
+                CandoString *name_str = cando_as_string(name_val);
+                const char *name_buf = name_str ? name_str->data : "?";
+                u32 name_len = name_str ? name_str->length : 1;
+                const char *recv_type =
+                    cando_value_type_name(cando_value_tag(receiver));
                 cando_value_release(method);
-                vm_runtime_error(vm, "%s method is not callable", is_fluent ? "fluent" : "");
+                vm_runtime_error(vm,
+                    "%smethod '%.*s' is not callable on %s",
+                    is_fluent ? "fluent " : "",
+                    (int)name_len, name_buf, recv_type);
                 goto handle_error;
             }
 
@@ -4438,11 +4421,27 @@ static CandoVMResult vm_run(CandoVM *vm) {
             for (u32 i = count; i-- > 0; )
                 vm->error_vals[i] = POP();
             vm->has_error = true;
-            /* Format error_msg from first thrown value, then append a
-             * stack trace so an uncaught throw is debuggable.            */
-            char *s = cando_value_tostring(vm->error_vals[0]);
-            snprintf(vm->error_msg, sizeof(vm->error_msg), "%s", s);
-            cando_free(s);
+            /* Format error_msg from the thrown value(s).  When the throw
+             * carries more than one value (the idiomatic
+             * THROW kind, code, detail form), include each value so an
+             * uncaught throw doesn't drop the code/detail on the floor;
+             * a TRY/CATCH still receives the values via OP_CATCH.        */
+            {
+                char *s = cando_value_tostring(vm->error_vals[0]);
+                int written = snprintf(vm->error_msg,
+                                       sizeof(vm->error_msg), "%s", s);
+                cando_free(s);
+                for (u32 i = 1; i < count && written >= 0 &&
+                                (size_t)written < sizeof(vm->error_msg); i++) {
+                    char *si = cando_value_tostring(vm->error_vals[i]);
+                    int n = snprintf(vm->error_msg + written,
+                                     sizeof(vm->error_msg) - (size_t)written,
+                                     ", %s", si);
+                    cando_free(si);
+                    if (n < 0) break;
+                    written += n;
+                }
+            }
             SYNC_IP();
             vm_append_stack_trace(vm);
             goto handle_error;

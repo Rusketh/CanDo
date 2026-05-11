@@ -8,9 +8,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 1] Error at '"stray backslash at end \";
-| print(s);
-| ': unterminated double-quoted string
+|   cando: [line 1] Error at '"stray backslash at end \";...': unterminated double-quoted string
 
 ------------------------------------------------------------
 TEST  : lex/unexpected_char_at.cdo
@@ -18,7 +16,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 1] Error at '@': unexpected character '\x40' (line 1)
+|   cando: [line 1] Error at '@': unexpected character '@'
 
 ------------------------------------------------------------
 TEST  : lex/unexpected_char_backslash.cdo
@@ -26,7 +24,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 1] Error at '\': unexpected character '\x5C' (line 1)
+|   cando: [line 1] Error at '\': unexpected character '\'
 
 ------------------------------------------------------------
 TEST  : lex/unexpected_char_dollar.cdo
@@ -34,7 +32,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 2] Error at '$': unexpected character '\x24' (line 2)
+|   cando: [line 1] Error at '$': unexpected character '$'
 
 ------------------------------------------------------------
 TEST  : lex/unexpected_char_utf8.cdo
@@ -42,7 +40,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 2] Error at 'Ï': unexpected character '\xCF' (line 2)
+|   cando: [line 1] Error at 'Ï': unexpected non-ASCII character (byte 0xCF) -- identifiers must be ASCII
 
 ------------------------------------------------------------
 TEST  : lex/unterminated_block_comment.cdo
@@ -50,9 +48,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 2] Error at '/* this comment never closes
-| print(x);
-| ': unterminated block comment
+|   cando: [line 2] Error at '/* this comment never closes...': unterminated block comment
 
 ------------------------------------------------------------
 TEST  : lex/unterminated_bt_interp.cdo
@@ -60,9 +56,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 1] Error at '`hello ${ 1 + 2 `;
-| print(s);
-| ': unterminated interpolation in backtick string
+|   cando: [line 1] Error at '`hello ${ 1 + 2 `;...': unterminated interpolation in backtick string
 
 ------------------------------------------------------------
 TEST  : lex/unterminated_bt_string.cdo
@@ -70,9 +64,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 1] Error at '`template ${1 + 2} never closes
-| print(s);
-| ': unterminated backtick string
+|   cando: [line 1] Error at '`template ${1 + 2} never closes...': unterminated backtick string
 
 ------------------------------------------------------------
 TEST  : lex/unterminated_dq_string.cdo
@@ -80,9 +72,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 1] Error at '"this string never closes;
-| print(s);
-| ': unterminated double-quoted string
+|   cando: [line 1] Error at '"this string never closes;...': unterminated double-quoted string
 
 ------------------------------------------------------------
 TEST  : lex/unterminated_sq_string.cdo
@@ -90,9 +80,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 1] Error at ''open quote never closes
-| print(s);
-| ': unterminated single-quoted string
+|   cando: [line 1] Error at ''open quote never closes...': unterminated single-quoted string
 ============================================================
 CATEGORY: parse
 ============================================================
@@ -136,7 +124,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 3] Error at '}': expected expression
+|   cando: [line 1] Error at 'CATCH': CATCH without matching TRY
 
 ------------------------------------------------------------
 TEST  : parse/class_missing_name.cdo
@@ -148,11 +136,11 @@ STDERR:
 
 ------------------------------------------------------------
 TEST  : parse/const_no_init.cdo
-EXIT  : 0
+EXIT  : 1
 STDOUT:
-|   null
-STDERR:
   <empty>
+STDERR:
+|   cando: [line 1] Error at ';': CONST declaration requires an initialiser
 
 ------------------------------------------------------------
 TEST  : parse/continue_outside_loop.cdo
@@ -169,7 +157,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 3] Error at '}': expected expression
+|   cando: [line 1] Error at 'ELSE': ELSE without matching IF
 
 ------------------------------------------------------------
 TEST  : parse/double_operator.cdo
@@ -201,7 +189,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 1] Error at '}': expected expression
+|   cando: [line 1] Error at '1': expected IN, OF, or OVER after loop variable(s)
 
 ------------------------------------------------------------
 TEST  : parse/keyword_as_var.cdo
@@ -209,7 +197,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 3] Error at '': expected '}' to close block
+|   cando: [line 1] Error at 'IF': expected variable name
 
 ------------------------------------------------------------
 TEST  : parse/missing_colon_ternary.cdo
@@ -225,7 +213,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 2] Error at '': expected '}' to close block
+|   cando: [line 1] Error at ';': expected '{' before function body
 
 ------------------------------------------------------------
 TEST  : parse/missing_function_name.cdo
@@ -273,7 +261,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: [line 3] Error at '': expected '}' to close block
+|   cando: [line 2] Error at 'print': expected '{' after IF condition
 
 ------------------------------------------------------------
 TEST  : parse/missing_var_name.cdo
@@ -389,11 +377,12 @@ STDERR:
 
 ------------------------------------------------------------
 TEST  : runtime/call_number.cdo
-EXIT  : 139
+EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-  <empty>
+|   cando: can only call functions (got number)
+|   at /home/user/CanDo/tests/scripts/errors/runtime/call_number.cdo:1
 
 ------------------------------------------------------------
 TEST  : runtime/compare_disparate.cdo
@@ -410,7 +399,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: error
+|   cando: error, kind, detail
 |   at /home/user/CanDo/tests/scripts/errors/runtime/deep_call_stack.cdo:3
 |   at /home/user/CanDo/tests/scripts/errors/runtime/deep_call_stack.cdo:2
 |   at /home/user/CanDo/tests/scripts/errors/runtime/deep_call_stack.cdo:1
@@ -466,7 +455,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: index access on non-object
+|   cando: index access on non-object (got number)
 |   at /home/user/CanDo/tests/scripts/errors/runtime/index_number.cdo:1
 
 ------------------------------------------------------------
@@ -506,7 +495,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando:  method is not callable
+|   cando: method 'fly' is not callable on object
 |   at /home/user/CanDo/tests/scripts/errors/runtime/method_not_found.cdo:1
 
 ------------------------------------------------------------
@@ -520,11 +509,12 @@ STDERR:
 
 ------------------------------------------------------------
 TEST  : runtime/mod_by_zero.cdo
-EXIT  : 0
+EXIT  : 1
 STDOUT:
-|   nan
-STDERR:
   <empty>
+STDERR:
+|   cando: modulo by zero
+|   at /home/user/CanDo/tests/scripts/errors/runtime/mod_by_zero.cdo:1
 
 ------------------------------------------------------------
 TEST  : runtime/negate_string.cdo
@@ -566,7 +556,7 @@ EXIT  : 1
 STDOUT:
   <empty>
 STDERR:
-|   cando: validation
+|   cando: validation, 422, missing 'name'
 |   at /home/user/CanDo/tests/scripts/errors/runtime/throw_uncaught.cdo:1
 
 ------------------------------------------------------------
@@ -600,6 +590,6 @@ STDERR:
 SUMMARY
 ============================================================
 total scripts        : 68
-produced stderr      : 54
-exited 0 (no error?) : 13
-non-zero but silent  : 1
+produced stderr      : 57
+exited 0 (no error?) : 11
+non-zero but silent  : 0

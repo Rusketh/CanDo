@@ -310,3 +310,75 @@ site (matching the behaviour of `wrong_arity_too_many`, which silently
 The raw per-script output is in `tests/error_reports/report.txt`. The
 suite itself lives in `tests/scripts/errors/` and is reproducible via
 `tests/integration/run_error_tests.sh`.
+
+---
+
+## Follow-up: fixes applied (post-evaluation)
+
+The findings above produced a conservative set of fixes in this same
+branch. Re-running the suite after the changes:
+
+| Bucket                        | Before | After |
+|-------------------------------|--------|-------|
+| Stderr produced               |   54   |   57  |
+| Exited 0 silently             |   13   |   11  |
+| Non-zero but silent (crashes) |    1   |    0  |
+| Existing integration tests    |   58 / 58 pass | 58 / 58 pass |
+
+### Code changes
+
+- `source/vm/vm.c` (`OP_CALL`): the unreachable-for-valid-programs
+  number-as-PC dispatch path was the SIGSEGV root cause. Replaced with
+  a clean `"can only call functions (got number)"` runtime error
+  (`tests/scripts/errors/runtime/call_number.cdo` now reports rather
+  than crashes).
+- `source/vm/vm.c` (`OP_MOD`): added `if (b == 0.0) error("modulo by
+  zero")`, matching the existing `OP_DIV` behaviour.
+- `source/vm/vm.c` (`OP_THROW`): on an uncaught throw, format every
+  thrown value, not just the first, so `THROW kind, code, detail` is
+  no longer silently truncated to `kind`.
+- `source/vm/vm.c` (`OP_GET_INDEX`): include the operand type in the
+  `index access on non-object` message, mirroring the `field access`
+  sibling.
+- `source/vm/vm.c` (`OP_METHOD_CALL` / `OP_FLUENT_CALL`): the
+  `method-not-callable` error now names the method and the receiver
+  type: `method 'fly' is not callable on object`.
+- `source/parser/parser.c` (`parse_var_decl`): a `CONST` declaration
+  without an initialiser is now a parse error rather than a silent
+  null-binding.
+- `source/parser/parser.c` (`parse_statement`): top-level `ELSE`,
+  `ALSO`, `CATCH`, `FINALY`, `IN`, `OF`, `OVER` now produce
+  construct-specific diagnostics instead of falling through to a
+  generic "expected expression".
+- `source/parser/parser.c` (`error_at`): retain the first error rather
+  than letting `synchronise()`-then-overwrite stomp it with a
+  follow-up recovery diagnostic. Also clip the echoed lexeme to 32
+  chars / first newline so unterminated strings no longer dump a
+  multi-line lexeme into the error.
+- `source/parser/lexer.c`: the "unexpected character" error now uses
+  the printable form for ASCII (`'@'`), a dedicated
+  "non-ASCII byte 0xCF -- identifiers must be ASCII" form for high
+  bytes, and the parser's own `[line N]` prefix is no longer
+  duplicated.
+
+### What's still open (intentionally)
+
+The 11 scripts that still exit 0 silently all fall under the
+"conservative fix" exclusion: silent OOB array indexing, implicit
+number↔string coercion (`"hello" + 1`), trailing comma in parameter
+lists, `FOR x OF 42` treating a scalar as a one-element iterable, and
+extra-argument tolerance on `add(1, 2, 3, 4)`. Each of these is a
+language-design choice rather than a bug, and tightening any of them
+risks breaking existing scripts. Re-open the discussion with an
+"aggressive" pass if stricter semantics are wanted.
+
+Two improvements from the original list were also deferred:
+
+- **Function names in stack frames.** The trace currently emits
+  `at <path>:<line>` per frame. Including the function name (`at c
+  (file:line)` etc.) requires adding a `name` field to the
+  `OBJ_FUNCTION` struct and plumbing it through `parser.c` and
+  `OP_CLOSURE`. Larger change than the others in this pass.
+- **File path on parser errors.** Runtime traces include the path;
+  parser errors only say `[line N]`. Same plumbing as above —
+  threading `chunk->name` into `error_at`.
