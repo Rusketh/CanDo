@@ -345,7 +345,6 @@ typedef struct {
     u16        *upvalue_specs;
     u16         upvalue_count;
     u32         upvalue_capacity;
-    u16         yield_slot;
 } FnScopeSave;
 
 /* Snapshot the current locals/upvalues tables and replace them with fresh
@@ -363,7 +362,6 @@ static void enter_function_scope(CandoParser *p, FnScopeSave *s)
     s->upvalue_specs    = p->upvalue_specs;
     s->upvalue_count    = p->upvalue_count;
     s->upvalue_capacity = p->upvalue_capacity;
-    s->yield_slot       = p->yield_slot;
 
     p->locals           = (CandoLocal *)cando_alloc(
                               sizeof(CandoLocal) * CANDO_LOCAL_INITIAL_CAP);
@@ -376,7 +374,6 @@ static void enter_function_scope(CandoParser *p, FnScopeSave *s)
                               sizeof(u16) * CANDO_LOCAL_INITIAL_CAP);
     p->upvalue_count    = 0;
     p->upvalue_capacity = CANDO_LOCAL_INITIAL_CAP;
-    p->yield_slot       = 0;  /* filled in by compile_function_body         */
 }
 
 /* Restore enclosing scope.  The body's upvalue capture buffer is handed
@@ -399,7 +396,6 @@ static void leave_function_scope(CandoParser *p, FnScopeSave *s,
     p->upvalue_specs    = s->upvalue_specs;
     p->upvalue_count    = s->upvalue_count;
     p->upvalue_capacity = s->upvalue_capacity;
-    p->yield_slot       = s->yield_slot;
 }
 
 /* ---- scope helpers ----------------------------------------------------- */
@@ -568,13 +564,6 @@ static u32 compile_function_body(CandoParser *p,
         else
             declare_local(p, "", 0, false);
     }
-
-    /* Mark this function as a legal YIELD site (non-zero = "inside a
-     * function body").  The current runtime has no generator/coroutine
-     * support, so parse_yield uses this only to gate a clear parse-time
-     * diagnostic rather than letting YIELD slip through to the
-     * unreachable OP_YIELD stub.                                         */
-    p->yield_slot = 1;
 
     parse_block(p);
 
@@ -2810,34 +2799,6 @@ static void parse_return(CandoParser *p)
     emit_op_a(p, OP_RETURN, count);
 }
 
-/* --- YIELD --------------------------------------------------------------
- * The runtime has no generator/coroutine machinery: a lazy YIELD that
- * pauses the function and resumes on demand cannot be expressed against
- * the current stack model.  Rather than half-implement it as
- * `RETURN [collected_values]` sugar (which conflicts with what users
- * expect from Python/JS yields), the keyword is rejected at parse time
- * with guidance toward the supported alternatives.                       */
-static void parse_yield(CandoParser *p)
-{
-    /* Consume any operand expression so the diagnostic isn't echoed
-     * twice by recovery, then surface a clear, single error.            */
-    if (!check(p, TOK_SEMI) && !check(p, TOK_RBRACE) && !check(p, TOK_EOF))
-        parse_expression(p);
-    match(p, TOK_SEMI);
-
-    if (p->yield_slot == 0) {
-        error(p,
-            "YIELD is reserved but not implemented "
-            "(no generator runtime); build an array explicitly and "
-            "RETURN it, or use `thread`/`async` for concurrent work");
-    } else {
-        error(p,
-            "YIELD is reserved but not implemented in this version "
-            "(no generator runtime); return an array of values or use "
-            "a pipe (~>) to build a collection lazily");
-    }
-}
-
 /* --- THROW -------------------------------------------------------------- */
 static void parse_throw(CandoParser *p)
 {
@@ -2969,8 +2930,6 @@ static void parse_statement(CandoParser *p)
         parse_class(p);
     } else if (match(p, TOK_RETURN)) {
         parse_return(p);
-    } else if (match(p, TOK_YIELD)) {
-        parse_yield(p);
     } else if (match(p, TOK_THROW)) {
         parse_throw(p);
     } else if (match(p, TOK_BREAK)) {
@@ -3047,7 +3006,6 @@ void cando_parser_init(CandoParser *p, const char *source, usize len,
     p->safe_chain_count   = 0;
     p->safe_chain_capacity = 0;
     p->ternary_then_depth = 0;
-    p->yield_slot         = 0;
     p->outer_locals       = NULL;
     p->outer_count        = 0;
     p->upvalue_specs      = (u16 *)cando_alloc(

@@ -131,7 +131,6 @@ static const char *const s_opcode_names[OP_COUNT] = {
     /* Band 15: threads */
     [OP_ASYNC]            = "OP_ASYNC",
     [OP_AWAIT]            = "OP_AWAIT",
-    [OP_YIELD]            = "OP_YIELD",
     [OP_THREAD]           = "OP_THREAD",
     /* Band 16: classes */
     [OP_NEW_CLASS]         = "OP_NEW_CLASS",
@@ -286,7 +285,6 @@ static const CandoOpFmt s_opcode_fmts[OP_COUNT] = {
     /* Band 15: threads */
     [OP_ASYNC]            = OPFMT_NONE,
     [OP_AWAIT]            = OPFMT_NONE,
-    [OP_YIELD]            = OPFMT_NONE,
     [OP_THREAD]           = OPFMT_NONE,
     /* Band 16: classes */
     [OP_NEW_CLASS]         = OPFMT_A,
@@ -475,7 +473,6 @@ static const CandoOpInfo s_opcode_info[OP_COUNT] = {
     /* Band 15: threads -- all may_recurse since they re-enter the VM */
     [OP_ASYNC]               = _OP(0, 0, EFFECT_CALL,    1, 1),
     [OP_AWAIT]               = _OP(1, 0, EFFECT_CALL,    1, 1), /* var ret */
-    [OP_YIELD]               = _OP(0, 0, EFFECT_CALL,    1, 1),
     [OP_THREAD]              = _OP(1, 1, EFFECT_CALL,    1, 1),
 
     /* Band 16: classes */

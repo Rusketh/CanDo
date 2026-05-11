@@ -177,7 +177,7 @@ range never has to be materialised as an array.
 `OP_THROW`, `OP_RERAISE`
 
 ### Band 15 — async / threads
-`OP_ASYNC` (reserved), `OP_AWAIT`, `OP_YIELD` (reserved), `OP_THREAD`
+`OP_ASYNC` (parser alias for `OP_THREAD`), `OP_AWAIT`, `OP_THREAD`
 
 ### Band 16 — class sugar
 `OP_NEW_CLASS`, `OP_BIND_METHOD`, `OP_INHERIT`,

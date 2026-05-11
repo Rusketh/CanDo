@@ -2056,7 +2056,6 @@ static CandoVMResult vm_run(CandoVM *vm) {
         [OP_RERAISE]          = &&lbl_OP_RERAISE,
         [OP_ASYNC]            = &&lbl_OP_ASYNC,
         [OP_AWAIT]            = &&lbl_OP_AWAIT,
-        [OP_YIELD]            = &&lbl_OP_YIELD,
         [OP_THREAD]           = &&lbl_OP_THREAD,
         [OP_NEW_CLASS]         = &&lbl_OP_NEW_CLASS,
         [OP_BIND_METHOD]       = &&lbl_OP_BIND_METHOD,
@@ -4805,7 +4804,7 @@ static CandoVMResult vm_run(CandoVM *vm) {
         }
 
         /* ── Band 15: Threads ───────────────────────────────────────── */
-        /* ── Band 17: Concurrency (async / await / yield / thread) ──── */
+        /* ── Band 17: Concurrency (async / await / thread) ──────────── */
         OP_CASE(OP_ASYNC): {
             vm_runtime_error(vm, "ASYNC not implemented (use 'thread' instead)");
             goto handle_error;
@@ -4868,15 +4867,6 @@ static CandoVMResult vm_run(CandoVM *vm) {
             vm->last_ret_count = (int)(t->result_count > 0 ? t->result_count : 1);
             cando_value_release(thread_val);
             DISPATCH();
-        }
-        OP_CASE(OP_YIELD): {
-            /* The parser rejects YIELD at compile time (see parse_yield);
-             * a script can only reach this opcode by hand-crafted
-             * bytecode, in which case we surface a clean error.          */
-            vm_runtime_error(vm,
-                "YIELD is reserved but not implemented "
-                "(no generator runtime)");
-            goto handle_error;
         }
         OP_CASE(OP_THREAD): {
             /* Pop the OBJ_FUNCTION closure value from stack. */

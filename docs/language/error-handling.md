@@ -157,14 +157,9 @@ them.
 | `class __call: missing class receiver`        | Default class `__call` invoked with no class. |
 | `class __call: invalid class handle`          | Default class `__call` saw an invalid handle. |
 
-### Reserved / not yet implemented
+### Notes on once-reserved keywords
 
-| Message                                                              | Notes |
-|---|---|
-| `YIELD is reserved but not implemented (no generator runtime)`        | Parse-time error: there is no coroutine/generator runtime, so YIELD is rejected at compile time.  Return an array explicitly, or use `thread`/`async` for concurrent work. |
-| `YIELD is reserved but not implemented in this version (no generator runtime)` | Same diagnostic when YIELD appears inside a function body. |
-
-`OP_TAIL_CALL` and `OP_ASYNC` were both reserved in earlier releases:
+`OP_TAIL_CALL` and `OP_ASYNC` were reserved in earlier releases:
 
 * **Tail calls** are now implemented — see
   [`functions.md`](functions.md#tail-calls).  `RETURN fn(args);` reuses

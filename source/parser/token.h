@@ -51,8 +51,6 @@ typedef enum {
     TOK_ASYNC,
     TOK_AWAIT,
     TOK_THREAD,          /* 'thread' -- spawn expression as OS thread       */
-    TOK_YIELD,           /* 'yield' -- append a value to the generator
-                            accumulator inside a function body              */
     TOK_NULL_KW,         /* NULL keyword                                    */
     TOK_TRUE_KW,         /* TRUE keyword                                    */
     TOK_FALSE_KW,        /* FALSE keyword                                   */
