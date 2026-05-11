@@ -1,0 +1,3 @@
+// EXPECT: number
+VAR x = 42;
+VAR s = `the answer is ${x|}`;

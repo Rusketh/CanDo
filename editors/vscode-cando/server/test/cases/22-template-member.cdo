@@ -1,0 +1,3 @@
+// MEMBERS: foo, bar
+VAR obj = { foo: 1, bar: 2 };
+VAR s = `${obj.|}`;

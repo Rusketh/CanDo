@@ -1,0 +1,5 @@
+// DOC-CONTAINS: Adds two numbers
+// Adds two numbers together and returns the sum.
+FUNCTION add|(a, b) {
+    RETURN a + b;
+}

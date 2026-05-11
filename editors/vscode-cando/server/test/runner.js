@@ -53,8 +53,11 @@ function findCursor(text) {
 }
 
 function parseDirectives(text) {
-    const out = { expect: null, members: [], nomembers: [], parseErrors: 0 };
-    const re = /\/\/\s*(EXPECT|MEMBERS|NOMEMBERS|PARSE_ERRORS):\s*(.+)$/gm;
+    const out = {
+        expect: null, members: [], nomembers: [], parseErrors: 0,
+        refs: null, docContains: null
+    };
+    const re = /\/\/\s*(EXPECT|MEMBERS|NOMEMBERS|PARSE_ERRORS|REFS|DOC-CONTAINS):\s*(.+)$/gm;
     let m;
     while ((m = re.exec(text))) {
         const tag = m[1].trim();
@@ -63,6 +66,8 @@ function parseDirectives(text) {
         else if (tag === 'MEMBERS') out.members.push(...val.split(',').map(s => s.trim()).filter(Boolean));
         else if (tag === 'NOMEMBERS') out.nomembers.push(...val.split(',').map(s => s.trim()).filter(Boolean));
         else if (tag === 'PARSE_ERRORS') out.parseErrors = parseInt(val, 10) | 0;
+        else if (tag === 'REFS') out.refs = parseInt(val, 10) | 0;
+        else if (tag === 'DOC-CONTAINS') out.docContains = val;
     }
     return out;
 }
@@ -153,6 +158,40 @@ function runCase(filePath) {
         const got = renderType(firstOf ? firstOf(t) : t);
         if (got !== directives.expect) {
             record(name, `EXPECT mismatch: want "${directives.expect}", got "${got}"`);
+            return;
+        }
+    }
+    /* REFS directive: count occurrences of the binding the cursor is on. */
+    if (directives.refs !== null) {
+        const { nodeAt } = require(path.join(OUT, 'ast.js'));
+        const node = nodeAt(a.program, cur.line, cur.character);
+        let binding = null;
+        if (node && node.kind === 'Ident') {
+            const scope = a.resolved.scopeOf.get(node);
+            binding = scope ? scope.lookup(node.name) : null;
+        } else if (node && (node.kind === 'FunctionDecl' || node.kind === 'ClassDecl')) {
+            binding = a.resolved.fileScope.bindings.get(node.name);
+        }
+        if (!binding) { record(name, 'no binding at cursor for REFS check'); return; }
+        if (binding.references.length !== directives.refs) {
+            record(name, `REFS mismatch: want ${directives.refs}, got ${binding.references.length}`);
+            return;
+        }
+    }
+    /* DOC-CONTAINS directive: binding.doc must include the substring. */
+    if (directives.docContains !== null) {
+        const { nodeAt } = require(path.join(OUT, 'ast.js'));
+        const node = nodeAt(a.program, cur.line, cur.character);
+        let binding = null;
+        if (node && node.kind === 'Ident') {
+            const scope = a.resolved.scopeOf.get(node);
+            binding = scope ? scope.lookup(node.name) : null;
+        } else if (node && (node.kind === 'FunctionDecl' || node.kind === 'ClassDecl')) {
+            binding = a.resolved.fileScope.bindings.get(node.name);
+        }
+        if (!binding) { record(name, 'no binding at cursor for DOC-CONTAINS check'); return; }
+        if (!binding.doc || !binding.doc.includes(directives.docContains)) {
+            record(name, `DOC-CONTAINS: want "${directives.docContains}", got ${binding.doc ? JSON.stringify(binding.doc) : '(no doc)'}`);
             return;
         }
     }

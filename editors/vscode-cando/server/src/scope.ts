@@ -46,6 +46,12 @@ export interface Binding {
     captured: boolean;
     /** Set by the resolver when the binding is mutated after declaration. */
     reassigned: boolean;
+    /** Every Ident occurrence that resolved to this binding, including the
+     *  declaration's own name range. Drives Find References / Rename. */
+    references: Range[];
+    /** Documentation comment harvested from the lines immediately above the
+     *  declaration (see analyze.ts). Markdown; rendered verbatim in hover. */
+    doc?: string;
 }
 
 export type ScopeKind = 'file' | 'function' | 'block';
@@ -122,7 +128,8 @@ class Resolver {
             name, kind, decl, declRange, nameRange, scope,
             type: kind === 'self' ? ANY : UNKNOWN,
             captured: false,
-            reassigned: false
+            reassigned: false,
+            references: [nameRange]
         };
         scope.bindings.set(name, b);
         if (!existing) this.allBindings.push(b);
@@ -156,6 +163,7 @@ class Resolver {
                         const b = scope.lookup(t.name);
                         if (b) {
                             b.reassigned = true;
+                            b.references.push(t.range);
                         } else {
                             /* Implicit global: matches the runtime rule that an
                              * assignment to an undeclared name creates a
@@ -295,7 +303,10 @@ class Resolver {
         switch (e.kind) {
             case 'Ident': {
                 const b = scope.lookup(e.name);
-                if (b) this.markCaptureIfNeeded(b, scope);
+                if (b) {
+                    this.markCaptureIfNeeded(b, scope);
+                    b.references.push(e.range);
+                }
                 return;
             }
             case 'FunctionExpr': {

@@ -24,10 +24,25 @@ import {
     Location,
     DocumentSymbol,
     SymbolKind as LspSymbolKind,
+    SymbolInformation,
     Range as LspRange,
     SignatureHelp,
     SignatureInformation,
-    ParameterInformation
+    ParameterInformation,
+    WorkspaceEdit,
+    TextEdit,
+    InlayHint,
+    InlayHintKind,
+    FoldingRange,
+    FoldingRangeKind,
+    SelectionRange,
+    SemanticTokens,
+    SemanticTokensBuilder,
+    Color,
+    ColorInformation,
+    ColorPresentation,
+    CodeAction,
+    CodeActionKind
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 
@@ -44,6 +59,7 @@ import {
 } from './typesys';
 import { Node, Call, rangeContains, nodeAt, children as astChildren } from './ast';
 import { Scope, Binding, scopeAt } from './scope';
+import { findReferencesAcrossWorkspace, workspaceSymbols, invalidateIndex } from './workspace';
 
 interface CandoSettings {
     diagnostics: { enable: boolean; semantic: boolean };
@@ -56,6 +72,28 @@ const DEFAULT_SETTINGS: CandoSettings = {
     completion: { includeBuiltins: true, includePaths: true, crossFile: true },
     keywordCase: 'upper'
 };
+
+/* Semantic-token legend. Keep in sync with the providers below. */
+const SEMANTIC_TOKEN_TYPES = [
+    'namespace', 'class', 'function', 'method', 'parameter',
+    'variable', 'property', 'enumMember', 'keyword', 'string',
+    'number', 'operator', 'macro', 'type'
+];
+const SEMANTIC_TOKEN_MODIFIERS = [
+    'declaration', 'readonly', 'static', 'deprecated',
+    'modification', 'documentation', 'defaultLibrary'
+];
+function semanticTokenType(name: string): number {
+    return SEMANTIC_TOKEN_TYPES.indexOf(name);
+}
+function semanticTokenModifier(...names: string[]): number {
+    let bits = 0;
+    for (const n of names) {
+        const i = SEMANTIC_TOKEN_MODIFIERS.indexOf(n);
+        if (i >= 0) bits |= 1 << i;
+    }
+    return bits;
+}
 
 let globalSettings: CandoSettings = DEFAULT_SETTINGS;
 let workspaceRoots: string[] = [];
@@ -81,6 +119,22 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
             hoverProvider: true,
             definitionProvider: true,
             documentSymbolProvider: true,
+            workspaceSymbolProvider: true,
+            referencesProvider: true,
+            renameProvider: { prepareProvider: true },
+            inlayHintProvider: { resolveProvider: false },
+            foldingRangeProvider: true,
+            selectionRangeProvider: true,
+            colorProvider: true,
+            codeActionProvider: { codeActionKinds: [CodeActionKind.QuickFix, CodeActionKind.Refactor] },
+            semanticTokensProvider: {
+                legend: {
+                    tokenTypes: SEMANTIC_TOKEN_TYPES,
+                    tokenModifiers: SEMANTIC_TOKEN_MODIFIERS
+                },
+                full: true,
+                range: false
+            },
             signatureHelpProvider: { triggerCharacters: ['(', ','] }
         }
     };
@@ -104,8 +158,18 @@ connection.onDidChangeConfiguration(change => {
     documents.all().forEach(refresh);
 });
 
-documents.onDidChangeContent(e => refresh(e.document));
-documents.onDidClose(e => clearDocument(e.document.uri));
+documents.onDidChangeContent(e => {
+    /* The on-disk version of this file is now stale -- the workspace
+     * indexer should re-pick it up next time someone asks for references. */
+    const fsPath = uriToFsPath(e.document.uri);
+    if (fsPath) invalidateIndex(fsPath);
+    refresh(e.document);
+});
+documents.onDidClose(e => {
+    const fsPath = uriToFsPath(e.document.uri);
+    if (fsPath) invalidateIndex(fsPath);
+    clearDocument(e.document.uri);
+});
 
 function refresh(doc: TextDocument): void {
     const analyzed = analyzeDocument(doc.uri, doc.getText(), doc.version, workspaceRoots);
@@ -327,18 +391,30 @@ connection.onCompletion(params => {
         for (const [name, b] of s.bindings) {
             if (seen.has(name)) continue;
             seen.add(name);
+            const docMd = b.doc ?? (b.kind === 'function'
+                ? `Defined at line ${b.declRange.start.line + 1}.`
+                : undefined);
             items.push({
                 label: name,
                 kind: bindingKindToCompletion(b),
                 detail: renderType(b.type),
-                documentation: b.kind === 'function'
-                    ? { kind: MarkupKind.Markdown, value: `Defined at line ${b.declRange.start.line + 1}.` }
-                    : undefined
+                documentation: docMd ? { kind: MarkupKind.Markdown, value: docMd } : undefined,
+                /* Push function and class declarations to the top of the
+                 * list; locals beat globals in a tie. */
+                sortText: completionSortKey(b)
             });
         }
     }
     return items;
 });
+
+function completionSortKey(b: Binding): string {
+    const tier = (b.kind === 'param' || b.kind === 'self' || b.kind === 'forvar' || b.kind === 'pipe' || b.kind === 'catch') ? '1'
+               : (b.kind === 'var' || b.kind === 'const') ? '2'
+               : (b.kind === 'function' || b.kind === 'class') ? '3'
+               : '4';
+    return tier + b.name;
+}
 
 function bindingKindToCompletion(b: Binding): CompletionItemKind {
     switch (b.kind) {
@@ -446,6 +522,7 @@ connection.onHover((params): Hover | null => {
                 const t = a.inferred.bindingTypes.get(b) ?? b.type;
                 const lines = [`**${b.name}** -- \`${renderType(t)}\``];
                 if (b.captured) lines.push('', '_(captured upvalue)_');
+                if (b.doc) lines.push('', b.doc);
                 return md(lines.join('\n'));
             }
             const ns = namespaceByName(node.name);
@@ -748,8 +825,477 @@ function fsPathToUri(p: string): string {
     return 'file://' + encodeURI(normalized).replace(/[#?]/g, c => encodeURIComponent(c));
 }
 
+/* ----------------------------------------------------------------------- */
+/* Find references                                                         */
+/* ----------------------------------------------------------------------- */
+
+connection.onReferences(params => {
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return [];
+    const node = nodeAt(a.program, params.position.line, params.position.character);
+    if (!node) return [];
+    const binding = bindingAtNode(a, node);
+    if (!binding) return [];
+    const hits = findReferencesAcrossWorkspace(binding, params.textDocument.uri, workspaceRoots);
+    const out: Location[] = hits.map(h => ({ uri: h.uri, range: toLsp(h.range) }));
+    if (params.context && !params.context.includeDeclaration) {
+        return out.filter(l => !(l.uri === params.textDocument.uri
+            && rangesEqual(l.range, toLsp(binding.declRange))));
+    }
+    return out;
+});
+
+function rangesEqual(a: LspRange, b: LspRange): boolean {
+    return a.start.line === b.start.line && a.start.character === b.start.character
+        && a.end.line === b.end.line && a.end.character === b.end.character;
+}
+
+function bindingAtNode(a: AnalyzedDocument, node: Node): Binding | null {
+    if (node.kind === 'Ident') {
+        const scope = a.resolved.scopeOf.get(node);
+        return scope?.lookup(node.name) ?? null;
+    }
+    if (node.kind === 'FunctionDecl' || node.kind === 'ClassDecl') {
+        return a.resolved.fileScope.bindings.get(node.name) ?? null;
+    }
+    return null;
+}
+
+/* ----------------------------------------------------------------------- */
+/* Rename                                                                  */
+/* ----------------------------------------------------------------------- */
+
+connection.onPrepareRename(params => {
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return null;
+    const node = nodeAt(a.program, params.position.line, params.position.character);
+    if (!node) return null;
+    const b = bindingAtNode(a, node);
+    if (!b) return null;
+    /* Don't allow rename of namespace / builtin idents. */
+    if (b.kind === 'self' || b.kind === 'pipe') return null;
+    return {
+        range: toLsp(node.kind === 'Ident' ? node.range : b.nameRange),
+        placeholder: b.name
+    };
+});
+
+connection.onRenameRequest((params): WorkspaceEdit | null => {
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return null;
+    const node = nodeAt(a.program, params.position.line, params.position.character);
+    if (!node) return null;
+    const b = bindingAtNode(a, node);
+    if (!b) return null;
+
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(params.newName)) return null;
+
+    const hits = findReferencesAcrossWorkspace(b, params.textDocument.uri, workspaceRoots);
+    const byUri = new Map<string, TextEdit[]>();
+    for (const h of hits) {
+        const list = byUri.get(h.uri) ?? [];
+        list.push({ range: toLsp(h.range), newText: params.newName });
+        byUri.set(h.uri, list);
+    }
+    const changes: { [uri: string]: TextEdit[] } = {};
+    for (const [uri, edits] of byUri) changes[uri] = edits;
+    return { changes };
+});
+
+/* ----------------------------------------------------------------------- */
+/* Workspace symbols                                                       */
+/* ----------------------------------------------------------------------- */
+
+connection.onWorkspaceSymbol(params => {
+    const q = (params.query ?? '').toLowerCase();
+    const hits = workspaceSymbols(workspaceRoots);
+    const out: SymbolInformation[] = [];
+    for (const h of hits) {
+        if (q && !h.name.toLowerCase().includes(q)) continue;
+        out.push({
+            name: h.name,
+            kind: bindingKindToSymbolKind(h.kind),
+            location: { uri: h.uri, range: toLsp(h.range) },
+            containerName: h.detail
+        });
+        if (out.length >= 500) break;
+    }
+    return out;
+});
+
+function bindingKindToSymbolKind(k: Binding['kind']): LspSymbolKind {
+    switch (k) {
+        case 'function': return LspSymbolKind.Function;
+        case 'class':    return LspSymbolKind.Class;
+        case 'const':    return LspSymbolKind.Constant;
+        case 'param':    return LspSymbolKind.Variable;
+        case 'self':     return LspSymbolKind.Variable;
+        case 'pipe':     return LspSymbolKind.Variable;
+        case 'catch':    return LspSymbolKind.Variable;
+        case 'forvar':   return LspSymbolKind.Variable;
+        case 'global':   return LspSymbolKind.Variable;
+        default:         return LspSymbolKind.Variable;
+    }
+}
+
+/* ----------------------------------------------------------------------- */
+/* Inlay hints                                                             */
+/* ----------------------------------------------------------------------- */
+
+connection.languages.inlayHint.on(params => {
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return [];
+    const out: InlayHint[] = [];
+
+    /* Show inferred types on the right-hand side of every VAR/CONST/GLOBAL
+     * binding that doesn't have an obvious literal on the right. */
+    astChildrenWalk(a.program, (n) => {
+        if (n.kind === 'VarDecl') {
+            for (let i = 0; i < n.targets.length; i++) {
+                const t = n.targets[i];
+                /* Skip when the user already typed a type-revealing literal. */
+                const init = n.init[i] ?? n.init[n.init.length - 1];
+                if (!init) continue;
+                if (init.kind === 'NumberLit' || init.kind === 'StringLit' ||
+                    init.kind === 'BoolLit'  || init.kind === 'NullLit' ||
+                    init.kind === 'ArrayLit' || init.kind === 'ObjectLit') continue;
+                const binding = a.resolved.fileScope.bindings.get(t.name)
+                    ?? scopeContaining(a, t.range.start.line, t.range.start.character).lookup(t.name);
+                if (!binding) continue;
+                const ty = a.inferred.bindingTypes.get(binding) ?? binding.type;
+                if (ty.kind === 'prim' && (ty.name === 'unknown' || ty.name === 'any')) continue;
+                out.push({
+                    position: t.range.end,
+                    label: ': ' + renderType(ty),
+                    kind: InlayHintKind.Type,
+                    paddingLeft: false,
+                    paddingRight: true
+                });
+            }
+        }
+        /* Show parameter names at call sites with positional args. */
+        if (n.kind === 'Call') {
+            const calleeT = a.inferred.nodeTypes.get(n.callee);
+            if (!calleeT || calleeT.kind !== 'function') return;
+            for (let i = 0; i < n.args.length && i < calleeT.params.length; i++) {
+                const arg = n.args[i];
+                const p = calleeT.params[i];
+                if (arg.spread || p.rest) continue;
+                /* Skip when arg already shows the param name (callee+ident
+                 * identical) -- common idiom in CanDo where args carry the
+                 * same name as params. */
+                if (arg.expr.kind === 'Ident' && arg.expr.name === p.name) continue;
+                /* Skip trivial literals to reduce noise -- numbers/strings
+                 * get the hint; idents and complex exprs don't. */
+                if (arg.expr.kind !== 'NumberLit' &&
+                    arg.expr.kind !== 'StringLit' &&
+                    arg.expr.kind !== 'BoolLit' &&
+                    arg.expr.kind !== 'NullLit') continue;
+                out.push({
+                    position: arg.expr.range.start,
+                    label: p.name + ':',
+                    kind: InlayHintKind.Parameter,
+                    paddingLeft: false,
+                    paddingRight: true
+                });
+            }
+        }
+    });
+    /* Filter to the requested range. */
+    return out.filter(h =>
+        h.position.line >= params.range.start.line
+        && h.position.line <= params.range.end.line);
+});
+
+function astChildrenWalk(n: Node, visit: (n: Node) => void): void {
+    visit(n);
+    for (const c of astChildren(n)) astChildrenWalk(c, visit);
+}
+
+/* ----------------------------------------------------------------------- */
+/* Folding ranges                                                          */
+/* ----------------------------------------------------------------------- */
+
+connection.onFoldingRanges(params => {
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return [];
+    const out: FoldingRange[] = [];
+    /* Every `{ ... }` block, every multi-line comment, and every multi-line
+     * IF chain becomes a folding range. */
+    astChildrenWalk(a.program, (n) => {
+        const isFoldable =
+            n.kind === 'BlockStmt' ||
+            n.kind === 'FunctionDecl' ||
+            n.kind === 'ClassDecl' ||
+            n.kind === 'IfStmt' ||
+            n.kind === 'WhileStmt' ||
+            n.kind === 'ForRange' || n.kind === 'ForKeys' ||
+            n.kind === 'ForValues' || n.kind === 'ForOver' ||
+            n.kind === 'TryStmt' ||
+            n.kind === 'ObjectLit' ||
+            n.kind === 'ArrayLit';
+        if (!isFoldable) return;
+        if (n.range.end.line <= n.range.start.line) return;
+        out.push({
+            startLine: n.range.start.line,
+            endLine: n.range.end.line - 1,
+            kind: FoldingRangeKind.Region
+        });
+    });
+    /* Comment tokens spanning multiple lines (block comments). */
+    for (const t of a.tokens) {
+        if (t.kind === 'comment' && t.range.end.line > t.range.start.line) {
+            out.push({
+                startLine: t.range.start.line,
+                endLine: t.range.end.line,
+                kind: FoldingRangeKind.Comment
+            });
+        }
+    }
+    return out;
+});
+
+/* ----------------------------------------------------------------------- */
+/* Selection ranges                                                        */
+/* ----------------------------------------------------------------------- */
+
+connection.onSelectionRanges(params => {
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return [];
+    return params.positions.map(pos => buildSelectionRange(a, pos.line, pos.character));
+});
+
+function buildSelectionRange(a: AnalyzedDocument, line: number, character: number): SelectionRange {
+    /* Walk from the deepest containing AST node up to the program root,
+     * building a stack of ranges that the editor cycles through. */
+    const ranges: LspRange[] = [];
+    const visit = (n: Node): boolean => {
+        if (!rangeContains(n.range, line, character)) return false;
+        let descended = false;
+        for (const c of astChildren(n)) {
+            if (visit(c)) { descended = true; break; }
+        }
+        if (!descended) ranges.push(toLsp(n.range));
+        else ranges.push(toLsp(n.range));
+        return true;
+    };
+    visit(a.program);
+    /* Build chain from innermost to outermost. */
+    let chain: SelectionRange | undefined;
+    for (const r of ranges) chain = { range: r, parent: chain };
+    return chain ?? { range: { start: { line, character }, end: { line, character } } };
+}
+
+/* ----------------------------------------------------------------------- */
+/* Semantic tokens                                                         */
+/* ----------------------------------------------------------------------- */
+
+connection.languages.semanticTokens.on(params => {
+    const a = getAnalyzed(params.textDocument.uri);
+    const builder = new SemanticTokensBuilder();
+    if (!a) return builder.build();
+    const all: { line: number; ch: number; len: number; type: number; mods: number }[] = [];
+
+    astChildrenWalk(a.program, (n) => {
+        if (n.kind === 'Ident') {
+            const scope = a.resolved.scopeOf.get(n);
+            const b = scope?.lookup(n.name);
+            if (b) {
+                push(all, n.range, semanticTokenType(bindingTokenType(b)), bindingTokenModifiers(b));
+            } else if (namespaceByName(n.name)) {
+                push(all, n.range, semanticTokenType('namespace'), semanticTokenModifier('defaultLibrary'));
+            } else if (builtinByName(n.name)) {
+                push(all, n.range, semanticTokenType('function'), semanticTokenModifier('defaultLibrary'));
+            }
+        } else if (n.kind === 'Member') {
+            push(all, n.propertyRange, semanticTokenType('property'), 0);
+        } else if (n.kind === 'FunctionDecl') {
+            push(all, n.nameRange, semanticTokenType('function'), semanticTokenModifier('declaration'));
+        } else if (n.kind === 'ClassDecl') {
+            push(all, n.nameRange, semanticTokenType('class'), semanticTokenModifier('declaration'));
+        } else if (n.kind === 'TemplateLit') {
+            for (const p of n.parts) {
+                if (p.kind === 'expr' && p.expr) {
+                    /* Highlight `${` / `}` boundaries as macros. */
+                    push(all, p.range, semanticTokenType('macro'), 0);
+                }
+            }
+        }
+    });
+
+    /* Highlight the dollar-brace boundaries in template strings by token. */
+    for (const t of a.tokens) {
+        if (t.kind === 'number') push(all, t.range, semanticTokenType('number'), 0);
+        else if (t.kind === 'string' || t.kind === 'template-string') push(all, t.range, semanticTokenType('string'), 0);
+        else if (t.kind === 'keyword') push(all, t.range, semanticTokenType('keyword'), 0);
+    }
+
+    /* Sort by (line, character) and emit. */
+    all.sort((x, y) => x.line - y.line || x.ch - y.ch);
+    for (const t of all) builder.push(t.line, t.ch, t.len, t.type, t.mods);
+    return builder.build();
+});
+
+function push(out: { line: number; ch: number; len: number; type: number; mods: number }[],
+              r: LexRange, type: number, mods: number): void {
+    if (type < 0) return;
+    if (r.start.line !== r.end.line) return; // skip multi-line tokens
+    out.push({
+        line: r.start.line,
+        ch: r.start.character,
+        len: r.end.character - r.start.character,
+        type, mods
+    });
+}
+
+function bindingTokenType(b: Binding): string {
+    switch (b.kind) {
+        case 'function': return 'function';
+        case 'class':    return 'class';
+        case 'const':    return 'variable';
+        case 'param':    return 'parameter';
+        case 'self':     return 'parameter';
+        case 'pipe':     return 'variable';
+        case 'catch':    return 'variable';
+        case 'forvar':   return 'variable';
+        default:         return 'variable';
+    }
+}
+
+function bindingTokenModifiers(b: Binding): number {
+    let m = 0;
+    if (b.kind === 'const') m |= semanticTokenModifier('readonly');
+    if (b.captured) m |= semanticTokenModifier('modification');
+    return m;
+}
+
+/* ----------------------------------------------------------------------- */
+/* Color provider (forms.Color.* + #rrggbb / 0xrrggbb literals)            */
+/* ----------------------------------------------------------------------- */
+
+connection.onDocumentColor(params => {
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return [];
+    const out: ColorInformation[] = [];
+    /* Numeric color literals: 0xRRGGBB hex constants used in forms.Color.*
+     * and similar. We only flag the form `0x[0-9A-Fa-f]{6}` -- 8-digit
+     * ARGB hex is also accepted. */
+    for (const t of a.tokens) {
+        if (t.kind !== 'number') continue;
+        const c = parseColorLiteral(t.value);
+        if (c) out.push({ range: toLsp(t.range), color: c });
+    }
+    return out;
+});
+
+connection.onColorPresentation(params => {
+    const r = params.color.red, g = params.color.green, b = params.color.blue;
+    const hex = '0x' +
+        toHex(Math.round(r * 255)) +
+        toHex(Math.round(g * 255)) +
+        toHex(Math.round(b * 255));
+    const out: ColorPresentation[] = [
+        { label: hex },
+        { label: `\`rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})\`` }
+    ];
+    return out;
+});
+
+function toHex(n: number): string {
+    const v = Math.max(0, Math.min(255, n));
+    const s = v.toString(16).toUpperCase();
+    return s.length < 2 ? '0' + s : s;
+}
+
+function parseColorLiteral(raw: string): Color | null {
+    if (!/^0[xX][0-9A-Fa-f]{6,8}$/.test(raw)) return null;
+    const digits = raw.slice(2);
+    let r: number, g: number, b: number, a: number;
+    if (digits.length === 6) {
+        r = parseInt(digits.slice(0, 2), 16);
+        g = parseInt(digits.slice(2, 4), 16);
+        b = parseInt(digits.slice(4, 6), 16);
+        a = 255;
+    } else {
+        a = parseInt(digits.slice(0, 2), 16);
+        r = parseInt(digits.slice(2, 4), 16);
+        g = parseInt(digits.slice(4, 6), 16);
+        b = parseInt(digits.slice(6, 8), 16);
+    }
+    return { red: r / 255, green: g / 255, blue: b / 255, alpha: a / 255 };
+}
+
+/* ----------------------------------------------------------------------- */
+/* Code actions                                                            */
+/* ----------------------------------------------------------------------- */
+
+connection.onCodeAction(params => {
+    const out: CodeAction[] = [];
+    const doc = documents.get(params.textDocument.uri);
+    if (!doc) return out;
+    for (const diag of params.context.diagnostics) {
+        if (typeof diag.message !== 'string') continue;
+        /* Quick fix: undeclared identifier -> introduce `VAR <name> = NULL;`
+         * at the top of the surrounding function/file. */
+        const undeclared = /'([A-Za-z_][A-Za-z0-9_]*)' is not declared/.exec(diag.message);
+        if (undeclared) {
+            const name = undeclared[1];
+            const insertLine = Math.max(0, diag.range.start.line);
+            const edit: WorkspaceEdit = {
+                changes: {
+                    [params.textDocument.uri]: [{
+                        range: { start: { line: insertLine, character: 0 }, end: { line: insertLine, character: 0 } },
+                        newText: `VAR ${name} = NULL;\n`
+                    }]
+                }
+            };
+            out.push({
+                title: `Declare 'VAR ${name} = NULL;' above this line`,
+                kind: CodeActionKind.QuickFix,
+                diagnostics: [diag],
+                edit,
+                isPreferred: true
+            });
+        }
+        /* Quick fix: assign-to-const -> change CONST to VAR. We do a simple
+         * text-scan on the line that holds the const declaration. */
+        const constAssign = /Cannot assign to CONST binding '([A-Za-z_][A-Za-z0-9_]*)'/.exec(diag.message);
+        if (constAssign) {
+            const name = constAssign[1];
+            const a = getAnalyzed(params.textDocument.uri);
+            const b = a?.resolved.fileScope.bindings.get(name);
+            if (b && b.kind === 'const') {
+                /* Find the leading CONST keyword token range on the decl line. */
+                const text = doc.getText();
+                const lineStart = doc.offsetAt({ line: b.declRange.start.line, character: 0 });
+                const lineEnd = doc.offsetAt({ line: b.declRange.start.line + 1, character: 0 });
+                const lineText = text.slice(lineStart, lineEnd);
+                const kwIdx = /\bCONST\b|\bconst\b/.exec(lineText);
+                if (kwIdx) {
+                    const startCh = kwIdx.index;
+                    const replaceRange: LspRange = {
+                        start: { line: b.declRange.start.line, character: startCh },
+                        end:   { line: b.declRange.start.line, character: startCh + kwIdx[0].length }
+                    };
+                    out.push({
+                        title: `Change CONST '${name}' to VAR`,
+                        kind: CodeActionKind.QuickFix,
+                        diagnostics: [diag],
+                        edit: {
+                            changes: {
+                                [params.textDocument.uri]: [{ range: replaceRange, newText: 'VAR' }]
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+    return out;
+});
+
 /* Reference imports retained for the public API surface. */
-void path; void namespaceMemberDetail;
+void path; void namespaceMemberDetail; void SemanticTokens;
 
 documents.listen(connection);
 connection.listen();

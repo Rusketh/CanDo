@@ -1,0 +1,5 @@
+// EXPECT: unknown
+VAR x = NULL;
+IF x {
+    VAR y = x|;
+}

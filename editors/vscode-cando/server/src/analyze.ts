@@ -68,8 +68,9 @@ export function getCached(uri: string): AnalyzedDocument | null {
 
 function analyzeFresh(uri: string, text: string, version: number, workspaceRoots: string[], includeStack: Set<string>): AnalyzedDocument {
     const tokens = new Lexer(text).tokenize();
-    const { program, errors: parseErrors } = parse(tokens);
+    const { program, errors: parseErrors } = parse(tokens, text);
     const resolved = resolveScopes(program);
+    attachDocComments(tokens, resolved);
     const inferred = infer(program, resolved, {
         documentUri: uri,
         workspaceRoots,
@@ -79,6 +80,46 @@ function analyzeFresh(uri: string, text: string, version: number, workspaceRoots
         }
     });
     return { uri, version, text, tokens, program, parseErrors, resolved, inferred };
+}
+
+/** Walk every binding whose declaration starts on line N and look for
+ *  consecutive `//` or `///` comments whose end line is N-1, N-2, ... .
+ *  Concatenated comment text (joined by newlines) becomes binding.doc. */
+function attachDocComments(tokens: Token[], resolved: ResolveResult): void {
+    /* Group comments by their end line for cheap lookup. */
+    const byEndLine = new Map<number, Token>();
+    for (const t of tokens) {
+        if (t.kind !== 'comment') continue;
+        byEndLine.set(t.range.end.line, t);
+    }
+    for (const b of resolved.allBindings) {
+        if (b.kind !== 'function' && b.kind !== 'class' &&
+            b.kind !== 'const' && b.kind !== 'var' && b.kind !== 'global') continue;
+        const lines: string[] = [];
+        let line = b.declRange.start.line - 1;
+        while (line >= 0) {
+            const c = byEndLine.get(line);
+            if (!c) break;
+            lines.unshift(stripCommentMarker(c.value));
+            line = c.range.start.line - 1;
+        }
+        if (lines.length) b.doc = lines.join('\n').trim();
+    }
+}
+
+function stripCommentMarker(raw: string): string {
+    /* Line comment values start with `//` (or `///`). Block comments start
+     * with `/*`. We strip the lead-in and any common indentation. */
+    let v = raw;
+    if (v.startsWith('///')) v = v.slice(3);
+    else if (v.startsWith('//')) v = v.slice(2);
+    else if (v.startsWith('/*')) {
+        v = v.slice(2);
+        if (v.endsWith('*/')) v = v.slice(0, -2);
+        /* For block comments, strip leading `*` per line. */
+        v = v.split('\n').map(line => line.replace(/^\s*\*\s?/, '')).join('\n');
+    }
+    return v.trim();
 }
 
 function resolveIncludeAt(absPath: string, workspaceRoots: string[], stack: Set<string>): TypeRef | null {

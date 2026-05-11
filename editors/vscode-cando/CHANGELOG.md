@@ -3,6 +3,46 @@
 All notable changes to the **CanDo Language** VS Code extension are
 documented in this file.
 
+## 0.5.0 -- 2026-05-11
+
+### Added
+
+- **Find references** -- every Ident occurrence that resolves to the
+  same binding (across the workspace for file-scoped declarations).
+- **Rename** -- workspace-wide, behind `prepareRename` so the editor
+  only offers it on real bindings (skips `self`, `pipe`, namespaces).
+- **Workspace symbols** -- searchable index of every top-level
+  declaration in every `.cdo` under the workspace roots.
+- **Inlay hints** -- shows inferred types on `VAR x = expr;` and
+  parameter names at call sites for literal arguments.
+- **Folding ranges** -- collapses every block, multi-line literal,
+  IF chain, loop, TRY, and multi-line comment.
+- **Selection ranges** -- smart expand (Cmd/Ctrl+Shift+Right) walks
+  the AST node stack from the cursor outward.
+- **Semantic tokens** -- richer highlighting that distinguishes
+  parameters, locals, captured upvalues, classes, functions, and
+  default-library namespaces.
+- **Color provider** -- `0xRRGGBB` / `0xAARRGGBB` numeric literals
+  render as inline color swatches and can be tweaked with the picker.
+- **Code actions** -- quick fixes for "undeclared identifier" (inserts
+  `VAR <name> = NULL;`) and "Cannot assign to CONST" (rewrites
+  `CONST` to `VAR`).
+- **Doc comment harvesting** -- consecutive `//`, `///`, and `/* */`
+  comments immediately above a declaration are attached to the
+  binding and shown in hover + completion documentation.
+- **Template-string interpolations are now real expressions.** The
+  parser re-lexes each `${...}` with the correct source-offset, so
+  member access, completion, and references work inside template
+  strings.
+- **Completion ranking** -- locals win ties over globals, then
+  function/class declarations, then namespaces / builtins.
+
+### Improved
+
+- Reference tracking added to every binding (resolver pass).
+- Workspace indexer with mtime-based invalidation; refreshes when a
+  visible document changes so refs always reflect the open buffers.
+
 ## 0.4.0 -- 2026-05-11
 
 ### Rewritten

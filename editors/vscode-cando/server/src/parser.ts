@@ -44,20 +44,25 @@ const COMPARE_ORD = new Set(['<', '<=', '>', '>=']);
 const ZERO_POS: Position = { line: 0, character: 0 };
 const ZERO_RANGE: Range = { start: ZERO_POS, end: ZERO_POS };
 
-export function parse(tokens: Token[]): ParseResult {
-    const p = new Parser(tokens);
+export function parse(tokens: Token[], source = ''): ParseResult {
+    const p = new Parser(tokens, source);
     const program = p.parseProgram();
     return { program, errors: p.errors };
 }
 
 class Parser {
     private readonly toks: Token[];
+    /** Original source -- used to extract substrings for template-string
+     *  interpolations so we can re-parse `${expr}` content. May be empty
+     *  when callers don't need interpolation parsing. */
+    private readonly source: string;
     /** Index into `toks`. Comment / newline / error tokens are skipped on read. */
     private i = 0;
     public errors: ParseError[] = [];
 
-    constructor(tokens: Token[]) {
+    constructor(tokens: Token[], source: string) {
         this.toks = tokens.filter(t => t.kind !== 'comment' && t.kind !== 'newline');
+        this.source = source;
     }
 
     /* ----------------------------------------------------------------- */
@@ -1196,11 +1201,9 @@ class Parser {
 
     private parseTemplateString(tok: Token): TemplateLit {
         /* The lexer captured the whole backtick string as one token plus a
-         * list of interpolation ranges. For analysis we treat each `${...}`
-         * as an opaque 'expr' part whose result is unknown; the containing
-         * template is `string`-typed regardless of part types. The cursor
-         * finder still descends into the parts so member completion inside
-         * an interpolation works via fallback identifier lookup. */
+         * list of interpolation ranges. Each `${...}` is re-lexed (using
+         * the original-source offset so positions stay accurate) and
+         * re-parsed as an expression. */
         const parts: TemplatePart[] = [];
         const interps = tok.interpolations ?? [];
         if (interps.length === 0) {
@@ -1208,13 +1211,51 @@ class Parser {
             return { kind: 'TemplateLit', parts, range: tok.range };
         }
         for (const r of interps) {
-            parts.push({
-                kind: 'expr',
-                expr: { kind: 'ErrorExpr', range: r },
-                range: r
-            });
+            const inner = this.extractSource(r);
+            const expr = inner !== null
+                ? parseExpressionFromFragment(inner, r.start.line, r.start.character)
+                : { kind: 'ErrorExpr', range: r } as Expr;
+            parts.push({ kind: 'expr', expr, range: r });
         }
         return { kind: 'TemplateLit', parts, range: tok.range };
+    }
+
+    /** Slice `this.source` to the substring covered by `r`. Falls back to
+     *  null when the source isn't available, so callers can degrade
+     *  gracefully. */
+    private extractSource(r: Range): string | null {
+        if (!this.source) return null;
+        let lineStart = 0;
+        let line = 0;
+        for (let i = 0; i < this.source.length && line < r.start.line; i++) {
+            if (this.source[i] === '\n') { line++; lineStart = i + 1; }
+        }
+        const start = lineStart + r.start.character;
+        let endLineStart = lineStart;
+        let endLine = line;
+        for (let i = start; i < this.source.length && endLine < r.end.line; i++) {
+            if (this.source[i] === '\n') { endLine++; endLineStart = i + 1; }
+        }
+        const end = endLineStart + r.end.character;
+        if (end < start) return null;
+        return this.source.slice(start, end);
+    }
+}
+
+/** Lex + parse a fragment, with token positions offset back into the parent
+ *  document's coordinates. Returns an ErrorExpr if parsing fails entirely. */
+function parseExpressionFromFragment(src: string, startLine: number, startCol: number): Expr {
+    const { Lexer: L } = require('./lexer') as typeof import('./lexer');
+    const tokens = new L(src, startLine, startCol).tokenize();
+    const p = new Parser(tokens, src);
+    /* eslint-disable @typescript-eslint/dot-notation */
+    if (tokens.length === 0 || tokens[0].kind === 'eof') {
+        return { kind: 'ErrorExpr', range: tokens[0]?.range ?? { start: { line: startLine, character: startCol }, end: { line: startLine, character: startCol } } };
+    }
+    try {
+        return p.parseExpression();
+    } catch {
+        return { kind: 'ErrorExpr', range: tokens[0].range };
     }
 }
 

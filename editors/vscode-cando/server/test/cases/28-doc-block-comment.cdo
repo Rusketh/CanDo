@@ -1,0 +1,5 @@
+// DOC-CONTAINS: A box that holds a number.
+/*
+ * A box that holds a number.
+ */
+CLASS Box| = (self, n) { self.n = n; }
