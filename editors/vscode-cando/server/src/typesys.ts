@@ -42,11 +42,22 @@ export interface ObjectType {
     /** Optional class name for nicer rendering. */
     className?: string;
 }
+export interface FunctionSummary {
+    /** Direct writes the body performs on its parameters: paramIdx
+     *  -> field name -> value type. Used to predict the shape of an
+     *  argument *after* a call (so completion lights up new keys). */
+    paramWrites: Map<number, Map<string, TypeRef>>;
+}
+
 export interface FunctionType {
     kind: 'function';
     params: FunctionParam[];
     /** Return values, positionally. A multi-return function has length > 1. */
     returns: TypeRef[];
+    /** Cross-call effect summary. Populated by the inferer after the
+     *  body has been walked once. Absent for builtin / manifest
+     *  functions, which describe their effects declaratively. */
+    summary?: FunctionSummary;
     /** When the function is the body of a method declared via `:` syntax
      *  the receiver type goes here so signature help can describe it. */
     self?: TypeRef;

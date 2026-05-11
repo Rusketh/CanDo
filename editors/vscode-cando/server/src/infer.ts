@@ -13,13 +13,13 @@
 
 import { Range } from './lexer';
 import {
-    Program, Stmt, Expr, FunctionDecl, ClassDecl,
+    Program, Stmt, Expr, FunctionDecl, ClassDecl, BlockStmt,
     VarDecl, AssignStmt, Ident, Member, Call, FunctionExpr, ClassExpr,
-    ArrayLit, ObjectLit, Pipe, Node
+    ArrayLit, ObjectLit, Pipe, Node, walk as walkAst
 } from './ast';
 import { Scope, Binding, ResolveResult } from './scope';
 import {
-    TypeRef, FunctionType, FunctionParam, ObjectType, ClassType,
+    TypeRef, FunctionType, FunctionParam, FunctionSummary, ObjectType, ClassType,
     ArrayType, NamespaceInfo, MemberType,
     ANY, UNKNOWN, NULL_T, BOOL_T, NUM_T, STR_T,
     arrayOf, tupleOf, emptyObject, optionalOf, unionOf,
@@ -487,6 +487,9 @@ class Inferer {
         const fnType = this.makeFunctionType(s.name, s.params, returns, s.nameRange);
         /* Layer doc info onto the synthesised function type. */
         this.applyDocSignatureOverlay(fnType, b, fnScope, docReturns);
+        /* Collect the cross-call summary so callers can predict the
+         * post-call shape of their arguments. */
+        fnType.summary = this.collectFunctionSummary(s.body, s.params.map(p => p.name));
         if (b) {
             b.type = fnType;
             this.bindingTypes.set(b, fnType);
@@ -1041,6 +1044,11 @@ class Inferer {
             return calleeT.instance;
         }
         if (calleeT.kind === 'function') {
+            /* Replay the callee's per-param write summary onto the
+             * arguments. Lets `init(a)` add the keys `init` writes to
+             * its first param onto `a`'s shape -- exactly the
+             * cross-function shape prediction we set out to build. */
+            this.replaySummary(calleeT, e.args, scope);
             if (calleeT.returnsSelf && e.callee.kind === 'Member') {
                 return this.expr(e.callee.object, scope, flow);
             }
@@ -1173,7 +1181,8 @@ class Inferer {
             params: fp,
             returns: items.length === 0 ? [NULL_T] : items,
             name: e.name,
-            defRange: e.nameRange ?? e.range
+            defRange: e.nameRange ?? e.range,
+            summary: this.collectFunctionSummary(e.body, e.params.map(p => p.name))
         };
     }
 
@@ -1297,6 +1306,87 @@ class Inferer {
                 defRange: b.nameRange
             });
         }
+    }
+
+    /* ------------------------------------------------------------------- */
+    /* Function summaries: cross-call shape effects                        */
+    /* ------------------------------------------------------------------- */
+
+    /** Walk a function body and record every direct `paramName.key = value`
+     *  write. Reading is enough for now -- the spike that gets us most of
+     *  the value is just the writes. Nested patterns (`p.a.b = v`),
+     *  conditional writes, and writes through aliased locals are ignored;
+     *  they fall back to today's behavior (no cross-call effect). */
+    private collectFunctionSummary(body: BlockStmt, paramNames: string[]): FunctionSummary {
+        const paramWrites = new Map<number, Map<string, TypeRef>>();
+        if (paramNames.length === 0) return { paramWrites };
+        const nameToIdx = new Map<string, number>();
+        for (let i = 0; i < paramNames.length; i++) nameToIdx.set(paramNames[i], i);
+
+        walkAst(body, (n) => {
+            if (n.kind !== 'AssignStmt') return;
+            const targets = n.targets;
+            const rhs = n.rhs;
+            for (let i = 0; i < targets.length; i++) {
+                const t = targets[i];
+                if (t.kind !== 'Member') continue;
+                if (t.object.kind !== 'Ident') continue;
+                const idx = nameToIdx.get(t.object.name);
+                if (idx === undefined) continue;
+                /* RHS type: positional match, fall back to ANY. */
+                const r = rhs.length === targets.length ? rhs[i] : (rhs[0] ?? null);
+                const valueT = r ? (this.nodeTypes.get(r) ?? ANY) : ANY;
+                let m = paramWrites.get(idx);
+                if (!m) { m = new Map(); paramWrites.set(idx, m); }
+                const existing = m.get(t.property);
+                m.set(t.property, existing ? unionOf([existing, valueT]) : valueT);
+            }
+        });
+        return { paramWrites };
+    }
+
+    /** Replay a callee's summary onto the arguments at a call site, so
+     *  the caller's local variables gain the keys the callee wrote.
+     *  Conservative: only mutates argument types that are already
+     *  object-shaped (so we don't promote scalars or break unions). */
+    private replaySummary(fnType: FunctionType, args: Call['args'], scope: Scope): void {
+        const sum = fnType.summary;
+        if (!sum) return;
+        for (const [paramIdx, writes] of sum.paramWrites) {
+            const arg = args[paramIdx];
+            if (!arg || arg.spread) continue;
+            if (arg.expr.kind !== 'Ident') continue;
+            const b = scope.lookup(arg.expr.name);
+            if (!b) continue;
+            const target = this.objectTargetFor(b);
+            if (!target) continue;
+            for (const [key, valueT] of writes) {
+                setMember(target, key, { type: valueT });
+            }
+            /* If we promoted an empty/unknown var to a shape, refresh
+             * the cached binding type so completion sees it. */
+            this.bindingTypes.set(b, b.type);
+        }
+    }
+
+    /** Find or create the ObjectType we should record writes on for a
+     *  binding. Returns null when the binding's type isn't shape-like
+     *  and we don't want to coerce it (e.g. it's a primitive, a class
+     *  instance from a manifest, or a union). */
+    private objectTargetFor(b: Binding): ObjectType | null {
+        const t = b.type;
+        if (t.kind === 'object') return t;
+        if (t.kind === 'class') return t.instance;
+        /* Promote `unknown` / freshly-empty-shape locals so the first
+         * call into a writer gives them a body. We *don't* promote
+         * `any`: that's a deliberate user-or-doc "anything goes" and
+         * we shouldn't override it. */
+        if (t.kind === 'prim' && t.name === 'unknown') {
+            const fresh: ObjectType = emptyObject();
+            b.type = fresh;
+            return fresh;
+        }
+        return null;
     }
 
     private inferPipe(e: Pipe, scope: Scope, flow: FlowEnv): TypeRef {

@@ -7,6 +7,17 @@ documented in this file.
 
 ### Added
 
+- **Cross-function object-shape prediction.** Every user function gets
+  a per-parameter write summary recorded during inference: every
+  direct `param.key = value` mutation. At call sites, the summary is
+  replayed onto the argument's binding, so an `init(rec)` whose body
+  writes `o.x` and `o.y` makes `rec.x` and `rec.y` available to
+  completion afterwards. Summaries propagate through `VAR alias =
+  init` (the FunctionType reference carries them) and through object
+  fields (`{ cb: init }`). Conservative on `any` / unions / non-shape
+  values -- the worst case is "no extra knowledge," never a wrong
+  claim. Implements the middle-ground plan we discussed: per-function
+  summaries + zero-depth on-call replay, no global fixpoint.
 - **Structured doc comments.** The extension now recognises a small
   JSDoc/LuaLS-flavored tag vocabulary in `///` line and `/** */`
   block comments and turns it into type information that drives

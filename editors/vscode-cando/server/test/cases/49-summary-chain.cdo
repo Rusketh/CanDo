@@ -1,0 +1,7 @@
+FUNCTION addA(o) { o.a = 1; }
+FUNCTION addB(o) { o.b = 2; }
+VAR rec = {};
+addA(rec);
+addB(rec);
+print(rec.|a);
+// MEMBERS: a, b

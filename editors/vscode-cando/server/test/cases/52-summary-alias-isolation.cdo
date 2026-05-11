@@ -1,0 +1,13 @@
+/// @shape Point { x: number, y: number }
+
+/// @param p {Point}
+FUNCTION addZ(p) { p.z = 0; }
+
+VAR a = { x: 1, y: 2 };
+VAR b = { x: 3, y: 4 };
+addZ(a);
+/* `b` was not passed through addZ, so it must NOT have gained `z`.
+ * If alias sharing leaked, `b.z` would appear. */
+print(b.|x);
+// MEMBERS: x, y
+// NOMEMBERS: z
