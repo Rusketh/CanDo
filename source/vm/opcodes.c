@@ -153,6 +153,9 @@ static const char *const s_opcode_names[OP_COUNT] = {
     [OP_GT_SPREAD]        = "OP_GT_SPREAD",
     [OP_LEQ_SPREAD]       = "OP_LEQ_SPREAD",
     [OP_GEQ_SPREAD]       = "OP_GEQ_SPREAD",
+    /* Band 13 (cont.): numeric-range FOR */
+    [OP_FOR_RANGE_INIT]   = "OP_FOR_RANGE_INIT",
+    [OP_FOR_RANGE_NEXT]   = "OP_FOR_RANGE_NEXT",
     /* Sentinels */
     [OP_NOP]              = "OP_NOP",
     [OP_HALT]             = "OP_HALT",
@@ -305,6 +308,9 @@ static const CandoOpFmt s_opcode_fmts[OP_COUNT] = {
     [OP_GT_SPREAD]        = OPFMT_NONE,
     [OP_LEQ_SPREAD]       = OPFMT_NONE,
     [OP_GEQ_SPREAD]       = OPFMT_NONE,
+    /* Band 13 (cont.): numeric-range FOR */
+    [OP_FOR_RANGE_INIT]   = OPFMT_A,
+    [OP_FOR_RANGE_NEXT]   = OPFMT_A,
     /* Sentinels */
     [OP_NOP]              = OPFMT_NONE,
     [OP_HALT]             = OPFMT_NONE,
@@ -496,6 +502,11 @@ static const CandoOpInfo s_opcode_info[OP_COUNT] = {
     [OP_GT_SPREAD]           = _OP(0, 1, EFFECT_PURE,    1, 1),
     [OP_LEQ_SPREAD]          = _OP(0, 1, EFFECT_PURE,    1, 1),
     [OP_GEQ_SPREAD]          = _OP(0, 1, EFFECT_PURE,    1, 1),
+
+    /* Band 13 (cont.): numeric-range FOR -- stack effect tracked by the
+     * dispatcher, not visible as a single-arity push/pop. */
+    [OP_FOR_RANGE_INIT]      = _OP(0, 0, EFFECT_CONTROL, 1, 0),
+    [OP_FOR_RANGE_NEXT]      = _OP(0, 0, EFFECT_CONTROL, 0, 0),
 
     /* Sentinels */
     [OP_NOP]                 = _OP(0, 0, EFFECT_PURE,    0, 0),

@@ -43,6 +43,9 @@ CandoChunk *cando_chunk_new(const char *name, u32 arity, bool has_vararg) {
     c->local_count = arity;   /* parameters occupy the first local slots  */
     c->upval_count = 0;
     c->has_vararg  = has_vararg;
+    c->inline_cache         = NULL;
+    c->inline_cache_cap     = 0;
+    c->globals_version_seen = 0;
     return c;
 }
 
@@ -58,6 +61,7 @@ void cando_chunk_free(CandoChunk *chunk) {
     cando_free(chunk->constants);
     cando_free(chunk->lines);
     cando_free(chunk->name);
+    cando_free(chunk->inline_cache);
     cando_free(chunk);
 }
 

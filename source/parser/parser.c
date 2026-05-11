@@ -2197,29 +2197,59 @@ static void parse_for(CandoParser *p)
         /* break_ip lands here — after the loop. */
         patch_loop_mark_break(p, mark_patch);
     } else {
-        /* If the iterable is a range (->/<-), it produces an array of values.
-         * FOR IN over a range should iterate those values, not indices, so
-         * override to OF mode (values) regardless of IN/OF keyword. */
-        if (keys_mode && cur(p)->code_len > 0) {
+        /* Peephole: if the iterable is a literal range (->/<-), avoid
+         * materialising it into a heap array.  Replace the trailing
+         * OP_RANGE_ASC / OP_RANGE_DESC byte with the specialised
+         * OP_FOR_RANGE_INIT (which pops lo / hi directly) and use
+         * OP_FOR_RANGE_NEXT inside the loop.  Only the single-var
+         * form (`FOR i IN lo -> hi`) is handled; multi-var FOR over a
+         * range is rare and falls through to the generic path. */
+        bool range_for = false;
+        bool range_desc = false;
+        if (cur(p)->code_len > 0) {
+            u8 last_op = cur(p)->code[cur(p)->code_len - 1];
+            if (last_op == (u8)OP_RANGE_ASC || last_op == (u8)OP_RANGE_DESC) {
+                range_for  = true;
+                range_desc = (last_op == (u8)OP_RANGE_DESC);
+            }
+        }
+        /* FOR IN over a range should bind values, not keys -- existing
+         * keys_mode override (kept here for the non-range fallback). */
+        if (range_for) keys_mode = false;
+        else if (keys_mode && cur(p)->code_len > 0) {
             u8 last_op = cur(p)->code[cur(p)->code_len - 1];
             if (last_op == (u8)OP_RANGE_ASC || last_op == (u8)OP_RANGE_DESC)
                 keys_mode = false;
         }
 
-        /* OP_FOR_INIT mode: 1 = keys (IN), 0 = values (OF) */
-        emit_op_a(p, OP_FOR_INIT, keys_mode ? 1 : 0);
+        if (range_for) {
+            /* Drop the trailing OP_RANGE_ASC/OP_RANGE_DESC byte; the
+             * lo / hi values it would have consumed stay on the stack
+             * for OP_FOR_RANGE_INIT to pop. */
+            cur(p)->code_len--;
+            emit_op_a(p, OP_FOR_RANGE_INIT, range_desc ? 1 : 0);
+        } else {
+            /* OP_FOR_INIT mode: 1 = keys (IN), 0 = values (OF) */
+            emit_op_a(p, OP_FOR_INIT, keys_mode ? 1 : 0);
+        }
 
         u32 loop_start = cur(p)->code_len;
-        u32 exit_jump  = emit_jump(p, OP_FOR_NEXT);   /* jumps when exhausted */
+        u32 exit_jump  = emit_jump(p,
+                                    range_for ? OP_FOR_RANGE_NEXT
+                                              : OP_FOR_NEXT);
 
         scope_begin(p);
-        /* OP_FOR_NEXT pushed the next element; bind it as a local.          */
+        /* OP_FOR_NEXT / OP_FOR_RANGE_NEXT pushed the next element; bind it. */
         u32 slot = declare_local(p, vars[0].name, vars[0].len, false);
         emit_op_a(p, OP_DEF_LOCAL, (u16)slot);
 
-        /* LOOP_MARK: cont_ip = loop_start (re-run FOR_NEXT), break unwinds
-         * the FOR state ([val0..valN, count, index]) via CANDO_LOOP_FOR.  */
-        u32 mark_patch = emit_loop_mark(p, loop_start, CANDO_LOOP_FOR);
+        /* LOOP_MARK: cont_ip = loop_start (re-run NEXT), break unwinds
+         * the FOR state via either CANDO_LOOP_FOR ([source, len, index],
+         * mixed types) or CANDO_LOOP_FOR_RANGE ([end, step, cur], all
+         * numbers). */
+        u32 mark_patch = emit_loop_mark(p, loop_start,
+                                          range_for ? CANDO_LOOP_FOR_RANGE
+                                                    : CANDO_LOOP_FOR);
 
         parse_block(p);
         scope_end(p);

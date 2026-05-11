@@ -35,7 +35,11 @@ CFLAGS_VM     = -std=c11 -Wall -Wextra -pthread -D_GNU_SOURCE \
 
 # Flags for building libcando.so and libcando.a
 # -DCANDO_BUILDING_LIB enables __attribute__((visibility("default"))) on exports.
-CFLAGS_LIB = -std=c11 -Wall -Wextra -pthread -D_GNU_SOURCE \
+# -O2 by default to match the cmake -DCMAKE_BUILD_TYPE=Release path that
+# CI uses for release builds.  Override with `make CFLAGS_OPT=-O0` for
+# easier debugging or `make CFLAGS_OPT=-O3` for benchmarking.
+CFLAGS_OPT ?= -O2
+CFLAGS_LIB = $(CFLAGS_OPT) -std=c11 -Wall -Wextra -pthread -D_GNU_SOURCE \
              -DCANDO_BUILDING_LIB -fPIC \
              -iquote source -iquote source/core -iquote source/parser \
              -iquote source/vm -iquote source/object -iquote source/compat \
@@ -44,7 +48,7 @@ CFLAGS_LIB = -std=c11 -Wall -Wextra -pthread -D_GNU_SOURCE \
 
 # Flags for the cando executable (links against libcando.so)
 # -iquote source so cando.h's relative includes ("core/common.h" etc.) resolve.
-CFLAGS_EXE = -std=c11 -Wall -Wextra -pthread -D_GNU_SOURCE \
+CFLAGS_EXE = $(CFLAGS_OPT) -std=c11 -Wall -Wextra -pthread -D_GNU_SOURCE \
              -iquote source -iquote source/core \
              -Iinclude
 

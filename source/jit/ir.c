@@ -203,6 +203,8 @@ static const char *const s_op_names[IR__COUNT] = {
     [IR_RANGE_DESC]  = "IR_RANGE_DESC",
     [IR_HLEN]        = "IR_HLEN",
     [IR_LOOP]        = "IR_LOOP",
+    [IR_RETURN]      = "IR_RETURN",
+    [IR_REC_CALL]    = "IR_REC_CALL",
 };
 
 static const char *const s_type_names[IRT__COUNT] = {

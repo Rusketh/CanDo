@@ -1430,8 +1430,17 @@ static bool vm_push_frame(CandoVM *vm, CandoClosure *closure, u8 *ip,
         for (u32 i = 0; i < n_extra; i++)
             cando_vm_push(vm, cando_null());
     }
-    if (CANDO_UNLIKELY(vm->jit_enabled))
+    if (CANDO_UNLIKELY(vm->jit_enabled)) {
         vm->jit_stats.func_entry_hits++;
+        /* Function-entry hot detection.  Single-arg numeric functions
+         * are eligible for function-trace recording / dispatch.  The
+         * dispatch fast path lives in OP_CALL and runs BEFORE the
+         * frame is pushed -- reaching here means OP_CALL didn't take
+         * the fast path (no compiled trace yet) and we should bump
+         * the entry-PC's hot counter. */
+        if (arg_count == 1)
+            cando_jit_func_hot_hit(vm, frame->ip, arg_count);
+    }
     return true;
 }
 
@@ -1972,6 +1981,8 @@ static CandoVMResult vm_run(CandoVM *vm) {
         [OP_RANGE_DESC]       = &&lbl_OP_RANGE_DESC,
         [OP_FOR_INIT]         = &&lbl_OP_FOR_INIT,
         [OP_FOR_NEXT]         = &&lbl_OP_FOR_NEXT,
+        [OP_FOR_RANGE_INIT]   = &&lbl_OP_FOR_RANGE_INIT,
+        [OP_FOR_RANGE_NEXT]   = &&lbl_OP_FOR_RANGE_NEXT,
         [OP_FOR_OVER_INIT]    = &&lbl_OP_FOR_OVER_INIT,
         [OP_FOR_OVER_NEXT]    = &&lbl_OP_FOR_OVER_NEXT,
         [OP_PIPE_INIT]        = &&lbl_OP_PIPE_INIT,
@@ -2074,15 +2085,68 @@ static CandoVMResult vm_run(CandoVM *vm) {
 
         /* ── Band 3: Globals ────────────────────────────────────────── */
         OP_CASE(OP_LOAD_GLOBAL): {
+            /* Inline cache: look up the entry pointer once per (chunk,
+             * const-index) pair and reuse it on subsequent hits.  The
+             * environment's `version` counter bumps on rehash, which is
+             * the only event that can invalidate a cached pointer.
+             *
+             * We still take the read lock around the actual value read
+             * so concurrent writers don't tear or free under us.  All
+             * the lock now protects is a couple of pointer/int reads --
+             * the hash + memcmp is gone, and that was the dominant
+             * per-call cost in recursive scripts (e.g. fib's 5.2M
+             * lookups of the global `fib`). */
             u16 ci = READ_U16();
-            CandoValue name_val = frame->closure->chunk->constants[ci];
-            CANDO_ASSERT(cando_is_string(name_val));
-            CandoValue out;
+            CandoChunk *chunk = frame->closure->chunk;
+            CandoValue out_copy;
+            bool found;
             cando_lock_read_acquire(&vm->globals->lock);
-            bool found = vm_get_global_str(vm, cando_as_string(name_val), &out);
-            CandoValue out_copy = found ? cando_value_copy(out) : cando_null();
+            CandoGlobalEntry *e = NULL;
+            u32 cur_ver = vm->globals->version;
+            if (ci < chunk->inline_cache_cap &&
+                chunk->globals_version_seen == cur_ver) {
+                e = chunk->inline_cache[ci];
+            }
+            if (CANDO_UNLIKELY(!e)) {
+                CandoValue name_val = chunk->constants[ci];
+                CANDO_ASSERT(cando_is_string(name_val));
+                e = cando_vm_get_global_entry(vm,
+                        cando_as_string(name_val)->data);
+                if (e) {
+                    /* Grow + populate cache, refreshing the version
+                     * stamp if we noticed a rehash since last update. */
+                    if (ci >= chunk->inline_cache_cap) {
+                        u32 nc = chunk->inline_cache_cap
+                                 ? chunk->inline_cache_cap * 2 : 8;
+                        while (nc <= ci) nc *= 2;
+                        chunk->inline_cache = (CandoGlobalEntry **)
+                            cando_realloc(chunk->inline_cache,
+                                          nc * sizeof(*chunk->inline_cache));
+                        memset(chunk->inline_cache + chunk->inline_cache_cap,
+                               0,
+                               (nc - chunk->inline_cache_cap)
+                                  * sizeof(*chunk->inline_cache));
+                        chunk->inline_cache_cap = nc;
+                    }
+                    if (chunk->globals_version_seen != cur_ver) {
+                        memset(chunk->inline_cache, 0,
+                               chunk->inline_cache_cap
+                                  * sizeof(*chunk->inline_cache));
+                        chunk->globals_version_seen = cur_ver;
+                    }
+                    chunk->inline_cache[ci] = e;
+                }
+            }
+            if (e) {
+                out_copy = cando_value_copy(e->value);
+                found = true;
+            } else {
+                out_copy = cando_null();
+                found = false;
+            }
             cando_lock_read_release(&vm->globals->lock);
             if (!found) {
+                CandoValue name_val = chunk->constants[ci];
                 vm_runtime_error(vm, "undefined variable '%s'",
                                  cando_as_string(name_val)->data);
                 goto handle_error;
@@ -2091,15 +2155,68 @@ static CandoVMResult vm_run(CandoVM *vm) {
             DISPATCH();
         }
         OP_CASE(OP_STORE_GLOBAL): {
+            /* Same cache as OP_LOAD_GLOBAL.  Only fall back to the
+             * hash-table path on cache miss / version mismatch / when
+             * cando_vm_set_global needs to allocate a new entry (which
+             * also bumps version, invalidating the cache for next
+             * load). */
             u16 ci = READ_U16();
-            CandoValue name_val = frame->closure->chunk->constants[ci];
-            CANDO_ASSERT(cando_is_string(name_val));
+            CandoChunk *chunk = frame->closure->chunk;
             CandoValue val = PEEK(0);
+            bool ok;
+            bool need_slow = true;
             cando_lock_write_acquire(&vm->globals->lock);
-            bool ok = vm_set_global_str(vm, cando_as_string(name_val),
-                                        cando_value_copy(val), false);
+            u32 cur_ver = vm->globals->version;
+            if (ci < chunk->inline_cache_cap &&
+                chunk->globals_version_seen == cur_ver) {
+                CandoGlobalEntry *e = chunk->inline_cache[ci];
+                if (e && !e->is_const) {
+                    cando_value_release(e->value);
+                    e->value = cando_value_copy(val);
+                    ok = true;
+                    need_slow = false;
+                } else if (e && e->is_const) {
+                    ok = false;
+                    need_slow = false;
+                }
+            }
+            if (need_slow) {
+                CandoValue name_val = chunk->constants[ci];
+                CANDO_ASSERT(cando_is_string(name_val));
+                ok = vm_set_global_str(vm, cando_as_string(name_val),
+                                       cando_value_copy(val), false);
+                /* Refresh cache for next load if the entry now exists. */
+                if (ok) {
+                    CandoGlobalEntry *e = cando_vm_get_global_entry(vm,
+                            cando_as_string(name_val)->data);
+                    if (e) {
+                        u32 v = vm->globals->version;
+                        if (ci >= chunk->inline_cache_cap) {
+                            u32 nc = chunk->inline_cache_cap
+                                     ? chunk->inline_cache_cap * 2 : 8;
+                            while (nc <= ci) nc *= 2;
+                            chunk->inline_cache = (CandoGlobalEntry **)
+                                cando_realloc(chunk->inline_cache,
+                                              nc * sizeof(*chunk->inline_cache));
+                            memset(chunk->inline_cache + chunk->inline_cache_cap,
+                                   0,
+                                   (nc - chunk->inline_cache_cap)
+                                      * sizeof(*chunk->inline_cache));
+                            chunk->inline_cache_cap = nc;
+                        }
+                        if (chunk->globals_version_seen != v) {
+                            memset(chunk->inline_cache, 0,
+                                   chunk->inline_cache_cap
+                                      * sizeof(*chunk->inline_cache));
+                            chunk->globals_version_seen = v;
+                        }
+                        chunk->inline_cache[ci] = e;
+                    }
+                }
+            }
             cando_lock_write_release(&vm->globals->lock);
             if (!ok) {
+                CandoValue name_val = chunk->constants[ci];
                 vm_runtime_error(vm, "cannot assign to constant '%s'",
                                  cando_as_string(name_val)->data);
                 goto handle_error;
@@ -3066,6 +3183,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 cando_value_release(POP()); /* index   */
                 cando_value_release(POP()); /* len     */
                 cando_value_release(POP()); /* source  */
+            } else if (ltyp == CANDO_LOOP_FOR_RANGE) {
+                /* All three slots are numbers (cur, step, end); the POP
+                 * is still needed to advance stack_top. */
+                DROP();
+                DROP();
+                DROP();
             }
 
             vm->spread_extra = 0;
@@ -3301,6 +3424,40 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * in the current chunk (parser emits cando_number((f64)fn_start)). */
             if (cando_is_number(callee)) {
                 u32 pc = (u32)cando_as_number(callee);
+                /* Function-trace fast path: iterate sibling function
+                 * traces at this entry PC (e.g. fib's leaf trace vs
+                 * its recursive trace, recorded as separate sibling
+                 * specialisations).  Each trace's guards either
+                 * accept the call (status=0, result in xmm0) or bail
+                 * (status=1, try next sibling).  When all siblings
+                 * fail we fall through to the standard frame-push +
+                 * interp path so the call's semantics are preserved. */
+                if (vm->jit_enabled && arg_count == 1) {
+                    const u8 *entry_pc =
+                        frame->closure->chunk->code + pc;
+                    CandoValue arg_val = vm->stack_top[-1];
+                    if (cando_is_number(arg_val)) {
+                        double arg_d = cando_as_number(arg_val);
+                        CandoTrace *fts[CANDO_FUNC_TRACE_MAX_VERSIONS];
+                        u32 nf = cando_jit_find_func_traces(vm, entry_pc,
+                                                              fts,
+                                                              CANDO_FUNC_TRACE_MAX_VERSIONS);
+                        for (u32 i = 0; i < nf; i++) {
+                            CandoTrace *ft = fts[i];
+                            if (!ft->func_mcode_fn) continue;
+                            SYNC_IP();
+                            CandoFuncTraceResult r =
+                                ft->func_mcode_fn(vm, ft, arg_d);
+                            if (r.status == 0) {
+                                DROP();
+                                DROP();
+                                PUSH(cando_number(r.value));
+                                vm->last_ret_count = 1;
+                                DISPATCH();
+                            }
+                        }
+                    }
+                }
                 SYNC_IP();
                 if (!vm_push_frame(vm, frame->closure,
                                    frame->closure->chunk->code + pc,
@@ -3326,6 +3483,35 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     CandoClosure *fn_closure =
                         (CandoClosure *)fn_obj->fn.script.bytecode;
                     u32 fn_pc = fn_obj->fn.script.param_count;
+
+                    /* Function-trace fast path -- mirror of the
+                     * cando_is_number branch above, see comment there. */
+                    if (vm->jit_enabled && arg_count == 1) {
+                        const u8 *entry_pc =
+                            fn_closure->chunk->code + fn_pc;
+                        CandoValue arg_val = vm->stack_top[-1];
+                        if (cando_is_number(arg_val)) {
+                            double arg_d = cando_as_number(arg_val);
+                            CandoTrace *fts[CANDO_FUNC_TRACE_MAX_VERSIONS];
+                            u32 nf = cando_jit_find_func_traces(vm, entry_pc,
+                                                                  fts,
+                                                                  CANDO_FUNC_TRACE_MAX_VERSIONS);
+                            for (u32 i = 0; i < nf; i++) {
+                                CandoTrace *ft = fts[i];
+                                if (!ft->func_mcode_fn) continue;
+                                SYNC_IP();
+                                CandoFuncTraceResult r =
+                                    ft->func_mcode_fn(vm, ft, arg_d);
+                                if (r.status == 0) {
+                                    cando_value_release(POP()); /* arg */
+                                    cando_value_release(POP()); /* callee */
+                                    PUSH(cando_number(r.value));
+                                    vm->last_ret_count = 1;
+                                    DISPATCH();
+                                }
+                            }
+                        }
+                    }
 
                     SYNC_IP();
                     if (!vm_push_frame(vm, fn_closure,
@@ -3859,6 +4045,65 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 }
                 /* PUSH above moved stack_top; the index slot is now at -2. */
                 cando_set_number(&vm->stack_top[-2], index_f + 1.0);
+                if (CANDO_UNLIKELY(vm->jit_enabled))
+                    vm->jit_stats.iter_next_hits++;
+            }
+            DISPATCH();
+        }
+        OP_CASE(OP_FOR_RANGE_INIT): {
+            /* Numeric range FOR -- avoids allocating a heap array.
+             * A = 0 ascending (step = +1), 1 descending (step = -1).
+             * Stack before: [..., lo, hi]   (lo pushed first by parser)
+             * Stack after:  [..., end, step, cur]
+             *
+             *   ASC : cur = lo, end = hi, step = +1  -- iterate lo..hi
+             *   DESC: cur = lo, end = hi, step = -1  -- iterate lo..hi descending
+             *
+             * Match OP_RANGE_ASC / OP_RANGE_DESC operand convention:
+             * OP_RANGE_ASC iterates from a (first-pushed) up to b
+             * (second-pushed); OP_RANGE_DESC iterates from a down to b.
+             * So for ASC we step +1 from lo toward hi, for DESC step -1.
+             *
+             * If lo and hi are in the wrong direction (e.g. ASC with lo > hi),
+             * OP_FOR_RANGE_NEXT exits immediately on its first check, matching
+             * the empty-array behaviour of the OP_RANGE_ASC + OP_FOR_INIT
+             * path (RANGE_ASC builds an empty array for from > to). */
+            u16 a = READ_U16();
+            CandoValue hi = POP();
+            CandoValue lo = POP();
+            if (!cando_is_number(lo) || !cando_is_number(hi)) {
+                vm_runtime_error(vm, "range requires numbers");
+                goto handle_error;
+            }
+            f64 cur_f  = cando_as_number(lo);
+            f64 end_f  = cando_as_number(hi);
+            f64 step_f = (a == 0) ? 1.0 : -1.0;
+            PUSH(cando_number(end_f));
+            PUSH(cando_number(step_f));
+            PUSH(cando_number(cur_f));
+            DISPATCH();
+        }
+        OP_CASE(OP_FOR_RANGE_NEXT): {
+            /* Stack: [..., end, step, cur]
+             * step is +1 (ascending) or -1 (descending).
+             * Exit condition: cur has moved past end in the step direction.
+             * On non-exit, push cur as the loop variable, advance cur by step. */
+            i16 off    = (i16)(READ_U16());
+            f64 cur_f  = cando_as_number(*(vm->stack_top - 1));
+            f64 step_f = cando_as_number(*(vm->stack_top - 2));
+            f64 end_f  = cando_as_number(*(vm->stack_top - 3));
+
+            bool done = (step_f > 0.0) ? (cur_f > end_f) : (cur_f < end_f);
+            if (done) {
+                /* Numbers are inline values; no release needed. Just drop. */
+                DROP();
+                DROP();
+                DROP();
+                ip += off;
+            } else {
+                PUSH(cando_number(cur_f));
+                /* After PUSH the cur slot is at -2. */
+                cando_set_number(&vm->stack_top[-2], cur_f + step_f);
                 if (CANDO_UNLIKELY(vm->jit_enabled))
                     vm->jit_stats.iter_next_hits++;
             }

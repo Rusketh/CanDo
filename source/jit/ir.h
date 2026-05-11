@@ -92,6 +92,18 @@ typedef enum {
                                    to direct memory ops; on side-exit
                                    it materialises the buffer into a
                                    real heap object. */
+#define IRF_NUM_KNOWN   0x10    /* IR_SLOAD whose slot is also SSTORE'd
+                                   somewhere in the trace with a value
+                                   of known IRT_NUM type.  Iter 1 still
+                                   validates the slot via the standard
+                                   NaN-box guard; on iter 2+ the SSTORE
+                                   from the previous iter guarantees the
+                                   slot holds a numeric, so codegen can
+                                   skip the per-iter type guard (gated
+                                   on the cached skip_invariant byte).
+                                   Set by mark_known_num_sloads in
+                                   jit.c, consumed by emit_sload in
+                                   codegen.c. */
 
 /* -----------------------------------------------------------------------
  * IROp -- IR opcode set.
@@ -260,6 +272,9 @@ typedef enum {
 
     /* ===== Band 7: Trace control ======================================== */
     IR_LOOP,               /* head-of-loop marker; the trace closes here    */
+    IR_RETURN,             /* function-trace return; op1 = numeric IRRef    */
+    IR_REC_CALL,           /* self-recursive call inside a function trace;
+                              op1 = arg IRRef (numeric); result IRT_NUM    */
 
     IR__COUNT
 } IROp;

@@ -88,6 +88,7 @@ static void rec_push_aux(CandoRecorder *r, u32 sp_after,
  * OP_SET_INDEX) have something to point at.  The aux marker stays
  * (other consumers like OP_GET_FIELD's fast-native lookup still
  * use it).  No-op if stack_map already has a real IRRef there. */
+static void rec_ensure_first_load_global(CandoRecorder *r, u32 want);
 static IRRef rec_materialize_obj_irref(CandoRecorder *r, u32 abs_pos) {
     if (abs_pos >= r->stack_map_cap) return IRREF_NIL;
     IRRef existing = r->stack_map[abs_pos];
@@ -95,7 +96,27 @@ static IRRef rec_materialize_obj_irref(CandoRecorder *r, u32 abs_pos) {
     u32 ax = r->stack_aux[abs_pos];
     if (CANDO_AUX_KIND(ax) != AUX_OBJECT_GLOBAL) return IRREF_NIL;
     u32 ki = CANDO_AUX_DATA(ax);
+    /* Cache IR_GLOAD-IRT_OBJ per kidx via cur_global_value so the
+     * same OBJECT global referenced multiple times in a trace
+     * (nbody: x, y, z, vx, vy, vz, m are each loaded ~5 times)
+     * collapses to a single GLOAD.  Sharing the IRRef also lets
+     * the rec_lookup_first_index_get path reuse a prior GET on
+     * the same (arr, idx) pair across reads/writes, since both
+     * sides now see the same arr_ref. */
+    rec_ensure_first_load_global(r, ki + 1);
+    IRRef cached = r->cur_global_value[ki];
+    if (cached != IRREF_NIL && cached < r->ir.ir_count) {
+        const IRIns *ci = &r->ir.ir[cached];
+        if (ci->op == IR_GLOAD && ci->type == IRT_OBJ &&
+            IRREF_IS_K(ci->op1) && IRREF_KIDX(ci->op1) == ki) {
+            r->stack_map[abs_pos] = cached;
+            return cached;
+        }
+    }
     IRRef e = cando_ir_emit(&r->ir, IR_GLOAD, IRT_OBJ, 0, IRREF_K(ki), 0);
+    r->cur_global_value[ki] = e;
+    if (r->first_load_global[ki] == IRREF_NIL)
+        r->first_load_global[ki] = e;
     r->stack_map[abs_pos] = e;
     return e;
 }
@@ -385,8 +406,10 @@ void cando_recorder_begin(struct CandoVM *vm, const u8 *pc) {
     }
 
     cando_trace_ir_reset(&r->ir);
-    r->active   = true;
-    r->start_pc = pc;
+    r->active            = true;
+    r->is_function_trace = false;
+    r->func_param_count  = 0;
+    r->start_pc          = pc;
     r->trace_starts++;
 
     /* Capture the recording frame.  vm->frame_count >= 1 always when
@@ -400,6 +423,7 @@ void cando_recorder_begin(struct CandoVM *vm, const u8 *pc) {
     }
     r->outer_frame_base = r->frame_base;
     r->call_depth       = 0;
+    r->rec_call_skip_frame = 0;
 
     /* Lazy-allocate stack_map sized to the VM's stack capacity;
      * subsequent traces reuse the same buffer. */
@@ -844,9 +868,75 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
                 /* op2 is the loop-variant index in v1 traces. */
                 inv = false;
                 break;
+            case IR_INDEX_GET: {
+                /* Hoistable when the array AND index are both
+                 * invariant AND no IR_INDEX_SET / IR_ARRAY_APPEND in
+                 * the trace mutates the same underlying array.  Hot
+                 * in nbody: x[i], y[i], z[i], m[i] are all invariant
+                 * in the inner j loop because those arrays only
+                 * mutate in the (separate) second i-loop pass.
+                 *
+                 * Aliasing: IR_GLOAD-IRT_OBJ for the same global name
+                 * resolves to the same CdoObject* but the recorder
+                 * may emit several IRRefs for it (CSE doesn't dedup
+                 * GLOAD).  Compare by the SOURCE GLOAD's constant-
+                 * pool index (kidx + 1, so 0 means "not a GLOAD" --
+                 * a non-GLOAD array ref is conservatively variant). */
+                bool arr_inv = (in->op1 < ir->ir_count) &&
+                               (ir->ir[in->op1].flags & IRF_INVARIANT);
+                bool idx_inv = false;
+                if (IRREF_IS_K(in->op2)) {
+                    idx_inv = true;
+                } else if (in->op2 < ir->ir_count) {
+                    idx_inv = (ir->ir[in->op2].flags & IRF_INVARIANT) != 0;
+                }
+                u32 my_key = 0;
+                if (in->op1 < ir->ir_count) {
+                    const IRIns *src = &ir->ir[in->op1];
+                    if (src->op == IR_GLOAD && src->type == IRT_OBJ &&
+                        IRREF_IS_K(src->op1)) {
+                        my_key = IRREF_KIDX(src->op1) + 1;
+                    }
+                }
+                bool aliased = false;
+                if (arr_inv && idx_inv && my_key) {
+                    for (u32 k = 1; k < ir->ir_count; k++) {
+                        const IRIns *sk = &ir->ir[k];
+                        if (sk->op != IR_INDEX_SET &&
+                            sk->op != IR_ARRAY_APPEND) continue;
+                        if (sk->op1 >= ir->ir_count) continue;
+                        const IRIns *ssrc = &ir->ir[sk->op1];
+                        u32 other_key = 0;
+                        if (ssrc->op == IR_GLOAD &&
+                            ssrc->type == IRT_OBJ &&
+                            IRREF_IS_K(ssrc->op1)) {
+                            other_key = IRREF_KIDX(ssrc->op1) + 1;
+                        }
+                        /* Conservative: same kidx -> alias; missing
+                         * key on either side -> alias (unknown
+                         * provenance). */
+                        if (other_key == 0 || other_key == my_key) {
+                            aliased = true;
+                            break;
+                        }
+                    }
+                } else if (arr_inv && idx_inv) {
+                    /* my_key == 0: unknown provenance.  Treat as
+                     * aliased with anything to stay safe. */
+                    for (u32 k = 1; k < ir->ir_count; k++) {
+                        const IRIns *sk = &ir->ir[k];
+                        if (sk->op == IR_INDEX_SET ||
+                            sk->op == IR_ARRAY_APPEND) {
+                            aliased = true;
+                            break;
+                        }
+                    }
+                }
+                inv = arr_inv && idx_inv && !aliased;
+                break;
+            }
             case IR_NEW_ARRAY:
             case IR_ARRAY_APPEND:
-            case IR_INDEX_GET:
             case IR_INDEX_SET:
             case IR_INDEX_SET_VAL:
             case IR_NEW_OBJECT:
@@ -855,11 +945,10 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
             case IR_FIELD_SET_VAL:
             case IR_RANGE_ASC:
             case IR_RANGE_DESC:
-                /* Phase 4.4a-f: allocations and array/object reads
-                 * /writes are NEVER invariant.  Allocations produce
-                 * fresh handles; mutations don't commute with reads.
-                 * SET_VAL ops are pinned pair-prefixes.  Range ops
-                 * allocate per call. */
+                /* Phase 4.4a-f: allocations and array/object writes
+                 * are NEVER invariant.  Allocations produce fresh
+                 * handles; SET_VAL ops are pinned pair-prefixes;
+                 * Range ops allocate per call. */
                 inv = false;
                 break;
             case IR_HLEN:
@@ -929,6 +1018,72 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
 
     cando_free(stored_slot);
     cando_free(stored_name);
+}
+
+/* Mark IR_SLOAD ops whose slot is also SSTORE'd somewhere in the
+ * trace, with a known-numeric value, as IRF_NUM_KNOWN.
+ *
+ * Codegen uses the flag to skip the per-iter NaN-box type guard on
+ * the warm path (skip_invariant == true / r13b set).  The reasoning:
+ * the recorder only emits a numeric SSTORE when the value's IRRef has
+ * type IRT_NUM, so once one iteration has executed the SSTORE, the
+ * slot is guaranteed to hold a numeric value.  Iter 1 still runs the
+ * guard (the trace may be re-entered with whatever the bytecode
+ * interpreter left in the slot), but iter 2+ inside the mcode's
+ * internal loop can skip it.
+ *
+ * Per-iter savings: roughly 5 instructions per tagged SLOAD (NaN-box
+ * AND + CMP + JE + scratch-restore + the constant-pool MOVABS).  On
+ * loops.cdo and similar numeric-loop hot paths this is observable
+ * because the loop body has only a handful of ops total.
+ *
+ * Must run AFTER eliminate_dead_stores (so a NOPped SSTORE doesn't
+ * confer a false guarantee on the SLOAD) and AFTER mark_loop_invariants
+ * (an IRF_INVARIANT SLOAD has its entire body LICM-skipped already, so
+ * flagging it is redundant). */
+static void mark_known_num_sloads(CandoTraceIR *ir) {
+    if (ir->ir_count <= 1) return;
+
+    u32 max_slot = 0;
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        const IRIns *in = &ir->ir[i];
+        if ((in->op == IR_SSTORE || in->op == IR_SLOAD) &&
+            in->op1 + 1 > max_slot) {
+            max_slot = in->op1 + 1;
+        }
+    }
+    if (max_slot == 0) return;
+
+    u8 *has_num_sstore = cando_alloc(max_slot);
+    memset(has_num_sstore, 0, max_slot);
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        const IRIns *in = &ir->ir[i];
+        if (in->op != IR_SSTORE) continue;
+        if (in->op1 >= max_slot) continue;
+        /* The value-IRRef sits in op2.  Constants are always numeric
+         * in v1; otherwise, verify the producer's type is IRT_NUM. */
+        IRRef val_ref = in->op2;
+        bool is_num = false;
+        if (IRREF_IS_K(val_ref)) {
+            is_num = true;
+        } else if (val_ref != 0) {
+            const IRIns *val_in = cando_ir_get_ins(ir, val_ref);
+            if (val_in && val_in->type == IRT_NUM) is_num = true;
+        }
+        if (is_num) has_num_sstore[in->op1] = 1;
+    }
+
+    for (u32 i = 1; i < ir->ir_count; i++) {
+        IRIns *in = &ir->ir[i];
+        if (in->op != IR_SLOAD) continue;
+        if (in->type != IRT_NUM) continue;
+        if (in->flags & IRF_INVARIANT) continue;   /* whole op gets skipped */
+        if (in->op1 >= max_slot) continue;
+        if (has_num_sstore[in->op1])
+            in->flags |= IRF_NUM_KNOWN;
+    }
+
+    cando_free(has_num_sstore);
 }
 
 /* Phase 8.5: common subexpression elimination.
@@ -1012,7 +1167,19 @@ static void common_subexpression_elimination(CandoTraceIR *ir) {
             case IR_HLOAD_SLOT:   dedupable = !has_sstore;  break;
             case IR_HLEN:         dedupable = !has_array_append; break;
             case IR_AREF:
-            case IR_INDEX_GET:    dedupable = !has_index_set; break;
+                dedupable = !has_index_set;
+                break;
+            case IR_INDEX_GET:
+                /* Conservatively skip dedup when ANY IR_INDEX_SET
+                 * exists in the trace -- the SET could be on this
+                 * same (arr, idx) and would invalidate a cached GET.
+                 * The exception is when both candidates are clearly
+                 * INVARIANT (no mutation on their array): in that
+                 * case the LICM pre-pass guarantees safety, so we
+                 * can dedup even with sets elsewhere. */
+                dedupable = !has_index_set ||
+                            ((in->flags & IRF_INVARIANT) != 0);
+                break;
             case IR_FIELD_GET:    dedupable = !has_field_set; break;
             default: dedupable = false; break;
             }
@@ -1083,7 +1250,13 @@ static void cando_recorder_finish(struct CandoVM *vm) {
         return;
     }
 
-    cando_ir_emit(&r->ir, IR_LOOP, IRT_VOID, 0, 0, 0);
+    /* Function traces close at IR_RETURN (already emitted by the
+     * OP_RETURN handler) instead of IR_LOOP.  All optimization
+     * passes still apply, except invariance has no notion in a
+     * non-loop trace -- it's a single-shot body. */
+    if (!r->is_function_trace) {
+        cando_ir_emit(&r->ir, IR_LOOP, IRT_VOID, 0, 0, 0);
+    }
 
     /* Optimisation passes, in order:
      *   1. Phase 5h DSE -- drop SSTORE/GSTOREs overwritten before
@@ -1097,16 +1270,21 @@ static void cando_recorder_finish(struct CandoVM *vm) {
      *      invariance flag isn't applied to about-to-be-killed ops. */
     eliminate_dead_stores(&r->ir);
     eliminate_dead_code(&r->ir);
-    /* Phase 8.5: CSE.  Runs AFTER DSE/DCE so we don't waste work
-     * on already-NOPped ops, and BEFORE LICM so the invariance
-     * pass sees the deduped IR (no need to re-mark merged ops). */
     common_subexpression_elimination(&r->ir);
-    /* Re-DCE after CSE to clean up any newly-dead ops. */
     eliminate_dead_code(&r->ir);
-    mark_loop_invariants(&r->ir);
-    /* Phase 4.4j: must run AFTER DSE -- a NOPped store no longer
-     * counts as an escape, so escape analysis can mark allocations
-     * sinkable that DSE has unhooked from a dead SSTORE. */
+    if (!r->is_function_trace) {
+        /* Loop-specific passes -- LICM and pinning rely on a single
+         * iteration of a closed loop, which a function trace doesn't
+         * have.  Function traces execute their body once per call,
+         * with no notion of "next iter". */
+        mark_loop_invariants(&r->ir);
+        mark_known_num_sloads(&r->ir);
+        /* Re-run CSE after LICM so the IR_INDEX_GET dedup path can
+         * use the just-set IRF_INVARIANT flag to merge same-(arr,
+         * idx) invariant reads (e.g. nbody's three m[i] reads). */
+        common_subexpression_elimination(&r->ir);
+        eliminate_dead_code(&r->ir);
+    }
     escape_analysis(&r->ir);
     /* Phase 8.1 (REVERTED): mark_promoted_globals broke the Phase
      * 4.1 div_rollback snapshot semantics.  Snapshots record the
@@ -1140,12 +1318,15 @@ static void cando_recorder_finish(struct CandoVM *vm) {
     /* Move the IR (transfer ownership): copy the struct by value;
      * the pointers inside (ir, constants) move with it.  Re-init
      * the recorder's IR so subsequent traces start fresh. */
-    t->ir         = r->ir;
-    t->start_pc   = r->start_pc;
-    t->id         = j->next_trace_id++;
-    t->last_used  = j->next_use_tick++;
-    t->values_buf = NULL;   /* lazy-allocated by cando_trace_run */
-    t->values_cap = 0;
+    t->ir                = r->ir;
+    t->start_pc          = r->start_pc;
+    t->id                = j->next_trace_id++;
+    t->last_used         = j->next_use_tick++;
+    t->values_buf        = NULL;
+    t->values_cap        = 0;
+    t->is_function_trace = r->is_function_trace;
+    t->param_count       = r->func_param_count;
+    t->func_mcode_fn     = NULL;
     /* Phase 6: codegen is opt-in and starts with no native body.  A
      * later cando_jit_codegen_trace() call may install one.  Until
      * then, mcode_fn = NULL routes execution through the IR-interp. */
@@ -1188,6 +1369,28 @@ static void cando_recorder_finish(struct CandoVM *vm) {
      * pure speedup.  vm is threaded through so codegen can resolve
      * fast-native fn pointers for IR_CALL_F1. */
     cando_jit_codegen_trace(vm, t);
+
+    /* Function-trace multi-version: a freshly compiled function trace
+     * specialises one execution path of the body (e.g. fib's n<2
+     * leaf case OR its n>=2 recursive case, depending on which the
+     * recorder happened to capture).  Unblacklist the entry PC if
+     * the per-PC version count is still below the cap so a later hot
+     * trip can record a sibling trace for the OTHER path; the
+     * dispatcher then tries each in order.  Without this, fib's
+     * recursive case (~half of all calls) never JITs and falls
+     * through to bytecode forever. */
+    if (t->is_function_trace && t->func_mcode_fn != NULL) {
+        u32 versions_at_pc = 0;
+        for (u32 i = 0; i < j->trace_count; i++) {
+            if (j->traces[i].is_function_trace &&
+                j->traces[i].start_pc == t->start_pc) {
+                versions_at_pc++;
+            }
+        }
+        if (versions_at_pc < CANDO_FUNC_TRACE_MAX_VERSIONS) {
+            cando_hot_unblacklist(&j->hot, t->start_pc);
+        }
+    }
 }
 
 /* ============================================================ */
@@ -1478,6 +1681,19 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
     CandoJit *j = jit_of(vm);
     if (!j || !j->recorder.active || !ip) return;
     CandoRecorder *r = &j->recorder;
+
+    /* IR_REC_CALL suppression: while the bytecode is executing the
+     * recursive call that an IR_REC_CALL stands in for, the recorder
+     * deliberately ignores all inner ops (regardless of which path
+     * the call took -- mcode of a sibling trace, or interp push-frame).
+     * Resume recording as soon as frame_count drops back to (or
+     * below) the snapshot taken at IR_REC_CALL emit.  Must run
+     * BEFORE the frame check below, since while suppressed
+     * vm->frame_count is intentionally higher than r->call_depth. */
+    if (r->rec_call_skip_frame != 0) {
+        if (vm->frame_count > r->rec_call_skip_frame) return;
+        r->rec_call_skip_frame = 0;
+    }
 
     /* Frame check: vm->frame_count must equal the recording-start
      * count plus however many CALLC inlines we've absorbed
@@ -1899,6 +2115,19 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                     "loop inside inlined call (v1 limitation)");
                 return;
             }
+            /* Function traces don't model multi-iteration loops --
+             * the body would unroll and emit multiple IR_LOOP ops,
+             * which the function-trace codegen path can't handle. */
+            if (r->is_function_trace &&
+                (op == OP_LOOP || op == OP_LOOP_MARK ||
+                 op == OP_LOOP_END || op == OP_FOR_INIT ||
+                 op == OP_FOR_NEXT || op == OP_FOR_RANGE_INIT ||
+                 op == OP_FOR_RANGE_NEXT || op == OP_FOR_OVER_INIT ||
+                 op == OP_FOR_OVER_NEXT)) {
+                cando_recorder_abort(vm,
+                    "function trace: loop in body (v1 limitation)");
+                return;
+            }
             break;
         }
 
@@ -2271,6 +2500,146 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             break;
         }
 
+        case OP_FOR_RANGE_NEXT: {
+            /* Numeric-range FOR advance (companion to OP_FOR_RANGE_INIT).
+             * Stack at entry: [..., end, step, cur], all numbers; step
+             * always +1.0 or -1.0 (the parser-emitted INIT enforces this).
+             *
+             * Recording strategy: specialise the trace for the runtime
+             * step direction.  The recorder reads the live step value
+             * from vm->stack_top[-2], picks IR_LE (ascending step=+1)
+             * or IR_GE (descending step=-1) for the continue-guard, and
+             * embeds the step as a KNUM in the IR_ADD for cur'.  end is
+             * SLOAD-ed once (the loop body never touches it, so LICM
+             * keeps it on the warm path).
+             *
+             * This avoids the IR_HLOAD_SLOT + IR_AREF chain that
+             * OP_FOR_NEXT needs for array iteration -- the next loop
+             * variable is just `cur` itself, with no memory load. */
+            if (sp < 3) {
+                cando_recorder_abort(vm, "OP_FOR_RANGE_NEXT with too few state slots");
+                return;
+            }
+            CANDO_ASSERT_MSG(sp - 3 >= r->frame_base,
+                             "FOR_RANGE state below frame_base");
+
+            CandoValue cur_v  = vm->stack_top[-1];
+            CandoValue step_v = vm->stack_top[-2];
+            CandoValue end_v  = vm->stack_top[-3];
+            if (!cando_is_number(cur_v) || !cando_is_number(step_v) ||
+                !cando_is_number(end_v)) {
+                cando_recorder_abort(vm, "OP_FOR_RANGE_NEXT state non-numeric");
+                return;
+            }
+            f64  cur_f   = cando_as_number(cur_v);
+            f64  step_f  = cando_as_number(step_v);
+            f64  end_f   = cando_as_number(end_v);
+            bool asc     = (step_f > 0.0);
+            bool done    = asc ? (cur_f > end_f) : (cur_f < end_f);
+
+            u32 abs_end  = sp - 3;
+            u32 abs_step = sp - 2;
+            u32 abs_cur  = sp - 1;
+            u32 rel_end  = abs_end  - r->outer_frame_base;
+            u32 rel_step = abs_step - r->outer_frame_base;
+            u32 rel_cur  = abs_cur  - r->outer_frame_base;
+
+            /* SLOAD cur (use cached IRRef if a previous iter SSTORE'd
+             * it; mirrors the OP_FOR_NEXT idx pattern). */
+            IRRef cur_ir = (abs_cur < r->stack_map_cap)
+                           ? r->stack_map[abs_cur] : IRREF_NIL;
+            if (cur_ir == IRREF_NIL) {
+                cur_ir = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0,
+                                       rel_cur, 0);
+                if (abs_cur < r->stack_map_cap) {
+                    r->stack_map[abs_cur] = cur_ir;
+                    if (r->first_load[abs_cur] == IRREF_NIL)
+                        r->first_load[abs_cur] = cur_ir;
+                }
+            }
+
+            if (done) {
+                /* Loop-exit iteration.  Same pattern as the OP_FOR_NEXT
+                 * exit branch: if this is the trace's start_pc, the
+                 * recording would only see the exit path -- abort.
+                 * Otherwise emit a GUARD_FALSE on the continue-condition
+                 * so future replays side-exit cleanly on the early
+                 * terminator. */
+                if (ip == r->start_pc) {
+                    cando_recorder_abort(vm,
+                        "OP_FOR_RANGE_NEXT recorded at exit iter");
+                    return;
+                }
+                IRRef end_ir = (abs_end < r->stack_map_cap)
+                                ? r->stack_map[abs_end] : IRREF_NIL;
+                if (end_ir == IRREF_NIL) {
+                    end_ir = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0,
+                                            rel_end, 0);
+                    if (abs_end < r->stack_map_cap) {
+                        r->stack_map[abs_end] = end_ir;
+                        if (r->first_load[abs_end] == IRREF_NIL)
+                            r->first_load[abs_end] = end_ir;
+                    }
+                }
+                IRRef cmp_ir = rec_emit_pure(r,
+                                              asc ? IR_LE : IR_GE,
+                                              IRT_BOOL, 0,
+                                              cur_ir, end_ir);
+                u16 snap_e = rec_build_snapshot(r);
+                cando_ir_emit(&r->ir, IR_GUARD_FALSE, IRT_BOOL, IRF_GUARD,
+                              cmp_ir, snap_e);
+
+                if (abs_end  < r->stack_map_cap) r->stack_map[abs_end]  = IRREF_NIL;
+                if (abs_step < r->stack_map_cap) r->stack_map[abs_step] = IRREF_NIL;
+                if (abs_cur  < r->stack_map_cap) r->stack_map[abs_cur]  = IRREF_NIL;
+                (void)rel_step;
+                break;
+            }
+
+            /* Normal iteration: SLOAD end (LICM will hoist it), emit
+             * the continue-guard, push cur as the loop variable, and
+             * SSTORE cur+step back to the cur slot. */
+            IRRef end_ir = (abs_end < r->stack_map_cap)
+                            ? r->stack_map[abs_end] : IRREF_NIL;
+            if (end_ir == IRREF_NIL) {
+                end_ir = cando_ir_emit(&r->ir, IR_SLOAD, IRT_NUM, 0,
+                                        rel_end, 0);
+                if (abs_end < r->stack_map_cap) {
+                    r->stack_map[abs_end] = end_ir;
+                    if (r->first_load[abs_end] == IRREF_NIL)
+                        r->first_load[abs_end] = end_ir;
+                }
+            }
+            IRRef cmp_ir = rec_emit_pure(r,
+                                          asc ? IR_LE : IR_GE,
+                                          IRT_BOOL, 0,
+                                          cur_ir, end_ir);
+            u16 snap = rec_build_snapshot(r);
+            cando_ir_emit(&r->ir, IR_GUARD_TRUE, IRT_BOOL, IRF_GUARD,
+                          cmp_ir, snap);
+
+            /* Loop body sees `cur` as the freshly-bound loop variable;
+             * push the cur IRRef at the new TOS so the following
+             * OP_DEF_LOCAL stores it into the loop var's slot. */
+            rec_push(r, cur_ir, sp);
+
+            /* cur' = cur + step.  step is a runtime constant (+1.0 or
+             * -1.0), embed it directly so codegen can fold the ADD. */
+            IRRef step_k_ir = rec_emit_const_num(&r->ir, step_f);
+            IRRef next_ir   = rec_emit_pure(r, IR_ADD, IRT_NUM, 0,
+                                             cur_ir, step_k_ir);
+            cando_ir_emit(&r->ir, IR_SSTORE, IRT_VOID, IRF_PINNED,
+                          rel_cur, next_ir);
+            if (abs_cur < r->stack_map_cap) {
+                if (r->first_load[abs_cur] != IRREF_NIL)
+                    rec_pending_snap_add(r, SNAP_SLOT, rel_cur,
+                                         r->first_load[abs_cur]);
+                r->stack_map[abs_cur] = next_ir;
+            }
+            (void)rel_step;
+            break;
+        }
+
         case OP_GET_FIELD: {
             /* Phase 4.2 + 4.4e: two paths.
              *   (a) Source is an AUX_OBJECT_GLOBAL marker AND the
@@ -2385,24 +2754,78 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                     return;
                 break;
             }
+
+            /* Function-trace self-recursion: when we're recording a
+             * function trace and OP_CALL targets the SAME function
+             * (entry PC matches r->start_pc), emit IR_REC_CALL
+             * instead of inlining (which would unroll and quickly
+             * blow the depth cap or trace length).  v1 supports
+             * single-arg recursive calls only. */
+            if (r->is_function_trace && r->call_depth == 0 && argc == 1) {
+                CandoValue callee_val = vm->stack_top[-(int)argc - 1];
+                u32 callee_pc = 0;
+                if (cando_is_number(callee_val) &&
+                    cando_as_number(callee_val) > 0.0) {
+                    callee_pc = (u32)cando_as_number(callee_val);
+                } else if (cando_is_object(callee_val)) {
+                    CdoObject *fn_obj = cando_bridge_resolve(vm,
+                                            cando_as_handle(callee_val));
+                    if (fn_obj && fn_obj->kind == OBJ_FUNCTION &&
+                        fn_obj->fn.script.bytecode) {
+                        CandoClosure *cl = (CandoClosure *)
+                                            fn_obj->fn.script.bytecode;
+                        callee_pc = fn_obj->fn.script.param_count;
+                        if (cl->chunk != current_chunk(vm)) callee_pc = 0;
+                    }
+                }
+                if (callee_pc != 0) {
+                    const u8 *callee_entry = current_chunk(vm)->code +
+                                              callee_pc;
+                    if (callee_entry == r->start_pc) {
+                        IRRef arg_ref = r->stack_map[callee_pos + 1];
+                        if (arg_ref == IRREF_NIL) {
+                            cando_recorder_abort(vm,
+                                "OP_REC_CALL: arg not in stack_map");
+                            return;
+                        }
+                        const IRIns *ai = cando_ir_get_ins(&r->ir, arg_ref);
+                        if (ai && ai->type != IRT_NUM) {
+                            cando_recorder_abort(vm,
+                                "OP_REC_CALL: arg non-numeric (v1)");
+                            return;
+                        }
+                        IRRef result = cando_ir_emit(&r->ir, IR_REC_CALL,
+                                                      IRT_NUM, 0,
+                                                      arg_ref, 0);
+                        rec_push(r, result, callee_pos);
+                        /* The bytecode is about to actually execute
+                         * this recursive call (either via mcode of an
+                         * existing sibling trace, or by pushing a real
+                         * VM frame and running the body interpreted).
+                         * Either way, the recorder must stop observing
+                         * inner ops -- the IR_REC_CALL we just emitted
+                         * stands in for the entire call.  Resume when
+                         * frame_count drops back to (or below) this
+                         * snapshot, which covers both code paths. */
+                        r->rec_call_skip_frame = vm->frame_count;
+                        break;
+                    }
+                }
+            }
+
             if (!rec_call_inline_user(vm, r, callee_pos, argc))
                 return;
             break;
         }
 
         case OP_RETURN: {
-            /* Inline-frame pop.  Only legal mid-trace when call_depth
-             * > 0 (the recording-start function returning is a trace
-             * boundary).  Bytecode places the return value at the
-             * caller's callee_pos and pops the frame; we mirror by
-             * stashing the return IRRef at stack_map[callee_pos].
-             *
-             * v1: only single-value returns supported. */
-            if (r->call_depth == 0) {
-                cando_recorder_abort(vm,
-                    "OP_RETURN at recording-frame boundary");
-                return;
-            }
+            /* Three flavours:
+             *   1. Inline-frame pop (call_depth > 0): mirror the
+             *      return value to the caller's callee_pos slot.
+             *   2. Function-trace recording-frame return (call_depth
+             *      == 0 AND r->is_function_trace): emit IR_RETURN
+             *      and finalise the function trace.
+             *   3. Otherwise: trace boundary, abort. */
             u16 ret_count = read_op_arg(ip);
             if (ret_count != 1) {
                 cando_recorder_abort(vm,
@@ -2424,6 +2847,21 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
             if (src && src->type != IRT_NUM) {
                 cando_recorder_abort(vm,
                     "OP_RETURN non-numeric value (v1)");
+                return;
+            }
+            if (r->call_depth == 0) {
+                if (!r->is_function_trace) {
+                    cando_recorder_abort(vm,
+                        "OP_RETURN at recording-frame boundary");
+                    return;
+                }
+                /* Function trace close.  Emit IR_RETURN with the value
+                 * IRRef in op1; cando_recorder_finish notices the
+                 * is_function_trace flag and skips IR_LOOP / takes the
+                 * function-trace codegen path. */
+                cando_ir_emit(&r->ir, IR_RETURN, IRT_VOID, IRF_GUARD,
+                              ret_ref, 0);
+                cando_recorder_finish(vm);
                 return;
             }
             r->call_depth--;
@@ -3396,6 +3834,103 @@ bool cando_jit_hot_hit(struct CandoVM *vm, const u8 *pc) {
         return j->recorder.active;
     }
     return false;
+}
+
+/* Function-entry hot detection.  Called from vm_push_frame just
+ * after the new call frame has been installed -- vm->frame_count
+ * already reflects the callee, vm->frames[top] already points at
+ * the callee's frame (and entry_pc == frame->ip == chunk->code).
+ *
+ * arg_count must be 1 in v1 (single-numeric-arg traces); other
+ * arities are silently ignored without bumping the counter so
+ * non-traceable functions don't blacklist their entry PCs. */
+bool cando_jit_func_hot_hit(struct CandoVM *vm, const u8 *entry_pc,
+                            u32 arg_count) {
+    CandoJit *j = jit_of(vm);
+    if (!j) return false;
+    if (arg_count != 1) return false;
+    /* Skip if the recorder is already active (e.g. another trace's
+     * inlined call landed us here -- don't restart on top of that). */
+    if (j->recorder.active) return false;
+    /* Multi-version: reaching vm_push_frame with an existing trace
+     * means the OP_CALL dispatcher tried it (and any sibling traces)
+     * and they all guard-failed.  cando_recorder_finish unblacklists
+     * the entry PC after a successful compile if the per-PC version
+     * count is still below the cap; once at the cap, the PC stays
+     * blacklisted and no further variants are recorded. */
+    if (cando_hot_hit(&j->hot, entry_pc)) {
+        CandoRecorder *r = &j->recorder;
+        cando_recorder_begin(vm, entry_pc);
+        if (r->active) {
+            r->is_function_trace = true;
+            r->func_param_count  = (u8)arg_count;
+        }
+        return r->active;
+    }
+    return false;
+}
+
+CandoTrace *cando_jit_find_func_trace(struct CandoVM *vm,
+                                      const u8 *entry_pc) {
+    CandoTrace *t = NULL;
+    cando_jit_find_func_traces(vm, entry_pc, &t, 1);
+    return t;
+}
+
+/* Helper invoked from IR_REC_CALL mcode.  Tries each sibling func
+ * trace at the recording-start PC and returns the first success.
+ * Sibling iteration is essential: a recursive call that lands on a
+ * "different" branch of the original recording (e.g. a leaf case
+ * when the outer trace specialised on the recursive case) must be
+ * able to find its own specialisation rather than failing all the
+ * way up to the bytecode dispatcher and unwinding the entire JIT
+ * frame stack.  Returns {status=1, value=0} only when every sibling
+ * also bails -- the caller then propagates failure to its own
+ * dispatcher. */
+CandoFuncTraceResult cando_jit_rec_call_dispatch(struct CandoVM *vm,
+                                                  CandoTrace *self_trace,
+                                                  double arg) {
+    CandoTrace *fts[CANDO_FUNC_TRACE_MAX_VERSIONS];
+    u32 nf = cando_jit_find_func_traces(vm, self_trace->start_pc, fts,
+                                          CANDO_FUNC_TRACE_MAX_VERSIONS);
+    for (u32 i = 0; i < nf; i++) {
+        CandoTrace *ft = fts[i];
+        if (!ft->func_mcode_fn) continue;
+        CandoFuncTraceResult r = ft->func_mcode_fn(vm, ft, arg);
+        if (r.status == 0) return r;
+    }
+    CandoFuncTraceResult fail = {1, 0.0};
+    return fail;
+}
+
+u32 cando_jit_find_func_traces(struct CandoVM *vm, const u8 *entry_pc,
+                                CandoTrace **out, u32 max) {
+    CandoJit *j = jit_of(vm);
+    if (!j || !entry_pc || !out || max == 0) return 0;
+    u32 found = 0;
+    /* Collect all matches, then sort by last_used DESC (most recent
+     * specialisation first) so the dispatcher tries the freshest
+     * trace before the others -- temporal locality wins for fib-
+     * style recursive functions where one path dominates a streak
+     * of calls. */
+    for (u32 i = 0; i < j->trace_count && found < max; i++) {
+        CandoTrace *t = &j->traces[i];
+        if (t->is_function_trace && t->start_pc == entry_pc &&
+            t->func_mcode_fn != NULL) {
+            out[found++] = t;
+        }
+    }
+    /* Insertion sort by last_used DESC; found is small (<= cap). */
+    for (u32 i = 1; i < found; i++) {
+        CandoTrace *key = out[i];
+        i32 k = (i32)i - 1;
+        while (k >= 0 && out[k]->last_used < key->last_used) {
+            out[k + 1] = out[k];
+            k--;
+        }
+        out[k + 1] = key;
+    }
+    return found;
 }
 
 /* ============================================================ */
