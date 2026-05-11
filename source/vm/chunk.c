@@ -46,6 +46,9 @@ CandoChunk *cando_chunk_new(const char *name, u32 arity, bool has_vararg) {
     c->inline_cache         = NULL;
     c->inline_cache_cap     = 0;
     c->globals_version_seen = 0;
+    c->fn_meta              = NULL;
+    c->fn_meta_count        = 0;
+    c->fn_meta_cap          = 0;
     return c;
 }
 
@@ -62,7 +65,66 @@ void cando_chunk_free(CandoChunk *chunk) {
     cando_free(chunk->lines);
     cando_free(chunk->name);
     cando_free(chunk->inline_cache);
+    if (chunk->fn_meta) {
+        for (u32 i = 0; i < chunk->fn_meta_count; i++)
+            cando_free(chunk->fn_meta[i].name);
+        cando_free(chunk->fn_meta);
+    }
     cando_free(chunk);
+}
+
+/* =========================================================================
+ * Function metadata table
+ * ===================================================================== */
+
+u32 cando_chunk_register_fn(CandoChunk *chunk, u32 pc_start,
+                            const char *name, u32 name_len,
+                            u16 arity, bool has_vararg) {
+    if (chunk->fn_meta_count >= chunk->fn_meta_cap) {
+        u32 new_cap = chunk->fn_meta_cap ? chunk->fn_meta_cap * 2 : 8;
+        chunk->fn_meta = (CandoFnMeta *)cando_realloc(
+            chunk->fn_meta, new_cap * sizeof(CandoFnMeta));
+        chunk->fn_meta_cap = new_cap;
+    }
+    CandoFnMeta *m = &chunk->fn_meta[chunk->fn_meta_count];
+    m->pc_start   = pc_start;
+    m->pc_end     = pc_start; /* placeholder until finalise */
+    m->name       = NULL;
+    m->arity      = arity;
+    m->has_vararg = has_vararg;
+    if (name && name_len > 0) {
+        m->name = (char *)cando_alloc((size_t)name_len + 1);
+        memcpy(m->name, name, name_len);
+        m->name[name_len] = '\0';
+    }
+    return chunk->fn_meta_count++;
+}
+
+void cando_chunk_finalise_fn(CandoChunk *chunk, u32 idx, u32 pc_end) {
+    if (idx >= chunk->fn_meta_count) return;
+    chunk->fn_meta[idx].pc_end = pc_end;
+}
+
+const CandoFnMeta *cando_chunk_find_fn_by_entry(const CandoChunk *chunk,
+                                                u32 pc) {
+    for (u32 i = 0; i < chunk->fn_meta_count; i++) {
+        if (chunk->fn_meta[i].pc_start == pc) return &chunk->fn_meta[i];
+    }
+    return NULL;
+}
+
+const CandoFnMeta *cando_chunk_find_fn_by_ip(const CandoChunk *chunk,
+                                             u32 pc) {
+    /* Innermost match wins.  Nested function bodies cannot overlap (the
+     * inner body's bytes lie entirely within the outer's [start, end)
+     * window only when the inner is registered AFTER the outer; we walk
+     * forwards and keep the latest match so the inner wins).              */
+    const CandoFnMeta *match = NULL;
+    for (u32 i = 0; i < chunk->fn_meta_count; i++) {
+        const CandoFnMeta *m = &chunk->fn_meta[i];
+        if (pc >= m->pc_start && pc < m->pc_end) match = m;
+    }
+    return match;
 }
 
 /* =========================================================================

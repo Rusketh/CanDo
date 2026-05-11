@@ -157,13 +157,16 @@ them.
 | `class __call: missing class receiver`        | Default class `__call` invoked with no class. |
 | `class __call: invalid class handle`          | Default class `__call` saw an invalid handle. |
 
-### Reserved / not yet implemented
+### Notes on once-reserved keywords
 
-| Message                                          | Notes |
-|---|---|
-| `tail call not yet implemented`                  | The `OP_TAIL_CALL` opcode is reserved. |
-| `ASYNC not implemented (use 'thread' instead)`   | Reserved keyword; use `thread` for concurrency. |
-| `YIELD not implemented (use 'thread' instead)`   | Same. |
+`OP_TAIL_CALL` and `OP_ASYNC` were reserved in earlier releases:
+
+* **Tail calls** are now implemented — see
+  [`functions.md`](functions.md#tail-calls).  `RETURN fn(args);` reuses
+  the current frame instead of pushing a new one.
+* **`ASYNC`** is now an alias for `THREAD`: `async expr` and
+  `async { block }` spawn the operand on a fresh OS thread and return a
+  joinable handle that `AWAIT` can wait on.
 
 ## Stack unwinding
 

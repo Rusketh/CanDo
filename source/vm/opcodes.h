@@ -196,7 +196,6 @@ typedef enum {
     OP_ASYNC,           /* (reserved — was fiber async; unused)           */
     OP_AWAIT,           /* pop CdoThread handle, block until done, push
                            return values; sets last_ret_count             */
-    OP_YIELD,           /* (reserved — was fiber yield; unused)           */
     OP_THREAD,          /* pop OBJ_FUNCTION closure, spawn OS thread,
                            push CdoThread handle                          */
 

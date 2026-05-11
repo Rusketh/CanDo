@@ -583,6 +583,15 @@ CANDO_API CandoVMResult cando_vm_exec_eval_module(CandoVM *vm, CandoChunk *chunk
 CANDO_API void cando_vm_error(CandoVM *vm, const char *fmt, ...);
 
 /*
+ * cando_vm_append_trace -- append a multi-line "  at <file>:<line>" call
+ * stack trace to vm->error_msg.  Native libraries that surface a deferred
+ * error from a nested compile/exec step (e.g. eval) call this after
+ * cando_vm_error so the user sees the original call site, not just the
+ * naked diagnostic.  No-op when vm has no active frames.
+ */
+CANDO_API void cando_vm_append_trace(CandoVM *vm);
+
+/*
  * cando_vm_log_uncaught -- print vm's current error to stderr in the
  * canonical "cando: uncaught error in <context>: <msg>" form, then clear
  * the error so the calling thread can continue.
