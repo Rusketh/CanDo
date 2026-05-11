@@ -190,6 +190,8 @@ export type Expr =
     | Pipe
     | Paren
     | RangeExpr
+    | ThreadExpr
+    | AwaitExpr
     | ErrorExpr;
 
 export interface NumberLit extends Base { kind: 'NumberLit'; value: number; raw: string; }
@@ -332,7 +334,8 @@ export interface Pipe extends Base {
     kind: 'Pipe';
     source: Expr;
     op: '~>' | '~!>' | '~&>';
-    body: Expr;
+    /** Either a single expression or a block (`{ ... RETURN x; }`). */
+    body: Expr | BlockStmt;
 }
 
 export interface Paren extends Base {
@@ -349,6 +352,22 @@ export interface RangeExpr extends Base {
 
 /** Used during error recovery so traversal never breaks. */
 export interface ErrorExpr extends Base { kind: 'ErrorExpr'; }
+
+/** `thread { ... }` (block form) or `thread expr` (call form). Spawns
+ *  an OS thread that runs the body; evaluates to a thread handle. */
+export interface ThreadExpr extends Base {
+    kind: 'ThreadExpr';
+    /** Either a BlockStmt for the block form or an Expr for the call
+     *  form. We don't normalise -- inference walks both shapes. */
+    body: BlockStmt | Expr;
+}
+
+/** `await expr` -- blocks until the thread completes and yields its
+ *  return value(s). */
+export interface AwaitExpr extends Base {
+    kind: 'AwaitExpr';
+    argument: Expr;
+}
 
 /* -- Patterns ------------------------------------------------------------ */
 
@@ -436,9 +455,14 @@ export function* children(n: Node): IterableIterator<Node> {
         case 'ClassExpr': yield n.body; return;
         case 'Mask': yield n.expr; return;
         case 'Spread': yield n.argument; return;
-        case 'Pipe': yield n.source; yield n.body; return;
+        case 'Pipe':
+            yield n.source;
+            yield n.body;
+            return;
         case 'Paren': yield n.expression; return;
         case 'RangeExpr': yield n.from; yield n.to; return;
+        case 'ThreadExpr': yield n.body; return;
+        case 'AwaitExpr': yield n.argument; return;
 
         default:
             return;

@@ -22,6 +22,7 @@ import { infer, InferResult } from './infer';
 import { TypeRef, ANY } from './typesys';
 import { findManifestFor } from './manifest';
 import { resolveIncludePath } from './paths';
+import { parseDocBlock, DocBlock } from './docparse';
 import * as path from 'path';
 
 export interface AnalyzedDocument {
@@ -84,7 +85,12 @@ function analyzeFresh(uri: string, text: string, version: number, workspaceRoots
 
 /** Walk every binding whose declaration starts on line N and look for
  *  consecutive `//` or `///` comments whose end line is N-1, N-2, ... .
- *  Concatenated comment text (joined by newlines) becomes binding.doc. */
+ *  Concatenated comment text (joined by newlines) becomes binding.doc.
+ *
+ *  Doc blocks that don't attach to any binding (e.g. a top-of-file
+ *  `@shape Foo { ... }` separated by a blank line from the next decl)
+ *  are recorded on `resolved.orphanDocBlocks` so the alias registry
+ *  can still pick up their `@shape` / `@callback` declarations. */
 function attachDocComments(tokens: Token[], resolved: ResolveResult): void {
     /* Group comments by their end line for cheap lookup. */
     const byEndLine = new Map<number, Token>();
@@ -92,18 +98,60 @@ function attachDocComments(tokens: Token[], resolved: ResolveResult): void {
         if (t.kind !== 'comment') continue;
         byEndLine.set(t.range.end.line, t);
     }
+
+    /* Track which comment tokens we attach to a binding so we can find
+     * orphan blocks afterwards. */
+    const consumed = new Set<Token>();
+
     for (const b of resolved.allBindings) {
         if (b.kind !== 'function' && b.kind !== 'class' &&
             b.kind !== 'const' && b.kind !== 'var' && b.kind !== 'global') continue;
         const lines: string[] = [];
+        const usedHere: Token[] = [];
         let line = b.declRange.start.line - 1;
         while (line >= 0) {
             const c = byEndLine.get(line);
             if (!c) break;
             lines.unshift(stripCommentMarker(c.value));
+            usedHere.push(c);
             line = c.range.start.line - 1;
         }
-        if (lines.length) b.doc = renderDocComment(lines.join('\n').trim());
+        if (lines.length) {
+            const raw = lines.join('\n').trim();
+            b.docBlock = parseDocBlock(raw);
+            b.doc = renderDocComment(raw);
+            if (b.docBlock.deprecated) b.deprecated = b.docBlock.deprecated;
+            for (const c of usedHere) consumed.add(c);
+        }
+    }
+
+    /* Find orphan blocks. Group consecutive comment tokens (no gaps)
+     * and parse each unconsumed group. */
+    const allComments = tokens
+        .filter(t => t.kind === 'comment')
+        .sort((a, b) => a.range.start.line - b.range.start.line);
+    let i = 0;
+    while (i < allComments.length) {
+        const start = i;
+        let j = i + 1;
+        while (j < allComments.length &&
+               allComments[j].range.start.line === allComments[j - 1].range.end.line + 1) {
+            j++;
+        }
+        const group = allComments.slice(start, j);
+        if (!group.some(c => consumed.has(c))) {
+            const raw = group.map(c => stripCommentMarker(c.value)).join('\n').trim();
+            if (raw.length > 0) {
+                const block = parseDocBlock(raw);
+                /* Only keep orphan blocks that carry useful tags --
+                 * loose narrative comments shouldn't pollute the
+                 * registry. */
+                if (block.tags.length > 0) {
+                    resolved.orphanDocBlocks.push(block);
+                }
+            }
+        }
+        i = j;
     }
 }
 

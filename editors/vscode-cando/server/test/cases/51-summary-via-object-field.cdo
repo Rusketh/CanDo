@@ -1,0 +1,10 @@
+FUNCTION init(o) { o.x = 1; o.y = 2; }
+VAR holder = { cb: init };
+VAR rec = {};
+/* Summary propagates through structural object fields because the
+ * FunctionType (with its summary) is preserved through value flow.
+ * This is a happy bonus -- the middle-ground plan flagged this as
+ * a fallback case, but it Just Works. */
+holder.cb(rec);
+print(rec.|x);
+// MEMBERS: x, y

@@ -350,6 +350,48 @@ function semanticDiagnostics(a: AnalyzedDocument): Diagnostic[] {
         });
     }
 
+    /* Doc-comment diagnostics:
+     *   - doc-bad-type: `{type}` annotation failed to parse cleanly.
+     *   - doc-unknown-tag: `@foo` tag we don't recognise.
+     *   - doc-deprecated-use: identifier resolves to a `@deprecated`
+     *     binding (informational, surfaced as faded text via tag). */
+    for (const d of a.inferred.docTypeErrors ?? []) {
+        out.push({
+            severity: DiagnosticSeverity.Information,
+            range: toLsp(d.range),
+            message: d.message,
+            source: 'cando',
+            code: 'doc-bad-type'
+        });
+    }
+    for (const b of a.resolved.allBindings) {
+        if (!b.docBlock) continue;
+        for (const tag of b.docBlock.unknownTags) {
+            out.push({
+                severity: DiagnosticSeverity.Hint,
+                range: toLsp(b.nameRange),
+                message: `Unknown doc tag '@${tag.name}' on '${b.name}'`,
+                source: 'cando',
+                code: 'doc-unknown-tag'
+            });
+        }
+    }
+    walkAst(a.program, (n) => {
+        if (n.kind !== 'Ident') return;
+        const scope = a.resolved.scopeOf.get(n);
+        const b = scope?.lookup(n.name);
+        if (!b || !b.deprecated) return;
+        if (b.references.length > 0 && b.references[0] === n.range) return; // skip the decl itself
+        out.push({
+            severity: DiagnosticSeverity.Hint,
+            range: toLsp(n.range),
+            message: `'${n.name}' is deprecated: ${b.deprecated}`,
+            source: 'cando',
+            code: 'doc-deprecated-use',
+            tags: [2]  // DiagnosticTag.Deprecated -- editor renders struck-through
+        });
+    });
+
     /* Dead code detection: any statement after a RETURN / THROW / BREAK /
      * CONTINUE / SETTLE in the same block is unreachable. */
     walkAst(a.program, (n) => {
@@ -545,7 +587,7 @@ connection.onCompletion(params => {
             const docMd = b.doc ?? (b.kind === 'function'
                 ? `Defined at line ${b.declRange.start.line + 1}.`
                 : undefined);
-            items.push({
+            const item: CompletionItem = {
                 label: name,
                 kind: bindingKindToCompletion(b),
                 detail: renderType(b.type),
@@ -553,7 +595,11 @@ connection.onCompletion(params => {
                 /* Push function and class declarations to the top of the
                  * list; locals beat globals in a tie. */
                 sortText: completionSortKey(b)
-            });
+            };
+            if (b.deprecated) {
+                item.tags = [1]; // CompletionItemTag.Deprecated -- editor renders struck-through
+            }
+            items.push(item);
         }
     }
     return items;

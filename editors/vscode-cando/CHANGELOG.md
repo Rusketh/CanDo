@@ -3,6 +3,65 @@
 All notable changes to the **CanDo Language** VS Code extension are
 documented in this file.
 
+## 0.8.0 -- 2026-05-11
+
+### Added
+
+- **`thread { ... }` and `await` as expressions.** Previously only the
+  statement form `THREAD expr;` was recognised; `VAR t = thread { ...
+  };` and `VAR r = await t;` are now first-class. The thread handle is
+  modelled as a structural type with `state`/`done`/`join`/`error`
+  members, and the body's RETURN type is recovered through `await` so
+  multi-return unpacks (`VAR a, b, c = await t;`) work as expected.
+- **Pipe block bodies.** `arr ~!> { IF pipe > 0 { RETURN pipe * 2; } }`
+  (and the same for `~>` / `~&>`) now parses cleanly. The body lives in
+  the pipe's own scope so `pipe` is visible inside it, and RETURNs are
+  collected into the mapped element type.
+- **`thread.<member>` disambiguation.** The `thread` keyword no longer
+  shadows the `thread` stdlib namespace; `thread.sleep(...)`,
+  `thread.cancel(t)`, etc. all parse correctly even though `thread`
+  itself remains the spawn keyword.
+- **Cross-function object-shape prediction.** Every user function gets
+  a per-parameter write summary recorded during inference: every
+  direct `param.key = value` mutation. At call sites, the summary is
+  replayed onto the argument's binding, so an `init(rec)` whose body
+  writes `o.x` and `o.y` makes `rec.x` and `rec.y` available to
+  completion afterwards. Summaries propagate through `VAR alias =
+  init` (the FunctionType reference carries them) and through object
+  fields (`{ cb: init }`). Conservative on `any` / unions / non-shape
+  values -- the worst case is "no extra knowledge," never a wrong
+  claim. Implements the middle-ground plan we discussed: per-function
+  summaries + zero-depth on-call replay, no global fixpoint.
+- **Structured doc comments.** The extension now recognises a small
+  JSDoc/LuaLS-flavored tag vocabulary in `///` line and `/** */`
+  block comments and turns it into type information that drives
+  completion, hover, signature help, and diagnostics:
+  - `@param name {type} description` -- type a function parameter.
+  - `@returns {type} description` -- type a return value (repeat for
+    multi-return).
+  - `@type {type}` -- type a `VAR` whose initialiser the inferer
+    can't pin down.
+  - `@field name {type} description` -- declare a class member; the
+    field becomes visible on `self.name` and on instances.
+  - `@shape Name { k: T, k2: T2 }` -- reusable named record type.
+  - `@callback Name (a: T, b: U) -> R` -- reusable function-signature
+    alias.
+  - `@class Name` / `@throws {type}` / `@thread-safe` / `@see` /
+    `@example` -- rendered into hover.
+  - `@deprecated msg` -- marks the binding; references render
+    struck-through and the completion entry is tagged.
+- **Doc-type mini-language.** A small recursive-descent parser
+  handles primitives (`number`, `string`, `bool`, ...), arrays
+  (`T[]` / `Array<T>`), unions (`T | U`), optionals (`T?`), object
+  literals (`{ k: T, k2: T2 }`), function literals
+  (`(a: T) -> R`, with multi-return `(...) -> R1, R2`), and named
+  references to `@shape` / `@callback` aliases declared anywhere in
+  the same file (including at file scope, outside any declaration).
+- **Doc diagnostics.** Three new advisory codes:
+  - `doc-bad-type` -- a `{type}` annotation didn't parse.
+  - `doc-unknown-tag` -- `@foo` isn't a known tag.
+  - `doc-deprecated-use` -- a reference to a `@deprecated` binding.
+
 ## 0.7.0 -- 2026-05-11
 
 ### Added

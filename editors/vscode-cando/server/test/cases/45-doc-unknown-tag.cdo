@@ -1,0 +1,6 @@
+/// @nonsense this tag doesn't exist
+/// @param x {number}
+FUNCTION fn(x) {
+    print(x|);
+}
+// DIAG-CODE: doc-unknown-tag

@@ -52,6 +52,13 @@ export interface Binding {
     /** Documentation comment harvested from the lines immediately above the
      *  declaration (see analyze.ts). Markdown; rendered verbatim in hover. */
     doc?: string;
+    /** Structured form of the same doc comment. Populated alongside
+     *  `doc`. Drives inference fallback (@type, @param, @returns) and
+     *  diagnostic surfacing (@deprecated, unknown tags). */
+    docBlock?: import('./docparse').DocBlock;
+    /** Deprecation message if `@deprecated` appeared in the doc block.
+     *  Surfaced by completion (CompletionItemTag.Deprecated) and hover. */
+    deprecated?: string;
 }
 
 export type ScopeKind = 'file' | 'function' | 'block';
@@ -98,6 +105,11 @@ export interface ResolveResult {
     scopeOf: Map<Node, Scope>;
     /** Bindings flattened (handy for diagnostics and tests). */
     allBindings: Binding[];
+    /** Doc-comment blocks that didn't attach to any declaration (free
+     *  floating). Mostly used to host `@shape` / `@callback` definitions
+     *  the user keeps near the top of the file. Populated by
+     *  analyze.ts:attachDocComments. */
+    orphanDocBlocks: import('./docparse').DocBlock[];
 }
 
 export function resolve(program: Program): ResolveResult {
@@ -112,7 +124,7 @@ export function resolve(program: Program): ResolveResult {
     }
     for (const s of program.body) r.stmt(s, file);
 
-    return { fileScope: file, scopeOf: r.scopeOf, allBindings: r.allBindings };
+    return { fileScope: file, scopeOf: r.scopeOf, allBindings: r.allBindings, orphanDocBlocks: [] };
 }
 
 class Resolver {
@@ -343,7 +355,12 @@ class Resolver {
                 const body = new Scope(this.nextId(), 'block', scope, e);
                 this.scopeOf.set(e, body);
                 this.declare(body, 'pipe', 'pipe', e, e.range, e.range);
-                this.expr(e.body, body);
+                if (e.body.kind === 'BlockStmt') {
+                    this.scopeOf.set(e.body, body);
+                    for (const sub of e.body.body) this.stmt(sub, body);
+                } else {
+                    this.expr(e.body, body);
+                }
                 return;
             }
             case 'Member': this.expr(e.object, scope); return;
@@ -382,6 +399,22 @@ class Resolver {
             case 'Spread': this.expr(e.argument, scope); return;
             case 'Paren': this.expr(e.expression, scope); return;
             case 'RangeExpr': this.expr(e.from, scope); this.expr(e.to, scope); return;
+            case 'ThreadExpr': {
+                /* `thread { ... }` is its own function-like scope: RETURN
+                 * targets the thread, locals don't leak. The call form
+                 * `thread foo(x)` just spawns the call, no new scope. */
+                if (e.body.kind === 'BlockStmt') {
+                    const fn = new Scope(this.nextId(), 'function', scope, e);
+                    this.scopeOf.set(e, fn);
+                    const body = new Scope(this.nextId(), 'block', fn, e.body);
+                    this.scopeOf.set(e.body, body);
+                    for (const sub of e.body.body) this.stmt(sub, body);
+                } else {
+                    this.expr(e.body, scope);
+                }
+                return;
+            }
+            case 'AwaitExpr': this.expr(e.argument, scope); return;
 
             case 'NumberLit':
             case 'StringLit':

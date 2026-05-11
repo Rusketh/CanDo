@@ -1,0 +1,4 @@
+VAR t = thread { RETURN "hello"; };
+VAR msg = await t;
+print(msg|);
+// EXPECT: string

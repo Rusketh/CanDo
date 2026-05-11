@@ -1,0 +1,8 @@
+/// @param o {{ existing: string }} starts with one key
+FUNCTION addMore(o) {
+    o.extra = 42;
+}
+VAR rec = { existing: "hi" };
+addMore(rec);
+print(rec.|extra);
+// MEMBERS: existing, extra

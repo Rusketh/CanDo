@@ -1,0 +1,10 @@
+/// A 3D vector.
+/// @field x {number} x component
+/// @field y {number} y component
+/// @field z {number} z component
+CLASS Vec3 = (self, x, y, z) {
+    self.x = x; self.y = y; self.z = z;
+}
+VAR v = Vec3(1, 2, 3);
+print(v.|x);
+// MEMBERS: x, y, z

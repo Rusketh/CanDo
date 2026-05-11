@@ -1,0 +1,5 @@
+/// @type {{ a: number, b: string }}
+VAR rec = something();
+print(rec.|a);
+// EXPECT: { a, b }
+// MEMBERS: a, b

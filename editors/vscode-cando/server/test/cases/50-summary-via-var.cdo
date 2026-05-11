@@ -1,0 +1,9 @@
+FUNCTION init(o) {
+    o.x = 1;
+    o.y = 2;
+}
+VAR alias = init;
+VAR rec = {};
+alias(rec);
+print(rec.|x);
+// MEMBERS: x, y

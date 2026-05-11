@@ -1,0 +1,8 @@
+FUNCTION init(o) {
+    o.name = "x";
+    o.count = 0;
+}
+VAR a = {};
+init(a);
+print(a.|name);
+// MEMBERS: name, count

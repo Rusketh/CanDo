@@ -1,0 +1,8 @@
+/// @returns {{ id: number, label: string }} a record
+FUNCTION makeRecord() {
+    RETURN someValue;
+}
+VAR r = makeRecord();
+print(r.|id);
+// EXPECT: { id, label }
+// MEMBERS: id, label
