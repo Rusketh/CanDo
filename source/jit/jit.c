@@ -88,6 +88,7 @@ static void rec_push_aux(CandoRecorder *r, u32 sp_after,
  * OP_SET_INDEX) have something to point at.  The aux marker stays
  * (other consumers like OP_GET_FIELD's fast-native lookup still
  * use it).  No-op if stack_map already has a real IRRef there. */
+static void rec_ensure_first_load_global(CandoRecorder *r, u32 want);
 static IRRef rec_materialize_obj_irref(CandoRecorder *r, u32 abs_pos) {
     if (abs_pos >= r->stack_map_cap) return IRREF_NIL;
     IRRef existing = r->stack_map[abs_pos];
@@ -95,7 +96,27 @@ static IRRef rec_materialize_obj_irref(CandoRecorder *r, u32 abs_pos) {
     u32 ax = r->stack_aux[abs_pos];
     if (CANDO_AUX_KIND(ax) != AUX_OBJECT_GLOBAL) return IRREF_NIL;
     u32 ki = CANDO_AUX_DATA(ax);
+    /* Cache IR_GLOAD-IRT_OBJ per kidx via cur_global_value so the
+     * same OBJECT global referenced multiple times in a trace
+     * (nbody: x, y, z, vx, vy, vz, m are each loaded ~5 times)
+     * collapses to a single GLOAD.  Sharing the IRRef also lets
+     * the rec_lookup_first_index_get path reuse a prior GET on
+     * the same (arr, idx) pair across reads/writes, since both
+     * sides now see the same arr_ref. */
+    rec_ensure_first_load_global(r, ki + 1);
+    IRRef cached = r->cur_global_value[ki];
+    if (cached != IRREF_NIL && cached < r->ir.ir_count) {
+        const IRIns *ci = &r->ir.ir[cached];
+        if (ci->op == IR_GLOAD && ci->type == IRT_OBJ &&
+            IRREF_IS_K(ci->op1) && IRREF_KIDX(ci->op1) == ki) {
+            r->stack_map[abs_pos] = cached;
+            return cached;
+        }
+    }
     IRRef e = cando_ir_emit(&r->ir, IR_GLOAD, IRT_OBJ, 0, IRREF_K(ki), 0);
+    r->cur_global_value[ki] = e;
+    if (r->first_load_global[ki] == IRREF_NIL)
+        r->first_load_global[ki] = e;
     r->stack_map[abs_pos] = e;
     return e;
 }
@@ -847,9 +868,75 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
                 /* op2 is the loop-variant index in v1 traces. */
                 inv = false;
                 break;
+            case IR_INDEX_GET: {
+                /* Hoistable when the array AND index are both
+                 * invariant AND no IR_INDEX_SET / IR_ARRAY_APPEND in
+                 * the trace mutates the same underlying array.  Hot
+                 * in nbody: x[i], y[i], z[i], m[i] are all invariant
+                 * in the inner j loop because those arrays only
+                 * mutate in the (separate) second i-loop pass.
+                 *
+                 * Aliasing: IR_GLOAD-IRT_OBJ for the same global name
+                 * resolves to the same CdoObject* but the recorder
+                 * may emit several IRRefs for it (CSE doesn't dedup
+                 * GLOAD).  Compare by the SOURCE GLOAD's constant-
+                 * pool index (kidx + 1, so 0 means "not a GLOAD" --
+                 * a non-GLOAD array ref is conservatively variant). */
+                bool arr_inv = (in->op1 < ir->ir_count) &&
+                               (ir->ir[in->op1].flags & IRF_INVARIANT);
+                bool idx_inv = false;
+                if (IRREF_IS_K(in->op2)) {
+                    idx_inv = true;
+                } else if (in->op2 < ir->ir_count) {
+                    idx_inv = (ir->ir[in->op2].flags & IRF_INVARIANT) != 0;
+                }
+                u32 my_key = 0;
+                if (in->op1 < ir->ir_count) {
+                    const IRIns *src = &ir->ir[in->op1];
+                    if (src->op == IR_GLOAD && src->type == IRT_OBJ &&
+                        IRREF_IS_K(src->op1)) {
+                        my_key = IRREF_KIDX(src->op1) + 1;
+                    }
+                }
+                bool aliased = false;
+                if (arr_inv && idx_inv && my_key) {
+                    for (u32 k = 1; k < ir->ir_count; k++) {
+                        const IRIns *sk = &ir->ir[k];
+                        if (sk->op != IR_INDEX_SET &&
+                            sk->op != IR_ARRAY_APPEND) continue;
+                        if (sk->op1 >= ir->ir_count) continue;
+                        const IRIns *ssrc = &ir->ir[sk->op1];
+                        u32 other_key = 0;
+                        if (ssrc->op == IR_GLOAD &&
+                            ssrc->type == IRT_OBJ &&
+                            IRREF_IS_K(ssrc->op1)) {
+                            other_key = IRREF_KIDX(ssrc->op1) + 1;
+                        }
+                        /* Conservative: same kidx -> alias; missing
+                         * key on either side -> alias (unknown
+                         * provenance). */
+                        if (other_key == 0 || other_key == my_key) {
+                            aliased = true;
+                            break;
+                        }
+                    }
+                } else if (arr_inv && idx_inv) {
+                    /* my_key == 0: unknown provenance.  Treat as
+                     * aliased with anything to stay safe. */
+                    for (u32 k = 1; k < ir->ir_count; k++) {
+                        const IRIns *sk = &ir->ir[k];
+                        if (sk->op == IR_INDEX_SET ||
+                            sk->op == IR_ARRAY_APPEND) {
+                            aliased = true;
+                            break;
+                        }
+                    }
+                }
+                inv = arr_inv && idx_inv && !aliased;
+                break;
+            }
             case IR_NEW_ARRAY:
             case IR_ARRAY_APPEND:
-            case IR_INDEX_GET:
             case IR_INDEX_SET:
             case IR_INDEX_SET_VAL:
             case IR_NEW_OBJECT:
@@ -858,11 +945,10 @@ static void mark_loop_invariants(CandoTraceIR *ir) {
             case IR_FIELD_SET_VAL:
             case IR_RANGE_ASC:
             case IR_RANGE_DESC:
-                /* Phase 4.4a-f: allocations and array/object reads
-                 * /writes are NEVER invariant.  Allocations produce
-                 * fresh handles; mutations don't commute with reads.
-                 * SET_VAL ops are pinned pair-prefixes.  Range ops
-                 * allocate per call. */
+                /* Phase 4.4a-f: allocations and array/object writes
+                 * are NEVER invariant.  Allocations produce fresh
+                 * handles; SET_VAL ops are pinned pair-prefixes;
+                 * Range ops allocate per call. */
                 inv = false;
                 break;
             case IR_HLEN:
@@ -1081,7 +1167,19 @@ static void common_subexpression_elimination(CandoTraceIR *ir) {
             case IR_HLOAD_SLOT:   dedupable = !has_sstore;  break;
             case IR_HLEN:         dedupable = !has_array_append; break;
             case IR_AREF:
-            case IR_INDEX_GET:    dedupable = !has_index_set; break;
+                dedupable = !has_index_set;
+                break;
+            case IR_INDEX_GET:
+                /* Conservatively skip dedup when ANY IR_INDEX_SET
+                 * exists in the trace -- the SET could be on this
+                 * same (arr, idx) and would invalidate a cached GET.
+                 * The exception is when both candidates are clearly
+                 * INVARIANT (no mutation on their array): in that
+                 * case the LICM pre-pass guarantees safety, so we
+                 * can dedup even with sets elsewhere. */
+                dedupable = !has_index_set ||
+                            ((in->flags & IRF_INVARIANT) != 0);
+                break;
             case IR_FIELD_GET:    dedupable = !has_field_set; break;
             default: dedupable = false; break;
             }
@@ -1181,6 +1279,11 @@ static void cando_recorder_finish(struct CandoVM *vm) {
          * with no notion of "next iter". */
         mark_loop_invariants(&r->ir);
         mark_known_num_sloads(&r->ir);
+        /* Re-run CSE after LICM so the IR_INDEX_GET dedup path can
+         * use the just-set IRF_INVARIANT flag to merge same-(arr,
+         * idx) invariant reads (e.g. nbody's three m[i] reads). */
+        common_subexpression_elimination(&r->ir);
+        eliminate_dead_code(&r->ir);
     }
     escape_analysis(&r->ir);
     /* Phase 8.1 (REVERTED): mark_promoted_globals broke the Phase
