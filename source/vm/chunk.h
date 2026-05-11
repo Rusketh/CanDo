@@ -26,6 +26,26 @@
 struct CandoGlobalEntry;
 
 /* -------------------------------------------------------------------------
+ * CandoFnMeta -- per-function debugging / dispatch metadata recorded by the
+ * parser when it compiles a function body inline into the host chunk.
+ *
+ * Each entry covers the half-open byte range [pc_start, pc_end) within the
+ * chunk's code array.  Lookups by IP (e.g. from the stack trace formatter)
+ * find the entry whose range contains the IP; lookups by entry PC (e.g.
+ * arity validation at OP_CALL) use pc_start directly.
+ *
+ * `name` is heap-owned and is NULL for anonymous function expressions and
+ * arrow lambdas.
+ * ---------------------------------------------------------------------- */
+typedef struct {
+    u32   pc_start;    /* byte offset of the function's first instruction */
+    u32   pc_end;      /* byte offset one past the function's last byte   */
+    char *name;        /* heap-owned function name, or NULL if anonymous  */
+    u16   arity;       /* number of declared named parameters             */
+    bool  has_vararg;  /* true if the function accepts ...rest            */
+} CandoFnMeta;
+
+/* -------------------------------------------------------------------------
  * CandoChunk
  * ---------------------------------------------------------------------- */
 typedef struct CandoChunk {
@@ -63,6 +83,11 @@ typedef struct CandoChunk {
     struct CandoGlobalEntry **inline_cache;
     u32  inline_cache_cap;
     u32  globals_version_seen;
+
+    /* Per-function metadata recorded by the parser; see CandoFnMeta.       */
+    CandoFnMeta *fn_meta;
+    u32          fn_meta_count;
+    u32          fn_meta_cap;
 } CandoChunk;
 
 /* -------------------------------------------------------------------------
@@ -138,5 +163,33 @@ CANDO_API u16 cando_chunk_add_string_const(CandoChunk *chunk, const char *str,
  * identifier reference.                                                  */
 CANDO_API u16 cando_chunk_intern_string(CandoChunk *chunk, const char *str,
                                         u32 len);
+
+/* -------------------------------------------------------------------------
+ * Function metadata table
+ * ---------------------------------------------------------------------- */
+
+/* cando_chunk_register_fn -- append a CandoFnMeta entry.  `name` may be
+ * NULL (anonymous); when non-NULL it is duplicated into heap-owned
+ * storage.  Caller is responsible for completing pc_end via
+ * cando_chunk_finalise_fn once the body has finished emitting.           */
+CANDO_API u32 cando_chunk_register_fn(CandoChunk *chunk, u32 pc_start,
+                                      const char *name, u32 name_len,
+                                      u16 arity, bool has_vararg);
+
+/* cando_chunk_finalise_fn -- set pc_end on a previously-registered
+ * entry returned by cando_chunk_register_fn.                              */
+CANDO_API void cando_chunk_finalise_fn(CandoChunk *chunk, u32 fn_meta_idx,
+                                       u32 pc_end);
+
+/* cando_chunk_find_fn_by_entry -- find the metadata entry whose
+ * pc_start matches `pc`, or NULL if none.                                 */
+CANDO_API const CandoFnMeta *cando_chunk_find_fn_by_entry(
+    const CandoChunk *chunk, u32 pc);
+
+/* cando_chunk_find_fn_by_ip -- find the metadata entry whose
+ * [pc_start, pc_end) range contains `pc`, or NULL if none.  Used by the
+ * stack trace formatter to label each active frame with its function.    */
+CANDO_API const CandoFnMeta *cando_chunk_find_fn_by_ip(
+    const CandoChunk *chunk, u32 pc);
 
 #endif /* CANDO_CHUNK_H */

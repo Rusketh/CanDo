@@ -122,6 +122,9 @@ static int native_eval(CandoVM *vm, int argc, CandoValue *args)
 
     if (!cando_parse(&parser)) {
         cando_vm_error(vm, "eval parse error: %s", cando_parser_error(&parser));
+        /* Append the caller's stack trace so the user can locate the
+         * eval() call site (parser errors do not naturally carry one).  */
+        cando_vm_append_trace(vm);
         cando_parser_free(&parser);
         cando_chunk_free(chunk);
         return -1;

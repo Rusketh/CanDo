@@ -159,11 +159,19 @@ them.
 
 ### Reserved / not yet implemented
 
-| Message                                          | Notes |
+| Message                                                              | Notes |
 |---|---|
-| `tail call not yet implemented`                  | The `OP_TAIL_CALL` opcode is reserved. |
-| `ASYNC not implemented (use 'thread' instead)`   | Reserved keyword; use `thread` for concurrency. |
-| `YIELD not implemented (use 'thread' instead)`   | Same. |
+| `YIELD is reserved but not implemented (no generator runtime)`        | Parse-time error: there is no coroutine/generator runtime, so YIELD is rejected at compile time.  Return an array explicitly, or use `thread`/`async` for concurrent work. |
+| `YIELD is reserved but not implemented in this version (no generator runtime)` | Same diagnostic when YIELD appears inside a function body. |
+
+`OP_TAIL_CALL` and `OP_ASYNC` were both reserved in earlier releases:
+
+* **Tail calls** are now implemented — see
+  [`functions.md`](functions.md#tail-calls).  `RETURN fn(args);` reuses
+  the current frame instead of pushing a new one.
+* **`ASYNC`** is now an alias for `THREAD`: `async expr` and
+  `async { block }` spawn the operand on a fresh OS thread and return a
+  joinable handle that `AWAIT` can wait on.
 
 ## Stack unwinding
 

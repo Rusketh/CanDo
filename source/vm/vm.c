@@ -1361,9 +1361,19 @@ static void vm_append_stack_trace(CandoVM *vm) {
         if (offset > 0) offset--;
         if (offset < chunk->code_len) line = chunk->lines[offset];
 
+        /* Resolve the function name by IP: the parser registers every
+         * function body's [pc_start, pc_end) range in chunk->fn_meta, so
+         * we can label this frame with the innermost enclosing function.
+         * Frames whose IP falls outside any registered range belong to
+         * the top-level <main> script.                                  */
+        const CandoFnMeta *fm = cando_chunk_find_fn_by_ip(chunk, offset);
+        const char *fn_name = (fm && fm->name) ? fm->name :
+                              (fm ? "<anonymous>" : "<main>");
+
         char entry[256];
         int n = snprintf(entry, sizeof(entry),
-                         "\n  at %s:%u",
+                         "\n  at %s (%s:%u)",
+                         fn_name,
                          chunk->name ? chunk->name : "<anonymous>",
                          line);
         if (n < 0) break;
@@ -1379,6 +1389,21 @@ static void vm_append_stack_trace(CandoVM *vm) {
         }
         memcpy(vm->error_msg + used, entry, (size_t)n + 1);
         used += (size_t)n;
+    }
+}
+
+/* Public wrapper around vm_append_stack_trace for native libraries that
+ * raise errors via cando_vm_error and want the call site appended.       */
+void cando_vm_append_trace(CandoVM *vm) {
+    if (!vm) return;
+    vm_append_stack_trace(vm);
+    /* Refresh error_vals[0] so the trace also appears in the caught value. */
+    if (vm->has_error) {
+        cando_value_release(vm->error_vals[0]);
+        CandoString *s = cando_string_new(vm->error_msg,
+                                          (u32)strlen(vm->error_msg));
+        vm->error_vals[0]   = cando_string_value(s);
+        vm->error_val_count = 1;
     }
 }
 
@@ -1406,6 +1431,37 @@ static void vm_runtime_error(CandoVM *vm, const char *fmt, ...) {
  * this returns, dispatch loop callers must reload their local frame/ip
  * via LOAD_FRAME().  Returns false (and raises a runtime error) on
  * frame_count overflow.                                                 */
+/* vm_bundle_varargs -- gather every argument past index `fixed_arity` into
+ * a fresh array and replace those stack slots with the array.  Returns
+ * the new effective arg_count (= fixed_arity + 1).  The callee then sees
+ * a uniform frame:
+ *
+ *   slot 0      = function value (sentinel)
+ *   slot 1..N   = fixed parameters
+ *   slot N+1    = rest array (always present, even when zero extras)
+ *
+ * Where N == fixed_arity.  This matches the parser, which declares the
+ * rest parameter as the (arity+1)th local in compile_function_body so
+ * the body can name it directly.                                        */
+static u32 vm_bundle_varargs(CandoVM *vm, u32 arg_count, u32 fixed_arity) {
+    u32 extra = arg_count - fixed_arity;
+    /* The extras occupy stack_top - extra .. stack_top - 1.              */
+    CandoValue arr_val = cando_bridge_new_array(vm);
+    if (extra > 0) {
+        CdoObject *arr = cando_bridge_resolve(vm, cando_as_handle(arr_val));
+        CandoValue *base = vm->stack_top - extra;
+        for (u32 i = 0; i < extra; i++) {
+            CdoValue item = cando_bridge_to_cdo(vm, base[i]);
+            cdo_array_push(arr, item);
+            cdo_value_release(item);
+            cando_value_release(base[i]);
+        }
+        vm->stack_top -= extra;
+    }
+    cando_vm_push(vm, arr_val);
+    return fixed_arity + 1;
+}
+
 static bool vm_push_frame(CandoVM *vm, CandoClosure *closure, u8 *ip,
                           u32 arg_count, bool is_fluent) {
     if (vm->frame_count >= CANDO_FRAMES_MAX) {
@@ -3447,6 +3503,36 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     goto handle_error;
                 }
                 u32 pc = (u32)pc_d;
+                /* Arity check at the call site, before the frame is even
+                 * pushed.  Without this the mismatch surfaces deep inside
+                 * the callee as a confusing "operands must be numbers
+                 * (got number and null)" or similar — far from the real
+                 * cause.                                                  */
+                const CandoFnMeta *fm = cando_chunk_find_fn_by_entry(
+                    frame->closure->chunk, pc);
+                if (fm) {
+                    if (fm->has_vararg) {
+                        if (arg_count < fm->arity) {
+                            vm_runtime_error(vm,
+                                "%s() expects at least %u argument%s, got %u",
+                                fm->name ? fm->name : "<anonymous>",
+                                (unsigned)fm->arity,
+                                fm->arity == 1 ? "" : "s",
+                                (unsigned)arg_count);
+                            goto handle_error;
+                        }
+                        /* Bundle extras into a rest array; see vm_bundle_varargs. */
+                        arg_count = vm_bundle_varargs(vm, arg_count, fm->arity);
+                    } else if (arg_count != fm->arity) {
+                        vm_runtime_error(vm,
+                            "%s() expects %u argument%s, got %u",
+                            fm->name ? fm->name : "<anonymous>",
+                            (unsigned)fm->arity,
+                            fm->arity == 1 ? "" : "s",
+                            (unsigned)arg_count);
+                        goto handle_error;
+                    }
+                }
                 /* Function-trace fast path: iterate sibling function
                  * traces at this entry PC (e.g. fib's leaf trace vs
                  * its recursive trace, recorded as separate sibling
@@ -3506,6 +3592,32 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     CandoClosure *fn_closure =
                         (CandoClosure *)fn_obj->fn.script.bytecode;
                     u32 fn_pc = fn_obj->fn.script.param_count;
+
+                    /* Call-site arity check (see numeric-callee branch). */
+                    const CandoFnMeta *fm = cando_chunk_find_fn_by_entry(
+                        fn_closure->chunk, fn_pc);
+                    if (fm) {
+                        if (fm->has_vararg) {
+                            if (arg_count < fm->arity) {
+                                vm_runtime_error(vm,
+                                    "%s() expects at least %u argument%s, got %u",
+                                    fm->name ? fm->name : "<anonymous>",
+                                    (unsigned)fm->arity,
+                                    fm->arity == 1 ? "" : "s",
+                                    (unsigned)arg_count);
+                                goto handle_error;
+                            }
+                            arg_count = vm_bundle_varargs(vm, arg_count, fm->arity);
+                        } else if (arg_count != fm->arity) {
+                            vm_runtime_error(vm,
+                                "%s() expects %u argument%s, got %u",
+                                fm->name ? fm->name : "<anonymous>",
+                                (unsigned)fm->arity,
+                                fm->arity == 1 ? "" : "s",
+                                (unsigned)arg_count);
+                            goto handle_error;
+                        }
+                    }
 
                     /* Function-trace fast path -- mirror of the
                      * cando_is_number branch above, see comment there. */
@@ -3745,6 +3857,31 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 if (fn_obj->kind == OBJ_FUNCTION && fn_obj->fn.script.bytecode) {
                     CandoClosure *fn_closure = (CandoClosure *)fn_obj->fn.script.bytecode;
                     u32 fn_pc = fn_obj->fn.script.param_count;
+                    /* Call-site arity / vararg handling (mirrors OP_CALL).   */
+                    const CandoFnMeta *fm = cando_chunk_find_fn_by_entry(
+                        fn_closure->chunk, fn_pc);
+                    if (fm) {
+                        if (fm->has_vararg) {
+                            if (total_argc < fm->arity) {
+                                vm_runtime_error(vm,
+                                    "%s() expects at least %u argument%s, got %u",
+                                    fm->name ? fm->name : "<anonymous>",
+                                    (unsigned)fm->arity,
+                                    fm->arity == 1 ? "" : "s",
+                                    (unsigned)total_argc);
+                                goto handle_error;
+                            }
+                            total_argc = vm_bundle_varargs(vm, total_argc, fm->arity);
+                        } else if (total_argc != fm->arity) {
+                            vm_runtime_error(vm,
+                                "%s() expects %u argument%s, got %u",
+                                fm->name ? fm->name : "<anonymous>",
+                                (unsigned)fm->arity,
+                                fm->arity == 1 ? "" : "s",
+                                (unsigned)total_argc);
+                            goto handle_error;
+                        }
+                    }
                     SYNC_IP();
                     if (!vm_push_frame(vm, fn_closure,
                                        fn_closure->chunk->code + fn_pc,
@@ -3885,24 +4022,188 @@ static CandoVMResult vm_run(CandoVM *vm) {
             DISPATCH();
         }
         OP_CASE(OP_TAIL_CALL): {
-            /* Skeleton: implemented as a regular call for now.          */
+            /* Replace the current frame with the callee instead of
+             * pushing a new one.  Emitted by the parser at strict tail
+             * positions (`RETURN fn(args);` with a single value), so
+             * deeply recursive script idioms don't exhaust the frame
+             * stack.
+             *
+             * For non-script callees (native functions, __call meta,
+             * fluent frames) we cannot reuse the current frame safely;
+             * those degenerate to a regular OP_CALL by rewinding the IP
+             * to point at the same instruction byte and re-dispatching
+             * as if it were OP_CALL.  The OP_RETURN that follows in the
+             * bytecode then returns the result normally — no TCO, but
+             * also no crash.                                            */
             u16 arg_count = READ_U16();
-            CANDO_UNUSED(arg_count);
-            vm_runtime_error(vm, "tail call not yet implemented");
-            goto handle_error;
+            CandoValue callee = *(vm->stack_top - arg_count - 1);
+
+            CandoClosure *new_closure = NULL;
+            u32           fn_pc       = 0;
+            bool tail_eligible = !frame->is_fluent;
+
+            if (tail_eligible && IS_NATIVE_FN(callee)) {
+                /* Native callee: not eligible for TCO; OP_CALL handles
+                 * native dispatch and the trailing OP_RETURN propagates
+                 * the result.                                            */
+                tail_eligible = false;
+            } else if (tail_eligible && cando_is_number(callee)) {
+                double pc_d = cando_as_number(callee);
+                if (pc_d < 0.0 || pc_d != (double)(u32)pc_d ||
+                    (u32)pc_d >= frame->closure->chunk->code_len) {
+                    vm_runtime_error(vm,
+                        "can only call functions (got number)");
+                    goto handle_error;
+                }
+                new_closure = frame->closure;
+                fn_pc       = (u32)pc_d;
+            } else if (tail_eligible && cando_is_object(callee)) {
+                CdoObject *fn_obj = cando_bridge_resolve(vm, cando_as_handle(callee));
+                if (fn_obj && fn_obj->kind == OBJ_FUNCTION &&
+                    fn_obj->fn.script.bytecode) {
+                    new_closure = (CandoClosure *)fn_obj->fn.script.bytecode;
+                    fn_pc       = fn_obj->fn.script.param_count;
+                } else {
+                    tail_eligible = false;
+                }
+            } else {
+                tail_eligible = false;
+            }
+
+            if (!tail_eligible) {
+                /* Non-script callee: rewind IP so the next dispatch
+                 * re-decodes the same byte as OP_CALL.  This costs an
+                 * opcode byte rewrite but keeps the fallback small and
+                 * shares all of OP_CALL's downstream logic.             */
+                ip -= 3;             /* back over opcode + u16 argc      */
+                *ip = (u8)OP_CALL;
+                DISPATCH();          /* re-execute as OP_CALL            */
+            }
+
+            /* Arity / vararg handling, identical to OP_CALL.            */
+            {
+                const CandoFnMeta *fm = cando_chunk_find_fn_by_entry(
+                    new_closure->chunk, fn_pc);
+                if (fm) {
+                    if (fm->has_vararg) {
+                        if (arg_count < fm->arity) {
+                            vm_runtime_error(vm,
+                                "%s() expects at least %u argument%s, got %u",
+                                fm->name ? fm->name : "<anonymous>",
+                                (unsigned)fm->arity,
+                                fm->arity == 1 ? "" : "s",
+                                (unsigned)arg_count);
+                            goto handle_error;
+                        }
+                        arg_count = vm_bundle_varargs(vm, arg_count, fm->arity);
+                    } else if (arg_count != fm->arity) {
+                        vm_runtime_error(vm,
+                            "%s() expects %u argument%s, got %u",
+                            fm->name ? fm->name : "<anonymous>",
+                            (unsigned)fm->arity,
+                            fm->arity == 1 ? "" : "s",
+                            (unsigned)arg_count);
+                        goto handle_error;
+                    }
+                }
+            }
+
+            /* Close any upvalues that pointed into the current frame's
+             * slots before we tear it down.                              */
+            vm_close_upvalues(vm, frame->slots);
+
+            {
+                /* The new callee + args currently live at
+                 *   vm->stack_top - arg_count - 1 .. vm->stack_top - 1.
+                 * The old frame's locals occupy frame->slots .. that
+                 * range.  Release the old locals and slide the new block
+                 * down into frame->slots.                                */
+                CandoValue *new_block = vm->stack_top - arg_count - 1;
+                CandoValue *dst       = frame->slots;
+                for (CandoValue *p = dst; p < new_block; p++)
+                    cando_value_release(*p);
+                memmove(dst, new_block,
+                        (size_t)(arg_count + 1) * sizeof(CandoValue));
+                vm->stack_top = dst + arg_count + 1;
+            }
+
+            /* Switch the frame to the new function.                      */
+            frame->closure = new_closure;
+            frame->ip      = new_closure->chunk->code + fn_pc;
+
+            /* Pre-allocate null slots for the new function's locals.    */
+            {
+                u32 n_present = arg_count + 1;
+                CandoChunk *new_chunk = new_closure->chunk;
+                if (new_chunk->local_count > n_present) {
+                    u32 n_extra = new_chunk->local_count - n_present;
+                    for (u32 i = 0; i < n_extra; i++)
+                        cando_vm_push(vm, cando_null());
+                }
+            }
+
+            LOAD_FRAME();
+            DISPATCH();
         }
 
         /* ── Band 12: Varargs ───────────────────────────────────────── */
         /* ── Band 13: Vararg / unpack ───────────────────────────────── */
+        /* OP_LOAD_VARARG / OP_VARARG_LEN are legacy ABI hooks from an
+         * earlier vararg design.  The current implementation surfaces the
+         * rest array as an ordinary local declared at the (arity+1)th
+         * slot by the parser (see compile_function_body), so the body
+         * accesses it through plain OP_LOAD_LOCAL / OP_GET_INDEX / #-len.
+         * The opcodes below remain as stable entry points for tools that
+         * hand-craft bytecode: they walk the locals window of the current
+         * frame to find the first OBJ_ARRAY slot after the fixed params
+         * and return either its element or its length.                    */
         OP_CASE(OP_LOAD_VARARG): {
-            /* TODO: vararg access requires vararg calling convention.     */
-            u16 slot = READ_U16(); CANDO_UNUSED(slot);
+            u16 slot = READ_U16();
+            CandoChunk *c = frame->closure->chunk;
+            u32 vararg_slot = c->arity + 1u; /* slot 0 = fn, 1..arity = params */
+            if (vararg_slot < c->local_count) {
+                CandoValue v = frame->slots[vararg_slot];
+                if (cando_is_object(v)) {
+                    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
+                    if (obj && obj->kind == OBJ_ARRAY) {
+                        u32 len = cdo_array_len(obj);
+                        if (slot == UINT16_MAX) {
+                            /* Push every element (used for `...rest` spread). */
+                            for (u32 i = 0; i < len; i++) {
+                                CdoValue cv = cdo_null();
+                                cdo_array_rawget_idx(obj, i, &cv);
+                                PUSH(cando_bridge_to_cando(vm, cv));
+                                cdo_value_release(cv);
+                            }
+                            vm->last_ret_count = (int)len;
+                            DISPATCH();
+                        }
+                        if (slot < len) {
+                            CdoValue cv = cdo_null();
+                            cdo_array_rawget_idx(obj, slot, &cv);
+                            PUSH(cando_bridge_to_cando(vm, cv));
+                            cdo_value_release(cv);
+                            DISPATCH();
+                        }
+                    }
+                }
+            }
             PUSH(cando_null());
             DISPATCH();
         }
         OP_CASE(OP_VARARG_LEN): {
-            /* TODO: vararg length requires vararg calling convention.     */
-            PUSH(cando_number(0.0));
+            CandoChunk *c = frame->closure->chunk;
+            u32 vararg_slot = c->arity + 1u;
+            u32 len = 0;
+            if (vararg_slot < c->local_count) {
+                CandoValue v = frame->slots[vararg_slot];
+                if (cando_is_object(v)) {
+                    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(v));
+                    if (obj && obj->kind == OBJ_ARRAY)
+                        len = cdo_array_len(obj);
+                }
+            }
+            PUSH(cando_number((f64)len));
             DISPATCH();
         }
         OP_CASE(OP_UNPACK): {
@@ -4569,7 +4870,12 @@ static CandoVMResult vm_run(CandoVM *vm) {
             DISPATCH();
         }
         OP_CASE(OP_YIELD): {
-            vm_runtime_error(vm, "YIELD not implemented (use 'thread' instead)");
+            /* The parser rejects YIELD at compile time (see parse_yield);
+             * a script can only reach this opcode by hand-crafted
+             * bytecode, in which case we surface a clean error.          */
+            vm_runtime_error(vm,
+                "YIELD is reserved but not implemented "
+                "(no generator runtime)");
             goto handle_error;
         }
         OP_CASE(OP_THREAD): {

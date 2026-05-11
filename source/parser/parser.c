@@ -66,11 +66,16 @@ static const ParseRule *get_rule(CandoTokenType t);
 static CandoChunk *cur(CandoParser *p) { return p->chunk; }
 
 /* ---- error -------------------------------------------------------------
- * Format: "[line N] Error at '<lexeme>': <msg>".  For TOK_ERROR (lexer
- * errors) and other multi-line tokens, the lexeme can span the entire
- * source -- echoing it whole is noise -- so we clip at the first newline
- * or 32 bytes, whichever comes first, and append a '...' continuation
- * mark when truncated.                                                   */
+ * Format: "[<file>:<line>] Error at '<lexeme>': <msg>".  The chunk's
+ * name is the source file path threaded through by the loader (cando_dofile
+ * passes the canonical path); if it is missing or matches the synthetic
+ * <string> / <eval> placeholders the bracket falls back to "[line N]" so
+ * legacy tests and ad-hoc strings stay readable.
+ *
+ * For TOK_ERROR (lexer errors) and other multi-line tokens, the lexeme can
+ * span the entire source -- echoing it whole is noise -- so we clip at the
+ * first newline or 32 bytes, whichever comes first, and append a '...'
+ * continuation mark when truncated.                                       */
 static void error_at(CandoParser *p, const CandoToken *tok, const char *msg)
 {
     if (p->panic_mode) return;
@@ -94,10 +99,19 @@ static void error_at(CandoParser *p, const CandoToken *tok, const char *msg)
             break;
         }
     }
-    snprintf(p->error_msg, sizeof(p->error_msg),
-             "[line %u] Error at '%.*s%s': %s",
-             tok->line, (int)lex_len, lex,
-             clipped ? "..." : "", msg);
+
+    const char *src_name = (p->chunk && p->chunk->name) ? p->chunk->name : NULL;
+    if (src_name && src_name[0] && src_name[0] != '<') {
+        snprintf(p->error_msg, sizeof(p->error_msg),
+                 "[%s:%u] Error at '%.*s%s': %s",
+                 src_name, tok->line, (int)lex_len, lex,
+                 clipped ? "..." : "", msg);
+    } else {
+        snprintf(p->error_msg, sizeof(p->error_msg),
+                 "[line %u] Error at '%.*s%s': %s",
+                 tok->line, (int)lex_len, lex,
+                 clipped ? "..." : "", msg);
+    }
 }
 
 static void error(CandoParser *p, const char *msg)
@@ -136,6 +150,33 @@ static bool match(CandoParser *p, CandoTokenType t)
 static void consume(CandoParser *p, CandoTokenType t, const char *msg)
 {
     if (check(p, t)) { advance(p); return; }
+    error_current(p, msg);
+}
+
+/* Test if a token type is one of the language's reserved keywords.  Used
+ * to upgrade "expected identifier" diagnostics into the more specific
+ * "'X' is a reserved keyword" message.  Keyword TOK_ values are
+ * contiguous in token.h between TOK_IF (first) and TOK_PIPE_KW (last). */
+static bool is_keyword_tok(CandoTokenType t)
+{
+    return t >= TOK_IF && t <= TOK_PIPE_KW;
+}
+
+/* Like consume(TOK_IDENT, ...) but if the current token is a reserved
+ * keyword the message names it explicitly so the user immediately sees
+ * the actual problem (e.g. `VAR IF = 5;`).                              */
+static void consume_ident(CandoParser *p, const char *msg)
+{
+    if (check(p, TOK_IDENT)) { advance(p); return; }
+    if (is_keyword_tok(p->current.type)) {
+        char detail[160];
+        snprintf(detail, sizeof(detail),
+                 "%s ('%.*s' is a reserved keyword)",
+                 msg,
+                 (int)p->current.length, p->current.start);
+        error_current(p, detail);
+        return;
+    }
     error_current(p, msg);
 }
 
@@ -304,6 +345,7 @@ typedef struct {
     u16        *upvalue_specs;
     u16         upvalue_count;
     u32         upvalue_capacity;
+    u16         yield_slot;
 } FnScopeSave;
 
 /* Snapshot the current locals/upvalues tables and replace them with fresh
@@ -321,6 +363,7 @@ static void enter_function_scope(CandoParser *p, FnScopeSave *s)
     s->upvalue_specs    = p->upvalue_specs;
     s->upvalue_count    = p->upvalue_count;
     s->upvalue_capacity = p->upvalue_capacity;
+    s->yield_slot       = p->yield_slot;
 
     p->locals           = (CandoLocal *)cando_alloc(
                               sizeof(CandoLocal) * CANDO_LOCAL_INITIAL_CAP);
@@ -333,6 +376,7 @@ static void enter_function_scope(CandoParser *p, FnScopeSave *s)
                               sizeof(u16) * CANDO_LOCAL_INITIAL_CAP);
     p->upvalue_count    = 0;
     p->upvalue_capacity = CANDO_LOCAL_INITIAL_CAP;
+    p->yield_slot       = 0;  /* filled in by compile_function_body         */
 }
 
 /* Restore enclosing scope.  The body's upvalue capture buffer is handed
@@ -355,6 +399,7 @@ static void leave_function_scope(CandoParser *p, FnScopeSave *s,
     p->upvalue_specs    = s->upvalue_specs;
     p->upvalue_count    = s->upvalue_count;
     p->upvalue_capacity = s->upvalue_capacity;
+    p->yield_slot       = s->yield_slot;
 }
 
 /* ---- scope helpers ----------------------------------------------------- */
@@ -414,22 +459,45 @@ static u32 declare_local(CandoParser *p, const char *name, u32 len,
  * and lengths are stored into the caller's arrays up to `max`; past
  * the cap an error is raised and excess parameters are skipped.
  *
- * A trailing '...' (TOK_VARARG) terminates the list.  This is currently
- * accepted for forwards compatibility but not propagated to
- * chunk->has_vararg, so behaves like an arity-fixing terminator.
+ * A trailing `...rest` collects every argument past the fixed arity
+ * into an array bound to `rest`; a bare trailing `...` discards the
+ * extras.  Either form sets `*has_vararg_out` to true and the function
+ * body sees the rest array via OP_LOAD_VARARG / OP_VARARG_LEN.
  *
- * Returns the parsed arity.                                             */
+ * The named-rest variant stores the rest parameter as the (arity+1)th
+ * slot in `names[]` / `lens[]` so the caller's declare_local loop can
+ * bind it; the returned `arity` does *not* count this slot — the body
+ * receives the array in slot `arity` (immediately after the fixed
+ * parameters), guaranteed bound by vm_push_frame's varargs handling.
+ *
+ * Returns the fixed-parameter arity.                                   */
 static u16 parse_param_list(CandoParser *p,
                             const char **names, u32 *lens,
                             u32 max,
-                            const char *close_msg)
+                            const char *close_msg,
+                            bool *has_vararg_out,
+                            const char **rest_name_out,
+                            u32 *rest_len_out)
 {
     u16 arity = 0;
+    bool has_vararg = false;
+    if (rest_name_out) *rest_name_out = NULL;
+    if (rest_len_out)  *rest_len_out  = 0;
+
     if (!check(p, TOK_RPAREN)) {
         do {
             if (check(p, TOK_RPAREN)) break;
-            if (match(p, TOK_VARARG)) break;
-            consume(p, TOK_IDENT, "expected parameter name");
+            if (match(p, TOK_VARARG)) {
+                has_vararg = true;
+                /* Optional identifier names the rest array. */
+                if (check(p, TOK_IDENT)) {
+                    advance(p);
+                    if (rest_name_out) *rest_name_out = p->previous.start;
+                    if (rest_len_out)  *rest_len_out  = p->previous.length;
+                }
+                break;
+            }
+            consume_ident(p, "expected parameter name");
             if (arity >= max) { error(p, "too many parameters"); break; }
             names[arity] = p->previous.start;
             lens[arity]  = p->previous.length;
@@ -437,6 +505,7 @@ static u16 parse_param_list(CandoParser *p,
         } while (match(p, TOK_COMMA));
     }
     consume(p, TOK_RPAREN, close_msg);
+    if (has_vararg_out) *has_vararg_out = has_vararg;
     return arity;
 }
 
@@ -455,10 +524,12 @@ static u16 parse_param_list(CandoParser *p,
  *   *uv_specs_out   -- ownership-transferred buffer of upvalue capture
  *                       slot indices; caller must cando_free after use.
  *   *uv_count_out   -- number of entries in *uv_specs_out.            */
-static void compile_function_body(CandoParser *p,
+static u32 compile_function_body(CandoParser *p,
                                   const char *const *param_names,
                                   const u32 *param_lens,
                                   u16 arity,
+                                  bool has_vararg,
+                                  const char *rest_name, u32 rest_len,
                                   const char *open_brace_msg,
                                   u32 *fn_start_out,
                                   u32 *skip_jump_out,
@@ -470,6 +541,14 @@ static void compile_function_body(CandoParser *p,
     *skip_jump_out = emit_jump(p, OP_JUMP);
     *fn_start_out  = cur(p)->code_len;
 
+    /* Register a metadata entry now so that the body's byte range can be
+     * recorded and so nested-function registrations append behind us.
+     * The entry starts anonymous; callers that have a name (statement-form
+     * FUNCTION declarations, named classes) overwrite it via
+     * set_fn_meta_name once this returns.                                 */
+    u32 meta_idx = cando_chunk_register_fn(cur(p), *fn_start_out,
+                                           NULL, 0, arity, has_vararg);
+
     FnScopeSave saved;
     enter_function_scope(p, &saved);
 
@@ -478,12 +557,53 @@ static void compile_function_body(CandoParser *p,
     for (u16 i = 0; i < arity; i++)
         declare_local(p, param_names[i], param_lens[i], false);
 
+    /* Vararg parameter: an extra local slot immediately after the fixed
+     * parameters that the VM populates with an array containing every
+     * argument past the fixed arity.  A bare trailing `...` (no name)
+     * still reserves the slot so OP_CALL can stash the rest array there,
+     * but the user can't reach it from the body.                          */
+    if (has_vararg) {
+        if (rest_name && rest_len > 0)
+            declare_local(p, rest_name, rest_len, false);
+        else
+            declare_local(p, "", 0, false);
+    }
+
+    /* Mark this function as a legal YIELD site (non-zero = "inside a
+     * function body").  The current runtime has no generator/coroutine
+     * support, so parse_yield uses this only to gate a clear parse-time
+     * diagnostic rather than letting YIELD slip through to the
+     * unreachable OP_YIELD stub.                                         */
+    p->yield_slot = 1;
+
     parse_block(p);
 
     emit_op(p, OP_NULL);
     emit_op_a(p, OP_RETURN, 1);
 
+    /* Finalise the metadata entry with the body's end PC.                  */
+    cando_chunk_finalise_fn(cur(p), meta_idx, cur(p)->code_len);
+
     leave_function_scope(p, &saved, uv_specs_out, uv_count_out);
+    return meta_idx;
+}
+
+/* Overwrite an existing fn_meta entry's name field.  Used after
+ * compile_function_body returns when the caller has a source name to
+ * attach (e.g. statement-form FUNCTION declarations).                    */
+static void set_fn_meta_name(CandoParser *p, u32 meta_idx,
+                             const char *name, u32 name_len)
+{
+    CandoChunk *c = cur(p);
+    if (meta_idx >= c->fn_meta_count) return;
+    CandoFnMeta *m = &c->fn_meta[meta_idx];
+    if (m->name) cando_free(m->name);
+    m->name = NULL;
+    if (name && name_len > 0) {
+        m->name = (char *)cando_alloc((size_t)name_len + 1);
+        memcpy(m->name, name, name_len);
+        m->name[name_len] = '\0';
+    }
 }
 
 /* =========================================================================
@@ -1593,10 +1713,18 @@ static void parse_thread_expr(CandoParser *p, bool can_assign)
 {
     (void)can_assign;
 
+    /* This handler covers two reserved keywords: THREAD (always emits a
+     * background-thread spawn) and ASYNC (synonym).  Only the THREAD
+     * keyword doubles as the global `thread` library object — `async.x`
+     * has no library binding, so we only fall back to the global-load
+     * shortcut when the keyword that triggered this prefix was THREAD. */
+    bool was_thread_kw = (p->previous.type == TOK_THREAD);
+
     /* If the token after 'thread' is '.', '[', or '(' the user is accessing
      * the 'thread' library object (e.g. thread.sleep(5)), not spawning a
      * new thread.  Treat 'thread' as a plain global variable in that case. */
-    if (check(p, TOK_DOT) || check(p, TOK_LBRACKET) || check(p, TOK_LPAREN)) {
+    if (was_thread_kw &&
+        (check(p, TOK_DOT) || check(p, TOK_LBRACKET) || check(p, TOK_LPAREN))) {
         u16 idx = str_const(p, "thread", 6);
         emit_op_a(p, OP_LOAD_GLOBAL, idx);
         return;
@@ -1682,6 +1810,12 @@ static const ParseRule RULES[TOK_COUNT] = {
     [TOK_FUNCTION]       = { parse_function_expr,  NULL,             PREC_NONE       },
     [TOK_CLASS]          = { parse_class_expr,     NULL,             PREC_NONE       },
     [TOK_THREAD]         = { parse_thread_expr,    NULL,             PREC_NONE       },
+    /* ASYNC is a synonym for THREAD: it spawns the operand on a fresh
+     * OS thread and yields a CdoThread handle that AWAIT can join on.
+     * The reserved keyword used to be a stub that errored at runtime;
+     * it now goes through the same OP_CLOSURE + OP_THREAD path so a
+     * familiar `async fn(...)` form (or `async { block }`) just works. */
+    [TOK_ASYNC]          = { parse_thread_expr,    NULL,             PREC_NONE       },
     [TOK_AWAIT]          = { parse_await_expr,     NULL,             PREC_NONE       },
 
     /* Unary prefix */
@@ -1851,7 +1985,7 @@ static void parse_var_decl(CandoParser *p, bool is_const)
     int var_count = 0;
 
     do {
-        consume(p, TOK_IDENT, "expected variable name");
+        consume_ident(p, "expected variable name");
         if (var_count >= MAX_MULTI_VARS) {
             error(p, "too many variables in declaration");
             break;
@@ -2146,7 +2280,7 @@ static void parse_for(CandoParser *p)
     int var_count = 0;
 
     do {
-        consume(p, TOK_IDENT, "expected loop variable name");
+        consume_ident(p, "expected loop variable name");
         if (var_count < MAX_FOR_VARS) {
             vars[var_count].name = p->previous.start;
             vars[var_count].len  = p->previous.length;
@@ -2165,7 +2299,8 @@ static void parse_for(CandoParser *p)
     } else if (match(p, TOK_OVER)) {
         is_over = true;
     } else {
-        error_current(p, "expected IN, OF, or OVER after loop variable(s)");
+        error_current(p,
+            "expected IN, OF, or OVER after FOR loop variable(s)");
         return;
     }
 
@@ -2372,13 +2507,18 @@ static void parse_function_expr(CandoParser *p, bool can_assign)
     u32         param_lens[CANDO_MAX_PARAMS];
 
     consume(p, TOK_LPAREN, "expected '(' after 'function'");
+    bool has_vararg = false;
+    const char *rest_name = NULL;
+    u32 rest_len = 0;
     u16 arity = parse_param_list(p, param_names, param_lens, CANDO_MAX_PARAMS,
-                                 "expected ')' after parameters");
+                                 "expected ')' after parameters",
+                                 &has_vararg, &rest_name, &rest_len);
 
     u32 fn_start, skip_body;
     u16 *body_uv_specs;
     u16  body_uv_count;
     compile_function_body(p, param_names, param_lens, arity,
+                          has_vararg, rest_name, rest_len,
                           "expected '{' before function body",
                           &fn_start, &skip_body,
                           &body_uv_specs, &body_uv_count);
@@ -2403,7 +2543,9 @@ static void parse_function_expr(CandoParser *p, bool can_assign)
  */
 static void parse_function(CandoParser *p)
 {
-    consume(p, TOK_IDENT, "expected function name");
+    consume_ident(p,
+        "expected function name "
+        "(use 'FUNCTION (...) { ... }' for an anonymous function expression)");
     const char *fn_name = p->previous.start;
     u32         fn_len  = p->previous.length;
 
@@ -2411,16 +2553,24 @@ static void parse_function(CandoParser *p)
 
     const char *param_names[CANDO_MAX_PARAMS];
     u32         param_lens[CANDO_MAX_PARAMS];
+    bool has_vararg = false;
+    const char *rest_name = NULL;
+    u32 rest_len = 0;
     u16 arity = parse_param_list(p, param_names, param_lens, CANDO_MAX_PARAMS,
-                                 "expected ')' after parameters");
+                                 "expected ')' after parameters",
+                                 &has_vararg, &rest_name, &rest_len);
 
     u32 fn_start, skip_body;
     u16 *body_uv_specs;
     u16  body_uv_count;
-    compile_function_body(p, param_names, param_lens, arity,
+    u32 fn_meta_idx = compile_function_body(p, param_names, param_lens, arity,
+                          has_vararg, rest_name, rest_len,
                           "expected '{' before function body",
                           &fn_start, &skip_body,
                           &body_uv_specs, &body_uv_count);
+
+    /* Record the function's source name in the fn_meta table.            */
+    set_fn_meta_name(p, fn_meta_idx, fn_name, fn_len);
 
     patch_jump(p, skip_body);
 
@@ -2468,10 +2618,14 @@ static void emit_class_body(CandoParser *p, bool has_extends)
     const char *param_names[CANDO_MAX_PARAMS];
     u32         param_lens[CANDO_MAX_PARAMS];
     u16 arity = 0;
+    bool has_vararg = false;
+    const char *rest_name = NULL;
+    u32 rest_len = 0;
 
     if (match(p, TOK_LPAREN)) {
         arity = parse_param_list(p, param_names, param_lens, CANDO_MAX_PARAMS,
-                                 "expected ')' after class parameters");
+                                 "expected ')' after class parameters",
+                                 &has_vararg, &rest_name, &rest_len);
     }
 
     /* Compile the constructor body with the same shape as a
@@ -2481,6 +2635,7 @@ static void emit_class_body(CandoParser *p, bool has_extends)
     u16 *body_uv_specs;
     u16  body_uv_count;
     compile_function_body(p, param_names, param_lens, arity,
+                          has_vararg, rest_name, rest_len,
                           "expected '{' before class body",
                           &fn_start, &skip_body,
                           &body_uv_specs, &body_uv_count);
@@ -2526,7 +2681,7 @@ static bool parse_class_extends(CandoParser *p)
  * ----------------------------------------------------------------------- */
 static void parse_class(CandoParser *p)
 {
-    consume(p, TOK_IDENT, "expected class name");
+    consume_ident(p, "expected class name");
     u16 name_idx = prev_name_const(p);
 
     bool has_extends = parse_class_extends(p);
@@ -2622,13 +2777,65 @@ static void parse_return(CandoParser *p)
     }
     u16 count = 0;
     p->call_depth++;
+    bool last_was_call_directly = false; /* expression ended with OP_CALL */
     do {
+        u32 code_before = cur(p)->code_len;
         parse_expression(p);
+        /* The last opcode emitted is OP_CALL exactly when the expression
+         * was a direct function call with no following operator (OP_CALL
+         * is encoded as 3 bytes: opcode + u16 argc).  parse_call sets
+         * last_expr_was_call=true on its way out, but that flag is also
+         * set by `~>` pipelines and `await` — those don't emit OP_CALL
+         * at the tail and so are NOT tail-call candidates.  Check the
+         * raw byte instead.                                              */
+        last_was_call_directly =
+            cur(p)->code_len >= code_before + 3 &&
+            cur(p)->code[cur(p)->code_len - 3] == OP_CALL;
         count++;
     } while (match(p, TOK_COMMA));
     p->call_depth--;
     match(p, TOK_SEMI);
+
+    /* Tail-call optimisation: when the return is exactly `RETURN fn(...)`
+     * with a single expression that ends in OP_CALL, rewrite that opcode
+     * as OP_TAIL_CALL.  The runtime then reuses the current call frame
+     * rather than pushing a new one, so deeply recursive idioms (mutual
+     * recursion, accumulator-style loops) don't exhaust CANDO_FRAMES_MAX.
+     *
+     * The guard `!p->in_pipe_body` keeps tail-call rewriting off inside
+     * `~>` / `~!>` blocks where RETURN doesn't actually exit the frame.  */
+    if (count == 1 && last_was_call_directly && !p->in_pipe_body) {
+        cur(p)->code[cur(p)->code_len - 3] = OP_TAIL_CALL;
+    }
     emit_op_a(p, OP_RETURN, count);
+}
+
+/* --- YIELD --------------------------------------------------------------
+ * The runtime has no generator/coroutine machinery: a lazy YIELD that
+ * pauses the function and resumes on demand cannot be expressed against
+ * the current stack model.  Rather than half-implement it as
+ * `RETURN [collected_values]` sugar (which conflicts with what users
+ * expect from Python/JS yields), the keyword is rejected at parse time
+ * with guidance toward the supported alternatives.                       */
+static void parse_yield(CandoParser *p)
+{
+    /* Consume any operand expression so the diagnostic isn't echoed
+     * twice by recovery, then surface a clear, single error.            */
+    if (!check(p, TOK_SEMI) && !check(p, TOK_RBRACE) && !check(p, TOK_EOF))
+        parse_expression(p);
+    match(p, TOK_SEMI);
+
+    if (p->yield_slot == 0) {
+        error(p,
+            "YIELD is reserved but not implemented "
+            "(no generator runtime); build an array explicitly and "
+            "RETURN it, or use `thread`/`async` for concurrent work");
+    } else {
+        error(p,
+            "YIELD is reserved but not implemented in this version "
+            "(no generator runtime); return an array of values or use "
+            "a pipe (~>) to build a collection lazily");
+    }
 }
 
 /* --- THROW -------------------------------------------------------------- */
@@ -2762,6 +2969,8 @@ static void parse_statement(CandoParser *p)
         parse_class(p);
     } else if (match(p, TOK_RETURN)) {
         parse_return(p);
+    } else if (match(p, TOK_YIELD)) {
+        parse_yield(p);
     } else if (match(p, TOK_THROW)) {
         parse_throw(p);
     } else if (match(p, TOK_BREAK)) {
@@ -2838,6 +3047,7 @@ void cando_parser_init(CandoParser *p, const char *source, usize len,
     p->safe_chain_count   = 0;
     p->safe_chain_capacity = 0;
     p->ternary_then_depth = 0;
+    p->yield_slot         = 0;
     p->outer_locals       = NULL;
     p->outer_count        = 0;
     p->upvalue_specs      = (u16 *)cando_alloc(

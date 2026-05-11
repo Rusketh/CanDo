@@ -97,6 +97,16 @@ typedef struct {
      * than as the method-call infix operator.                            */
     u32          ternary_then_depth;
 
+    /* Generator (YIELD) slot tracking ---------------------------------- */
+    /* When non-zero, identifies the hidden local slot reserved by
+     * compile_function_body for the YIELD list-builder.  YIELD <expr>
+     * appends to (or lazily creates) the array stored at this slot;
+     * the function's implicit epilogue returns whatever is there, so a
+     * function that never yields naturally returns null (same as before)
+     * and a function that yields returns the collected array.
+     * 0 means "not inside a function body" — YIELD is a parse error.   */
+    u16          yield_slot;
+
     /* Closure capture tracking ----------------------------------------- */
     /* When parsing the body of a nested function, `outer_locals` /
      * `outer_count` point at the enclosing function's local table.  An

@@ -211,10 +211,26 @@ constructor and returns a fresh instance.
 
 ## Tail calls
 
-`OP_TAIL_CALL` is reserved in the bytecode but is not yet implemented.
-Recursive code that needs deep stacks should be rewritten iteratively;
-the runtime will throw a "call stack overflow" error past
-`CANDO_FRAMES_MAX = 256` frames.
+When the compiler sees `RETURN fn(args);` with a single function-call
+expression in tail position, it emits `OP_TAIL_CALL` instead of the
+usual `OP_CALL` + `OP_RETURN` pair.  At runtime the VM reuses the
+current call frame rather than pushing a new one, so deeply recursive
+script functions (mutual recursion, accumulator-style loops) don't
+exhaust `CANDO_FRAMES_MAX = 256`.
+
+```cdo
+FUNCTION countdown(n) {
+    IF n == 0 { RETURN "done"; }
+    RETURN countdown(n - 1);  // tail call: stack stays flat
+}
+print(countdown(100000));      // works
+```
+
+Tail-call optimisation only fires when the call is the **only**
+expression in the `RETURN` and the callee is a script function.
+`RETURN 1 + fn(n);`, `RETURN fn(), g();`, fluent / method dispatch, and
+calls to native built-ins all fall back to the regular call+return path
+and grow the stack normally.
 
 ## Examples — common idioms
 
