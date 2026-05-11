@@ -1,0 +1,6 @@
+// EXPECT: number
+CLASS Box = (self, n) { self.n = n; }
+Box.get = FUNCTION(self) { RETURN 42; };
+VAR b = Box(7);
+VAR v = b:get();
+v|

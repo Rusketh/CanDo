@@ -1,0 +1,4 @@
+// EXPECT: number
+FUNCTION triple() { RETURN 10, 20, 30; }
+VAR first, third = (~.~) triple();
+third|

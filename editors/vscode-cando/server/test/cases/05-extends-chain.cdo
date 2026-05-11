@@ -1,0 +1,8 @@
+// MEMBERS: speak, breed
+CLASS Animal = (self, name) { self.name = name; }
+Animal.speak = FUNCTION(self) { RETURN "hi"; };
+CLASS Dog EXTENDS Animal = (self, n, b) {
+    self.breed = b;
+}
+VAR rex = Dog("Rex", "lab");
+rex.|

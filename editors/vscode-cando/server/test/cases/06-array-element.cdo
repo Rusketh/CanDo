@@ -1,0 +1,4 @@
+// EXPECT: number
+VAR xs = [10, 20, 30];
+VAR x = xs[0];
+x|

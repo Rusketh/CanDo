@@ -1,0 +1,5 @@
+// DIAG-CODE: unreachable
+FUNCTION foo() {
+    RETURN 1;
+    VAR x = 2;|
+}

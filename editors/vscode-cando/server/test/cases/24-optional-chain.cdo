@@ -1,0 +1,4 @@
+// EXPECT: { b }?
+VAR obj = { a: { b: 42 } };
+VAR r = obj?.a;
+r|

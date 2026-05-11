@@ -1,0 +1,5 @@
+// EXPECT: Foo
+CLASS Foo = (self, x) { self.x = x; }
+Foo.greet = FUNCTION(self) { RETURN "hi"; };
+VAR f = Foo(7);
+f|

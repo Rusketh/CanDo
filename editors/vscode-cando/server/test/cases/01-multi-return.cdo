@@ -1,0 +1,4 @@
+// EXPECT: number
+FUNCTION pair() { RETURN 1, 2; }
+VAR a, b = pair();
+b|

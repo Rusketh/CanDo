@@ -1,0 +1,5 @@
+// EXPECT: number
+FOR i IN 1 -> 10 {
+    VAR x = i;
+    x|
+}

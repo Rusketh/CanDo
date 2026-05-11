@@ -50,8 +50,19 @@ export class Lexer {
     private pos = 0;
     private line = 0;
     private col = 0;
+    /** Position offsets applied to every token range -- used when lexing a
+     *  sub-fragment (e.g. a template interpolation) so its tokens point
+     *  back into the parent document's coordinate space. */
+    private readonly startLine: number;
+    private readonly startCol: number;
 
-    constructor(src: string) { this.src = src; }
+    constructor(src: string, startLine = 0, startCol = 0) {
+        this.src = src;
+        this.startLine = startLine;
+        this.startCol = startCol;
+        this.line = startLine;
+        this.col = startCol;
+    }
 
     public tokenize(): Token[] {
         const out: Token[] = [];
@@ -325,6 +336,9 @@ export class Lexer {
         this.pos++;
         if (c === '\n') {
             this.line++;
+            /* After a newline, the column resets to 0 -- not to startCol,
+             * because startCol only applies to the very first line of the
+             * fragment. */
             this.col = 0;
         } else {
             this.col++;

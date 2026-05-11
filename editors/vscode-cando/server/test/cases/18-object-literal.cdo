@@ -1,0 +1,3 @@
+// MEMBERS: a, b, c
+VAR o = { a: 1, b: "hi", c: TRUE };
+o.|

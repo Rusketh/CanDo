@@ -3,6 +3,158 @@
 All notable changes to the **CanDo Language** VS Code extension are
 documented in this file.
 
+## 0.7.0 -- 2026-05-11
+
+### Added
+
+- **Unused variable / parameter detection** -- locals and params with
+  no reads are flagged as unnecessary (rendered faded by the editor).
+  Names starting with `_` are silenced; functions / classes / globals
+  are exempt because they're API surface.
+- **Dead-code detection** -- statements after `RETURN`, `THROW`,
+  `BREAK`, `CONTINUE`, `SETTLE` in the same block are flagged
+  unreachable.
+- **Argument type checking** -- when a callee's parameter has a known
+  concrete type, mismatched argument types raise a warning. Permissive
+  on `any` / `unknown` to avoid noise on under-typed code.
+- **"Did you mean ...?" code action** -- undefined identifiers get a
+  Levenshtein-bounded suggestion plus a one-click rename to the
+  closest visible name (locals, scoped names, namespaces, builtins).
+- **Auto-include code action** -- typing `forms.x` with `forms`
+  unbound suggests adding `VAR forms = include("./forms.so");` at the
+  top of the file when a matching native module is found under
+  `<workspace>/modules/<name>/cando.api.json`.
+- **Call hierarchy** -- right-click on a function for "Show Call
+  Hierarchy". Incoming calls are aggregated by enclosing function
+  across the whole workspace; outgoing calls walk the body.
+- **`workspace/didChangeWatchedFiles`** -- external `.cdo` file
+  changes invalidate the workspace index and refresh open documents.
+- **`workspace/willRenameFiles`** -- renaming a `.cdo` file
+  rewrites every workspace `include("...")` argument that pointed at
+  it to the new relative path.
+
+## 0.6.0 -- 2026-05-11
+
+### Added
+
+- **Document highlights** -- every occurrence of the binding under the
+  cursor is highlighted (Write kind on the declaration; Read on uses).
+- **CodeLens** -- function and class declarations show their workspace
+  reference count inline.
+- **Document formatting** -- single-pass token-aware formatter:
+  normalizes internal whitespace, indents to 4 spaces, ensures a space
+  after `,`, leaves strings / comments / template literals untouched.
+- **`__call` metamethod** -- instances whose class defines `__call`
+  are callable; the return-type comes from `__call`'s function
+  signature (no more spurious "non-callable" diagnostics).
+- **Operator overloads** -- binary `+ - * / % ^ == < <=` dispatch
+  through `__add`, `__sub`, etc., so `Vector(1,2) + Vector(3,4)`
+  infers as `Vector`.
+- **Type narrowing via `type(x) == "..."`** -- inside the IF branch
+  `x`'s type is locked to the named runtime tag (string/number/bool/
+  array/object/null or any class / manifest type). Same for
+  `x.__type == "Foo"` discrimination.
+- **Member access on `any` stays `any`** -- previously degraded to
+  `unknown`, which suppressed completion chains starting from
+  untyped parameters.
+- **Self-type inference** -- assigning `ClassOrObj.method =
+  FUNCTION(self, ...) { ... };` infers `self` as the owner's instance
+  type, so member access inside the method body is typed.
+- **JSDoc-style `@param` / `@returns` / `@deprecated` / `@example`**
+  in doc comments now render as Markdown sections in hover.
+- **Richer snippets** -- adds doc-commented function, multi-var
+  decl, ALSO branch, method-on-class, named/anon function, vararg
+  function, throw, mask selector, default-value pattern, safe access,
+  inspect. Existing snippets corrected (FOR range now uses `IN`).
+
+## 0.5.0 -- 2026-05-11
+
+### Added
+
+- **Find references** -- every Ident occurrence that resolves to the
+  same binding (across the workspace for file-scoped declarations).
+- **Rename** -- workspace-wide, behind `prepareRename` so the editor
+  only offers it on real bindings (skips `self`, `pipe`, namespaces).
+- **Workspace symbols** -- searchable index of every top-level
+  declaration in every `.cdo` under the workspace roots.
+- **Inlay hints** -- shows inferred types on `VAR x = expr;` and
+  parameter names at call sites for literal arguments.
+- **Folding ranges** -- collapses every block, multi-line literal,
+  IF chain, loop, TRY, and multi-line comment.
+- **Selection ranges** -- smart expand (Cmd/Ctrl+Shift+Right) walks
+  the AST node stack from the cursor outward.
+- **Semantic tokens** -- richer highlighting that distinguishes
+  parameters, locals, captured upvalues, classes, functions, and
+  default-library namespaces.
+- **Color provider** -- `0xRRGGBB` / `0xAARRGGBB` numeric literals
+  render as inline color swatches and can be tweaked with the picker.
+- **Code actions** -- quick fixes for "undeclared identifier" (inserts
+  `VAR <name> = NULL;`) and "Cannot assign to CONST" (rewrites
+  `CONST` to `VAR`).
+- **Doc comment harvesting** -- consecutive `//`, `///`, and `/* */`
+  comments immediately above a declaration are attached to the
+  binding and shown in hover + completion documentation.
+- **Template-string interpolations are now real expressions.** The
+  parser re-lexes each `${...}` with the correct source-offset, so
+  member access, completion, and references work inside template
+  strings.
+- **Completion ranking** -- locals win ties over globals, then
+  function/class declarations, then namespaces / builtins.
+
+### Improved
+
+- Reference tracking added to every binding (resolver pass).
+- Workspace indexer with mtime-based invalidation; refreshes when a
+  visible document changes so refs always reflect the open buffers.
+
+## 0.4.0 -- 2026-05-11
+
+### Rewritten
+
+- **Complete rewrite of the language server around a real parser + AST +
+  scope tree + type inferer.** The previous server walked the token
+  stream with shallow pattern matching; it never tracked function return
+  values, lost member writes through reassignment, and couldn't see
+  beyond first-occurrence symbol lookups. The new pipeline (parse →
+  resolve → infer) is structurally aware:
+  - **Function return types are tracked.** `VAR x = f(); x.|`
+    now lists `f`'s actual return-value members.
+  - **Multi-return distribution.** `VAR a, b = pair();` types `a` and
+    `b` positionally from `pair`'s return tuple.
+  - **Member-flow through reassignment.** `VAR x = {}; x.foo = 1;
+    VAR y = x; y.|` shows `foo`.
+  - **Indexing.** `arr[i]` now yields the array's element type.
+  - **Class / EXTENDS chains.** `Dog EXTENDS Animal` instance lookup
+    walks the prototype chain via the manifest- or in-file-defined
+    `__index` parent.
+  - **Fluent `::` calls.** Always type to the receiver, so chains
+    survive `obj::a()::b()`.
+  - **Pipes.** `arr ~> body` exposes `pipe: <element type>` in the
+    body scope; `~>` yields `array<bodyType>`, `~&>` / `~!>` yield
+    `array<sourceElement>`.
+  - **Flow narrowing.** `IF x { x.| }` drops the `null` variant of a
+    union so member completion shows the truthy side.
+  - **Closures and scoping.** Block / function / file scopes with
+    proper shadowing; upvalue captures are tracked.
+  - **Cross-file include.** `.cdo` modules are re-analyzed; their
+    top-level `RETURN value;` (or top-level binding bag) becomes the
+    include's value type. Binary modules fall through to their
+    `cando.api.json` manifest.
+
+### Added
+
+- **Semantic diagnostics** (on by default) flag `undefined-identifier`
+  (advisory), `wrong-arg-count`, `non-callable-call`, and
+  `assign-to-const`. Disable with `cando.diagnostics.semantic = false`.
+- **Headless test suite** at `server/test/cases/*.cdo` plus
+  `server/test/runner.js`. Run with `npm test`.
+
+### Removed
+
+- The legacy `analyzer.ts`, `types.ts`, and `crossfile.ts` modules
+  (replaced by `ast.ts`, `parser.ts`, `scope.ts`, `typesys.ts`,
+  `infer.ts`, and `analyze.ts`).
+
 ## 0.3.3 -- 2026-05-01
 
 ### Fixed

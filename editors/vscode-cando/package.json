@@ -2,7 +2,7 @@
   "name": "vscode-cando",
   "displayName": "CanDo Language",
   "description": "Syntax highlighting, snippets and IntelliSense for the CanDo scripting language (.cdo).",
-  "version": "0.3.3",
+  "version": "0.7.0",
   "publisher": "CandoProject",
   "license": "SEE LICENSE IN LICENSE",
   "icon": "icons/cando.png",
@@ -62,6 +62,11 @@
           "default": true,
           "description": "Enable lightweight syntax diagnostics for .cdo files."
         },
+        "cando.diagnostics.semantic": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable semantic checks (undefined identifier, wrong arg count, assign-to-const). CanDo is dynamic so these are advisory; disable if too noisy on your codebase."
+        },
         "cando.completion.includeBuiltins": {
           "type": "boolean",
           "default": true,
@@ -102,6 +107,7 @@
   "scripts": {
     "compile": "tsc -b",
     "watch": "tsc -b -w",
+    "test": "tsc -b && node server/test/runner.js",
     "package": "npm run compile && vsce package"
   },
   "devDependencies": {

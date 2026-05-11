@@ -1,0 +1,4 @@
+// MEMBERS: setText, setSize, setLocation
+VAR forms = include("../../../../../modules/forms/forms.so");
+VAR btn = forms.Button(forms.Form());
+btn.|

@@ -1,0 +1,6 @@
+// MEMBERS: foo, bar
+VAR x = {};
+x.foo = 42;
+x.bar = "hi";
+VAR y = x;
+y.|
