@@ -131,8 +131,12 @@ the right-hand operand (left-hand for unary).
 | `a == b`       | `__eq`       | `(a, b) → bool` (only when both sides are objects of the same class) |
 | `a < b`        | `__lt`       | `(a, b) → bool`                |
 | `a <= b`       | `__le`       | `(a, b) → bool`                |
-| `a..b`         | `__concat`   | (string concat fallback)       |
 | `a(args)`      | `__call`     | `(a, ...args) → ...result`     |
+
+String concatenation is performed by `+` when either operand is a
+string; there is no separate `..` operator and no `__concat`
+metamethod.  `__tostring` is consulted when a non-string operand
+participates in string concatenation.
 
 For the binary operators, if the left operand has no metamethod, the
 right operand's metamethod is consulted.
@@ -193,30 +197,26 @@ VAR alwaysFalsy = { __is: FALSE };
 IF alwaysFalsy { /* skipped */ }
 ```
 
-### Field flags (advanced)
+## Shared members
 
-Fields can carry flags that change how they behave under writes and
-serialization.  These are exposed through the `object` and `_meta`
-libraries — see [../libraries/object.md](../libraries/object.md) and
-[../libraries/meta.md](../libraries/meta.md).
-
-## Member modifiers
-
-The reserved words `STATIC` and `PRIVATE` mark class members.
+Any field assigned directly on the class object is shared across all
+instances — instances reach it through `__index`.
 
 ```cdo
 CLASS Counter = (self) { self.n = 0; }
+Counter.kind = "counter";           // shared across all instances
 
-STATIC Counter.kind = "counter";    // shared across all instances
-PRIVATE Counter.tick = FUNCTION(self) { self.n = self.n + 1; };
+VAR a = Counter();
+VAR b = Counter();
+print(a.kind, b.kind);              // counter counter
 ```
 
-- `STATIC` means the field lives on the class object itself, not the
-  instance — every instance reads through `__index` and sees the same
-  value.
-- `PRIVATE` is a soft contract: it suppresses the member from
-  `inspect()` output and from `object.keys()` enumeration.  It does
-  **not** enforce access control.
+`STATIC` and `PRIVATE` are reserved words but are not currently parsed
+as member modifiers.  Field-level flags (immutable / hidden) that
+control write protection and `inspect()` / `object.keys()` visibility
+are available programmatically through the `object` and `_meta`
+libraries — see [../libraries/object.md](../libraries/object.md) and
+[../libraries/meta.md](../libraries/meta.md).
 
 ## Default `__call` for classes
 

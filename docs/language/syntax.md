@@ -74,12 +74,15 @@ A few notes:
 All numbers are IEEE-754 double-precision floats.
 
 ```cdo
-42         3.14       1e6        1.5e-3
-0xff       0o77       0b1010
+42         3.14
 ```
 
-Integer prefixes `0x` (hex), `0o` (octal), and `0b` (binary) are
-accepted.  Underscores between digits are not currently parsed.
+The lexer accepts a run of decimal digits, optionally followed by a
+single `.` and another run of digits.  Hexadecimal (`0xff`), octal
+(`0o77`), binary (`0b1010`), scientific notation (`1e6`, `1.5e-3`),
+and underscore digit separators are **not** currently recognised — the
+lexer stops at the first non-digit and the rest of the literal would
+be re-lexed as identifier tokens.
 
 ### Boolean literals
 
@@ -95,23 +98,24 @@ NULL
 
 ### String literals
 
-Three quote styles, with different escape and interpolation rules:
+Three quote styles:
 
-| Delimiter | Escapes? | Multiline? | Interpolation? |
+| Delimiter | Multiline? | Interpolation? | Notes                       |
 |---|---|---|---|
-| `"…"`         | yes (`\n \t \" \\ \r \xNN \uNNNN`) | no  | no  |
-| `'…'`         | no                                  | yes | no  |
-| `` `…` ``     | yes                                 | yes | yes (`${expr}`) |
+| `"…"`         | no  | no              | single-line; backslash before a `"` keeps the quote inside the string, but escape sequences such as `\n`, `\t`, `\xNN`, `\uNNNN` are **not** decoded — they are stored as the literal bytes. |
+| `'…'`         | yes | no              | newlines are preserved literally. |
+| `` `…` ``     | yes | yes (`${expr}`) | template strings; interpolated expressions go through `toString`. |
 
 ```cdo
-VAR plain    = "hello\nworld";          // 11-byte string with a newline
+VAR plain    = "hello world";           // literal text
 VAR raw      = 'multi
 line literal';
 VAR template = `2 + 2 = ${2 + 2}`;
 ```
 
-`#s` returns the byte length of `s`.  Strings are immutable; methods
-that "transform" a string return a new string.
+To embed a real newline, use the `'…'` form or splice one in via
+template interpolation.  `#s` returns the byte length of `s`.  Strings
+are immutable; methods that "transform" a string return a new string.
 
 ### Array literals
 

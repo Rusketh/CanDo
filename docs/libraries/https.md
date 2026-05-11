@@ -37,15 +37,20 @@ with `https://`.  See [http.md](http.md).
 
 ## Server
 
-### `https.createServer(handler, keyPath, certPath) → server`
+### `https.createServer(opts, handler) → server`
 
-Identical to `http.createServer`, plus required `keyPath` and
-`certPath` arguments pointing to PEM files.
+Like `http.createServer`, but the first argument is an options object
+containing PEM-encoded `cert` and `key` **strings** (not file paths):
 
 ```cdo
-https.createServer(FUNCTION(req, res) {
+VAR opts = {
+    cert: file.read("server.crt"),
+    key:  file.read("server.key"),
+};
+
+https.createServer(opts, FUNCTION(req, res) {
     res:json({ secure: TRUE });
-}, "server.key", "server.crt"):listen(8443);
+}):listen(8443);
 ```
 
 For more control over the TLS configuration (cipher suites, mutual

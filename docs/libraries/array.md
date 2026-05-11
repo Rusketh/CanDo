@@ -8,9 +8,10 @@ arr:push(42)               // method form
 array.push(arr, 42)         // function form — same body
 ```
 
-Indices are **0-based**.  Methods that mutate `arr` return either the
-new length or the receiver itself; methods that derive a new array
-return that array, leaving the receiver unchanged.
+Indices are **0-based**.  Mutating methods typically return a status
+value (`TRUE` on success) or the removed element; derived-array methods
+(`map`, `filter`, `splice`, `copy`) return a new array and leave the
+receiver unchanged.
 
 ## Reference
 
@@ -24,9 +25,10 @@ print(xs:length());        // 3
 print(#xs);                // 3 — same value via the # operator
 ```
 
-### `a:push(v) → number`
+### `a:push(v) → bool`
 
-Append `v` to the array; return the new length.
+Append `v` to the array.  Returns `TRUE` on success, `FALSE` if `a`
+isn't a writable array.
 
 ```cdo
 VAR xs = [];
@@ -36,10 +38,10 @@ xs:push(3);
 print(inspect(xs));        // [1, 2, 3]
 ```
 
-### `a:push(i, v) → number`
+### `a:push(i, v) → bool`
 
-Insert `v` at index `i`, shifting existing elements right.  Return the
-new length.
+Insert `v` at index `i`, shifting existing elements right.  Returns
+`TRUE` on success, `FALSE` otherwise.
 
 ```cdo
 VAR xs = [1, 2, 4];

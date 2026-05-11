@@ -45,9 +45,11 @@ windowing module — increments while a window is open and decrements
 when it closes).  Embedders can use it to tell whether the script is
 still doing useful work or just waiting on a closed event loop.
 
-### `app.exitCode() → number`
+### `app.exitCode(code*) → number`
 
-The exit code that has been set so far (default `0`).
+With no argument, returns the exit code currently set (default `0`).
+With a numeric argument, updates the exit code and returns the new
+value.  This is the value the embedder will see when the script ends.
 
 ## Examples
 

@@ -15,12 +15,16 @@ IR of every compiled trace.
 
 ```
 source/jit/
-  recorder.c        trace recording
-  ir.c              IR construction and optimization
-  codegen.c         IR → native (x86-64 today)
-  cache.c           trace cache and eviction
-  jit.c, jit.h       public interface; the runtime knobs
+  jit.c, jit.h        public interface, runtime knobs, recorder
+                      driver, and the trace cache
+  hot.c, hot.h        hot-pc counting and threshold detection
+  ir.c, ir.h          IR construction and optimization
+  codegen.c, codegen.h IR → native (x86-64 today)
+  mcode.c, mcode.h    executable code page allocator
 ```
+
+There is no separate `recorder.c` or `cache.c` — both responsibilities
+live inside `jit.c`.
 
 ## Lifecycle of a trace
 

@@ -32,27 +32,36 @@ Read an environment variable.  Returns `NULL` if unset.
 VAR home = os.getenv("HOME") || "/tmp";
 ```
 
-### `os.setenv(name, value) → bool`
+### `os.setenv(name, value, overwrite*) → bool`
 
-Set or overwrite an environment variable for the current process and
-its descendants.
+Set an environment variable for the current process and its
+descendants.  Returns `TRUE` on success, `FALSE` if `name` or `value`
+is not a string.
+
+If `overwrite` is omitted or truthy (the default), an existing value
+is replaced.  Pass `FALSE` (or `0`) to leave a pre-existing value
+untouched:
 
 ```cdo
-os.setenv("LANG", "C.UTF-8");
+os.setenv("LANG", "C.UTF-8");          // always overwrites
+os.setenv("LANG", "C.UTF-8", FALSE);   // only set if LANG is unset
 ```
 
-### `os.execute(cmd) → string | null`
+### `os.execute(cmd) → number`
 
 Run `cmd` via the host shell (`/bin/sh -c` on POSIX, `cmd.exe /c` on
-Windows) and return its captured stdout.  Returns `NULL` on failure.
+Windows) and return the shell's **exit status** as a number.  Returns
+`-1` if the shell could not be launched.  Stdout and stderr go to the
+parent process's standard streams; they are *not* captured.
 
 ```cdo
-VAR who = os.execute("whoami"):trim();
-print(who);
+VAR status = os.execute("ls /tmp > /dev/null");
+print(status);                     // 0
 ```
 
-For more control over stdin/stdout/stderr, working directory, and
-arguments, use [`process.spawn`](process.md) instead.
+To capture output, set working directory, redirect streams, or pass
+arguments without shell quoting, use [`process.spawn`](process.md)
+instead.
 
 ### `os.exit(code*)`
 

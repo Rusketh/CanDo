@@ -106,6 +106,15 @@ Inside a block you can introduce locals, `IF`, etc.  An explicit
 `RETURN` provides the value; otherwise the value is `NULL`, which
 matters for `~!>` and `~&>`.
 
+## The `pipe` binding
+
+Inside the body, `pipe` is the only iteration-state name the runtime
+exposes.  There is **no implicit index binding** (no `pipe_index`,
+`i`, `_idx`, etc.) — the OP_PIPE_* opcodes track the source index
+internally but never push it onto the script stack.  If you need the
+position, walk the array with `FOR i IN 0 -> #arr - 1 { … }`
+instead.
+
 ## Composition
 
 Pipes return arrays, so they chain naturally:

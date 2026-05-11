@@ -6,8 +6,8 @@ JSON parsing and serialization.
 
 ### `json.parse(text) → any`
 
-Decode a JSON string into CanDo values.  Returns `NULL` on malformed
-input.
+Decode a JSON string into CanDo values.  **Throws** on malformed input
+— wrap in `TRY` / `CATCH` to recover.
 
 | JSON           | CanDo value          |
 |----------------|----------------------|
@@ -23,12 +23,19 @@ VAR data = json.parse('{"name":"Alice","scores":[10,20,30]}');
 print(data.name);                  // Alice
 print(inspect(data.scores));       // [10, 20, 30]
 
-print(json.parse("not json"));     // null
+TRY {
+    json.parse("not json");
+} CATCH (e) {
+    print("bad json:", e);
+}
 ```
 
-### `json.stringify(value) → string`
+### `json.stringify(value, indent*) → string`
 
-Encode a CanDo value as JSON text.
+Encode a CanDo value as JSON text.  The optional `indent` argument
+controls pretty-printing: `0` (the default) produces compact output;
+any value from `1` to `16` is taken as the number of spaces per
+nesting level.  Values outside that range are clamped.
 
 - Numbers use the shortest representation that round-trips.
 - Objects serialize in **FIFO insertion order**.
@@ -58,21 +65,29 @@ print(loaded.port);                // 8080
 ### Defensive parsing
 
 ```cdo
-VAR data = json.parse(input) || {};
+VAR data;
+TRY {
+    data = json.parse(input);
+} CATCH (e) {
+    data = {};
+}
 VAR token = data?.auth?.token || "anonymous";
 ```
 
-`json.parse` returns `NULL` rather than throwing, so chaining `||` is
-safe.
+Wrap parsing in `TRY` / `CATCH` whenever the input may be untrusted —
+malformed JSON throws.
 
 ### Pretty printing
 
-`json.stringify` always produces compact output.  For indented JSON,
-use the YAML library instead, or implement formatting yourself:
+Pass `indent` to `json.stringify`:
 
 ```cdo
-FUNCTION pretty(v, indent) {
-    indent = indent || "  ";
-    // ... user implementation
-}
+print(json.stringify({ a: 1, b: [2, 3] }, 2));
+// {
+//   "a": 1,
+//   "b": [
+//     2,
+//     3
+//   ]
+// }
 ```

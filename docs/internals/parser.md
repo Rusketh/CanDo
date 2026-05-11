@@ -11,9 +11,11 @@ want to change it.
 source/parser/
   lexer.c, lexer.h        token stream
   token.h                  TokenType enum, keyword/operator table
-  parser.c, parser.h       Pratt parser; emits bytecode as it parses
-  scope.c, scope.h         block scopes, locals, upvalues, captures
-  emit.c, emit.h           emit_op / emit_op_a / emit_op_ab + helpers
+  parser.c, parser.h       Pratt parser; emits bytecode as it parses.
+                           Scope tracking (locals, upvalues, captures)
+                           and the emit helpers (emit_op / emit_op_a /
+                           emit_op_ab) live here as well — there is no
+                           separate scope.c or emit.c.
 ```
 
 ## Lexer
@@ -57,7 +59,8 @@ parser is responsible for emitting its own opcodes.
 1. Add a token type if needed (in `token.h`) and teach the lexer to
    produce it.
 2. Add a case in `parse_statement()`.
-3. Emit the right opcode sequence using the helpers in `emit.h`.
+3. Emit the right opcode sequence using the `emit_op` / `emit_op_a` /
+   `emit_op_ab` helpers in `parser.c`.
 
 ### Adding a new operator
 
@@ -70,7 +73,9 @@ parser is responsible for emitting its own opcodes.
 
 ## Scope system
 
-`source/parser/scope.c` tracks lexical scopes.  A scope owns:
+Scope tracking lives directly in `parser.c` (in the `CandoParser`
+struct and helpers around it — there is no separate `scope.c`).  A
+scope owns:
 
 - A list of local names → slot indices.
 - A list of captured upvalues for the function it belongs to.

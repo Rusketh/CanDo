@@ -211,6 +211,7 @@ CanDo does **very little implicit coercion**.
 - Equality between objects is **identity-based** (same handle).  Two
   separate objects with the same fields compare unequal.
 
-The `__add`, `__concat`, `__eq`, `__lt`, `__le` metamethods let
-user-defined types opt in to operator overloading; see
-[classes.md](classes.md).
+The `__add`, `__eq`, `__lt`, `__le` (and other operator) metamethods
+let user-defined types opt in to operator overloading; see
+[classes.md](classes.md).  String concatenation uses `+`; there is no
+separate `__concat` metamethod.

@@ -15,6 +15,7 @@ is dropped — `:close()` is idempotent.
 
 Duplex in-memory buffer.  Auto-compacts as the reader drains.  Useful
 as a glue between producers and consumers in the same thread.
+`initialBytes` is clamped to `[64, 64 MiB]`.
 
 ```cdo
 VAR buf = stream.memory();
@@ -25,7 +26,7 @@ print(buf:read(5));            // hello
 ### `stream.channel(capacity*) → stream`
 
 Bounded thread channel.  Reads block while empty; writes block while
-full.  `capacity = 0` is unbounded.
+full.  `capacity` is clamped to `[64, 64 MiB]`.
 
 ```cdo
 VAR ch = stream.channel(100);
@@ -50,7 +51,10 @@ await consumer;
 ### `stream.transform(fn) → stream`
 
 Pipes every chunk through `fn(chunk) → chunk`.  Returning `NULL` (or a
-non-string) drops the chunk.
+non-string) drops the chunk.  Errors thrown inside `fn` are **logged
+and swallowed**, not surfaced to the writer or reader — the offending
+chunk is simply dropped.  Use a regular function call (not
+`stream.transform`) if you need errors to propagate.
 
 ```cdo
 VAR upcase = stream.transform(FUNCTION(chunk) { RETURN chunk:toUpper(); });
@@ -60,11 +64,11 @@ print(upcase:read(11));         // HELLO WORLD
 
 ## Methods (`_meta.stream`)
 
-### `s:read(maxLen, timeoutMs*) → string`
+### `s:read(maxLen*) → string`
 
-Read up to `maxLen` bytes.  Returns `""` on clean EOF.  When
-`timeoutMs` is given and elapses before any data arrives, throws a
-timeout error.
+Read up to `maxLen` bytes (default `4096`, capped at 16 MiB).  Returns
+`""` on clean EOF.  Throws if the stream is not readable or has been
+closed with an error.
 
 ### `s:readAll() → string`
 

@@ -26,7 +26,7 @@ Arbitrary request.  `options` is an object:
 | `method`   | string | `"GET"` | `"GET"`, `"POST"`, `"PUT"`, `"DELETE"`, `"PATCH"`, `"HEAD"`. |
 | `headers`  | object | `{}`    | Request headers. |
 | `body`     | string | `""`    | Request body. |
-| `timeout`  | number | `0`     | Per-request timeout in ms. |
+| `timeout`  | number | `30000` | Per-request timeout in ms (default 30 seconds). |
 | `stream`   | bool   | `FALSE` | If `TRUE`, the response body is read lazily through `res:stream()` instead of buffered. |
 
 ```cdo
@@ -93,7 +93,7 @@ Stop accepting new connections; in-flight ones finish.
 ### Request object (`req`)
 
 Inherits from `_meta.http_request`.  Carries `method`, `url`, `path`,
-`query`, `headers`, `body` fields.
+`query`, `headers`, `body`, and `httpVersion` fields.
 
 ### Response object (`res`)
 
@@ -102,8 +102,8 @@ Inherits from `_meta.http_response`.  Default methods:
 | Method                    | Description |
 |---------------------------|-------------|
 | `res:status(code)`        | Set status code; returns the receiver for chaining. |
-| `res:setHeader(name, v)`  | Add a response header. |
-| `res:send(body*)`         | Flush the response.  If `body` is omitted, the receiver's `body` field (a string accumulator that defaults to `""`) is used. |
+| `res:setHeader(name, v)`  | Add a response header; returns the receiver for chaining. |
+| `res:send(body*)`         | Flush the response.  If `body` is omitted, the receiver's `body` field (a string accumulator that defaults to `""`) is used.  When no `Content-Type` header has been set, defaults to `text/html; charset=utf-8`. |
 | `res:json(value)`         | JSON-encode `value` and send with `Content-Type: application/json`. |
 | `res:stream() → stream`   | Writable view; `:end()` flushes the buffered response. |
 

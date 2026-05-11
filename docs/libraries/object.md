@@ -87,9 +87,9 @@ print(inspect(custom));             // { theme: "dark", lang: "fr" }
 
 Return `o.__index` if it points at an object, else `NULL`.
 
-### `object.setPrototype(o, proto) → object`
+### `object.setPrototype(o, proto)`
 
-Set `__index` on `o`.  `proto = NULL` removes it.  Returns `o`.
+Set `__index` on `o`.  `proto = NULL` removes it.  Returns `NULL`.
 
 ```cdo
 VAR base = { greet: FUNCTION(self) { RETURN `hi ${self.name}`; } };
@@ -98,17 +98,17 @@ object.setPrototype(a, base);
 print(a:greet());                   // hi Alice
 ```
 
-### `object.lock(o) → object`
+### `object.lock(o)`
 
-Acquire `o`'s **re-entrant script lock**.  Returns `o`.  Blocks if
-another thread holds the lock.
+Acquire `o`'s **re-entrant script lock**.  Blocks if another thread
+holds the lock.  Returns `NULL`.
 
 The same thread can call `lock` multiple times on the same object as
 long as it later calls `unlock` the same number of times.
 
 ### `object.unlock(o)`
 
-Release one level of `o`'s lock.
+Release one level of `o`'s lock.  Returns `NULL`.
 
 ### `object.locked(o) → bool`
 

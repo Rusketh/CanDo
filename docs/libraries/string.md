@@ -89,42 +89,44 @@ print("ab":repeat(3));             // ababab
 print("-":repeat(10));             // ----------
 ```
 
-### `s:find(needle) → number`
+### `s:find(pattern, no_regex*) → number | null`
 
-Byte index of the first occurrence of `needle`, or `-1` if not found.
+Byte index of the first occurrence of `pattern`, or `NULL` if not
+found.  `pattern` is treated as a POSIX extended regex by default; pass
+`TRUE` as the optional `no_regex` argument to perform a literal
+substring search instead.
 
 ```cdo
-print("hello":find("ll"));         // 2
-print("hello":find("xx"));         // -1
+print("hello":find("ll"));               // 2     (regex; "ll" matches)
+print("hello":find("xx"));               // null
+print("price: $9.50":find("[0-9]+"));    // 8     (regex)
+print("a.b.c":find(".", TRUE));          // 1     (literal: first '.')
 ```
 
-### `s:split(sep) → array`
+### `s:split(pattern, no_regex*) → array`
 
-Split `s` on `sep`.  Returns an array of parts (the separator itself is
-excluded).  An empty `sep` splits into individual characters.
+Split `s` on `pattern`.  Returns an array of parts (the separator
+itself is excluded).  `pattern` is treated as a POSIX extended regex
+by default; pass `TRUE` as the optional second argument for a literal
+substring split.  An empty pattern returns a single-element array
+containing `s` unchanged.
 
 ```cdo
-print(inspect("a,b,c":split(",")));   // ["a", "b", "c"]
-print(inspect("hello":split("")));    // ["h", "e", "l", "l", "o"]
-print(inspect(",a,":split(",")));     // ["", "a", ""]
+print(inspect("a,b,c":split(",")));         // ["a", "b", "c"]
+print(inspect("a, b,  c":split(", *")));    // ["a", "b", "c"]   (regex)
+print(inspect("a.b.c":split(".", TRUE)));   // ["a", "b", "c"]   (literal)
 ```
 
-### `s:join(parts) → string`
+### `s:replace(pattern, repl, no_regex*) → string`
 
-Concatenate the `parts` array using `s` as a separator between elements.
-
-```cdo
-print(", ":join(["a", "b", "c"])); // a, b, c
-print("/":join(["usr", "local"])); // usr/local
-```
-
-### `s:replace(old, new) → string`
-
-Replace **every** occurrence of `old` with `new`.
+Replace **every** occurrence of `pattern` in `s` with `repl`.
+`pattern` is treated as a POSIX extended regex by default; pass
+`TRUE` as the optional fourth argument for literal replacement.
 
 ```cdo
-print("hello world":replace("o", "0"));   // hell0 w0rld
-print("a b c":replace(" ", "-"));         // a-b-c
+print("hello world":replace("o", "0"));         // hell0 w0rld
+print("hello 42":replace("[0-9]+", "N"));        // hello N        (regex)
+print("a.b.c":replace(".", "/", TRUE));          // a/b/c          (literal)
 ```
 
 ### `s:startsWith(prefix) → bool`, `s:endsWith(suffix) → bool`
@@ -142,21 +144,20 @@ argument from the right.
 
 ```cdo
 print("hello, %s!":format("world"));            // hello, world!
-print("%d items, $%.2f total":format(3, 9.5));  // 3 items, $9.50
+print("%d items, $%f total":format(3, 9.5));    // 3 items, $9.500000 total
 print("100%% done":format());                   // 100% done
 ```
 
 Supported conversions:
 
 - `%s` — `toString(arg)`
-- `%d` / `%i` — integer (truncates non-integer numeric input)
-- `%f` — float; precision via `%.Nf`
-- `%x` / `%X` — hexadecimal integer (lower / upper case)
-- `%c` — single byte from an integer code point
+- `%d` — integer (truncates non-integer numeric input)
+- `%f` — float (host `printf`'s default precision)
 - `%%` — literal `%`
 
-Width and precision flags use the host's `printf` semantics (left-align
-with `-`, zero-pad with `0`, etc.).
+Any other `%`-token (including `%x`, `%X`, `%c`, `%i`, and width or
+precision flags) is currently passed through verbatim — the formatter
+does **not** implement the full `printf` syntax.
 
 ### `s:match(pattern, start*, end*) → bool, array`
 
