@@ -1,0 +1,605 @@
+============================================================
+CATEGORY: lex
+============================================================
+
+------------------------------------------------------------
+TEST  : lex/bad_escape_in_string.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at '"stray backslash at end \";
+| print(s);
+| ': unterminated double-quoted string
+
+------------------------------------------------------------
+TEST  : lex/unexpected_char_at.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at '@': unexpected character '\x40' (line 1)
+
+------------------------------------------------------------
+TEST  : lex/unexpected_char_backslash.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at '\': unexpected character '\x5C' (line 1)
+
+------------------------------------------------------------
+TEST  : lex/unexpected_char_dollar.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 2] Error at '$': unexpected character '\x24' (line 2)
+
+------------------------------------------------------------
+TEST  : lex/unexpected_char_utf8.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 2] Error at 'Ï': unexpected character '\xCF' (line 2)
+
+------------------------------------------------------------
+TEST  : lex/unterminated_block_comment.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 2] Error at '/* this comment never closes
+| print(x);
+| ': unterminated block comment
+
+------------------------------------------------------------
+TEST  : lex/unterminated_bt_interp.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at '`hello ${ 1 + 2 `;
+| print(s);
+| ': unterminated interpolation in backtick string
+
+------------------------------------------------------------
+TEST  : lex/unterminated_bt_string.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at '`template ${1 + 2} never closes
+| print(s);
+| ': unterminated backtick string
+
+------------------------------------------------------------
+TEST  : lex/unterminated_dq_string.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at '"this string never closes;
+| print(s);
+| ': unterminated double-quoted string
+
+------------------------------------------------------------
+TEST  : lex/unterminated_sq_string.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at ''open quote never closes
+| print(s);
+| ': unterminated single-quoted string
+============================================================
+CATEGORY: parse
+============================================================
+
+------------------------------------------------------------
+TEST  : parse/assign_to_call.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 2] Error at '=': invalid assignment target
+
+------------------------------------------------------------
+TEST  : parse/assign_to_literal.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at '=': invalid assignment target
+
+------------------------------------------------------------
+TEST  : parse/bad_object_literal.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at '"Alice"': expected ':' after object key
+
+------------------------------------------------------------
+TEST  : parse/break_outside_loop.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: BREAK outside loop (depth 0, loop_depth 0)
+|   at /home/user/CanDo/tests/scripts/errors/parse/break_outside_loop.cdo:1
+
+------------------------------------------------------------
+TEST  : parse/catch_without_try.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 3] Error at '}': expected expression
+
+------------------------------------------------------------
+TEST  : parse/class_missing_name.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at '=': expected class name
+
+------------------------------------------------------------
+TEST  : parse/const_no_init.cdo
+EXIT  : 0
+STDOUT:
+|   null
+STDERR:
+  <empty>
+
+------------------------------------------------------------
+TEST  : parse/continue_outside_loop.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: CONTINUE outside loop (depth 0, loop_depth 0)
+|   at /home/user/CanDo/tests/scripts/errors/parse/continue_outside_loop.cdo:1
+
+------------------------------------------------------------
+TEST  : parse/dangling_else.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 3] Error at '}': expected expression
+
+------------------------------------------------------------
+TEST  : parse/double_operator.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at '+': expected expression
+
+------------------------------------------------------------
+TEST  : parse/duplicate_local.cdo
+EXIT  : 0
+STDOUT:
+|   2
+STDERR:
+  <empty>
+
+------------------------------------------------------------
+TEST  : parse/empty_paren_expression.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at ')': expected expression
+
+------------------------------------------------------------
+TEST  : parse/for_missing_in.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at '}': expected expression
+
+------------------------------------------------------------
+TEST  : parse/keyword_as_var.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 3] Error at '': expected '}' to close block
+
+------------------------------------------------------------
+TEST  : parse/missing_colon_ternary.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at '2': expected ':' in ternary expression
+
+------------------------------------------------------------
+TEST  : parse/missing_function_body.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 2] Error at '': expected '}' to close block
+
+------------------------------------------------------------
+TEST  : parse/missing_function_name.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 2] Error at '': expected ';' after expression
+
+------------------------------------------------------------
+TEST  : parse/missing_rbrace.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 4] Error at '': expected '}' to close block
+
+------------------------------------------------------------
+TEST  : parse/missing_rbracket.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at ';': expected ']' after array elements
+
+------------------------------------------------------------
+TEST  : parse/missing_rparen.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at ';': expected ')' after arguments
+
+------------------------------------------------------------
+TEST  : parse/missing_semicolon.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 2] Error at 'VAR': expected ';' after variable declaration
+
+------------------------------------------------------------
+TEST  : parse/missing_then_block.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 3] Error at '': expected '}' to close block
+
+------------------------------------------------------------
+TEST  : parse/missing_var_name.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at '=': expected variable name
+
+------------------------------------------------------------
+TEST  : parse/return_outside_function.cdo
+EXIT  : 0
+STDOUT:
+  <empty>
+STDERR:
+  <empty>
+
+------------------------------------------------------------
+TEST  : parse/stray_rparen.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 1] Error at ')': expected ';' after expression
+
+------------------------------------------------------------
+TEST  : parse/trailing_comma_args.cdo
+EXIT  : 0
+STDOUT:
+|   3
+STDERR:
+  <empty>
+
+------------------------------------------------------------
+TEST  : parse/try_without_catch.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: [line 4] Error at '': expected CATCH after TRY block
+============================================================
+CATEGORY: runtime
+============================================================
+
+------------------------------------------------------------
+TEST  : runtime/add_num_to_bool.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: operands must be numbers (got number and bool)
+|   at /home/user/CanDo/tests/scripts/errors/runtime/add_num_to_bool.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/add_num_to_null.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: operands must be numbers (got number and null)
+|   at /home/user/CanDo/tests/scripts/errors/runtime/add_num_to_null.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/array_negative_index.cdo
+EXIT  : 0
+STDOUT:
+|   null
+STDERR:
+  <empty>
+
+------------------------------------------------------------
+TEST  : runtime/array_out_of_bounds.cdo
+EXIT  : 0
+STDOUT:
+|   null
+STDERR:
+  <empty>
+
+------------------------------------------------------------
+TEST  : runtime/assign_to_const.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: cannot assign to constant 'PI'
+|   at /home/user/CanDo/tests/scripts/errors/runtime/assign_to_const.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/await_non_thread.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: await: expected a thread handle
+|   at /home/user/CanDo/tests/scripts/errors/runtime/await_non_thread.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/bitop_on_string.cdo
+EXIT  : 0
+STDOUT:
+|   0
+STDERR:
+  <empty>
+
+------------------------------------------------------------
+TEST  : runtime/call_null.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: can only call functions (got null)
+|   at /home/user/CanDo/tests/scripts/errors/runtime/call_null.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/call_number.cdo
+EXIT  : 139
+STDOUT:
+  <empty>
+STDERR:
+  <empty>
+
+------------------------------------------------------------
+TEST  : runtime/compare_disparate.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: comparison requires numbers
+|   at /home/user/CanDo/tests/scripts/errors/runtime/compare_disparate.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/deep_call_stack.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: error
+|   at /home/user/CanDo/tests/scripts/errors/runtime/deep_call_stack.cdo:3
+|   at /home/user/CanDo/tests/scripts/errors/runtime/deep_call_stack.cdo:2
+|   at /home/user/CanDo/tests/scripts/errors/runtime/deep_call_stack.cdo:1
+|   at /home/user/CanDo/tests/scripts/errors/runtime/deep_call_stack.cdo:4
+
+------------------------------------------------------------
+TEST  : runtime/div_by_zero.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: division by zero
+|   at /home/user/CanDo/tests/scripts/errors/runtime/div_by_zero.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/dot_on_null.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: field access on non-object (got null)
+|   at /home/user/CanDo/tests/scripts/errors/runtime/dot_on_null.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/eval_runtime_error.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: operands must be numbers (got number and bool)
+|   at <eval>:1
+|   at /home/user/CanDo/tests/scripts/errors/runtime/eval_runtime_error.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/eval_syntax_error.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: eval parse error: [line 1] Error at ';': expected expression
+
+------------------------------------------------------------
+TEST  : runtime/include_missing.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: include: cannot resolve path 'this_file_does_not_exist.cdo'
+
+------------------------------------------------------------
+TEST  : runtime/index_number.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: index access on non-object
+|   at /home/user/CanDo/tests/scripts/errors/runtime/index_number.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/index_with_string.cdo
+EXIT  : 0
+STDOUT:
+|   null
+STDERR:
+  <empty>
+
+------------------------------------------------------------
+TEST  : runtime/infinite_recursion.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: call stack overflow
+|   at /home/user/CanDo/tests/scripts/errors/runtime/infinite_recursion.cdo:1
+|   at /home/user/CanDo/tests/scripts/errors/runtime/infinite_recursion.cdo:1
+|   at /home/user/CanDo/tests/scripts/errors/runtime/infinite_recursion.cdo:1
+|   at /home/user/CanDo/tests/scripts/errors/runtime/infinite_recursion.cdo:1
+|   at /home/user/CanDo/tests/scripts/errors/runtime/infinite_recursion.cdo:1
+|   at /home/user/CanDo/tests/scripts/errors/runtime/infinite_recursion.cdo:1
+|   ... 250 more frame(s)
+
+------------------------------------------------------------
+TEST  : runtime/iterate_non_iterable.cdo
+EXIT  : 0
+STDOUT:
+|   42
+STDERR:
+  <empty>
+
+------------------------------------------------------------
+TEST  : runtime/method_not_found.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando:  method is not callable
+|   at /home/user/CanDo/tests/scripts/errors/runtime/method_not_found.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/missing_property.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: field access on non-object (got null)
+|   at /home/user/CanDo/tests/scripts/errors/runtime/missing_property.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/mod_by_zero.cdo
+EXIT  : 0
+STDOUT:
+|   nan
+STDERR:
+  <empty>
+
+------------------------------------------------------------
+TEST  : runtime/negate_string.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: unary '-' requires a number
+|   at /home/user/CanDo/tests/scripts/errors/runtime/negate_string.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/print_no_args.cdo
+EXIT  : 0
+STDOUT:
+  <empty>
+STDERR:
+  <empty>
+
+------------------------------------------------------------
+TEST  : runtime/string_concat_number.cdo
+EXIT  : 0
+STDOUT:
+|   hello1
+STDERR:
+  <empty>
+
+------------------------------------------------------------
+TEST  : runtime/throw_string.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: this is a thrown error
+|   at /home/user/CanDo/tests/scripts/errors/runtime/throw_string.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/throw_uncaught.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: validation
+|   at /home/user/CanDo/tests/scripts/errors/runtime/throw_uncaught.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/undefined_variable.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: undefined variable 'undefined_thing'
+|   at /home/user/CanDo/tests/scripts/errors/runtime/undefined_variable.cdo:1
+
+------------------------------------------------------------
+TEST  : runtime/wrong_arity_too_few.cdo
+EXIT  : 1
+STDOUT:
+  <empty>
+STDERR:
+|   cando: operands must be numbers (got number and null)
+|   at /home/user/CanDo/tests/scripts/errors/runtime/wrong_arity_too_few.cdo:1
+|   at /home/user/CanDo/tests/scripts/errors/runtime/wrong_arity_too_few.cdo:2
+
+------------------------------------------------------------
+TEST  : runtime/wrong_arity_too_many.cdo
+EXIT  : 0
+STDOUT:
+|   3
+STDERR:
+  <empty>
+
+============================================================
+SUMMARY
+============================================================
+total scripts        : 68
+produced stderr      : 54
+exited 0 (no error?) : 13
+non-zero but silent  : 1

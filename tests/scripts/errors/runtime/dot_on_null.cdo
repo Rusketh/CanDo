@@ -1,0 +1,2 @@
+VAR x = NULL;
+print(x.field);

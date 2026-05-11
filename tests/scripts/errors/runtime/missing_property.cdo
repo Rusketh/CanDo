@@ -1,0 +1,2 @@
+VAR o = { name: "Alice" };
+print(o.nonexistent.x);

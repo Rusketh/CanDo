@@ -1,0 +1,2 @@
+VAR o = { name "Alice", age: 30 };
+print(o);

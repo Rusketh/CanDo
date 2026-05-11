@@ -1,0 +1,2 @@
+IF TRUE
+    print("no block");

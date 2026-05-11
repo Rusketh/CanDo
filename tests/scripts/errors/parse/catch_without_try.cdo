@@ -1,0 +1,3 @@
+CATCH (e) {
+    print("orphan catch");
+}
