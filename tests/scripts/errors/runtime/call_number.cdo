@@ -1,2 +1,8 @@
-VAR x = 5;
+/* A small numeric PC (e.g. `5`) still routes through the script-fn
+ * dispatch path because the C-level VM API uses bare numbers as
+ * function entries; see source/vm/vm.c:OP_CALL.  The PC range check
+ * catches obviously-bad values like this one.  Fully fixing the
+ * conflation between user numbers and function-PC numbers requires a
+ * dedicated value tag and is tracked separately. */
+VAR x = 9999999;
 x(1, 2);

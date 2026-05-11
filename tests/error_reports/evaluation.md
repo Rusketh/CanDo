@@ -327,11 +327,19 @@ branch. Re-running the suite after the changes:
 
 ### Code changes
 
-- `source/vm/vm.c` (`OP_CALL`): the unreachable-for-valid-programs
-  number-as-PC dispatch path was the SIGSEGV root cause. Replaced with
-  a clean `"can only call functions (got number)"` runtime error
-  (`tests/scripts/errors/runtime/call_number.cdo` now reports rather
-  than crashes).
+- `source/vm/vm.c` (`OP_CALL`): the numeric-callee dispatch path is a
+  documented C-level API (see `tests/test_vm.c:985`) used by embedders
+  who hand-build chunks and store function entries as
+  `cando_number((f64)fn_start)`. Adding a PC range check turns
+  obviously out-of-range numbers (e.g. `VAR x = 9999999; x();`) into
+  a clean `"can only call functions (got number)"` error rather than a
+  segfault. Small numeric values that happen to land within
+  `chunk->code_len` still mis-dispatch -- the script parser never
+  produces this shape on its own (function definitions go through
+  `OP_CLOSURE` → `OBJ_FUNCTION`), so the only way for a user script to
+  hit it is to do something already nonsensical like `VAR x = 5; x()`.
+  Closing the residual gap requires a dedicated `CandoValue` tag for
+  function-PC values, which is larger than this pass.
 - `source/vm/vm.c` (`OP_MOD`): added `if (b == 0.0) error("modulo by
   zero")`, matching the existing `OP_DIV` behaviour.
 - `source/vm/vm.c` (`OP_THROW`): on an uncaught throw, format every

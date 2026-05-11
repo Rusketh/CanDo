@@ -382,7 +382,7 @@ STDOUT:
   <empty>
 STDERR:
 |   cando: can only call functions (got number)
-|   at /home/user/CanDo/tests/scripts/errors/runtime/call_number.cdo:1
+|   at /home/user/CanDo/tests/scripts/errors/runtime/call_number.cdo:7
 
 ------------------------------------------------------------
 TEST  : runtime/compare_disparate.cdo

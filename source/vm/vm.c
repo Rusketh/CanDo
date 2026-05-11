@@ -3427,17 +3427,67 @@ static CandoVMResult vm_run(CandoVM *vm) {
                 DISPATCH();
             }
 
-            /* Positive number on the callee slot: cannot originate from a
-             * legitimate program path -- script functions are produced by
-             * OP_CLOSURE which wraps them in an OBJ_FUNCTION (handled
-             * below) and native sentinels are negative (handled above).
-             * Treating a user-supplied number as a PC offset would jump
-             * the dispatcher into arbitrary bytecode (memory-unsafe);
-             * reject it explicitly. */
+            /* Positive number on the callee slot: a script-function PC
+             * offset.  This is used by C-level callers that build chunks
+             * by hand and store function entries via
+             *     cando_chunk_add_const(c, cando_number((f64)fn_start));
+             *     OP_CONST <idx>; OP_CALL ...
+             * The script parser never produces this shape on its own --
+             * function definitions there flow through OP_CLOSURE which
+             * wraps the entry in an OBJ_FUNCTION -- so a script-level
+             * `VAR x = 5; x();` is always a bug; we range-check the PC
+             * to turn the obvious case into a clean error instead of a
+             * jump into arbitrary bytecode.                            */
             if (cando_is_number(callee)) {
-                vm_runtime_error(vm,
-                                 "can only call functions (got number)");
-                goto handle_error;
+                double pc_d = cando_as_number(callee);
+                if (pc_d < 0.0 || pc_d != (double)(u32)pc_d ||
+                    (u32)pc_d >= frame->closure->chunk->code_len) {
+                    vm_runtime_error(vm,
+                        "can only call functions (got number)");
+                    goto handle_error;
+                }
+                u32 pc = (u32)pc_d;
+                /* Function-trace fast path: iterate sibling function
+                 * traces at this entry PC (e.g. fib's leaf trace vs
+                 * its recursive trace, recorded as separate sibling
+                 * specialisations).  Each trace's guards either
+                 * accept the call (status=0, result in xmm0) or bail
+                 * (status=1, try next sibling).  When all siblings
+                 * fail we fall through to the standard frame-push +
+                 * interp path so the call's semantics are preserved. */
+                if (vm->jit_enabled && arg_count == 1) {
+                    const u8 *entry_pc =
+                        frame->closure->chunk->code + pc;
+                    CandoValue arg_val = vm->stack_top[-1];
+                    if (cando_is_number(arg_val)) {
+                        double arg_d = cando_as_number(arg_val);
+                        CandoTrace *fts[CANDO_FUNC_TRACE_MAX_VERSIONS];
+                        u32 nf = cando_jit_find_func_traces(vm, entry_pc,
+                                                              fts,
+                                                              CANDO_FUNC_TRACE_MAX_VERSIONS);
+                        for (u32 i = 0; i < nf; i++) {
+                            CandoTrace *ft = fts[i];
+                            if (!ft->func_mcode_fn) continue;
+                            SYNC_IP();
+                            CandoFuncTraceResult r =
+                                ft->func_mcode_fn(vm, ft, arg_d);
+                            if (r.status == 0) {
+                                DROP();
+                                DROP();
+                                PUSH(cando_number(r.value));
+                                vm->last_ret_count = 1;
+                                DISPATCH();
+                            }
+                        }
+                    }
+                }
+                SYNC_IP();
+                if (!vm_push_frame(vm, frame->closure,
+                                   frame->closure->chunk->code + pc,
+                                   arg_count, false))
+                    goto handle_error;
+                LOAD_FRAME();
+                DISPATCH();
             }
 
             if (!cando_is_object(callee)) {
