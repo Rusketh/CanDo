@@ -179,12 +179,39 @@ typedef struct {
      * still the iter-start value because nothing else writes there.
      * Reset at the start of each codegen pass; flipped on SSTORE. */
     bool pinned_overwritten[CG_MAX_PINNED];
+
+    /* Array-pointer pinning: keep up to CG_MAX_PINNED_OBJ invariant
+     * IR_GLOAD-IRT_OBJ results in caller-saved GPRs (r10, r11)
+     * across the trace's hot iters.  Each IR_INDEX_GET / IR_INDEX_SET
+     * whose array operand resolves to a pinned IRRef uses `mov rdi,
+     * r10/r11` (3 bytes) instead of `mov rdi, [r14 + 8*irref]`
+     * (7 bytes), saving a memory load per access.
+     *
+     * Pre-pass picks the IRT_OBJ globals with the highest reference
+     * count from IR_INDEX_GET / IR_INDEX_SET op1.  The pinned reg is
+     * written at the END of the GLOAD's LICM-skip block (so the
+     * write only happens on iter 1) and stays valid across helper
+     * calls via cg_spill_pinned_obj / cg_reload_pinned_obj. */
+#define CG_MAX_PINNED_OBJ 2u
+    u32 pinned_obj_count;
+    IRRef pinned_obj_irref[CG_MAX_PINNED_OBJ];  /* IRRef of the GLOAD */
+
     bool in_stub_emit;     /* once true, emit_call_rax stops spilling
                               pinned xmm regs around the call -- the
                               snapshot replay path has already flushed
                               to the slot and the trace is on its way
                               out. */
 } CG;
+
+/* GPR index for the k-th pinned object pointer (k=0 -> r10, k=1 -> r11). */
+static u8 cg_pin_gpr_index(u32 k) { return (u8)(10 + k); }
+
+/* Returns the GPR index (10..) if `irref` is pinned, else 0. */
+static u32 cg_pin_gpr_for_irref(const CG *cg, IRRef irref) {
+    for (u32 k = 0; k < cg->pinned_obj_count; k++)
+        if (cg->pinned_obj_irref[k] == irref) return cg_pin_gpr_index(k);
+    return 0;
+}
 
 /* Maps a slot to the xmm reg index assigned to it (6, 7, 8, 9), or 0
  * if unpinned.  Linear scan; CG_MAX_PINNED is small. */
@@ -599,6 +626,45 @@ static void emit_mov_rdi_vals(CG *cg, u32 idx) {
     cg_emit_bytes(cg, prefix, 3);
     cg_emit_u32(cg, idx * 8);
 }
+
+/* Array-pointer pinning helpers (r10, r11).
+ *
+ * mov r10/r11, [r14 + 8*idx]  -- load pinned obj from vals[idx].
+ *   REX.W=1, REX.R=1, REX.B=1 -> 0x4D.  Opcode 8B /r.
+ *   For r10 dst: ModR/M.reg = 010, r/m = 110 (r14) -> 0x96.
+ *   For r11 dst: ModR/M.reg = 011, r/m = 110         -> 0x9E.
+ * mov [r14 + 8*idx], r10/r11  -- spill pinned reg to vals[idx].
+ *   Opcode 89 /r.  ModR/M same regs as above.
+ * mov rdi, r10/r11            -- 4C 89 D7 (r10) / 4C 89 DF (r11). */
+static void emit_mov_pinned_obj_vals(CG *cg, u32 k, u32 idx) {
+    u8 modrm = (k == 0) ? 0x96 : 0x9E;       /* reg field 2 or 3 */
+    cg_emit_u8(cg, 0x4D);
+    cg_emit_u8(cg, 0x8B);
+    cg_emit_u8(cg, modrm);
+    cg_emit_u32(cg, idx * 8);
+}
+static void emit_mov_vals_pinned_obj(CG *cg, u32 idx, u32 k) {
+    u8 modrm = (k == 0) ? 0x96 : 0x9E;
+    cg_emit_u8(cg, 0x4D);
+    cg_emit_u8(cg, 0x89);
+    cg_emit_u8(cg, modrm);
+    cg_emit_u32(cg, idx * 8);
+}
+static void emit_mov_rdi_pinned_obj(CG *cg, u32 k) {
+    /* k=0 -> mov rdi, r10 = 4C 89 D7
+     * k=1 -> mov rdi, r11 = 4C 89 DF */
+    cg_emit_u8(cg, 0x4C);
+    cg_emit_u8(cg, 0x89);
+    cg_emit_u8(cg, (k == 0) ? 0xD7 : 0xDF);
+}
+/* mov r10/r11, rax  -- copy the helper-returned pointer into the
+ * pinned register right after IR_GLOAD-IRT_OBJ's helper call.
+ *   r10: 49 89 C2     r11: 49 89 C3 */
+static void emit_mov_pinned_obj_rax(CG *cg, u32 k) {
+    cg_emit_u8(cg, 0x49);
+    cg_emit_u8(cg, 0x89);
+    cg_emit_u8(cg, (k == 0) ? 0xC2 : 0xC3);
+}
 /* cvttsd2si esi, xmm0        -- F2 0F 2C F0.  Truncate-toward-zero
  * f64 in xmm0 to i32 in esi (which we treat as u32 idx for AREF). */
 static void emit_cvttsd2si_esi_xmm0(CG *cg) {
@@ -980,11 +1046,25 @@ static void emit_mov_r9_r13(CG *cg) {
  * happen AFTER the side-exit replay (which has already flushed to
  * the slot), so they don't need preserving. */
 static void emit_call_rax(CG *cg) {
-    bool wrap = cg->pinned_slot_count > 0 && !cg->in_stub_emit;
-    if (wrap) cg_spill_pinned(cg);
+    bool wrap_xmm = cg->pinned_slot_count > 0 && !cg->in_stub_emit;
+    bool wrap_obj = cg->pinned_obj_count  > 0 && !cg->in_stub_emit;
+    if (wrap_xmm) cg_spill_pinned(cg);
     static const u8 b[] = { 0xFF, 0xD0 };
     cg_emit_bytes(cg, b, 2);
-    if (wrap) cg_reload_pinned(cg);
+    if (wrap_xmm) cg_reload_pinned(cg);
+    /* Pinned object pointers (r10/r11) are also caller-saved on
+     * SysV and need restoring after a helper call.  Reload from
+     * vals[obj_irref], which the invariant IR_GLOAD-IRT_OBJ wrote
+     * on iter 1 and which remains stable thereafter.  We don't
+     * need an explicit spill: vals[obj_irref] is the authoritative
+     * copy.  On the very first call (the gload helper itself), the
+     * reload reads vals[] before it's been written -- but the
+     * subsequent `mov r10/r11, rax` inside emit_gload_arr overwrites
+     * with the correct value, so this is harmless. */
+    if (wrap_obj) {
+        for (u32 k = 0; k < cg->pinned_obj_count; k++)
+            emit_mov_pinned_obj_vals(cg, k, cg->pinned_obj_irref[k]);
+    }
 }
 
 /* ============================================================ */
@@ -1414,7 +1494,16 @@ static void emit_index_get_inline(CG *cg, u32 op1, u32 op2, u32 i) {
     i32 items_len_off = (i32)offsetof(struct CdoObject, items_len);
     i32 items_off     = (i32)offsetof(struct CdoObject, items);
 
-    emit_mov_rdi_vals(cg, op1);
+    /* Array-pointer pinning shortcut: if op1's IR_GLOAD-IRT_OBJ was
+     * pinned to r10/r11, fetch the pointer from that register rather
+     * than from vals[].  Saves the 7-byte memory load on every
+     * INDEX_GET on the pinned array. */
+    u32 pin_k = cg_pin_gpr_for_irref(cg, (IRRef)op1);
+    if (pin_k) {
+        emit_mov_rdi_pinned_obj(cg, pin_k - 10u);
+    } else {
+        emit_mov_rdi_vals(cg, op1);
+    }
     emit_load_xmm0(cg, op2);
     emit_cvttsd2si_esi_xmm0(cg);
     emit_cmp_esi_rdi_off(cg, items_len_off);
@@ -1464,7 +1553,12 @@ static void emit_index_set_inline(CG *cg, u32 op1, u32 idx_op, u32 val_op) {
     i32 items_len_off = (i32)offsetof(struct CdoObject, items_len);
     i32 items_off     = (i32)offsetof(struct CdoObject, items);
 
-    emit_mov_rdi_vals(cg, op1);
+    u32 pin_k = cg_pin_gpr_for_irref(cg, (IRRef)op1);
+    if (pin_k) {
+        emit_mov_rdi_pinned_obj(cg, pin_k - 10u);
+    } else {
+        emit_mov_rdi_vals(cg, op1);
+    }
     emit_load_xmm0(cg, idx_op);
     emit_cvttsd2si_esi_xmm0(cg);
     emit_cmp_esi_rdi_off(cg, items_len_off);
@@ -1709,6 +1803,17 @@ static void emit_gload_arr(CG *cg, const CandoTraceIR *ir, IRRef name_ref, u32 i
     emit_test_rax_rax(cg);
     emit_je_to_stub(cg, cg->cur_snap);            /* NULL -> bad type */
     emit_mov_vals_rax(cg, i);                     /* vals[i] = obj_ptr */
+    /* Array-pointer pinning: if this GLOAD's IRRef was selected by
+     * the pre-pass for pinning, also copy rax into the assigned
+     * pinned GPR.  Both writes sit inside the LICM-skip block for
+     * an invariant GLOAD, so only iter 1 pays this cost; iter 2+
+     * skips and the GPR retains its iter-1 value. */
+    for (u32 k = 0; k < cg->pinned_obj_count; k++) {
+        if (cg->pinned_obj_irref[k] == (IRRef)i) {
+            emit_mov_pinned_obj_rax(cg, k);
+            break;
+        }
+    }
     cg_invalidate_xmm0(cg);
 }
 
@@ -2162,6 +2267,63 @@ static void cg_assign_pinned_slots(CG *cg, const CandoTraceIR *ir) {
     }
 }
 
+/* Pre-pass: pick the top CG_MAX_PINNED_OBJ invariant IRT_OBJ globals
+ * by IR_INDEX_GET / IR_INDEX_SET reference count.  These pointers are
+ * resolved once via the GLOAD helper on the trace's iter 1 (LICM
+ * keeps them invariant); we additionally copy the result into a
+ * dedicated GPR so subsequent INDEX_GET / INDEX_SET inlines fetch
+ * the array pointer via `mov rdi, r10/r11` instead of a memory load.
+ *
+ * Each candidate is scored by how many INDEX accesses reference its
+ * IRRef directly as op1; the two highest-scoring win.  Ties are
+ * broken by IR emission order (first encountered wins). */
+static void cg_assign_pinned_obj_globals(CG *cg, const CandoTraceIR *ir) {
+    cg->pinned_obj_count = 0;
+    if (ir->ir_count <= 1) return;
+    for (u32 k = 0; k < CG_MAX_PINNED_OBJ; k++) cg->pinned_obj_irref[k] = 0;
+
+    /* Collect candidate (IRRef, score) pairs. */
+    struct { IRRef ref; u32 score; } cands[16];
+    u32 ncands = 0;
+    for (u32 i = 1; i < ir->ir_count && ncands < 16; i++) {
+        const IRIns *in = &ir->ir[i];
+        if (in->op != IR_GLOAD) continue;
+        if (in->type != IRT_OBJ) continue;
+        if (!(in->flags & IRF_INVARIANT)) continue;
+        cands[ncands].ref   = (IRRef)i;
+        cands[ncands].score = 0;
+        ncands++;
+    }
+    if (ncands == 0) return;
+
+    for (u32 j = 1; j < ir->ir_count; j++) {
+        const IRIns *in = &ir->ir[j];
+        if (in->op != IR_INDEX_GET && in->op != IR_INDEX_SET) continue;
+        for (u32 c = 0; c < ncands; c++) {
+            if (cands[c].ref == in->op1) {
+                cands[c].score++;
+                break;
+            }
+        }
+    }
+
+    /* Pick top CG_MAX_PINNED_OBJ by score.  Skip candidates with
+     * zero score -- pinning an unused global wastes the GPR slot. */
+    for (u32 pick = 0; pick < CG_MAX_PINNED_OBJ; pick++) {
+        u32 best_idx = (u32)-1;
+        u32 best_score = 0;
+        for (u32 c = 0; c < ncands; c++) {
+            if (cands[c].score > best_score) {
+                best_idx   = c;
+                best_score = cands[c].score;
+            }
+        }
+        if (best_idx == (u32)-1) break;
+        cg->pinned_obj_irref[cg->pinned_obj_count++] = cands[best_idx].ref;
+        cands[best_idx].score = 0;   /* consume so the next pick differs */
+    }
+}
+
 /* For the codegen body: load the pinned slot into its xmm reg.
  * Emitted at the START of each iter ONLY on the first iter via the
  * standard skip_invariant gate -- on iter 2+ the previous iter's
@@ -2492,6 +2654,10 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
      * set by mark_known_num_sloads.  Body emit and side-exit stubs
      * consult cg.pinned_slots / pinned_first_load. */
     cg_assign_pinned_slots(&cg, &t->ir);
+    /* Array-pointer pinning: assign r10/r11 to the most-referenced
+     * invariant IRT_OBJ globals so INDEX_GET / INDEX_SET inlines can
+     * use them directly instead of loading the pointer from vals[]. */
+    cg_assign_pinned_obj_globals(&cg, &t->ir);
 
     emit_prologue(&cg);
     emit_pinned_prologue(&cg);
