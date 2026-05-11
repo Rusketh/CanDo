@@ -146,7 +146,53 @@ typedef struct {
         u32 stub_off;      /* filled in when the stub is emitted later */
     } guards[CG_MAX_GUARDS];
     u32 guard_count;
+
+    /* Register pinning: keep loop-carried numeric scalars in
+     * xmm6 .. xmm6+CG_MAX_PINNED-1 across iterations so the per-iter
+     * SLOAD's slot read becomes a register copy and the SSTORE's slot
+     * write becomes a register move + slot store rather than a memory-
+     * to-memory hop.  Selected by a pre-pass that picks slots which
+     * (a) have an IR_SLOAD with IRF_NUM_KNOWN, (b) are SSTORE'd as
+     * IRT_NUM somewhere in the trace, (c) are not invariant.  Each
+     * pinned slot is loaded + type-checked once in the prologue.
+     *
+     * pinned_slot_count is the number of pinned slots; pinned_slots[k]
+     * is the (outer-frame-relative) slot index assigned to xmm(6+k);
+     * pinned_first_load[k] is the IR_SLOAD's IRRef -- snapshot replay
+     * uses vals[pinned_first_load[k]] as the pre-iter value, so we
+     * keep it in sync via the SLOAD's "movsd vals[i], xmm".
+     *
+     * The xmm6+ range is caller-saved on SysV, so any C-helper call
+     * inside the body would clobber them; the per-call save/restore
+     * helpers below (cg_spill_pinned / cg_reload_pinned) wrap the
+     * helper-call sites that the body emits. */
+#define CG_MAX_PINNED 4u
+    u32 pinned_slot_count;
+    u32 pinned_slots      [CG_MAX_PINNED];
+    u32 pinned_first_load [CG_MAX_PINNED];
+    /* Codegen-time flag tracking whether the pinned xmm reg still
+     * matches the value of pinned_first_load[k] (the IR_SLOAD's
+     * result IRRef).  SSTORE to the same pinned slot writes the
+     * "next iter's" value into the xmm reg, after which subsequent
+     * arith / cmp ops in the SAME iter that reference the SLOAD's
+     * IRRef must read from vals[] instead -- vals[first_load] is
+     * still the iter-start value because nothing else writes there.
+     * Reset at the start of each codegen pass; flipped on SSTORE. */
+    bool pinned_overwritten[CG_MAX_PINNED];
+    bool in_stub_emit;     /* once true, emit_call_rax stops spilling
+                              pinned xmm regs around the call -- the
+                              snapshot replay path has already flushed
+                              to the slot and the trace is on its way
+                              out. */
 } CG;
+
+/* Maps a slot to the xmm reg index assigned to it (6, 7, 8, 9), or 0
+ * if unpinned.  Linear scan; CG_MAX_PINNED is small. */
+static u32 cg_pin_xmm_for_slot(const CG *cg, u32 slot) {
+    for (u32 k = 0; k < cg->pinned_slot_count; k++)
+        if (cg->pinned_slots[k] == slot) return 6 + k;
+    return 0;
+}
 
 /* ============================================================ */
 /* Byte-level helpers                                            */
@@ -237,6 +283,135 @@ static void emit_movsd_vals_xmm(CG *cg, u32 idx, u8 xmm) {
     cg_emit_u8(cg, 0x11);
     cg_emit_u8(cg, (u8)(0x86 | (xmm << 3)));
     cg_emit_u32(cg, idx * 8);
+}
+
+/* Generic helpers that handle xmm0-xmm15 plus r14 (vals) and r15
+ * (frame_slots) addressing.  Used by the register-pinning path so
+ * the pinned xmm6+ regs are reachable.  Existing helpers above
+ * (emit_movsd_xmm_vals etc.) hardcode REX.B=1 and assume xmm<=7;
+ * keep them for the hot xmm0/xmm1 paths to avoid bloating those
+ * call sites. */
+
+/* movsd xmm_dst, xmm_src   -- F2 [REX] 0F 10 11 dst src
+ * REX.R selects xmm_dst[8], REX.B selects xmm_src[8]. */
+static void emit_movsd_xmm_xmm(CG *cg, u8 dst, u8 src) {
+    cg_emit_u8(cg, 0xF2);
+    u8 rex = 0;
+    if (dst & 8) rex |= 0x44;        /* REX.R */
+    if (src & 8) rex |= 0x41;        /* REX.B */
+    if (rex) cg_emit_u8(cg, rex);
+    cg_emit_u8(cg, 0x0F);
+    cg_emit_u8(cg, 0x10);
+    cg_emit_u8(cg, (u8)(0xC0 | ((dst & 7) << 3) | (src & 7)));
+}
+
+/* movsd xmmN, [r14 + 8*idx]   for any N in 0..15. */
+static void emit_movsd_xmmN_vals(CG *cg, u8 xmm, u32 idx) {
+    cg_emit_u8(cg, 0xF2);
+    /* Always REX.B=1 for r14 base; REX.R extends xmm. */
+    u8 rex = 0x41;
+    if (xmm & 8) rex |= 0x04;        /* REX.R */
+    cg_emit_u8(cg, rex);
+    cg_emit_u8(cg, 0x0F);
+    cg_emit_u8(cg, 0x10);
+    cg_emit_u8(cg, (u8)(0x86 | ((xmm & 7) << 3)));
+    cg_emit_u32(cg, idx * 8);
+}
+
+/* movsd [r14 + 8*idx], xmmN  for any N in 0..15. */
+static void emit_movsd_vals_xmmN(CG *cg, u32 idx, u8 xmm) {
+    cg_emit_u8(cg, 0xF2);
+    u8 rex = 0x41;
+    if (xmm & 8) rex |= 0x04;
+    cg_emit_u8(cg, rex);
+    cg_emit_u8(cg, 0x0F);
+    cg_emit_u8(cg, 0x11);
+    cg_emit_u8(cg, (u8)(0x86 | ((xmm & 7) << 3)));
+    cg_emit_u32(cg, idx * 8);
+}
+
+/* movsd xmmN, [r15 + 8*slot]  -- load a frame slot into a pinned xmm. */
+static void emit_movsd_xmmN_slot(CG *cg, u8 xmm, u32 slot) {
+    cg_emit_u8(cg, 0xF2);
+    u8 rex = 0x41;                   /* REX.B for r15 */
+    if (xmm & 8) rex |= 0x04;
+    cg_emit_u8(cg, rex);
+    cg_emit_u8(cg, 0x0F);
+    cg_emit_u8(cg, 0x10);
+    cg_emit_u8(cg, (u8)(0x87 | ((xmm & 7) << 3)));
+    cg_emit_u32(cg, slot * 8);
+}
+
+/* movsd [r15 + 8*slot], xmmN  -- store a pinned xmm back to a slot. */
+static void emit_movsd_slot_xmmN(CG *cg, u32 slot, u8 xmm) {
+    cg_emit_u8(cg, 0xF2);
+    u8 rex = 0x41;
+    if (xmm & 8) rex |= 0x04;
+    cg_emit_u8(cg, rex);
+    cg_emit_u8(cg, 0x0F);
+    cg_emit_u8(cg, 0x11);
+    cg_emit_u8(cg, (u8)(0x87 | ((xmm & 7) << 3)));
+    cg_emit_u32(cg, slot * 8);
+}
+
+/* mov rax, [r15 + 8*slot]  -- load the raw u64 NaN-box bits at a
+ * frame slot.  Used by the prologue's per-pinned-slot type check. */
+static void emit_mov_rax_r15_slot(CG *cg, u32 slot) {
+    static const u8 b[] = { 0x49, 0x8B, 0x87 };  /* mov rax, [r15+disp32] */
+    cg_emit_bytes(cg, b, 3);
+    cg_emit_u32(cg, slot * 8);
+}
+
+/* opXsd xmm0, xmmN where opXsd in {ADD=0x58, MUL=0x59, SUB=0x5C,
+ * DIV=0x5E, ucomisd=0x2E (with 0x66 prefix instead of 0xF2)}. */
+static void emit_arith_xmm0_xmmN(CG *cg, u8 op_byte, u8 xmm) {
+    cg_emit_u8(cg, 0xF2);
+    if (xmm & 8) cg_emit_u8(cg, 0x41);
+    cg_emit_u8(cg, 0x0F);
+    cg_emit_u8(cg, op_byte);
+    cg_emit_u8(cg, (u8)(0xC0 | (xmm & 7)));
+}
+
+/* ucomisd xmm0, xmmN  -- 66 [REX] 0F 2E ModR/M.  Variant of the
+ * existing emit_ucomisd_xmm0_xmm1 that takes a runtime xmm reg. */
+static void emit_ucomisd_xmm0_xmmN(CG *cg, u8 xmm) {
+    cg_emit_u8(cg, 0x66);
+    if (xmm & 8) cg_emit_u8(cg, 0x41);
+    cg_emit_u8(cg, 0x0F);
+    cg_emit_u8(cg, 0x2E);
+    cg_emit_u8(cg, (u8)(0xC0 | (xmm & 7)));
+}
+
+/* If `irref` is the IRRef of a pinned IR_SLOAD AND the pinned xmm
+ * reg has not yet been overwritten by a same-iter SSTORE, return
+ * the xmm reg holding its value (6, 7, ..).  Otherwise 0 -- the
+ * caller falls back to vals[irref], which is the iter-start value
+ * the SLOAD mirrored there. */
+static u32 cg_pin_xmm_for_irref(const CG *cg, u32 irref) {
+    for (u32 k = 0; k < cg->pinned_slot_count; k++) {
+        if (cg->pinned_first_load[k] != irref) continue;
+        if (cg->pinned_overwritten[k]) return 0;
+        return 6 + k;
+    }
+    return 0;
+}
+
+/* Spill / reload pinned xmm regs around C-helper calls so caller-
+ * saved xmm6+ survives the call.  We deliberately use frame_slots
+ * (which the pinned IR_SSTORE keeps in sync, and which is the
+ * snapshot's eventual destination anyway) rather than
+ * vals[first_load]: the latter would be CLOBBERED if the helper
+ * call follows an in-iter SSTORE, polluting the snapshot's pre-iter
+ * value and double-counting the post-SSTORE value into downstream
+ * consumers (e.g. `sum += i` would get sum += i+1 on the iter that
+ * happens to take the GLOAD slow path). */
+static void cg_spill_pinned(CG *cg) {
+    for (u32 k = 0; k < cg->pinned_slot_count; k++)
+        emit_movsd_slot_xmmN(cg, cg->pinned_slots[k], (u8)(6 + k));
+}
+static void cg_reload_pinned(CG *cg) {
+    for (u32 k = 0; k < cg->pinned_slot_count; k++)
+        emit_movsd_xmmN_slot(cg, (u8)(6 + k), cg->pinned_slots[k]);
 }
 
 /* movsd xmm0, [rbp + disp32]  -- F2 0F 10 85 disp32.  Phase 4.4k
@@ -796,9 +971,20 @@ static void emit_mov_r9_r13(CG *cg) {
     static const u8 b[] = { 0x4D, 0x89, 0xE9 }; cg_emit_bytes(cg, b, 3);
 }
 
-/* call rax           -- FF D0. */
+/* call rax           -- FF D0.
+ *
+ * When register pinning is active and we're still emitting body code
+ * (cg->in_stub_emit == false), spill the pinned xmm regs to vals[]
+ * before the call and reload after.  xmm6+ are caller-saved on SysV,
+ * so any helper call would otherwise clobber them.  Stub-area calls
+ * happen AFTER the side-exit replay (which has already flushed to
+ * the slot), so they don't need preserving. */
 static void emit_call_rax(CG *cg) {
-    static const u8 b[] = { 0xFF, 0xD0 }; cg_emit_bytes(cg, b, 2);
+    bool wrap = cg->pinned_slot_count > 0 && !cg->in_stub_emit;
+    if (wrap) cg_spill_pinned(cg);
+    static const u8 b[] = { 0xFF, 0xD0 };
+    cg_emit_bytes(cg, b, 2);
+    if (wrap) cg_reload_pinned(cg);
 }
 
 /* ============================================================ */
@@ -929,6 +1115,20 @@ static void emit_epilogue(CG *cg) {
  * (loaded) value, so the snapshot replay is a no-op for this slot. */
 static void emit_sload(CG *cg, u32 slot, u32 i, IRType slot_type,
                        bool num_known) {
+    /* Pinned-register fast path: the slot's value lives in xmm6+
+     * across iterations; the SLOAD just mirrors it to vals[i] so any
+     * downstream non-pinned consumer (and snapshot replay) sees a
+     * coherent value.  Type was already validated in the prologue's
+     * cold-path load. */
+    if (slot_type == IRT_NUM) {
+        u32 xmm = cg_pin_xmm_for_slot(cg, slot);
+        if (xmm) {
+            emit_movsd_vals_xmmN(cg, i, (u8)xmm);
+            cg_invalidate_xmm0(cg);
+            return;
+        }
+    }
+
     emit_mov_rax_slot(cg, slot);
     if (slot_type == IRT_OBJ) {
         emit_movabs_rcx(cg, 0xFFFF000000000000ULL);   /* NB_TAG_BITS_MASK */
@@ -997,8 +1197,32 @@ static void emit_sload(CG *cg, u32 slot, u32 i, IRType slot_type,
     emit_mov_vals_rax(cg, i);
 }
 
-/* IR_SSTORE slot, op2: vals[op2] -> frame_slots[slot]. */
+/* IR_SSTORE slot, op2: vals[op2] -> frame_slots[slot].
+ *
+ * Pinned-slot path: update the pinned xmm reg AND the slot.  Updating
+ * just the xmm reg would be tempting, but a side-exit at a guard
+ * whose snapshot is empty (e.g. the loop-exit IR_LE failure, which
+ * sees no preceding SSTOREs in the recorded iter) would skip
+ * snapshot replay entirely and leave the slot at the pre-trace
+ * value -- bytecode would then re-trip the back-edge and re-enter
+ * the JIT forever.  Writing the slot on every SSTORE keeps the
+ * snapshot mechanism robust and still buys us the SLOAD-side win
+ * (the SLOAD's memory load + NaN-box guard are both gone for
+ * pinned slots). */
 static void emit_sstore(CG *cg, u32 slot, u32 op2) {
+    u32 xmm = cg_pin_xmm_for_slot(cg, slot);
+    if (xmm) {
+        /* Pinned slot: only update the xmm reg.  The slot itself is
+         * NOT written per iter -- the side-exit common stub writes
+         * xmm to slot on bail (so an early guard that fires before
+         * any SSTORE in this iter still restores the slot to its
+         * iter-start value), and snapshot replay overwrites with
+         * vals[first_load] when SSTOREs precede the failing guard. */
+        emit_movsd_xmmN_vals(cg, (u8)xmm, op2);
+        u32 k = (u32)xmm - 6u;
+        if (k < CG_MAX_PINNED) cg->pinned_overwritten[k] = true;
+        return;
+    }
     emit_mov_rax_vals(cg, op2);
     emit_mov_slot_rax(cg, slot);
 }
@@ -1030,7 +1254,22 @@ static void emit_kbool(CG *cg, u32 imm, u32 i) {
  * movsd load.  Mandelbrot's hot loop has two such MULs (zr*zr,
  * zi*zi) per iteration. */
 static void emit_arith(CG *cg, IROp op, u32 a, u32 b, u32 i) {
-    emit_load_xmm0(cg, a);
+    /* Pinned-reg fast paths: when a or b is a pinned IR_SLOAD's IRRef,
+     * the value lives in xmm6+ across iterations -- skip the
+     * `movsd xmm0, [vals+]` load entirely.  RHS in a pinned reg
+     * folds straight into the arith op as `addsd xmm0, xmmN` etc. */
+    u32 a_xmm = cg_pin_xmm_for_irref(cg, a);
+    u32 b_xmm = cg_pin_xmm_for_irref(cg, b);
+
+    /* Stage LHS in xmm0. */
+    if (a_xmm) {
+        emit_movsd_xmm_xmm(cg, 0, (u8)a_xmm);
+        cg_invalidate_xmm0(cg);    /* xmm0_holds tracking only knows
+                                       about loads from vals */
+    } else {
+        emit_load_xmm0(cg, a);
+    }
+
     if (a == b) {
         switch (op) {
         case IR_ADD: emit_addsd_self(cg); break;
@@ -1039,6 +1278,16 @@ static void emit_arith(CG *cg, IROp op, u32 a, u32 b, u32 i) {
         case IR_DIV: emit_divsd_self(cg); break;
         default:     cg->failed = true; return;
         }
+    } else if (b_xmm) {
+        u8 op_byte;
+        switch (op) {
+        case IR_ADD: op_byte = 0x58; break;
+        case IR_SUB: op_byte = 0x5C; break;
+        case IR_MUL: op_byte = 0x59; break;
+        case IR_DIV: op_byte = 0x5E; break;
+        default:     cg->failed = true; return;
+        }
+        emit_arith_xmm0_xmmN(cg, op_byte, (u8)b_xmm);
     } else {
         emit_movsd_xmm_vals(cg, 1, b);
         switch (op) {
@@ -1810,9 +2059,23 @@ static void emit_call_f1(CG *cg, u32 native_idx, u32 op2, u32 i) {
  * Mirrors the IR-interp's "(a CMP b) ? 1.0 : 0.0" semantics.  We
  * trust no NaN inputs in v1 (numeric IR by construction). */
 static void emit_compare(CG *cg, IROp op, u32 a, u32 b, u32 i) {
-    emit_load_xmm0(cg, a);
-    emit_movsd_xmm_vals(cg, 1, b);
-    emit_ucomisd_xmm0_xmm1(cg);
+    /* Mirrors emit_arith's pinned-reg shortcuts: skip the LHS vals[]
+     * load when a is pinned, and feed RHS as `ucomisd xmm0, xmmN`
+     * when b is pinned. */
+    u32 a_xmm = cg_pin_xmm_for_irref(cg, a);
+    u32 b_xmm = cg_pin_xmm_for_irref(cg, b);
+    if (a_xmm) {
+        emit_movsd_xmm_xmm(cg, 0, (u8)a_xmm);
+        cg_invalidate_xmm0(cg);
+    } else {
+        emit_load_xmm0(cg, a);
+    }
+    if (b_xmm) {
+        emit_ucomisd_xmm0_xmmN(cg, (u8)b_xmm);
+    } else {
+        emit_movsd_xmm_vals(cg, 1, b);
+        emit_ucomisd_xmm0_xmm1(cg);
+    }
     switch (op) {
     case IR_LT:  emit_setb_al(cg);  break;
     case IR_LE:  emit_setbe_al(cg); break;
@@ -1858,6 +2121,107 @@ static void emit_guard_bool(CG *cg, IROp op, u32 op1, u16 snap_idx) {
 /* Main entry point                                              */
 /* ============================================================ */
 
+/* Register-pinning pre-pass: select up to CG_MAX_PINNED slots that
+ * are good candidates for keeping in callee-managed xmm regs across
+ * iterations.  A slot qualifies when (a) the trace contains an
+ * IR_SLOAD of it tagged IRF_NUM_KNOWN (i.e. an SSTORE elsewhere
+ * proves the slot is numeric on subsequent iters), (b) the slot
+ * isn't IRF_INVARIANT (which would already be skipped on warm).
+ *
+ * For each pinned slot we record the IRRef of the FIRST IR_SLOAD --
+ * that's the IRRef snapshot replay reads from vals[] to restore the
+ * pre-iter slot value, so the SLOAD codegen keeps writing vals[]
+ * from the pinned register to keep snapshots correct.
+ *
+ * Picks the first qualifying slots in IR-emission order; this favours
+ * loop counters / FOR_RANGE state and accumulators bound first by
+ * the recorder, which is exactly the high-traffic data. */
+static void cg_assign_pinned_slots(CG *cg, const CandoTraceIR *ir) {
+    cg->pinned_slot_count = 0;
+    if (ir->ir_count <= 1) return;
+    for (u32 i = 1; i < ir->ir_count &&
+                    cg->pinned_slot_count < CG_MAX_PINNED; i++) {
+        const IRIns *in = &ir->ir[i];
+        if (in->op != IR_SLOAD) continue;
+        if (in->type != IRT_NUM) continue;
+        if (!(in->flags & IRF_NUM_KNOWN)) continue;
+        if (in->flags & IRF_INVARIANT) continue;
+        u32 slot = in->op1;
+        bool dup = false;
+        for (u32 k = 0; k < cg->pinned_slot_count; k++)
+            if (cg->pinned_slots[k] == slot) { dup = true; break; }
+        if (dup) continue;
+        cg->pinned_slots     [cg->pinned_slot_count] = slot;
+        cg->pinned_first_load[cg->pinned_slot_count] = i;
+        cg->pinned_slot_count++;
+    }
+}
+
+/* For the codegen body: load the pinned slot into its xmm reg.
+ * Emitted at the START of each iter ONLY on the first iter via the
+ * standard skip_invariant gate -- on iter 2+ the previous iter's
+ * SSTORE has left the right value in the xmm reg, so we just skip
+ * the reload.  Type checks are folded in -- a non-numeric value
+ * side-exits to the trace's first guard's snapshot.
+ *
+ * Layout per pinned slot, gated on (skip_invariant == false):
+ *
+ *   mov   rax, [r15 + 8*slot]     ; load NaN-box bits
+ *   movq  xmmN, rax               ; copy bits -> xmm
+ *   ; type check on rax (cold path)
+ *   movabs rcx, NB_MASK
+ *   and   rax, rcx
+ *   cmp   rax, rcx
+ *   je    side_exit               ; not a number -> bail
+ *
+ * The xmm reg also caches in vals[first_load] (so snapshot replay
+ * sees a coherent pre-iter value).  We do that with a single movsd
+ * after the check, which doubles as the "vals[] mirror". */
+static void emit_pinned_prologue(CG *cg) {
+    if (cg->pinned_slot_count == 0) return;
+    /* Gate on skip_invariant -- iter 2+ trusts the prior SSTORE. */
+    static const u8 test_jne[] = { 0x45, 0x84, 0xED, 0x0F, 0x85 };
+    cg_emit_bytes(cg, test_jne, 5);
+    u32 skip_disp_off = cg_off(cg);
+    cg_emit_u32(cg, 0);
+    u32 cold_start = cg_off(cg);
+    for (u32 k = 0; k < cg->pinned_slot_count; k++) {
+        u8  xmm  = (u8)(6 + k);
+        u32 slot = cg->pinned_slots[k];
+        emit_mov_rax_r15_slot(cg, slot);
+        /* movq xmm, rax -- 66 [REX] 0F 6E ModR/M; using REX.W for
+         * 64-bit GPR transfer.  REX.R for xmm>=8 (we don't reach
+         * here with CG_MAX_PINNED=4). */
+        cg_emit_u8(cg, 0x66);
+        u8 rex = 0x48;                          /* REX.W */
+        if (xmm & 8) rex |= 0x04;
+        cg_emit_u8(cg, rex);
+        cg_emit_u8(cg, 0x0F);
+        cg_emit_u8(cg, 0x6E);
+        cg_emit_u8(cg, (u8)(0xC0 | ((xmm & 7) << 3) | 0));   /* rax = 0 */
+        /* Type check: (rax & NB_MASK) == NB_MASK -> not a number. */
+        emit_movabs_rcx(cg, 0xFFF8000000000000ULL);
+        emit_and_rax_rcx(cg);
+        emit_cmp_rax_rcx(cg);
+        if (cg->guard_count >= CG_MAX_GUARDS) { cg->failed = true; return; }
+        cg->guards[cg->guard_count].je_disp_off = emit_je_rel32_placeholder(cg);
+        cg->guards[cg->guard_count].snap_idx    = 0;   /* trace head */
+        cg->guards[cg->guard_count].stub_off    = 0;
+        cg->guard_count++;
+        /* Mirror to vals[first_load] so snapshot replay restores the
+         * slot to its pre-iter value on later guard fails. */
+        emit_movsd_vals_xmmN(cg, cg->pinned_first_load[k], xmm);
+    }
+    /* Patch the JNE to land here. */
+    u32 here = cg_off(cg);
+    i32 disp = (i32)here - (i32)(skip_disp_off + 4);
+    cg->base[skip_disp_off + 0] = (u8)(disp & 0xFF);
+    cg->base[skip_disp_off + 1] = (u8)((disp >> 8) & 0xFF);
+    cg->base[skip_disp_off + 2] = (u8)((disp >> 16) & 0xFF);
+    cg->base[skip_disp_off + 3] = (u8)((disp >> 24) & 0xFF);
+    (void)cold_start;
+}
+
 bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
     if (!t || t->mcode_fn != NULL) return t && t->mcode_fn != NULL;
     if (t->ir.ir_count == 0) return false;
@@ -1874,8 +2238,13 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
      * BEFORE the prologue so its sub rsp can reserve the right
      * amount.  Reads IRF_SUNK set by escape_analysis. */
     cg_assign_sunk_offsets(&cg, &t->ir);
+    /* Pin loop-carried numeric scalars in xmm6+.  Reads IRF_NUM_KNOWN
+     * set by mark_known_num_sloads.  Body emit and side-exit stubs
+     * consult cg.pinned_slots / pinned_first_load. */
+    cg_assign_pinned_slots(&cg, &t->ir);
 
     emit_prologue(&cg);
+    emit_pinned_prologue(&cg);
 
     /* Phase 8.9: capture body-start offset so IR_LOOP can emit a
      * backwards jump (instead of falling off the end and returning
@@ -2232,9 +2601,22 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
             (i32)offsetof(struct CandoTrace, sink_shadow_init), 1);
     }
 
-    /* LOOP_DONE epilogue: returns 0 (TRACE_LOOP_DONE). */
+    /* LOOP_DONE epilogue: returns 0 (TRACE_LOOP_DONE).  Pinned regs
+     * mirror to vals[first_load] is already kept up-to-date by SLOAD,
+     * so a clean LOOP_DONE doesn't need to re-flush -- but we still
+     * write each pinned slot back to its frame slot here, since this
+     * exit path bypasses snapshot replay. */
+    if (cg.pinned_slot_count > 0) {
+        for (u32 k = 0; k < cg.pinned_slot_count; k++)
+            emit_movsd_slot_xmmN(&cg, cg.pinned_slots[k], (u8)(6 + k));
+    }
     emit_xor_eax_eax(&cg);
     emit_epilogue(&cg);
+
+    /* Stub area: side-exit replay calls run AFTER the snapshot has
+     * already been built; we don't need to preserve pinned xmm regs
+     * across those calls.  Switch the spill-wrap off. */
+    cg.in_stub_emit = true;
 
     /* Per-guard stubs: each loads its snap_idx into r9d then jumps
      * to side_exit_common.  Records the stub's offset so we can
@@ -2273,6 +2655,16 @@ bool cando_jit_codegen_trace(struct CandoVM *vm, CandoTrace *t) {
      *   epilogue
      */
     u32 common_off = cg_off(&cg);
+    /* Pinned-slot flush.  For each pinned slot, write the current
+     * xmm reg back to frame_slots[slot] BEFORE snapshot replay.
+     * This guarantees a correct slot value even when the failing
+     * guard's snapshot doesn't include an entry for this slot (i.e.
+     * the failing guard fires before any same-iter SSTORE).  If the
+     * guard fires after an SSTORE, the snapshot's SNAP_SLOT entry
+     * will overwrite with vals[first_load] = iter-start value -- so
+     * the SLOAD's mirror at iter start is what ultimately wins. */
+    for (u32 k = 0; k < cg.pinned_slot_count; k++)
+        emit_movsd_slot_xmmN(&cg, cg.pinned_slots[k], (u8)(6 + k));
     if (cg.sink_count > 0) {
         /* r9 carries snap_idx for the replay helper; the
          * materialise call would clobber it.  Stash in r13
