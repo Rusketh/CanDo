@@ -21,7 +21,7 @@ import { Scope, Binding, ResolveResult } from './scope';
 import {
     TypeRef, FunctionType, FunctionParam, FunctionSummary, ObjectType, ClassType,
     ArrayType, NamespaceInfo, MemberType,
-    ANY, UNKNOWN, NULL_T, BOOL_T, NUM_T, STR_T,
+    ANY, UNKNOWN, NULL_T, BOOL_T, NUM_T, STR_T, THREAD_T,
     arrayOf, tupleOf, emptyObject, optionalOf, unionOf,
     firstOf, enumerateMembers, narrowTruthy, narrowFalsy,
     setMember
@@ -888,8 +888,60 @@ class Inferer {
                 this.expr(e.from, scope, flow);
                 this.expr(e.to, scope, flow);
                 return arrayOf(NUM_T);
+            case 'ThreadExpr': return this.inferThreadExpr(e, scope, flow);
+            case 'AwaitExpr': return this.inferAwaitExpr(e, scope, flow);
             case 'ErrorExpr': return UNKNOWN;
         }
+    }
+
+    private inferThreadExpr(e: import('./ast').ThreadExpr, scope: Scope, flow: FlowEnv): TypeRef {
+        /* Walk the body for side effects so locals are typed and any
+         * doc-driven param replays still happen. We don't recover the
+         * thread's return type yet -- that requires linking ThreadExpr
+         * sites to their await sites, which is future work. */
+        if (e.body.kind === 'BlockStmt') {
+            const fnScope = this.resolved.scopeOf.get(e) ?? scope;
+            const bodyScope = this.resolved.scopeOf.get(e.body) ?? fnScope;
+            const returns: TypeRef[][] = [];
+            this.fnStack.push({ returns });
+            let inner = flow;
+            for (const sub of e.body.body) inner = this.stmt(sub, bodyScope, inner);
+            this.fnStack.pop();
+            /* Remember the body's return type on the node so a
+             * downstream `await` can recover it. */
+            this.nodeTypes.set(e, this.threadHandleType(this.combineReturns(returns)));
+        } else {
+            const inner = this.expr(e.body, scope, flow);
+            this.nodeTypes.set(e, this.threadHandleType(inner));
+        }
+        return this.nodeTypes.get(e) ?? THREAD_T;
+    }
+
+    private inferAwaitExpr(e: import('./ast').AwaitExpr, scope: Scope, flow: FlowEnv): TypeRef {
+        const t = this.expr(e.argument, scope, flow);
+        /* If we know the awaited value came from a ThreadExpr we typed
+         * with a "thread<R>" shape, peel back to R. Otherwise punt. */
+        if (t.kind === 'object' && t.className === 'thread' && t.indexValue) {
+            return t.indexValue;
+        }
+        return UNKNOWN;
+    }
+
+    /** Construct a "thread handle" type carrying the body's return type
+     *  in `indexValue`. We piggyback on ObjectType (className='thread')
+     *  rather than inventing a new TypeRef kind. */
+    private threadHandleType(returnType: TypeRef): ObjectType {
+        return {
+            kind: 'object',
+            className: 'thread',
+            members: new Map([
+                ['state',  { type: { kind: 'function', params: [], returns: [STR_T], name: 'thread.state' } }],
+                ['done',   { type: { kind: 'function', params: [], returns: [BOOL_T], name: 'thread.done' } }],
+                ['join',   { type: { kind: 'function', params: [], returns: [returnType], name: 'thread.join' } }],
+                ['error',  { type: { kind: 'function', params: [], returns: [UNKNOWN], name: 'thread.error' } }]
+            ]),
+            indexValue: returnType
+        };
     }
 
     private inferIdent(e: Ident, scope: Scope, flow: FlowEnv): TypeRef {
@@ -1395,9 +1447,27 @@ class Inferer {
         const pipeBind = inner.bindings.get('pipe');
         const element = srcT.kind === 'array' ? srcT.element : ANY;
         if (pipeBind) { pipeBind.type = element; this.bindingTypes.set(pipeBind, element); }
-        const bodyT = this.expr(e.body, inner, flow);
+        let bodyT: TypeRef;
+        if (e.body.kind === 'BlockStmt') {
+            /* Block body: walk statements and collect RETURN values
+             * into a synthetic function frame so we can recover the
+             * mapped element's type. */
+            const returns: TypeRef[][] = [];
+            this.fnStack.push({ returns });
+            let f = flow;
+            for (const sub of e.body.body) f = this.stmt(sub, inner, f);
+            this.fnStack.pop();
+            bodyT = this.combineReturns(returns);
+        } else {
+            bodyT = this.expr(e.body, inner, flow);
+        }
         if (e.op === '~>') return arrayOf(firstOf(bodyT));
-        /* ~!> and ~&> are filters: result is array of source-element. */
+        if (e.op === '~!>') {
+            /* Map+filter: result element is whatever the body returns,
+             * minus the dropped-NULL case. We don't model the drop. */
+            return arrayOf(firstOf(bodyT));
+        }
+        /* ~&> is a predicate filter: result is array of source-element. */
         return arrayOf(element);
     }
 }

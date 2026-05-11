@@ -355,7 +355,12 @@ class Resolver {
                 const body = new Scope(this.nextId(), 'block', scope, e);
                 this.scopeOf.set(e, body);
                 this.declare(body, 'pipe', 'pipe', e, e.range, e.range);
-                this.expr(e.body, body);
+                if (e.body.kind === 'BlockStmt') {
+                    this.scopeOf.set(e.body, body);
+                    for (const sub of e.body.body) this.stmt(sub, body);
+                } else {
+                    this.expr(e.body, body);
+                }
                 return;
             }
             case 'Member': this.expr(e.object, scope); return;
@@ -394,6 +399,22 @@ class Resolver {
             case 'Spread': this.expr(e.argument, scope); return;
             case 'Paren': this.expr(e.expression, scope); return;
             case 'RangeExpr': this.expr(e.from, scope); this.expr(e.to, scope); return;
+            case 'ThreadExpr': {
+                /* `thread { ... }` is its own function-like scope: RETURN
+                 * targets the thread, locals don't leak. The call form
+                 * `thread foo(x)` just spawns the call, no new scope. */
+                if (e.body.kind === 'BlockStmt') {
+                    const fn = new Scope(this.nextId(), 'function', scope, e);
+                    this.scopeOf.set(e, fn);
+                    const body = new Scope(this.nextId(), 'block', fn, e.body);
+                    this.scopeOf.set(e.body, body);
+                    for (const sub of e.body.body) this.stmt(sub, body);
+                } else {
+                    this.expr(e.body, scope);
+                }
+                return;
+            }
+            case 'AwaitExpr': this.expr(e.argument, scope); return;
 
             case 'NumberLit':
             case 'StringLit':

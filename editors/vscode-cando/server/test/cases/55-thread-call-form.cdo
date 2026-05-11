@@ -1,0 +1,4 @@
+FUNCTION compute(x) { RETURN x * x; }
+VAR t = thread compute(7);
+print(t.|join());
+// MEMBERS: state, done, join, error

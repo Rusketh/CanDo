@@ -1,0 +1,5 @@
+VAR t = thread { thread.sleep(10); RETURN "done"; };
+thread.cancel(t);
+VAR s = t:state();
+print(s|);
+// EXPECT: string

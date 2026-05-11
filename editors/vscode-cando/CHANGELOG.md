@@ -7,6 +7,20 @@ documented in this file.
 
 ### Added
 
+- **`thread { ... }` and `await` as expressions.** Previously only the
+  statement form `THREAD expr;` was recognised; `VAR t = thread { ...
+  };` and `VAR r = await t;` are now first-class. The thread handle is
+  modelled as a structural type with `state`/`done`/`join`/`error`
+  members, and the body's RETURN type is recovered through `await` so
+  multi-return unpacks (`VAR a, b, c = await t;`) work as expected.
+- **Pipe block bodies.** `arr ~!> { IF pipe > 0 { RETURN pipe * 2; } }`
+  (and the same for `~>` / `~&>`) now parses cleanly. The body lives in
+  the pipe's own scope so `pipe` is visible inside it, and RETURNs are
+  collected into the mapped element type.
+- **`thread.<member>` disambiguation.** The `thread` keyword no longer
+  shadows the `thread` stdlib namespace; `thread.sleep(...)`,
+  `thread.cancel(t)`, etc. all parse correctly even though `thread`
+  itself remains the spawn keyword.
 - **Cross-function object-shape prediction.** Every user function gets
   a per-parameter write summary recorded during inference: every
   direct `param.key = value` mutation. At call sites, the summary is

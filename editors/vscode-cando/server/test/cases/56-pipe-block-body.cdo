@@ -1,0 +1,6 @@
+VAR xs = [1, 2, 3, 4];
+VAR evens_doubled = xs ~!> {
+    IF pipe % 2 == 0 { RETURN pipe * 2; }
+};
+print(evens_doubled|);
+// EXPECT: array<number>

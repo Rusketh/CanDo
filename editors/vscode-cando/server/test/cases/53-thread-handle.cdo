@@ -1,0 +1,4 @@
+VAR t = thread { RETURN 42; };
+print(t.|state());
+// EXPECT: thread
+// MEMBERS: state, done, join, error

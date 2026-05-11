@@ -197,13 +197,18 @@ class Parser {
                 case 'CONTINUE': return this.parseBreakLike('ContinueStmt');
                 case 'SETTLE':   return this.parseBreakLike('SettleStmt');
                 case 'THREAD': {
-                    /* THREAD expr; — desugars to a thread-spawn; for analysis we
-                     * just treat it as an expression statement so the body is
-                     * still typed. */
-                    const tStart = this.advance().range.start;
-                    const expr = this.parseExpression();
+                    /* `thread.foo(...)` is stdlib namespace access, not the
+                     * spawn keyword; fall through to expression-statement
+                     * parsing so member/call handling takes over. */
+                    const next = this.peek(1);
+                    if (next.kind === 'op' && (next.value === '.' || next.value === '(' || next.value === '[')) {
+                        return this.parseExpressionStatement();
+                    }
+                    /* THREAD expr; — wrap as an ExprStmt around a ThreadExpr
+                     * so analysis sees the spawn and yields a thread handle. */
+                    const expr = this.parseThreadExpr();
                     this.matchOp(';');
-                    return { kind: 'ExprStmt', expr, range: { start: tStart, end: expr.range.end } };
+                    return { kind: 'ExprStmt', expr, range: expr.range };
                 }
             }
         }
@@ -737,21 +742,32 @@ class Parser {
             if (info.bp < minBp) break;
             this.advance();
             const nextMin = info.rightAssoc ? info.bp : info.bp + 1;
-            const right = this.parseBinaryAt(nextMin);
-            if (op === '->' || op === '<-') {
-                left = {
-                    kind: 'RangeExpr',
-                    from: op === '->' ? left : right,
-                    to:   op === '->' ? right : left,
-                    dir: op === '->' ? 'ASC' : 'DESC',
-                    range: { start: left.range.start, end: right.range.end }
-                };
-            } else if (op === '~>' || op === '~!>' || op === '~&>') {
+            /* Pipe bodies (`~>`, `~!>`, `~&>`) allow a block form on the
+             * RHS as an alternative to a single expression -- treat a
+             * leading `{` as a block-expression rather than an object
+             * literal here. */
+            const right = ((op === '~>' || op === '~!>' || op === '~&>') && this.isOp('{'))
+                ? this.parseBlockAsExpr()
+                : this.parseBinaryAt(nextMin);
+            if (op === '~>' || op === '~!>' || op === '~&>') {
                 left = {
                     kind: 'Pipe',
                     source: left,
                     op: op as Pipe['op'],
                     body: right,
+                    range: { start: left.range.start, end: right.range.end }
+                };
+            } else if (right.kind === 'BlockStmt') {
+                /* parseBlockAsExpr only fires for pipe ops; this branch
+                 * is defensive. */
+                this.error(right.range, 'Block expression not allowed here');
+                left = { kind: 'ErrorExpr', range: right.range };
+            } else if (op === '->' || op === '<-') {
+                left = {
+                    kind: 'RangeExpr',
+                    from: op === '->' ? left : right,
+                    to:   op === '->' ? right : left,
+                    dir: op === '->' ? 'ASC' : 'DESC',
                     range: { start: left.range.start, end: right.range.end }
                 };
             } else {
@@ -964,6 +980,19 @@ class Parser {
                 if (up === 'NULL')  { this.advance(); return { kind: 'NullLit',                range: t.range }; }
                 if (up === 'FUNCTION') return this.parseFunctionExpr();
                 if (up === 'CLASS')    return this.parseClassExpr();
+                if (up === 'THREAD') {
+                    /* `thread.<member>` and `thread(...)` are stdlib
+                     * namespace access, not the spawn keyword. Treat
+                     * the bare keyword followed by `.` or `(` as an
+                     * identifier so member/call parsing takes over. */
+                    const next = this.peek(1);
+                    if (next.kind === 'op' && (next.value === '.' || next.value === '(' || next.value === '[')) {
+                        this.advance();
+                        return { kind: 'Ident', name: 'thread', range: t.range };
+                    }
+                    return this.parseThreadExpr();
+                }
+                if (up === 'AWAIT')    return this.parseAwaitExpr();
                 /* `pipe` keyword is the loop variable inside ~> bodies. */
                 if (t.value === 'pipe' || up === 'PIPE') {
                     this.advance();
@@ -1078,6 +1107,44 @@ class Parser {
             kind: 'FunctionExpr',
             params, body, arrow: true,
             range: { start: open.range.start, end: body.range.end }
+        };
+    }
+
+    /** Pipe block body: `{ ... }`. Returns the BlockStmt as-is; the
+     *  pipe AST node tolerates Expr | BlockStmt for its body. */
+    private parseBlockAsExpr(): BlockStmt {
+        return this.parseBlock();
+    }
+
+    private parseThreadExpr(): Expr {
+        const kw = this.advance();   // THREAD / thread
+        if (this.isOp('{')) {
+            /* Block form: `thread { ... }`. Body is a sequence of
+             * statements; RETURN inside it yields the thread's value. */
+            const body = this.parseBlock();
+            return {
+                kind: 'ThreadExpr',
+                body,
+                range: { start: kw.range.start, end: body.range.end }
+            };
+        }
+        /* Call form: `thread expr` -- parse a unary-level expression so
+         * suffixes (member/call) attach to the inner expr, then wrap. */
+        const inner = this.parsePrefix();
+        return {
+            kind: 'ThreadExpr',
+            body: inner,
+            range: { start: kw.range.start, end: inner.range.end }
+        };
+    }
+
+    private parseAwaitExpr(): Expr {
+        const kw = this.advance();
+        const arg = this.parsePrefix();
+        return {
+            kind: 'AwaitExpr',
+            argument: arg,
+            range: { start: kw.range.start, end: arg.range.end }
         };
     }
 
