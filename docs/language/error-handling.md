@@ -56,21 +56,18 @@ objects.  When the embedder receives an uncaught error, it sees the
 
 ## Re-throwing
 
-Inside a `CATCH`, `RERAISE` rethrows the current error unchanged:
+CanDo has no dedicated re-raise keyword.  To propagate an error from a
+`CATCH`, either omit the `CATCH` clause for the cases you don't want to
+handle, or `THROW` a fresh value (the new error replaces the old one):
 
 ```cdo
 TRY {
     risky();
 } CATCH (e) {
     log(e);
-    RERAISE;
+    THROW e;          // forward the same value
 }
 ```
-
-`RERAISE` outside a `CATCH` body is a runtime error.
-
-You can also `THROW` a fresh error from inside `CATCH`; the new error
-replaces the old one.
 
 ## Runtime errors
 
@@ -99,7 +96,6 @@ different failure modes.
 | `comparison requires numbers`                              | `<`, `<=`, `>`, `>=` between non-numeric values without a `__lt` / `__le` metamethod. |
 | `range requires numbers`                                   | `a -> b` or `a <- b` outside a `FOR` (the range-list form). |
 | `range check requires numbers`                             | A `FOR i IN a -> b { … }` where `a` or `b` isn't a number. |
-| `unary '+' requires a number`                              | `+x` on a non-string non-number. |
 | `unary '-' requires a number`                              | `-x` on a non-numeric value without `__unm`. |
 | `'++' requires a number`, `'--' requires a number`         | Increment/decrement on a non-number. |
 | `# operator requires a string or object`                   | `#x` on `null`, `bool`, or `number` without `__len`. |
@@ -137,7 +133,6 @@ different failure modes.
 | `BREAK outside loop`                     | `BREAK` (or `BREAK n`) used where no loop is active. |
 | `CONTINUE outside loop`                  | `CONTINUE` used where no loop is active. |
 | `SETTLE outside IF`                      | `SETTLE` (or `SETTLE n`) used outside an `IF` chain. |
-| `RERAISE outside of catch block`         | `RERAISE` used outside a `CATCH` body. |
 
 ### Threads and concurrency
 

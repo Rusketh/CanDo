@@ -6,8 +6,8 @@ JSON parsing and serialization.
 
 ### `json.parse(text) → any`
 
-Decode a JSON string into CanDo values.  Returns `NULL` on malformed
-input.
+Decode a JSON string into CanDo values.  **Throws** on malformed input
+— wrap in `TRY` / `CATCH` to recover.
 
 | JSON           | CanDo value          |
 |----------------|----------------------|
@@ -23,7 +23,11 @@ VAR data = json.parse('{"name":"Alice","scores":[10,20,30]}');
 print(data.name);                  // Alice
 print(inspect(data.scores));       // [10, 20, 30]
 
-print(json.parse("not json"));     // null
+TRY {
+    json.parse("not json");
+} CATCH (e) {
+    print("bad json:", e);
+}
 ```
 
 ### `json.stringify(value) → string`
@@ -58,12 +62,17 @@ print(loaded.port);                // 8080
 ### Defensive parsing
 
 ```cdo
-VAR data = json.parse(input) || {};
+VAR data;
+TRY {
+    data = json.parse(input);
+} CATCH (e) {
+    data = {};
+}
 VAR token = data?.auth?.token || "anonymous";
 ```
 
-`json.parse` returns `NULL` rather than throwing, so chaining `||` is
-safe.
+Wrap parsing in `TRY` / `CATCH` whenever the input may be untrusted —
+malformed JSON throws.
 
 ### Pretty printing
 

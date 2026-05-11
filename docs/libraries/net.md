@@ -8,16 +8,16 @@ resolution internally and accept hostnames directly.
 
 ## Reference
 
-### `net.lookup(hostname) → string | null`
+### `net.lookup(hostname) → array | null`
 
-Resolve a hostname to an IPv4 address string, or `NULL` if resolution
-fails.
+Resolve a hostname to an array of IPv4 address strings, or `NULL` if
+resolution fails.  Every address returned by the host resolver is
+included.
 
 ```cdo
-print(net.lookup("example.com"));     // "93.184.216.34"
-print(net.lookup("nope.invalid"));    // null
+print(inspect(net.lookup("example.com")));   // ["93.184.216.34", ...]
+print(net.lookup("nope.invalid"));           // null
 ```
 
-For multiple addresses or IPv6 results, use [`socket.resolve`](socket.md)
-instead — it returns an array of up to 16 numeric addresses (IPv4 and
-IPv6).
+For IPv6 results, use [`socket.resolve`](socket.md) instead — it
+returns up to 16 numeric addresses across both address families.

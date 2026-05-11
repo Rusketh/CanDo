@@ -41,18 +41,21 @@ its descendants.
 os.setenv("LANG", "C.UTF-8");
 ```
 
-### `os.execute(cmd) → string | null`
+### `os.execute(cmd) → number`
 
 Run `cmd` via the host shell (`/bin/sh -c` on POSIX, `cmd.exe /c` on
-Windows) and return its captured stdout.  Returns `NULL` on failure.
+Windows) and return the shell's **exit status** as a number.  Returns
+`-1` if the shell could not be launched.  Stdout and stderr go to the
+parent process's standard streams; they are *not* captured.
 
 ```cdo
-VAR who = os.execute("whoami"):trim();
-print(who);
+VAR status = os.execute("ls /tmp > /dev/null");
+print(status);                     // 0
 ```
 
-For more control over stdin/stdout/stderr, working directory, and
-arguments, use [`process.spawn`](process.md) instead.
+To capture output, set working directory, redirect streams, or pass
+arguments without shell quoting, use [`process.spawn`](process.md)
+instead.
 
 ### `os.exit(code*)`
 

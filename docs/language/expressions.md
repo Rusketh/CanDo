@@ -8,10 +8,11 @@ forms.  See [statements.md](statements.md) for control flow.
 | Category   | Operators                                                  |
 |------------|------------------------------------------------------------|
 | Arithmetic | `+  -  *  /  %  ^` (power)                                 |
-| Unary      | `-x  +x  !x  ~x  #x  ++x  --x`                             |
+| Unary      | `-x  !x  #x`                                               |
+| Postfix    | `x++  x--` (identifier targets only)                       |
 | Comparison | `==  !=  <  >  <=  >=`                                     |
 | Logical    | `&&  \|\|  !`                                              |
-| Bitwise    | `&  \|  \|&` (xor)  `~` (not)  `<<  >>`                    |
+| Bitwise    | `&  \|  \|&` (xor)  `<<  >>`                               |
 | Assignment | `=  +=  -=  *=  /=  %=  ^=`                                |
 | Indexing   | `a[i]   obj.field   obj["field"]`                          |
 | Safe       | `obj?.field   obj?[expr]`                                  |
@@ -40,9 +41,9 @@ From lowest to highest (each row binds tighter than the row above it):
 11. Additive `+`, `-`
 12. Multiplicative `*`, `/`, `%`
 13. Power `^` — right-associative
-14. Unary `- + ! ~ # ++ --`
+14. Unary prefix `- ! #`
 15. Postfix call `(...)`, member `.`, index `[…]`, method `:`, fluent
-    `::`, safe `?.` / `?[`
+    `::`, safe `?.` / `?[`, increment/decrement `++` / `--`
 
 This follows C with two adjustments: `^` is power (right-assoc), and
 the pipe operators (`~>`, `~!>`, `~&>`) form their own associativity

@@ -32,8 +32,9 @@ object owns:
   methods, `__index`, metamethods),
 - a dense `values[]` array for integer-indexed storage (used by
   arrays),
-- an `ObjectKind` tag (plain object, array, function, native, thread,
-  class, …),
+- an `ObjectKind` tag — one of `OBJ_OBJECT`, `OBJ_ARRAY`,
+  `OBJ_FUNCTION`, `OBJ_NATIVE`, `OBJ_THREAD` (classes use
+  `OBJ_OBJECT`; there is no dedicated `OBJ_CLASS`),
 - type-specific metadata (function bytecode, native pointer, thread
   state, …).
 

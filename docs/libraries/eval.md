@@ -4,11 +4,24 @@ Compile and run a string of CanDo source in the current VM.
 
 ## Reference
 
-### `eval(source) → any`
+### `eval(source, options*) → any`
 
 Compile `source` as a CanDo expression (or block of statements) and
 execute it in the calling VM.  The last expression is the return
-value.  The evaluated code has full access to the calling globals.
+value.  The evaluated code has full access to the calling globals
+(unless `sandbox` is set — see below).
+
+The optional second argument is an options object:
+
+| Field      | Type   | Effect                                                 |
+|------------|--------|--------------------------------------------------------|
+| `name`     | string | Chunk name used in error messages (default `"<eval>"`).|
+| `sandbox`  | bool   | Run with an isolated global environment.               |
+
+```cdo
+print(eval("1 + 2", { name: "math-cell" }));
+print(eval("x", { sandbox: TRUE }));   // throws: 'x' is undefined here
+```
 
 Parse or runtime errors are thrown — wrap in `TRY` / `CATCH` to handle.
 

@@ -89,13 +89,18 @@ print("ab":repeat(3));             // ababab
 print("-":repeat(10));             // ----------
 ```
 
-### `s:find(needle) → number`
+### `s:find(pattern, no_regex*) → number | null`
 
-Byte index of the first occurrence of `needle`, or `-1` if not found.
+Byte index of the first occurrence of `pattern`, or `NULL` if not
+found.  `pattern` is treated as a POSIX extended regex by default; pass
+`TRUE` as the optional `no_regex` argument to perform a literal
+substring search instead.
 
 ```cdo
-print("hello":find("ll"));         // 2
-print("hello":find("xx"));         // -1
+print("hello":find("ll"));               // 2     (regex; "ll" matches)
+print("hello":find("xx"));               // null
+print("price: $9.50":find("[0-9]+"));    // 8     (regex)
+print("a.b.c":find(".", TRUE));          // 1     (literal: first '.')
 ```
 
 ### `s:split(sep) → array`
@@ -142,21 +147,20 @@ argument from the right.
 
 ```cdo
 print("hello, %s!":format("world"));            // hello, world!
-print("%d items, $%.2f total":format(3, 9.5));  // 3 items, $9.50
+print("%d items, $%f total":format(3, 9.5));    // 3 items, $9.500000 total
 print("100%% done":format());                   // 100% done
 ```
 
 Supported conversions:
 
 - `%s` — `toString(arg)`
-- `%d` / `%i` — integer (truncates non-integer numeric input)
-- `%f` — float; precision via `%.Nf`
-- `%x` / `%X` — hexadecimal integer (lower / upper case)
-- `%c` — single byte from an integer code point
+- `%d` — integer (truncates non-integer numeric input)
+- `%f` — float (host `printf`'s default precision)
 - `%%` — literal `%`
 
-Width and precision flags use the host's `printf` semantics (left-align
-with `-`, zero-pad with `0`, etc.).
+Any other `%`-token (including `%x`, `%X`, `%c`, `%i`, and width or
+precision flags) is currently passed through verbatim — the formatter
+does **not** implement the full `printf` syntax.
 
 ### `s:match(pattern, start*, end*) → bool, array`
 

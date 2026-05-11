@@ -11,9 +11,11 @@ want to change it.
 source/parser/
   lexer.c, lexer.h        token stream
   token.h                  TokenType enum, keyword/operator table
-  parser.c, parser.h       Pratt parser; emits bytecode as it parses
-  scope.c, scope.h         block scopes, locals, upvalues, captures
-  emit.c, emit.h           emit_op / emit_op_a / emit_op_ab + helpers
+  parser.c, parser.h       Pratt parser; emits bytecode as it parses.
+                           Scope tracking (locals, upvalues, captures)
+                           and the emit helpers (emit_op / emit_op_a /
+                           emit_op_ab) live here as well — there is no
+                           separate scope.c or emit.c.
 ```
 
 ## Lexer
