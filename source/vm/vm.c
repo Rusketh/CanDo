@@ -3424,26 +3424,31 @@ static CandoVMResult vm_run(CandoVM *vm) {
              * in the current chunk (parser emits cando_number((f64)fn_start)). */
             if (cando_is_number(callee)) {
                 u32 pc = (u32)cando_as_number(callee);
-                /* Function-trace fast path: when the callee has a
-                 * compiled function trace AND the call shape matches
-                 * (single numeric arg), invoke the mcode directly
-                 * without pushing a VM frame.  On status==0 we have
-                 * a numeric result; on guard failure (status==1) we
-                 * fall through to the standard frame-push + interp
-                 * path so the call's semantics are preserved.       */
+                /* Function-trace fast path: iterate sibling function
+                 * traces at this entry PC (e.g. fib's leaf trace vs
+                 * its recursive trace, recorded as separate sibling
+                 * specialisations).  Each trace's guards either
+                 * accept the call (status=0, result in xmm0) or bail
+                 * (status=1, try next sibling).  When all siblings
+                 * fail we fall through to the standard frame-push +
+                 * interp path so the call's semantics are preserved. */
                 if (vm->jit_enabled && arg_count == 1) {
                     const u8 *entry_pc =
                         frame->closure->chunk->code + pc;
-                    CandoTrace *ft = cando_jit_find_func_trace(vm, entry_pc);
-                    if (ft && ft->func_mcode_fn != NULL) {
-                        CandoValue arg_val = vm->stack_top[-1];
-                        if (cando_is_number(arg_val)) {
-                            double arg_d = cando_as_number(arg_val);
+                    CandoValue arg_val = vm->stack_top[-1];
+                    if (cando_is_number(arg_val)) {
+                        double arg_d = cando_as_number(arg_val);
+                        CandoTrace *fts[CANDO_FUNC_TRACE_MAX_VERSIONS];
+                        u32 nf = cando_jit_find_func_traces(vm, entry_pc,
+                                                              fts,
+                                                              CANDO_FUNC_TRACE_MAX_VERSIONS);
+                        for (u32 i = 0; i < nf; i++) {
+                            CandoTrace *ft = fts[i];
+                            if (!ft->func_mcode_fn) continue;
                             SYNC_IP();
                             CandoFuncTraceResult r =
                                 ft->func_mcode_fn(vm, ft, arg_d);
                             if (r.status == 0) {
-                                /* Replace [callee, arg] with [result]. */
                                 DROP();
                                 DROP();
                                 PUSH(cando_number(r.value));
@@ -3484,12 +3489,16 @@ static CandoVMResult vm_run(CandoVM *vm) {
                     if (vm->jit_enabled && arg_count == 1) {
                         const u8 *entry_pc =
                             fn_closure->chunk->code + fn_pc;
-                        CandoTrace *ft =
-                            cando_jit_find_func_trace(vm, entry_pc);
-                        if (ft && ft->func_mcode_fn != NULL) {
-                            CandoValue arg_val = vm->stack_top[-1];
-                            if (cando_is_number(arg_val)) {
-                                double arg_d = cando_as_number(arg_val);
+                        CandoValue arg_val = vm->stack_top[-1];
+                        if (cando_is_number(arg_val)) {
+                            double arg_d = cando_as_number(arg_val);
+                            CandoTrace *fts[CANDO_FUNC_TRACE_MAX_VERSIONS];
+                            u32 nf = cando_jit_find_func_traces(vm, entry_pc,
+                                                                  fts,
+                                                                  CANDO_FUNC_TRACE_MAX_VERSIONS);
+                            for (u32 i = 0; i < nf; i++) {
+                                CandoTrace *ft = fts[i];
+                                if (!ft->func_mcode_fn) continue;
                                 SYNC_IP();
                                 CandoFuncTraceResult r =
                                     ft->func_mcode_fn(vm, ft, arg_d);

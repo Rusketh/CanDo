@@ -402,6 +402,7 @@ void cando_recorder_begin(struct CandoVM *vm, const u8 *pc) {
     }
     r->outer_frame_base = r->frame_base;
     r->call_depth       = 0;
+    r->rec_call_skip_frame = 0;
 
     /* Lazy-allocate stack_map sized to the VM's stack capacity;
      * subsequent traces reuse the same buffer. */
@@ -1265,6 +1266,28 @@ static void cando_recorder_finish(struct CandoVM *vm) {
      * pure speedup.  vm is threaded through so codegen can resolve
      * fast-native fn pointers for IR_CALL_F1. */
     cando_jit_codegen_trace(vm, t);
+
+    /* Function-trace multi-version: a freshly compiled function trace
+     * specialises one execution path of the body (e.g. fib's n<2
+     * leaf case OR its n>=2 recursive case, depending on which the
+     * recorder happened to capture).  Unblacklist the entry PC if
+     * the per-PC version count is still below the cap so a later hot
+     * trip can record a sibling trace for the OTHER path; the
+     * dispatcher then tries each in order.  Without this, fib's
+     * recursive case (~half of all calls) never JITs and falls
+     * through to bytecode forever. */
+    if (t->is_function_trace && t->func_mcode_fn != NULL) {
+        u32 versions_at_pc = 0;
+        for (u32 i = 0; i < j->trace_count; i++) {
+            if (j->traces[i].is_function_trace &&
+                j->traces[i].start_pc == t->start_pc) {
+                versions_at_pc++;
+            }
+        }
+        if (versions_at_pc < CANDO_FUNC_TRACE_MAX_VERSIONS) {
+            cando_hot_unblacklist(&j->hot, t->start_pc);
+        }
+    }
 }
 
 /* ============================================================ */
@@ -1555,6 +1578,19 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
     CandoJit *j = jit_of(vm);
     if (!j || !j->recorder.active || !ip) return;
     CandoRecorder *r = &j->recorder;
+
+    /* IR_REC_CALL suppression: while the bytecode is executing the
+     * recursive call that an IR_REC_CALL stands in for, the recorder
+     * deliberately ignores all inner ops (regardless of which path
+     * the call took -- mcode of a sibling trace, or interp push-frame).
+     * Resume recording as soon as frame_count drops back to (or
+     * below) the snapshot taken at IR_REC_CALL emit.  Must run
+     * BEFORE the frame check below, since while suppressed
+     * vm->frame_count is intentionally higher than r->call_depth. */
+    if (r->rec_call_skip_frame != 0) {
+        if (vm->frame_count > r->rec_call_skip_frame) return;
+        r->rec_call_skip_frame = 0;
+    }
 
     /* Frame check: vm->frame_count must equal the recording-start
      * count plus however many CALLC inlines we've absorbed
@@ -2659,6 +2695,16 @@ void cando_recorder_observe(struct CandoVM *vm, const u8 *ip) {
                                                       IRT_NUM, 0,
                                                       arg_ref, 0);
                         rec_push(r, result, callee_pos);
+                        /* The bytecode is about to actually execute
+                         * this recursive call (either via mcode of an
+                         * existing sibling trace, or by pushing a real
+                         * VM frame and running the body interpreted).
+                         * Either way, the recorder must stop observing
+                         * inner ops -- the IR_REC_CALL we just emitted
+                         * stands in for the entire call.  Resume when
+                         * frame_count drops back to (or below) this
+                         * snapshot, which covers both code paths. */
+                        r->rec_call_skip_frame = vm->frame_count;
                         break;
                     }
                 }
@@ -3703,11 +3749,12 @@ bool cando_jit_func_hot_hit(struct CandoVM *vm, const u8 *entry_pc,
     /* Skip if the recorder is already active (e.g. another trace's
      * inlined call landed us here -- don't restart on top of that). */
     if (j->recorder.active) return false;
-    /* Skip if a function trace already exists for this entry PC --
-     * the OP_CALL dispatcher would have used it instead of pushing
-     * a frame, so reaching vm_push_frame means it's still being
-     * recorded or it's not the right entry. */
-    if (cando_jit_find_func_trace(vm, entry_pc) != NULL) return false;
+    /* Multi-version: reaching vm_push_frame with an existing trace
+     * means the OP_CALL dispatcher tried it (and any sibling traces)
+     * and they all guard-failed.  cando_recorder_finish unblacklists
+     * the entry PC after a successful compile if the per-PC version
+     * count is still below the cap; once at the cap, the PC stays
+     * blacklisted and no further variants are recorded. */
     if (cando_hot_hit(&j->hot, entry_pc)) {
         CandoRecorder *r = &j->recorder;
         cando_recorder_begin(vm, entry_pc);
@@ -3722,17 +3769,65 @@ bool cando_jit_func_hot_hit(struct CandoVM *vm, const u8 *entry_pc,
 
 CandoTrace *cando_jit_find_func_trace(struct CandoVM *vm,
                                       const u8 *entry_pc) {
+    CandoTrace *t = NULL;
+    cando_jit_find_func_traces(vm, entry_pc, &t, 1);
+    return t;
+}
+
+/* Helper invoked from IR_REC_CALL mcode.  Tries each sibling func
+ * trace at the recording-start PC and returns the first success.
+ * Sibling iteration is essential: a recursive call that lands on a
+ * "different" branch of the original recording (e.g. a leaf case
+ * when the outer trace specialised on the recursive case) must be
+ * able to find its own specialisation rather than failing all the
+ * way up to the bytecode dispatcher and unwinding the entire JIT
+ * frame stack.  Returns {status=1, value=0} only when every sibling
+ * also bails -- the caller then propagates failure to its own
+ * dispatcher. */
+CandoFuncTraceResult cando_jit_rec_call_dispatch(struct CandoVM *vm,
+                                                  CandoTrace *self_trace,
+                                                  double arg) {
+    CandoTrace *fts[CANDO_FUNC_TRACE_MAX_VERSIONS];
+    u32 nf = cando_jit_find_func_traces(vm, self_trace->start_pc, fts,
+                                          CANDO_FUNC_TRACE_MAX_VERSIONS);
+    for (u32 i = 0; i < nf; i++) {
+        CandoTrace *ft = fts[i];
+        if (!ft->func_mcode_fn) continue;
+        CandoFuncTraceResult r = ft->func_mcode_fn(vm, ft, arg);
+        if (r.status == 0) return r;
+    }
+    CandoFuncTraceResult fail = {1, 0.0};
+    return fail;
+}
+
+u32 cando_jit_find_func_traces(struct CandoVM *vm, const u8 *entry_pc,
+                                CandoTrace **out, u32 max) {
     CandoJit *j = jit_of(vm);
-    if (!j || !entry_pc) return NULL;
-    for (u32 i = 0; i < j->trace_count; i++) {
+    if (!j || !entry_pc || !out || max == 0) return 0;
+    u32 found = 0;
+    /* Collect all matches, then sort by last_used DESC (most recent
+     * specialisation first) so the dispatcher tries the freshest
+     * trace before the others -- temporal locality wins for fib-
+     * style recursive functions where one path dominates a streak
+     * of calls. */
+    for (u32 i = 0; i < j->trace_count && found < max; i++) {
         CandoTrace *t = &j->traces[i];
         if (t->is_function_trace && t->start_pc == entry_pc &&
             t->func_mcode_fn != NULL) {
-            t->last_used = ++j->next_use_tick;
-            return t;
+            out[found++] = t;
         }
     }
-    return NULL;
+    /* Insertion sort by last_used DESC; found is small (<= cap). */
+    for (u32 i = 1; i < found; i++) {
+        CandoTrace *key = out[i];
+        i32 k = (i32)i - 1;
+        while (k >= 0 && out[k]->last_used < key->last_used) {
+            out[k + 1] = out[k];
+            k--;
+        }
+        out[k + 1] = key;
+    }
+    return found;
 }
 
 /* ============================================================ */

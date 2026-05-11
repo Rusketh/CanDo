@@ -48,6 +48,13 @@ struct CandoChunk;
 #define CANDO_JIT_MAX_IR_INS      4096u  /* trace length cap */
 #define CANDO_JIT_MAX_TRACES      64u    /* completed traces stored per VM */
 #define CANDO_JIT_MAX_INLINE_DEPTH 4u    /* nested inlined CALLC depth cap */
+/* Per-function-entry-PC version cap.  A function trace specialises
+ * one path through the body; the dispatcher iterates up to this many
+ * sibling traces (most-recent first) before falling back to bytecode.
+ * Set high enough to cover the leaf + recursive cases of a recursive
+ * function plus a couple of polymorphic call-site variants without
+ * unbounded growth. */
+#define CANDO_FUNC_TRACE_MAX_VERSIONS 4u
 
 /* -----------------------------------------------------------------------
  * CandoSnapshot -- captured state at a guard's bytecode position.
@@ -406,6 +413,16 @@ typedef struct CandoRecorder {
     u32                   staging_snap_entry_cap;
     u32                   frame_base;     /* slot index, not pointer */
     u32                   frame_count_at_start;
+    /* Function-trace self-recursion suppression.  Set to the
+     * recording-frame's vm->frame_count at the point an IR_REC_CALL
+     * is emitted; the bytecode will then actually execute the
+     * recursive call (pushing its own frame, running the callee body,
+     * and returning), and we want the recorder to ignore the inner
+     * ops entirely -- the IR_REC_CALL stands in for them.  observe
+     * resumes recording when vm->frame_count drops back to (or below)
+     * this snapshot, which covers both the interp path (frame
+     * pushed/popped) and the mcode dispatch path (no frame pushed). */
+    u32                   rec_call_skip_frame;
     /* Phase 4.3: outer (recording-start) frame anchor.  All IR slot
      * operands are encoded relative to this so trace_run can read
      * them via vm->frames[top].slots[slot] regardless of whether the
@@ -493,5 +510,15 @@ bool cando_jit_func_hot_hit(struct CandoVM *vm, const u8 *entry_pc,
  * into the trace's mcode without pushing a VM frame. */
 struct CandoTrace *cando_jit_find_func_trace(struct CandoVM *vm,
                                               const u8 *entry_pc);
+
+/* cando_jit_find_func_traces -- multi-version variant.  Returns up
+ * to `max` compiled function traces matching `entry_pc`, ordered
+ * most-recently-used first.  Used by OP_CALL to iterate sibling
+ * specialisations (e.g. fib's leaf vs recursive traces); the first
+ * one whose guards pass takes the call. */
+CANDO_API u32 cando_jit_find_func_traces(struct CandoVM *vm,
+                                          const u8 *entry_pc,
+                                          struct CandoTrace **out,
+                                          u32 max);
 
 #endif /* CANDO_JIT_JIT_H */

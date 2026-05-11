@@ -1315,6 +1315,11 @@ extern int cando_jit_index_get_for_mcode(struct CandoVM *vm, u64 arr_u, u32 idx,
                                           double *out);
 extern int cando_jit_index_set_for_mcode(struct CandoVM *vm, u64 arr_u, u32 idx,
                                           double val);
+/* Sibling-trace dispatcher used by IR_REC_CALL.  See its definition
+ * in jit.c. */
+extern CandoFuncTraceResult cando_jit_rec_call_dispatch(struct CandoVM *vm,
+                                                         struct CandoTrace *self_trace,
+                                                         double arg);
 
 /* IR_NEW_ARRAY: vals[i].u = cando_jit_new_array(vm).  Single-arg
  * (vm in rdi); no failure path -- the helper always returns a
@@ -2358,28 +2363,30 @@ static bool cando_jit_codegen_func_trace(struct CandoVM *vm, CandoTrace *t) {
             emit_guard_bool(&cg, (IROp)in->op, in->op1, 0);
             break;
         case IR_REC_CALL: {
-            /* Compute arg into xmm0, then emit a near `call rel32 0`
-             * that jumps to the start of this same mcode buffer. */
+            /* Route through cando_jit_rec_call_dispatch so the inner
+             * call iterates ALL sibling function traces (leaf +
+             * recursive specialisations) and only falls back to a
+             * caller-bubble failure when every sibling bails.  A
+             * direct `call rel32` back into this same mcode would
+             * miss the other branch's trace -- e.g. fib's recursive
+             * trace recursing into a leaf-case argument would bail
+             * out the inner mcode, propagate all the way up, and
+             * leave the entire JIT frame stack to bytecode. */
             emit_load_xmm0(&cg, in->op1);
-            /* mov rdi, rbx ; mov rsi, r12 */
-            emit_mov_rdi_rbx(&cg);
-            emit_mov_rsi_r12(&cg);
-            /* call rel32  -- E8 disp32 ; disp = mcode_entry - (here+5) */
-            cg_emit_u8(&cg, 0xE8);
-            u32 disp_off = cg_off(&cg);
-            i32 here_after = (i32)(disp_off + 4);
-            i32 disp = (i32)mcode_entry_off - here_after;
-            cg_emit_u32(&cg, (u32)disp);
-            /* test eax, eax ; jne side_exit */
+            emit_mov_rdi_rbx(&cg);              /* arg1: vm     */
+            emit_mov_rsi_r12(&cg);              /* arg2: self_trace */
+            emit_movabs_rax(&cg,
+                (u64)(uintptr_t)&cando_jit_rec_call_dispatch);
+            emit_call_rax(&cg);
             emit_test_eax_eax(&cg);
             if (cg.guard_count >= CG_MAX_GUARDS) { cg.failed = true; break; }
             cg.guards[cg.guard_count].je_disp_off = emit_jne_rel32_placeholder(&cg);
             cg.guards[cg.guard_count].snap_idx    = 0;
             cg.guards[cg.guard_count].stub_off    = 0;
             cg.guard_count++;
-            /* xmm0 has the result -- mirror to vals[i]. */
             emit_movsd_vals_xmm(&cg, i, 0);
             cg.xmm0_holds = i;
+            (void)mcode_entry_off;
             break;
         }
         case IR_RETURN: {
