@@ -1,0 +1,11 @@
+/// @shape Point { x: number, y: number }
+
+/// Translate a point by a delta.
+/// @param p {Point} input point
+/// @param dx {number} x offset
+/// @returns {Point} a new point
+FUNCTION translate(p, dx) {
+    RETURN { x: p.|x + dx, y: p.y };
+}
+// EXPECT: { x, y }
+// MEMBERS: x, y

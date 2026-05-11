@@ -1,0 +1,8 @@
+/// @callback Handler (err: string, data: number) -> null
+
+/// Register a handler.
+/// @param h {Handler} the callback
+FUNCTION subscribe(h) {
+    print(h|);
+}
+// EXPECT: (err: string, data: number) -> null

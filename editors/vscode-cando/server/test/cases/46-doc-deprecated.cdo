@@ -1,0 +1,7 @@
+/// Old API, use newFn instead.
+/// @deprecated since 0.6
+FUNCTION oldFn() {
+    RETURN 1;
+}
+VAR x = oldFn|();
+// DIAG-CODE: doc-deprecated-use

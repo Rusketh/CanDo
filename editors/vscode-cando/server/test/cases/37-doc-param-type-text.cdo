@@ -1,0 +1,9 @@
+// DOC-CONTAINS: Adds two numbers
+/// Adds two numbers and returns the sum.
+///
+/// @param a {number} first addend
+/// @param b {number} second addend
+/// @returns {number} the sum
+FUNCTION add|(a, b) {
+    RETURN a + b;
+}

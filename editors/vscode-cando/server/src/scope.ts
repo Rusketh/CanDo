@@ -52,6 +52,13 @@ export interface Binding {
     /** Documentation comment harvested from the lines immediately above the
      *  declaration (see analyze.ts). Markdown; rendered verbatim in hover. */
     doc?: string;
+    /** Structured form of the same doc comment. Populated alongside
+     *  `doc`. Drives inference fallback (@type, @param, @returns) and
+     *  diagnostic surfacing (@deprecated, unknown tags). */
+    docBlock?: import('./docparse').DocBlock;
+    /** Deprecation message if `@deprecated` appeared in the doc block.
+     *  Surfaced by completion (CompletionItemTag.Deprecated) and hover. */
+    deprecated?: string;
 }
 
 export type ScopeKind = 'file' | 'function' | 'block';
@@ -98,6 +105,11 @@ export interface ResolveResult {
     scopeOf: Map<Node, Scope>;
     /** Bindings flattened (handy for diagnostics and tests). */
     allBindings: Binding[];
+    /** Doc-comment blocks that didn't attach to any declaration (free
+     *  floating). Mostly used to host `@shape` / `@callback` definitions
+     *  the user keeps near the top of the file. Populated by
+     *  analyze.ts:attachDocComments. */
+    orphanDocBlocks: import('./docparse').DocBlock[];
 }
 
 export function resolve(program: Program): ResolveResult {
@@ -112,7 +124,7 @@ export function resolve(program: Program): ResolveResult {
     }
     for (const s of program.body) r.stmt(s, file);
 
-    return { fileScope: file, scopeOf: r.scopeOf, allBindings: r.allBindings };
+    return { fileScope: file, scopeOf: r.scopeOf, allBindings: r.allBindings, orphanDocBlocks: [] };
 }
 
 class Resolver {

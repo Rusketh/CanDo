@@ -1,0 +1,5 @@
+/// @param x {NotARealType} oops
+FUNCTION badType(x) {
+    print(x|);
+}
+// DIAG-CODE: doc-bad-type

@@ -3,6 +3,40 @@
 All notable changes to the **CanDo Language** VS Code extension are
 documented in this file.
 
+## 0.8.0 -- 2026-05-11
+
+### Added
+
+- **Structured doc comments.** The extension now recognises a small
+  JSDoc/LuaLS-flavored tag vocabulary in `///` line and `/** */`
+  block comments and turns it into type information that drives
+  completion, hover, signature help, and diagnostics:
+  - `@param name {type} description` -- type a function parameter.
+  - `@returns {type} description` -- type a return value (repeat for
+    multi-return).
+  - `@type {type}` -- type a `VAR` whose initialiser the inferer
+    can't pin down.
+  - `@field name {type} description` -- declare a class member; the
+    field becomes visible on `self.name` and on instances.
+  - `@shape Name { k: T, k2: T2 }` -- reusable named record type.
+  - `@callback Name (a: T, b: U) -> R` -- reusable function-signature
+    alias.
+  - `@class Name` / `@throws {type}` / `@thread-safe` / `@see` /
+    `@example` -- rendered into hover.
+  - `@deprecated msg` -- marks the binding; references render
+    struck-through and the completion entry is tagged.
+- **Doc-type mini-language.** A small recursive-descent parser
+  handles primitives (`number`, `string`, `bool`, ...), arrays
+  (`T[]` / `Array<T>`), unions (`T | U`), optionals (`T?`), object
+  literals (`{ k: T, k2: T2 }`), function literals
+  (`(a: T) -> R`, with multi-return `(...) -> R1, R2`), and named
+  references to `@shape` / `@callback` aliases declared anywhere in
+  the same file (including at file scope, outside any declaration).
+- **Doc diagnostics.** Three new advisory codes:
+  - `doc-bad-type` -- a `{type}` annotation didn't parse.
+  - `doc-unknown-tag` -- `@foo` isn't a known tag.
+  - `doc-deprecated-use` -- a reference to a `@deprecated` binding.
+
 ## 0.7.0 -- 2026-05-11
 
 ### Added

@@ -123,6 +123,24 @@ function semanticDiagnosticsFor(a) {
         if (b.references.length > 1) continue;
         out.push({ code: 'unused', range: b.nameRange, name: b.name });
     }
+    /* doc diagnostics */
+    for (const d of (a.inferred.docTypeErrors || [])) {
+        out.push({ code: 'doc-bad-type', range: d.range, message: d.message });
+    }
+    for (const b of a.resolved.allBindings) {
+        if (!b.docBlock) continue;
+        for (const t of b.docBlock.unknownTags) {
+            out.push({ code: 'doc-unknown-tag', range: b.nameRange, name: t.name });
+        }
+    }
+    walk(a.program, (n) => {
+        if (n.kind !== 'Ident') return;
+        const scope = a.resolved.scopeOf.get(n);
+        const b = scope ? scope.lookup(n.name) : null;
+        if (!b || !b.deprecated) return;
+        if (b.references.length > 0 && b.references[0] === n.range) return;
+        out.push({ code: 'doc-deprecated-use', range: n.range, name: n.name });
+    });
     /* dead code */
     walk(a.program, (n) => {
         if (n.kind !== 'BlockStmt') return;

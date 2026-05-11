@@ -29,6 +29,8 @@ import {
 import { findManifestFor } from './manifest';
 import { NAMESPACES, GLOBAL_BUILTINS, NamespaceInfo as RawNamespaceInfo } from './builtins';
 import { resolveIncludePath } from './paths';
+import { parseDocType, DocTypeContext, emptyDocTypeContext } from './doctypes';
+import { DocBlock, DocTag } from './docparse';
 
 export interface InferOptions {
     documentUri: string;
@@ -47,6 +49,9 @@ export interface InferResult {
     bindingTypes: Map<Binding, TypeRef>;
     /** Top-level RETURN value of the program (drives module exports). */
     moduleType: TypeRef;
+    /** Advisory errors produced while parsing `{type}` doc annotations.
+     *  Surfaced as `doc-bad-type` diagnostics. */
+    docTypeErrors: Array<{ range: Range; message: string }>;
 }
 
 /** Lightweight immutable overlay of binding-id -> TypeRef. */
@@ -219,7 +224,8 @@ export function infer(program: Program, resolved: ResolveResult, opts: InferOpti
     return {
         nodeTypes: inf.nodeTypes,
         bindingTypes: inf.bindingTypes,
-        moduleType: inf.moduleType
+        moduleType: inf.moduleType,
+        docTypeErrors: inf.docTypeErrors
     };
 }
 
@@ -231,6 +237,14 @@ class Inferer {
     /** Stack of in-progress functions (for collecting RETURN tuples). */
     private fnStack: { returns: TypeRef[][] }[] = [];
 
+    /** Per-file alias table populated from `@shape` / `@callback` tags
+     *  on any binding visible at file scope. */
+    private docCtx: DocTypeContext = emptyDocTypeContext();
+
+    /** Errors produced while parsing `{type}` annotations in doc
+     *  comments. Surfaced as advisory diagnostics. */
+    public docTypeErrors: Array<{ range: Range; message: string }> = [];
+
     constructor(
         private readonly resolved: ResolveResult,
         private readonly opts: InferOptions
@@ -239,6 +253,10 @@ class Inferer {
     run(program: Program): void {
         const file = this.resolved.fileScope;
         let flow: FlowEnv = new Map();
+
+        /* Build the alias registry first so `@param x {MyShape}` can
+         * resolve a shape declared anywhere in the file. */
+        this.buildDocAliasRegistry();
 
         /* Two passes for forward refs to FunctionDecl / ClassDecl. First a
          * shallow declaration pass; then the full inference walk. */
@@ -455,6 +473,11 @@ class Inferer {
             }
         }
 
+        /* Doc-driven params/returns override the defaults. Done before
+         * the body so `o.field` reads inside the body see the declared
+         * shape during inference. */
+        const docReturns = this.applyDocToFunction(s, fnScope, b);
+
         const returns: TypeRef[][] = [];
         this.fnStack.push({ returns });
         let inner = flow;
@@ -462,12 +485,38 @@ class Inferer {
         this.fnStack.pop();
 
         const fnType = this.makeFunctionType(s.name, s.params, returns, s.nameRange);
+        /* Layer doc info onto the synthesised function type. */
+        this.applyDocSignatureOverlay(fnType, b, fnScope, docReturns);
         if (b) {
             b.type = fnType;
             this.bindingTypes.set(b, fnType);
         }
         this.nodeTypes.set(s, fnType);
         return flow;
+    }
+
+    /** After body-walk produces an inferred FunctionType, fold in any
+     *  `@param` types (already set on param bindings) and override
+     *  return types from `@returns`. Also copies the description into
+     *  `doc` for hover. */
+    private applyDocSignatureOverlay(
+        fnType: FunctionType,
+        b: Binding | undefined,
+        fnScope: Scope,
+        docReturns: TypeRef[] | null
+    ): void {
+        if (!b || !b.docBlock) return;
+        for (let i = 0; i < fnType.params.length; i++) {
+            const fp = fnType.params[i];
+            const pb = fnScope.bindings.get(fp.name);
+            if (pb) fp.type = pb.type;
+            const tag = b.docBlock.tags.find(t => t.kind === 'param' && t.name === fp.name);
+            if (tag && tag.kind === 'param' && tag.description) fp.doc = tag.description;
+        }
+        if (docReturns && docReturns.length > 0) {
+            fnType.returns = docReturns;
+        }
+        if (b.docBlock.description) fnType.doc = b.docBlock.description;
     }
 
     private stmtClassDecl(s: ClassDecl, scope: Scope, flow: FlowEnv): FlowEnv {
@@ -480,6 +529,9 @@ class Inferer {
                 instance.prototype = parent.type.instance;
             }
         }
+        /* Seed instance shape from `@field` annotations *before* walking
+         * the constructor body so reads like `self.foo` resolve. */
+        this.applyDocFieldsToClass(b, instance);
         if (b) {
             b.type = classType;
             this.bindingTypes.set(b, classType);
@@ -547,8 +599,10 @@ class Inferer {
             const v = values[i] ?? NULL_T;
             const b = targetScope.bindings.get(t.name);
             if (b) {
-                b.type = v;
-                this.bindingTypes.set(b, v);
+                /* `@type` on the declaration wins over inference. */
+                const docT = this.applyDocToVar(b);
+                b.type = docT ?? v;
+                this.bindingTypes.set(b, b.type);
             }
         }
         this.nodeTypes.set(s, NULL_T);
@@ -1146,6 +1200,103 @@ class Inferer {
         let inner = flow;
         for (const sub of e.body.body) inner = this.stmt(sub, bodyScope, inner);
         return ct;
+    }
+
+    /* ------------------------------------------------------------------- */
+    /* Doc-comment integration                                             */
+    /* ------------------------------------------------------------------- */
+
+    /** Walk every binding once and register `@shape` / `@callback`
+     *  aliases. Two passes: aliases that reference other aliases work
+     *  because the second pass parses with the populated table. */
+    private buildDocAliasRegistry(): void {
+        const blocks: DocBlock[] = [];
+        for (const b of this.resolved.allBindings) {
+            if (b.docBlock) blocks.push(b.docBlock);
+        }
+        blocks.push(...this.resolved.orphanDocBlocks);
+
+        /* Two passes so aliases that reference other aliases resolve in
+         * the second pass once the first has populated the table. */
+        for (let pass = 0; pass < 2; pass++) {
+            for (const block of blocks) {
+                for (const tag of block.tags) {
+                    if (tag.kind === 'shape' || tag.kind === 'callback') {
+                        const r = parseDocType(tag.typeText, this.docCtx);
+                        if (r.type) this.docCtx.aliases.set(tag.name, r.type);
+                    }
+                }
+            }
+        }
+    }
+
+    /** Look up a single doc-tag entry on a binding by tag kind. */
+    private docTagsOf<K extends DocTag['kind']>(b: Binding | undefined, kind: K): Array<Extract<DocTag, { kind: K }>> {
+        if (!b || !b.docBlock) return [];
+        return b.docBlock.tags.filter(t => t.kind === kind) as Array<Extract<DocTag, { kind: K }>>;
+    }
+
+    /** Resolve `{type}` text to a TypeRef. Errors get pushed to
+     *  `docTypeErrors` keyed by the binding's declaration range so the
+     *  diagnostic surface can attach them. */
+    private resolveDocType(text: string | undefined, attachAt: Range): TypeRef | null {
+        if (!text) return null;
+        const r = parseDocType(text, this.docCtx);
+        for (const msg of r.errors) {
+            this.docTypeErrors.push({ range: attachAt, message: msg });
+        }
+        return r.type;
+    }
+
+    /** Apply `@param` / `@returns` to a function declaration *before*
+     *  the body is walked. Returns the function's declared return-type
+     *  vector (or null if `@returns` was absent), so the caller can use
+     *  it as a fallback when inference yields UNKNOWN. */
+    private applyDocToFunction(decl: FunctionDecl, fnScope: Scope, declBinding?: Binding): TypeRef[] | null {
+        const block = declBinding?.docBlock;
+        if (!block) return null;
+
+        for (const tag of block.tags) {
+            if (tag.kind === 'param') {
+                const pb = fnScope.bindings.get(tag.name);
+                if (!pb) continue;
+                const t = this.resolveDocType(tag.typeText, declBinding!.nameRange);
+                if (t) {
+                    pb.type = t;
+                    this.bindingTypes.set(pb, t);
+                }
+            }
+        }
+        const returnsTags = block.tags.filter(t => t.kind === 'returns');
+        if (returnsTags.length === 0) return null;
+        const rets: TypeRef[] = [];
+        for (const rt of returnsTags) {
+            const t = this.resolveDocType(rt.typeText, declBinding!.nameRange);
+            rets.push(t ?? UNKNOWN);
+        }
+        return rets;
+    }
+
+    /** Apply `@type` from a VarDecl's binding to its declared type. */
+    private applyDocToVar(b: Binding | undefined): TypeRef | null {
+        if (!b || !b.docBlock) return null;
+        const typeTag = b.docBlock.tags.find(t => t.kind === 'type');
+        if (!typeTag) return null;
+        return this.resolveDocType(typeTag.typeText, b.nameRange);
+    }
+
+    /** Apply `@field` tags to a class instance's member table. */
+    private applyDocFieldsToClass(b: Binding | undefined, instance: ObjectType): void {
+        if (!b || !b.docBlock) return;
+        for (const tag of b.docBlock.tags) {
+            if (tag.kind !== 'field') continue;
+            const t = this.resolveDocType(tag.typeText, b.nameRange) ?? ANY;
+            instance.members.set(tag.name, {
+                type: t,
+                doc: tag.description || undefined,
+                defRange: b.nameRange
+            });
+        }
     }
 
     private inferPipe(e: Pipe, scope: Scope, flow: FlowEnv): TypeRef {

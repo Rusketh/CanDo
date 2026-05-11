@@ -1,0 +1,8 @@
+/// Connect to a service.
+///
+/// @param config {{ host: string, port: number, tls: bool }} settings
+FUNCTION connect(config) {
+    RETURN config.|host;
+    // MEMBERS: host, port, tls
+    // EXPECT: { host, port, tls }
+}
