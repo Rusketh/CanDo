@@ -3,6 +3,40 @@
 All notable changes to the **CanDo Language** VS Code extension are
 documented in this file.
 
+## 0.6.0 -- 2026-05-11
+
+### Added
+
+- **Document highlights** -- every occurrence of the binding under the
+  cursor is highlighted (Write kind on the declaration; Read on uses).
+- **CodeLens** -- function and class declarations show their workspace
+  reference count inline.
+- **Document formatting** -- single-pass token-aware formatter:
+  normalizes internal whitespace, indents to 4 spaces, ensures a space
+  after `,`, leaves strings / comments / template literals untouched.
+- **`__call` metamethod** -- instances whose class defines `__call`
+  are callable; the return-type comes from `__call`'s function
+  signature (no more spurious "non-callable" diagnostics).
+- **Operator overloads** -- binary `+ - * / % ^ == < <=` dispatch
+  through `__add`, `__sub`, etc., so `Vector(1,2) + Vector(3,4)`
+  infers as `Vector`.
+- **Type narrowing via `type(x) == "..."`** -- inside the IF branch
+  `x`'s type is locked to the named runtime tag (string/number/bool/
+  array/object/null or any class / manifest type). Same for
+  `x.__type == "Foo"` discrimination.
+- **Member access on `any` stays `any`** -- previously degraded to
+  `unknown`, which suppressed completion chains starting from
+  untyped parameters.
+- **Self-type inference** -- assigning `ClassOrObj.method =
+  FUNCTION(self, ...) { ... };` infers `self` as the owner's instance
+  type, so member access inside the method body is typed.
+- **JSDoc-style `@param` / `@returns` / `@deprecated` / `@example`**
+  in doc comments now render as Markdown sections in hover.
+- **Richer snippets** -- adds doc-commented function, multi-var
+  decl, ALSO branch, method-on-class, named/anon function, vararg
+  function, throw, mask selector, default-value pattern, safe access,
+  inspect. Existing snippets corrected (FOR range now uses `IN`).
+
 ## 0.5.0 -- 2026-05-11
 
 ### Added

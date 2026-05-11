@@ -33,6 +33,11 @@ import {
     TextEdit,
     InlayHint,
     InlayHintKind,
+    DocumentHighlight,
+    DocumentHighlightKind,
+    CodeLens,
+    Command,
+    TextDocumentEdit,
     FoldingRange,
     FoldingRangeKind,
     SelectionRange,
@@ -122,6 +127,9 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
             workspaceSymbolProvider: true,
             referencesProvider: true,
             renameProvider: { prepareProvider: true },
+            documentHighlightProvider: true,
+            codeLensProvider: { resolveProvider: false },
+            documentFormattingProvider: true,
             inlayHintProvider: { resolveProvider: false },
             foldingRangeProvider: true,
             selectionRangeProvider: true,
@@ -302,8 +310,12 @@ function isCallableType(t: TypeRef): boolean {
     if (t.kind === 'prim' && (t.name === 'any' || t.name === 'unknown')) return true;
     if (t.kind === 'union') return t.variants.every(isCallableType);
     if (t.kind === 'optional') return isCallableType(t.inner);
-    /* Objects may have __call -- can't tell without walking. Allow. */
-    if (t.kind === 'object' || t.kind === 'manifest-exports' || t.kind === 'manifest-type') return true;
+    /* Objects and manifest types are callable iff they expose a __call
+     * metamethod (or come from a manifest that may have one we can't see). */
+    if (t.kind === 'object') {
+        return enumerateMembers(t).has('__call');
+    }
+    if (t.kind === 'manifest-exports' || t.kind === 'manifest-type') return true;
     return false;
 }
 
@@ -1294,8 +1306,207 @@ connection.onCodeAction(params => {
     return out;
 });
 
+/* ----------------------------------------------------------------------- */
+/* Document highlights                                                     */
+/* ----------------------------------------------------------------------- */
+
+connection.onDocumentHighlight(params => {
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return [];
+    const node = nodeAt(a.program, params.position.line, params.position.character);
+    if (!node) return [];
+    const binding = bindingAtNode(a, node);
+    if (!binding) return [];
+    const out: DocumentHighlight[] = [];
+    for (const r of binding.references) {
+        const kind = rangesEqual(toLsp(r), toLsp(binding.nameRange))
+            ? DocumentHighlightKind.Write
+            : DocumentHighlightKind.Read;
+        out.push({ range: toLsp(r), kind });
+    }
+    return out;
+});
+
+/* ----------------------------------------------------------------------- */
+/* CodeLens                                                                */
+/* ----------------------------------------------------------------------- */
+
+connection.onCodeLens(params => {
+    const a = getAnalyzed(params.textDocument.uri);
+    if (!a) return [];
+    const out: CodeLens[] = [];
+    for (const stmt of a.program.body) {
+        if (stmt.kind !== 'FunctionDecl' && stmt.kind !== 'ClassDecl') continue;
+        const b = a.resolved.fileScope.bindings.get(stmt.name);
+        if (!b) continue;
+        /* declaration counts as 1 in references[] -- subtract it. */
+        const count = Math.max(0, b.references.length - 1);
+        const command: Command = {
+            title: count === 1 ? '1 reference' : `${count} references`,
+            command: '',  // information-only; clicking is a no-op
+            arguments: []
+        };
+        out.push({ range: toLsp(stmt.nameRange), command });
+    }
+    return out;
+});
+
+/* ----------------------------------------------------------------------- */
+/* Document formatting                                                     */
+/* ----------------------------------------------------------------------- */
+
+connection.onDocumentFormatting(params => {
+    const doc = documents.get(params.textDocument.uri);
+    if (!doc) return [];
+    const original = doc.getText();
+    const formatted = formatSource(original);
+    if (formatted === original) return [];
+    return [{
+        range: {
+            start: { line: 0, character: 0 },
+            end: doc.positionAt(original.length)
+        },
+        newText: formatted
+    }];
+});
+
+/** Conservative, token-aware formatter. Goals:
+ *   - Collapse runs of internal whitespace to a single space.
+ *   - Keep one space after `,` and around binary operators.
+ *   - No space inside `(`, `[`, `{` adjacent to their contents.
+ *   - Preserve line breaks the user wrote (we don't reflow blocks). */
+function formatSource(src: string): string {
+    /* Single-pass character-driven formatter that avoids touching strings,
+     * template strings, and comments. Anything outside those is normalized. */
+    let out = '';
+    let i = 0;
+    let atLineStart = true;
+    let indent = 0;
+    const INDENT = '    ';
+
+    while (i < src.length) {
+        const c = src[i];
+
+        /* Preserve comments verbatim. */
+        if (c === '/' && src[i + 1] === '/') {
+            const end = src.indexOf('\n', i);
+            const stop = end < 0 ? src.length : end;
+            out += src.slice(i, stop);
+            i = stop;
+            continue;
+        }
+        if (c === '/' && src[i + 1] === '*') {
+            const end = src.indexOf('*/', i + 2);
+            const stop = end < 0 ? src.length : end + 2;
+            out += src.slice(i, stop);
+            i = stop;
+            continue;
+        }
+
+        /* Preserve string and template literals. */
+        if (c === '"' || c === '\'') {
+            const stop = scanQuoted(src, i, c);
+            out += src.slice(i, stop);
+            i = stop;
+            atLineStart = false;
+            continue;
+        }
+        if (c === '`') {
+            const stop = scanTemplate(src, i);
+            out += src.slice(i, stop);
+            i = stop;
+            atLineStart = false;
+            continue;
+        }
+
+        if (c === '\n') {
+            /* Strip trailing whitespace before the newline. */
+            out = out.replace(/[ \t]+$/, '');
+            out += '\n';
+            atLineStart = true;
+            i++;
+            continue;
+        }
+        if (c === ' ' || c === '\t' || c === '\r') {
+            if (atLineStart) {
+                /* Collapse leading whitespace -- re-emit it as `INDENT * depth`. */
+                while (i < src.length && (src[i] === ' ' || src[i] === '\t' || src[i] === '\r')) i++;
+                /* Re-look at the next character to decide whether to dedent. */
+                if (src[i] === '}' || src[i] === ']' || src[i] === ')') {
+                    out += INDENT.repeat(Math.max(0, indent - 1));
+                } else {
+                    out += INDENT.repeat(indent);
+                }
+                atLineStart = false;
+                continue;
+            }
+            /* Collapse to a single space. */
+            while (i < src.length && (src[i] === ' ' || src[i] === '\t' || src[i] === '\r')) i++;
+            /* Suppress trailing internal spaces immediately before close
+             * brackets / commas / semicolons. */
+            const next = src[i];
+            if (next !== ')' && next !== ']' && next !== '}' && next !== ',' && next !== ';' && next !== '\n') {
+                out += ' ';
+            }
+            continue;
+        }
+
+        if (c === '{') { out += '{'; indent++; i++; atLineStart = false; continue; }
+        if (c === '}') { indent = Math.max(0, indent - 1); out += '}'; i++; atLineStart = false; continue; }
+
+        /* Insert a space after commas if missing. */
+        if (c === ',') {
+            out += ',';
+            i++;
+            if (i < src.length && src[i] !== ' ' && src[i] !== '\n' && src[i] !== '\t') {
+                out += ' ';
+            }
+            atLineStart = false;
+            continue;
+        }
+
+        out += c;
+        i++;
+        atLineStart = false;
+    }
+    /* Ensure a trailing newline. */
+    if (!out.endsWith('\n')) out += '\n';
+    return out;
+}
+
+function scanQuoted(src: string, start: number, quote: string): number {
+    let i = start + 1;
+    while (i < src.length) {
+        if (src[i] === '\\' && i + 1 < src.length) { i += 2; continue; }
+        if (src[i] === quote) return i + 1;
+        if (src[i] === '\n' && quote === '"') return i;
+        i++;
+    }
+    return i;
+}
+
+function scanTemplate(src: string, start: number): number {
+    let i = start + 1;
+    while (i < src.length) {
+        if (src[i] === '\\' && i + 1 < src.length) { i += 2; continue; }
+        if (src[i] === '`') return i + 1;
+        if (src[i] === '$' && src[i + 1] === '{') {
+            i += 2;
+            let depth = 1;
+            while (i < src.length && depth > 0) {
+                if (src[i] === '{') depth++;
+                else if (src[i] === '}') depth--;
+                i++;
+            }
+            continue;
+        }
+        i++;
+    }
+    return i;
+}
+
 /* Reference imports retained for the public API surface. */
-void path; void namespaceMemberDetail; void SemanticTokens;
+void path; void namespaceMemberDetail; void SemanticTokens; void TextDocumentEdit;
 
 documents.listen(connection);
 connection.listen();

@@ -1,0 +1,6 @@
+// EXPECT: number
+CLASS Counter = (self) { self.n = 0; }
+Counter.__call = FUNCTION(self) { self.n = self.n + 1; RETURN self.n; };
+VAR c = Counter();
+VAR r = c();
+r|

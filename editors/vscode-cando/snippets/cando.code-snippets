@@ -4,9 +4,14 @@
     "body": ["VAR ${1:name} = ${2:value};"],
     "description": "Declare a mutable variable."
   },
+  "Multi-variable declaration": {
+    "prefix": ["var2", "VAR2"],
+    "body": ["VAR ${1:a}, ${2:b} = ${3:expr1}, ${4:expr2};"],
+    "description": "Declare multiple variables (or unpack a multi-return)."
+  },
   "Constant declaration": {
     "prefix": ["const", "CONST"],
-    "body": ["CONST ${1:name} = ${2:value};"],
+    "body": ["CONST ${1:NAME} = ${2:value};"],
     "description": "Declare an immutable constant."
   },
   "Global declaration": {
@@ -34,6 +39,24 @@
     ],
     "description": "If / else statement."
   },
+  "If / Else If / Else": {
+    "prefix": ["ifelse", "IFELSE"],
+    "body": [
+      "IF ${1:cond1} {",
+      "\t$2",
+      "} ELSE IF ${3:cond2} {",
+      "\t$4",
+      "} ELSE {",
+      "\t$0",
+      "}"
+    ],
+    "description": "If / else-if / else chain."
+  },
+  "ALSO branch (inclusive)": {
+    "prefix": ["also", "ALSO"],
+    "body": ["ALSO IF ${1:condition} {", "\t$0", "}"],
+    "description": "Inclusive `ALSO IF` branch -- fires when the preceding branch ran."
+  },
   "Multi-comparison If": {
     "prefix": ["ifmulti", "IFMULTI"],
     "body": [
@@ -53,40 +76,49 @@
     "description": "While loop."
   },
   "For range (ascending)": {
-    "prefix": ["forasc", "FORASC"],
+    "prefix": ["fori", "FOR"],
     "body": [
-      "FOR ${1:i} OF ${2:1} -> ${3:n} {",
+      "FOR ${1:i} IN ${2:1} -> ${3:n} {",
       "\t$0",
       "}"
     ],
-    "description": "Ascending range loop."
+    "description": "Ascending range loop. `IN` plus `->` is the range form."
   },
   "For range (descending)": {
     "prefix": ["fordesc", "FORDESC"],
     "body": [
-      "FOR ${1:i} OF ${2:n} <- ${3:1} {",
+      "FOR ${1:i} IN ${2:n} <- ${3:1} {",
       "\t$0",
       "}"
     ],
     "description": "Descending range loop."
   },
-  "For-in loop": {
-    "prefix": ["forin", "FORIN"],
+  "For values (FOR v OF arr)": {
+    "prefix": ["forof", "FOROF"],
     "body": [
-      "FOR ${1:item} IN ${2:collection} {",
+      "FOR ${1:v} OF ${2:array} {",
       "\t$0",
       "}"
     ],
-    "description": "Iterate elements of a collection."
+    "description": "Iterate values of an array or object."
   },
-  "For-over loop": {
+  "For keys (FOR k IN obj)": {
+    "prefix": ["forkeys", "FORKEYS"],
+    "body": [
+      "FOR ${1:k} IN ${2:object} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Iterate own keys of an object."
+  },
+  "For OVER (iterator protocol)": {
     "prefix": ["forover", "FOROVER"],
     "body": [
-      "FOR ${1:key}, ${2:value} OVER ${3:object} {",
+      "FOR ${1:k}, ${2:v} OVER ${3:iter}(${4:state}) {",
       "\t$0",
       "}"
     ],
-    "description": "Iterate keys and values of an object."
+    "description": "Iterator-protocol loop: `iter(state, control)` triple."
   },
   "Function declaration": {
     "prefix": ["fn", "function", "FUNCTION"],
@@ -97,70 +129,132 @@
     ],
     "description": "Named function."
   },
+  "Anonymous function": {
+    "prefix": ["fnx", "FUNCTIONX"],
+    "body": [
+      "FUNCTION(${1:args}) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Anonymous function expression."
+  },
   "Lambda function": {
     "prefix": ["lambda", "=>"],
     "body": ["(${1:args}) => ${0:expr}"],
     "description": "Lambda / arrow function."
   },
+  "Function with vararg": {
+    "prefix": ["fnvar", "FNVAR"],
+    "body": [
+      "FUNCTION ${1:name}(${2:first}, ...${3:rest}) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Function with varargs."
+  },
   "Class declaration": {
     "prefix": ["class", "CLASS"],
     "body": [
-      "CLASS ${1:Name} {",
-      "\tFUNCTION init(${2:args}) {",
-      "\t\t$0",
-      "\t}",
+      "CLASS ${1:Name} = (self, ${2:args}) {",
+      "\tself.${3:field} = ${4:value};",
+      "\t$0",
       "}"
     ],
-    "description": "Class declaration with init."
+    "description": "Class with constructor."
   },
-  "Class extends": {
+  "Class with EXTENDS": {
     "prefix": ["classx", "CLASSX"],
     "body": [
-      "CLASS ${1:Name} EXTENDS ${2:Parent} {",
-      "\tFUNCTION init(${3:args}) {",
-      "\t\t$0",
-      "\t}",
+      "CLASS ${1:Name} EXTENDS ${2:Parent} = (self, ${3:args}) {",
+      "\t${2:Parent}.__constructor(self, ${4:parent_args});",
+      "\tself.${5:field} = ${6:value};",
+      "\t$0",
       "}"
     ],
-    "description": "Class extending another class."
+    "description": "Class extending a parent. The parent's constructor must be called explicitly."
+  },
+  "Method on class": {
+    "prefix": ["method", "METHOD"],
+    "body": [
+      "${1:ClassName}.${2:methodName} = FUNCTION(self${3:, args}) {",
+      "\t$0",
+      "};"
+    ],
+    "description": "Attach a method to a class. First param is implicit-self."
   },
   "Try / catch / finaly": {
     "prefix": ["try", "TRY"],
     "body": [
       "TRY {",
       "\t$1",
-      "} CATCH ${2:err} {",
-      "\t$3",
+      "} CATCH (${2:kind}, ${3:code}, ${4:detail}) {",
+      "\t$5",
       "} FINALY {",
       "\t$0",
       "}"
     ],
     "description": "Try / catch / finaly block (note: FINALY, one L)."
   },
+  "Try / catch (no finally)": {
+    "prefix": ["tryc", "TRYC"],
+    "body": [
+      "TRY {",
+      "\t$1",
+      "} CATCH (${2:kind}, ${3:code}, ${4:detail}) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Try / catch without a FINALY block."
+  },
+  "THROW": {
+    "prefix": ["throw", "THROW"],
+    "body": ["THROW ${1:\"error\"}, ${2:0}, ${0:detail};"],
+    "description": "Throw an error to the nearest CATCH."
+  },
   "Pipe map": {
     "prefix": ["pipe", "~>"],
-    "body": ["${1:array} ~> { RETURN ${0:expr}; }"],
-    "description": "Functional map using ~>."
+    "body": ["${1:array} ~> ${0:pipe * 2}"],
+    "description": "Map using `~>` (the `pipe` ident is the current element)."
   },
   "Pipe filter": {
     "prefix": ["filter", "~!>"],
-    "body": ["${1:array} ~!> { RETURN ${0:predicate}; }"],
-    "description": "Functional filter using ~!>."
+    "body": ["${1:array} ~!> ${0:pipe % 2 == 0}"],
+    "description": "Filter using `~!>`."
   },
   "Conditional filter": {
     "prefix": ["cfilter", "~&>"],
-    "body": ["${1:array} ~&> ${0:predicate}"],
-    "description": "Conditional filter using ~&> (predicate keeps value)."
+    "body": ["${1:array} ~&> ${0:pipe > 0}"],
+    "description": "Conditional filter using `~&>`."
   },
   "Ternary": {
     "prefix": ["ternary", "?:"],
     "body": ["${1:cond} ? ${2:a} : ${0:b}"],
     "description": "Ternary conditional."
   },
+  "Mask selector": {
+    "prefix": ["mask", "~.~"],
+    "body": ["VAR ${1:a}, ${2:c} = (~.~) ${0:f()};"],
+    "description": "Mask selector picks positions (`~` keep, `.` skip)."
+  },
+  "Default value (|| guard)": {
+    "prefix": ["default", "||"],
+    "body": ["${1:value} = ${1:value} || ${0:fallback};"],
+    "description": "Default-value pattern using `||`."
+  },
+  "Safe access": {
+    "prefix": ["safe", "?."],
+    "body": ["${1:obj}?.${2:field}"],
+    "description": "Safe member access -- short-circuits to NULL if receiver is NULL."
+  },
   "Print": {
     "prefix": "print",
     "body": ["print(${0:value});"],
     "description": "Print to stdout."
+  },
+  "Inspect (debug print)": {
+    "prefix": "inspect",
+    "body": ["print(inspect(${0:value}));"],
+    "description": "Pretty-print a value's internal structure."
   },
   "Include module": {
     "prefix": ["include", "import", "require"],
@@ -170,13 +264,13 @@
   "Include binary module (cross-platform)": {
     "prefix": ["includeso", "includebin"],
     "body": [
-      "VAR ${1:mod};",
+      "VAR ${1:mod} = NULL;",
       "TRY {",
       "\t${1:mod} = include(\"./${2:module}.so\");",
-      "} CATCH e {",
+      "} CATCH (e) {",
       "\tTRY {",
       "\t\t${1:mod} = include(\"./${2:module}.dylib\");",
-      "\t} CATCH e2 {",
+      "\t} CATCH (e2) {",
       "\t\t${1:mod} = include(\"./${2:module}.dll\");",
       "\t}",
       "}"
@@ -186,11 +280,11 @@
   "Module export object": {
     "prefix": ["return", "export"],
     "body": [
-      "RETURN {",
-      "\t${1:name}: ${0:value}",
-      "};"
+      "VAR exports = {};",
+      "exports.${1:name} = ${0:value};",
+      "RETURN exports;"
     ],
-    "description": "Return an object literal as the module's exports."
+    "description": "Build and return an exports object."
   },
   "Thread spawn": {
     "prefix": ["thread", "THREAD"],
@@ -205,5 +299,20 @@
       "}"
     ],
     "description": "Asynchronous function."
+  },
+  "Doc-commented function": {
+    "prefix": ["docfn", "DOCFN"],
+    "body": [
+      "/**",
+      " * ${1:Short description.}",
+      " *",
+      " * @param ${2:name} ${3:What it is.}",
+      " * @returns ${0:What is returned.}",
+      " */",
+      "FUNCTION ${4:name}(${2:name}) {",
+      "\t",
+      "}"
+    ],
+    "description": "Function with a JSDoc-style block comment."
   }
 }

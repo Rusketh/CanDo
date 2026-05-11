@@ -443,10 +443,13 @@ class Inferer {
         const fnScope = this.resolved.scopeOf.get(s) ?? scope;
         const bodyScope = this.resolved.scopeOf.get(s.body) ?? fnScope;
 
-        /* Initialise param bindings inside fnScope. */
+        /* Initialise param bindings inside fnScope. Preserve any
+         * contextual type that an outer pass already installed (see the
+         * method-shape inference in stmtAssign). */
         for (const p of s.params) {
             const pb = fnScope.bindings.get(p.name);
-            if (pb) {
+            if (!pb) continue;
+            if (pb.type.kind === 'prim' && pb.type.name === 'unknown') {
                 pb.type = p.rest ? arrayOf(ANY) : ANY;
                 this.bindingTypes.set(pb, pb.type);
             }
@@ -553,6 +556,32 @@ class Inferer {
     }
 
     private stmtAssign(s: AssignStmt, scope: Scope, flow: FlowEnv): FlowEnv {
+        /* Method-shape inference: `ClassOrObj.method = FUNCTION(self, ...) {...}`
+         * binds `self` to the owner's instance type so member access inside
+         * the body resolves to the class's fields. Same trick for
+         * `obj.method = FUNCTION(self, ...) {...}` where obj is a record. */
+        if (s.targets.length === 1 && s.rhs.length === 1) {
+            const t0 = s.targets[0];
+            const r0 = s.rhs[0];
+            if (t0.kind === 'Member' && t0.object.kind === 'Ident' && r0.kind === 'FunctionExpr'
+                && r0.params.length > 0) {
+                const owner = scope.lookup(t0.object.name);
+                if (owner) {
+                    let selfType: TypeRef | null = null;
+                    if (owner.type.kind === 'class') selfType = owner.type.instance;
+                    else if (owner.type.kind === 'object') selfType = owner.type;
+                    if (selfType) {
+                        const fnScope = this.resolved.scopeOf.get(r0);
+                        const firstParamBinding = fnScope?.bindings.get(r0.params[0].name);
+                        if (firstParamBinding) {
+                            firstParamBinding.type = selfType;
+                            this.bindingTypes.set(firstParamBinding, selfType);
+                        }
+                    }
+                }
+            }
+        }
+
         const values = this.evalRHSList(s.rhs, scope, flow);
         for (let i = 0; i < s.targets.length; i++) {
             const t = s.targets[i];
@@ -622,7 +651,82 @@ class Inferer {
             const cur = flowGet(flow, b);
             return flowSet(flow, b, truthy ? narrowTruthy(cur) : narrowFalsy(cur));
         }
+        /* type(x) == "string"  or  "string" == type(x)
+         * x.__type == "Foo"    or  "Foo" == x.__type
+         * These pin a binding to a specific runtime tag. */
+        if (cond.kind === 'Binary' && (cond.op === '==' || cond.op === '!=')) {
+            const want = truthy ? cond.op === '==' : cond.op === '!=';
+            const narrowed = this.tryDiscriminantNarrow(cond.left, cond.right, flow, want)
+                          ?? this.tryDiscriminantNarrow(cond.right, cond.left, flow, want);
+            if (narrowed) return narrowed;
+        }
         return flow;
+    }
+
+    private tryDiscriminantNarrow(probe: Expr, value: Expr, flow: FlowEnv, equal: boolean): FlowEnv | null {
+        if (value.kind !== 'StringLit') return null;
+        const tagName = value.value;
+        let target: Binding | null = null;
+        if (probe.kind === 'Call'
+            && probe.callee.kind === 'Ident' && probe.callee.name === 'type'
+            && probe.args.length === 1
+            && probe.args[0].expr.kind === 'Ident') {
+            target = this.lookupOfIdent(probe.args[0].expr);
+        } else if (probe.kind === 'Member' && probe.property === '__type'
+            && probe.object.kind === 'Ident') {
+            target = this.lookupOfIdent(probe.object);
+        }
+        if (!target || target.reassigned) return null;
+        const cur = flowGet(flow, target);
+        const narrowed = this.narrowToTag(cur, tagName, equal);
+        if (narrowed === cur) return null;
+        return flowSet(flow, target, narrowed);
+    }
+
+    private lookupOfIdent(e: Ident): Binding | null {
+        const scope = this.resolved.scopeOf.get(e);
+        return scope?.lookup(e.name) ?? null;
+    }
+
+    private narrowToTag(t: TypeRef, tag: string, equal: boolean): TypeRef {
+        const matchesTag = (variant: TypeRef): boolean => {
+            switch (variant.kind) {
+                case 'prim': return variant.name === tag;
+                case 'array': return tag === 'array';
+                case 'object': return tag === 'object' || (!!variant.className && variant.className === tag);
+                case 'class':  return variant.name === tag;
+                case 'function': return tag === 'function';
+                case 'manifest-type': return variant.typeName === tag;
+                default: return false;
+            }
+        };
+        const filter = (variants: TypeRef[]): TypeRef[] =>
+            variants.filter(v => equal ? matchesTag(v) : !matchesTag(v));
+        if (t.kind === 'union') {
+            const out = filter(t.variants);
+            if (out.length === 0) return t;
+            if (out.length === 1) return out[0];
+            return { kind: 'union', variants: out };
+        }
+        if (t.kind === 'optional') {
+            /* optional<T> = T | null. If tag matches null, narrow to null;
+             * otherwise narrow to T. */
+            if (tag === 'null') return equal ? NULL_T : t.inner;
+            return equal ? t.inner : NULL_T;
+        }
+        /* `any` and `unknown` get refined to the discriminant. */
+        if (t.kind === 'prim' && (t.name === 'any' || t.name === 'unknown') && equal) {
+            switch (tag) {
+                case 'string': return STR_T;
+                case 'number': return NUM_T;
+                case 'bool':   return BOOL_T;
+                case 'null':   return NULL_T;
+                case 'array':  return arrayOf(ANY);
+                case 'function': return { kind: 'function', params: [], returns: [ANY] };
+                case 'object': return emptyObject();
+            }
+        }
+        return t;
     }
 
     private lookupAt(e: Ident): Binding | null {
@@ -780,11 +884,17 @@ class Inferer {
         let result: TypeRef;
         if (m) {
             result = m.type;
+        } else if (lookupT.kind === 'object' && lookupT.indexValue) {
+            result = lookupT.indexValue;
+        } else if (lookupT.kind === 'array' && e.property === 'length') {
+            result = NUM_T;
+        } else if (lookupT.kind === 'prim' && (lookupT.name === 'any' || lookupT.name === 'unknown')) {
+            /* `any.foo` is `any`, not `unknown` -- we don't *know* the
+             * member is missing, only that we can't enumerate it. Mirrors
+             * the convention in TypeScript / mypy / Sorbet. */
+            result = lookupT.name === 'any' ? ANY : UNKNOWN;
         } else {
-            /* Index-access fallback. */
-            if (lookupT.kind === 'object' && lookupT.indexValue) result = lookupT.indexValue;
-            else if (lookupT.kind === 'array' && (e.property === 'length')) result = NUM_T;
-            else result = UNKNOWN;
+            result = UNKNOWN;
         }
         if (e.safe) result = optionalOf(result);
         return result;
@@ -883,6 +993,10 @@ class Inferer {
             if (calleeT.returns.length === 1) return calleeT.returns[0];
             return tupleOf(calleeT.returns);
         }
+        /* __call metamethod: objects whose class defines __call are
+         * callable. Look it up on the callee's type and use its return. */
+        const metaCall = this.metaCall(calleeT, '__call', []);
+        if (metaCall) return metaCall;
         return UNKNOWN;
     }
 
@@ -922,6 +1036,11 @@ class Inferer {
     private inferBinary(e: import('./ast').Binary, scope: Scope, flow: FlowEnv): TypeRef {
         const a = this.expr(e.left, scope, flow);
         const b = this.expr(e.right, scope, flow);
+        const meta = METHOD_FOR_OP[e.op];
+        if (meta) {
+            const t = this.metaCall(a, meta, [a, b]) ?? this.metaCall(b, meta, [a, b]);
+            if (t) return t;
+        }
         switch (e.op) {
             case '+': {
                 /* String concat if either side is string. */
@@ -956,12 +1075,32 @@ class Inferer {
         return UNKNOWN;
     }
 
+    /** Look up a metamethod (e.g. `__add`, `__call`) on `t` and return the
+     *  type of invoking it with `args`. Returns null when the metamethod is
+     *  absent or non-function-typed. */
+    private metaCall(t: TypeRef, name: string, _args: TypeRef[]): TypeRef | null {
+        const members = enumerateMembers(t);
+        const m = members.get(name);
+        if (!m || m.type.kind !== 'function') return null;
+        const fn = m.type;
+        if (fn.returnsSelf) return t;
+        if (fn.returns.length === 1) return fn.returns[0];
+        return tupleOf(fn.returns);
+    }
+
     private inferFunctionExpr(e: FunctionExpr, scope: Scope, flow: FlowEnv): TypeRef {
         const fnScope = this.resolved.scopeOf.get(e) ?? scope;
         const bodyScope = this.resolved.scopeOf.get(e.body) ?? fnScope;
         for (const p of e.params) {
             const pb = fnScope.bindings.get(p.name);
-            if (pb) { pb.type = ANY; this.bindingTypes.set(pb, ANY); }
+            if (!pb) continue;
+            /* Preserve any contextually-installed type (e.g. `self` set up by
+             * stmtAssign when assigning to ClassOrObj.method). Otherwise
+             * default to ANY. */
+            if (pb.type.kind === 'prim' && pb.type.name === 'unknown') {
+                pb.type = p.rest ? arrayOf(ANY) : ANY;
+                this.bindingTypes.set(pb, pb.type);
+            }
         }
         const returns: TypeRef[][] = [];
         this.fnStack.push({ returns });
@@ -1043,6 +1182,19 @@ function uriToFsPath(uri: string): string | null {
     if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
     return p;
 }
+
+/** Operator -> metamethod name. Mirrors CanDo's runtime dispatch table. */
+const METHOD_FOR_OP: Record<string, string> = {
+    '+':  '__add',
+    '-':  '__sub',
+    '*':  '__mul',
+    '/':  '__div',
+    '%':  '__mod',
+    '^':  '__pow',
+    '==': '__eq',
+    '<':  '__lt',
+    '<=': '__le'
+};
 
 function isString(t: TypeRef): boolean {
     if (t.kind === 'prim') return t.name === 'string';

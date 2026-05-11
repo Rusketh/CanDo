@@ -103,8 +103,72 @@ function attachDocComments(tokens: Token[], resolved: ResolveResult): void {
             lines.unshift(stripCommentMarker(c.value));
             line = c.range.start.line - 1;
         }
-        if (lines.length) b.doc = lines.join('\n').trim();
+        if (lines.length) b.doc = renderDocComment(lines.join('\n').trim());
     }
+}
+
+/** Reformat a doc comment that uses JSDoc-style tags (`@param`,
+ *  `@returns`, `@example`, `@deprecated`) into a Markdown block that
+ *  renders nicely in hover. Unknown tags fall through unchanged. */
+function renderDocComment(raw: string): string {
+    const lines = raw.split('\n');
+    const summary: string[] = [];
+    const params: { name: string; rest: string }[] = [];
+    let returns: string | null = null;
+    let deprecated: string | null = null;
+    const examples: string[] = [];
+
+    let inExample = false;
+    let exampleBuf = '';
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (inExample) {
+            if (trimmed.startsWith('@')) {
+                examples.push(exampleBuf.trim());
+                exampleBuf = '';
+                inExample = false;
+                /* fall through to tag handling below */
+            } else {
+                exampleBuf += line + '\n';
+                continue;
+            }
+        }
+        const tag = /^@(\w+)\s*(.*)$/.exec(trimmed);
+        if (!tag) {
+            summary.push(line);
+            continue;
+        }
+        const name = tag[1].toLowerCase();
+        const rest = tag[2];
+        if (name === 'param') {
+            const parts = /^([A-Za-z_][A-Za-z0-9_]*)\s*[-:]?\s*(.*)$/.exec(rest);
+            if (parts) params.push({ name: parts[1], rest: parts[2] });
+        } else if (name === 'return' || name === 'returns') {
+            returns = rest;
+        } else if (name === 'deprecated') {
+            deprecated = rest || 'This binding is deprecated.';
+        } else if (name === 'example') {
+            inExample = true;
+            exampleBuf = '';
+        }
+    }
+    if (inExample) examples.push(exampleBuf.trim());
+
+    const out: string[] = [];
+    if (deprecated) out.push(`**Deprecated:** ${deprecated}`, '');
+    if (summary.length) out.push(summary.join('\n').trim());
+    if (params.length) {
+        out.push('', '**Parameters:**');
+        for (const p of params) out.push(`  - \`${p.name}\` -- ${p.rest}`);
+    }
+    if (returns) {
+        out.push('', `**Returns:** ${returns}`);
+    }
+    for (const ex of examples) {
+        if (!ex) continue;
+        out.push('', '**Example:**', '```cdo', ex, '```');
+    }
+    return out.join('\n').trim();
 }
 
 function stripCommentMarker(raw: string): string {

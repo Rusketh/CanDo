@@ -1,0 +1,5 @@
+// EXPECT: Vec
+CLASS Vec = (self, x, y) { self.x = x; self.y = y; }
+Vec.__add = FUNCTION(a, b) { RETURN Vec(a.x + b.x, a.y + b.y); };
+VAR sum = Vec(1, 2) + Vec(3, 4);
+sum|

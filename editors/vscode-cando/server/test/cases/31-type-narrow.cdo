@@ -1,0 +1,6 @@
+// EXPECT: string
+FUNCTION mixed(x) {
+    IF type(x) == "string" {
+        VAR y = x|;
+    }
+}

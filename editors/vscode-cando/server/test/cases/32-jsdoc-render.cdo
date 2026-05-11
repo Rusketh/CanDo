@@ -1,0 +1,9 @@
+// DOC-CONTAINS: **Parameters:**
+/**
+ * Adds two numbers.
+ *
+ * @param a First operand.
+ * @param b Second operand.
+ * @returns The sum.
+ */
+FUNCTION sum|(a, b) { RETURN a + b; }
