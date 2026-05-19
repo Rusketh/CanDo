@@ -22,6 +22,11 @@
  *                   suppress the print without disabling globally.
  *   --jit-dump      after stats, print the IR of every compiled
  *                   trace.  Implies --jit.
+ *   --no-console    drop the inherited console window at startup
+ *                   (Windows: FreeConsole(); POSIX: dup /dev/null
+ *                   over fd 0/1/2) and disable the console standard
+ *                   library for the lifetime of the VM.  Useful when
+ *                   launching CanDo scripts from a GUI shortcut.
  *
  * Environment variables:
  *   CANDO_JIT=1     equivalent to --jit when no CLI flag overrides.
@@ -46,28 +51,31 @@ int main(int argc, char *argv[])
         fprintf(stderr, "CanDo %s\n", CANDO_VERSION);
         fprintf(stderr, "usage: %s <file.cdo> "
                         "[--disasm] [--jit|--no-jit] [--jit-stats] "
-                        "[args...]\n", argv[0]);
+                        "[--no-console] [args...]\n", argv[0]);
         return 1;
     }
 
-    const char *path        = argv[1];
+    const char *path        = NULL;
     bool        disasm      = false;
     bool        jit_stats   = false;
     bool        jit_request = false;
     bool        jit_disable = false;
     bool        jit_dump    = false;
+    bool        no_console  = false;
 
-    /* Collect script args: everything after argv[1] that isn't an
-     * interpreter flag. */
+    /* Walk argv: interpreter flags can appear before or after the
+     * script path; the first non-flag arg is the script.  Everything
+     * after the script that isn't an interpreter flag becomes a
+     * script-arg. */
     const char **script_argv = NULL;
     int          script_argc = 0;
-    if (argc > 2) {
-        script_argv = (const char **)malloc(sizeof(char *) * (size_t)(argc - 2));
+    if (argc > 1) {
+        script_argv = (const char **)malloc(sizeof(char *) * (size_t)(argc - 1));
         if (!script_argv) {
             fprintf(stderr, "cando: out of memory\n");
             return 1;
         }
-        for (int i = 2; i < argc; i++) {
+        for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "--disasm") == 0) {
                 disasm = true;
             } else if (strcmp(argv[i], "--jit") == 0) {
@@ -78,10 +86,29 @@ int main(int argc, char *argv[])
                 jit_stats = true;
             } else if (strcmp(argv[i], "--jit-dump") == 0) {
                 jit_dump = true;
+            } else if (strcmp(argv[i], "--no-console") == 0) {
+                no_console = true;
+            } else if (!path) {
+                path = argv[i];
             } else {
                 script_argv[script_argc++] = argv[i];
             }
         }
+    }
+
+    if (!path) {
+        fprintf(stderr, "cando: missing script path\n");
+        free(script_argv);
+        return 1;
+    }
+
+    /* --no-console drops the inherited console window before the VM
+     * is even spun up; the library is then disabled for the script's
+     * lifetime so any console.* call throws cleanly.  Done before
+     * cando_open so a FreeConsole-mid-startup race can't drop a log
+     * line written by the VM init. */
+    if (no_console) {
+        cando_console_detach();
     }
 
     /* Create a new VM and load all standard libraries. */
@@ -93,6 +120,10 @@ int main(int argc, char *argv[])
     }
     cando_openlibs(vm);
     cando_set_args(vm, script_argc, script_argv);
+
+    if (no_console) {
+        cando_console_set_enabled(vm, false);
+    }
 
     /* JIT profiling state.  Resolution order:
      *   1. --no-jit on the CLI wins over everything (force off).

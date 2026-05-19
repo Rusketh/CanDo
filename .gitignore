@@ -16,6 +16,7 @@ tests/test_vm
 tests/test_sockutil
 tests/test_yaml
 tests/test_crypto
+tests/test_console
 tests/test_jit_ir
 tests/test_jit_hot
 tests/test_jit_mcode

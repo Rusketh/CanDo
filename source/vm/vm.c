@@ -233,6 +233,11 @@ void cando_vm_init(CandoVM *vm, CandoMemCtrl *mem) {
     vm->jit_enabled = false;
     vm->jit_stats   = (CandoJitStats){ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     vm->jit         = NULL;   /* lazy-allocated by cando_jit_enable     */
+
+    /* Console library: on by default.  Embedded hosts can turn it
+     * off via cando_console_set_enabled() and the CLI's
+     * --no-console flag.                                              */
+    vm->console_enabled = true;
 }
 
 void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
@@ -295,6 +300,10 @@ void cando_vm_init_child(CandoVM *child, const CandoVM *parent) {
     /* Child gets its own hot-counter / recorder state if the JIT is
      * on; cross-thread sharing of trace metadata is a Phase 4 problem. */
     child->jit         = parent->jit_enabled ? cando_jit_create() : NULL;
+
+    /* Console-enable flag inherits from the parent so child threads
+     * see the same disabled-state for `console.*` calls.            */
+    child->console_enabled = parent->console_enabled;
 
     /* Copy native function registry (read-only after init; child gets its
      * own buffer so subsequent registrations on either VM cannot disturb
@@ -642,6 +651,24 @@ void cando_jit_disable(CandoVM *vm) {
 
 bool cando_jit_is_enabled(const CandoVM *vm) {
     return vm ? vm->jit_enabled : false;
+}
+
+/* =========================================================================
+ * Console standard library embedder API
+ *
+ * The library itself lives in source/lib/console*.c.  These three
+ * symbols are the public lever embedded host applications use to
+ * gate / detach it; they live here so they can be called before the
+ * console library is initialised (or even when libcando is built
+ * without it, in some hypothetical future minimal config).
+ * ===================================================================== */
+
+void cando_console_set_enabled(CandoVM *vm, bool enabled) {
+    if (vm) vm->console_enabled = enabled;
+}
+
+bool cando_console_is_enabled(const CandoVM *vm) {
+    return vm ? vm->console_enabled : false;
 }
 
 CandoJitStats cando_jit_get_stats(const CandoVM *vm) {

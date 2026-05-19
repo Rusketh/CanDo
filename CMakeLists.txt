@@ -96,6 +96,12 @@ set(LIB_SRCS
     source/lib/datetime.c
     source/lib/array.c
     source/lib/crypto.c
+    source/lib/console.c
+    source/lib/console_term.c
+    source/lib/console_input.c
+    source/lib/console_events.c
+    source/lib/console_lineedit.c
+    source/lib/console_dispatch.c
     source/lib/process.c
     source/lib/net.c
     source/lib/object.c
@@ -358,3 +364,21 @@ add_executable(test_crypto tests/test_crypto.c)
 target_include_directories(test_crypto PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_crypto PRIVATE OpenSSL::SSL OpenSSL::Crypto ${PLATFORM_LIBS})
 add_test(NAME test_crypto COMMAND $<TARGET_FILE:test_crypto>)
+
+# test_console — pure-C tests for the key/mouse decoder + event
+# queue.  Compiles the relevant lib/*.c sources directly (no libcando
+# link, since we want to exercise the helpers in isolation).
+add_executable(test_console
+    tests/test_console.c
+    source/lib/console_input.c
+    source/lib/console_events.c
+    source/core/thread_platform.c
+    source/core/common.c
+)
+target_include_directories(test_console PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/source
+    ${CMAKE_SOURCE_DIR}/source/lib
+)
+target_link_libraries(test_console PRIVATE Threads::Threads ${PLATFORM_LIBS})
+add_test(NAME test_console COMMAND $<TARGET_FILE:test_console>)
