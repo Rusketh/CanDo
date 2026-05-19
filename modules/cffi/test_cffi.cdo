@@ -1,0 +1,279 @@
+// Script-level integration tests for the cffi module.  These exercise
+// the full path: load -> bind / call -> marshal -> ffi_call ->
+// demarshal -> handle lifecycle.  The target library is libc, which is
+// present on every supported platform under predictable names.
+//
+// Run with:
+//
+//     ./cando modules/cffi/test_cffi.cdo
+//
+// The script counts pass / fail in-script so CI sees a single PASS or
+// FAIL line at the end; non-zero exit on any failure.
+
+VAR ffi = include("./modules/cffi/cffi");
+
+VAR failures = 0;
+VAR passed   = 0;
+
+FUNCTION assert_eq(name, got, want) {
+    IF got == want {
+        passed = passed + 1;
+        print(`  PASS  ${name}`);
+    } ELSE {
+        failures = failures + 1;
+        print(`  FAIL  ${name}: got ${got}, want ${want}`);
+    }
+}
+
+FUNCTION assert_true(name, cond) {
+    IF cond {
+        passed = passed + 1;
+        print(`  PASS  ${name}`);
+    } ELSE {
+        failures = failures + 1;
+        print(`  FAIL  ${name}: condition was false`);
+    }
+}
+
+FUNCTION assert_throws(name, fn) {
+    VAR threw = FALSE;
+    TRY {
+        fn();
+    } CATCH (e) {
+        threw = TRUE;
+    }
+    IF threw {
+        passed = passed + 1;
+        print(`  PASS  ${name}`);
+    } ELSE {
+        failures = failures + 1;
+        print(`  FAIL  ${name}: expected throw`);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Open libc -- name varies by platform.
+// ---------------------------------------------------------------------------
+
+VAR libc_path = "libc.so.6";
+IF os.platform == "darwin" { libc_path = "libSystem.B.dylib"; }
+IF os.platform == "windows" { libc_path = "msvcrt.dll"; }
+
+print(""); print(`[load libc: ${libc_path}]`);
+
+VAR libc = ffi.load(libc_path);
+assert_true("ffi.load returned a non-null handle", libc != NULL);
+
+// ---------------------------------------------------------------------------
+// Direct call -- scalar in, scalar out.
+// ---------------------------------------------------------------------------
+
+print(""); print("[scalar calls]");
+
+VAR pid = libc:call("getpid", "int()");
+assert_true("getpid > 0", pid > 0);
+assert_true("getpid is integer-shaped", pid == (pid + 0));   // i.e. finite number
+
+VAR forty_two = libc:call("atoi", "int(const char*)", "42");
+assert_eq("atoi(\"42\")", forty_two, 42);
+
+VAR negative = libc:call("atoi", "int(const char*)", "-17");
+assert_eq("atoi(\"-17\")", negative, -17);
+
+VAR zero = libc:call("atoi", "int(const char*)", "not a number");
+assert_eq("atoi(\"not a number\")", zero, 0);
+
+VAR len = libc:call("strlen", "size_t(const char*)", "hello, world");
+assert_eq("strlen(\"hello, world\")", len, 12);
+
+VAR abs_val = libc:call("abs", "int(int)", -7);
+assert_eq("abs(-7)", abs_val, 7);
+
+// Two cstr args.
+VAR cmp_eq = libc:call("strcmp", "int(const char*, const char*)", "abc", "abc");
+assert_eq("strcmp(\"abc\", \"abc\")", cmp_eq, 0);
+
+VAR cmp_lt = libc:call("strcmp", "int(const char*, const char*)", "abc", "abd");
+assert_true("strcmp(\"abc\", \"abd\") < 0", cmp_lt < 0);
+
+VAR cmp_gt = libc:call("strcmp", "int(const char*, const char*)", "abd", "abc");
+assert_true("strcmp(\"abd\", \"abc\") > 0", cmp_gt > 0);
+
+// ---------------------------------------------------------------------------
+// Function-style call shape -- same handler, different invocation.
+// ---------------------------------------------------------------------------
+
+print(""); print("[function-style calls]");
+
+VAR pid2 = ffi.call(libc, "getpid", "int()");
+assert_eq("ffi.call(libc, getpid) == lib:call(getpid)", pid2, pid);
+
+VAR len2 = ffi.call(libc, "strlen", "size_t(const char*)", "abcdef");
+assert_eq("ffi.call(libc, strlen, \"abcdef\")", len2, 6);
+
+// ---------------------------------------------------------------------------
+// Bound calls -- signature parsed once.
+// ---------------------------------------------------------------------------
+
+print(""); print("[bound calls]");
+
+VAR b_getpid = libc:bind("getpid", "int()");
+assert_true("bind returned non-null", b_getpid != NULL);
+assert_eq("bound getpid matches direct", b_getpid:call(), pid);
+
+VAR b_strlen = libc:bind("strlen", "size_t(const char*)");
+assert_eq("bound strlen(\"\")",         b_strlen:call(""),        0);
+assert_eq("bound strlen(\"a\")",        b_strlen:call("a"),       1);
+assert_eq("bound strlen(\"hello\")",    b_strlen:call("hello"),   5);
+
+assert_true("binding has name field",      b_strlen.name == "strlen");
+assert_true("binding has signature field", b_strlen.signature == "size_t(const char*)");
+
+// ---------------------------------------------------------------------------
+// Pointer return + ffi.string round-trip.
+// ---------------------------------------------------------------------------
+
+print(""); print("[pointer returns]");
+
+// strchr returns char* into the input -- locate 'w' in "hello, world"
+VAR p = libc:call("strchr", "char*(const char*, int)", "hello, world", 119);
+assert_true("strchr returned non-null pointer", p != NULL);
+VAR tail = ffi.string(p);
+assert_eq("ffi.string(strchr result)", tail, "world");
+
+// strchr with not-found returns NULL.
+VAR missing = libc:call("strchr", "char*(const char*, int)", "hello", 122);
+assert_true("strchr miss returns NULL", missing == NULL);
+
+// ---------------------------------------------------------------------------
+// Buffer allocation, write, read, free.
+// ---------------------------------------------------------------------------
+
+print(""); print("[buffer lifecycle]");
+
+VAR buf = ffi.alloc(64);
+assert_true("ffi.alloc returned a buffer", buf != NULL);
+assert_eq("alloc'd buffer size",  buf:size(), 64);
+assert_true("buffer is not null", buf:isNull() == FALSE);
+
+buf:write("hello\0");
+assert_eq("read back at offset 0", buf:read(0, 5), "hello");
+
+buf:write(10, "world");
+assert_eq("read back at offset 10", buf:read(10, 5), "world");
+
+VAR addr = buf:address();
+assert_true("buffer address > 0", addr > 0);
+
+// Foreign pointers don't know their length, so :read() without args
+// is an error.  But after :write(), we should be able to read what we
+// wrote.
+buf:free();
+assert_true("buf:isNull after free", buf:isNull() == TRUE);
+buf:free();  // idempotent
+assert_true("double free is a no-op", TRUE);
+
+// ---------------------------------------------------------------------------
+// memcpy round-trip through ffi.alloc'd buffers.
+// ---------------------------------------------------------------------------
+
+print(""); print("[memcpy via ffi.alloc]");
+
+VAR src = ffi.alloc(16);
+src:write("abcdefghij");
+VAR dst = ffi.alloc(16);
+
+VAR r = libc:call("memcpy", "void*(void*, const void*, size_t)", dst, src, 10);
+assert_true("memcpy returned non-null", r != NULL);
+assert_eq("dst contents after memcpy", dst:read(0, 10), "abcdefghij");
+
+src:free();
+dst:free();
+
+// memcpy directly into a string source -- the cffi marshal lets a
+// string be passed where const void* is expected.
+VAR dst2 = ffi.alloc(8);
+libc:call("memcpy", "void*(void*, const void*, size_t)", dst2, "XYZ", 3);
+assert_eq("memcpy from string src", dst2:read(0, 3), "XYZ");
+dst2:free();
+
+// ---------------------------------------------------------------------------
+// memcmp -- signed return.
+// ---------------------------------------------------------------------------
+
+print(""); print("[memcmp]");
+
+VAR mc_eq = libc:call("memcmp", "int(const void*, const void*, size_t)", "abc", "abc", 3);
+assert_eq("memcmp(eq) == 0", mc_eq, 0);
+
+VAR mc_lt = libc:call("memcmp", "int(const void*, const void*, size_t)", "abc", "abd", 3);
+assert_true("memcmp(<) < 0", mc_lt < 0);
+
+VAR mc_gt = libc:call("memcmp", "int(const void*, const void*, size_t)", "abd", "abc", 3);
+assert_true("memcmp(>) > 0", mc_gt > 0);
+
+// ---------------------------------------------------------------------------
+// Error paths: bad sig / missing symbol / closed library
+// ---------------------------------------------------------------------------
+
+print(""); print("[error paths]");
+
+assert_throws("bad signature throws", FUNCTION() {
+    libc:call("getpid", "thisIsNotAType()");
+});
+
+assert_throws("missing symbol throws", FUNCTION() {
+    libc:call("definitely_not_a_real_symbol_xyzzy", "int()");
+});
+
+assert_throws("ffi.load(missing file) throws", FUNCTION() {
+    ffi.load("/no/such/file/exists.so");
+});
+
+assert_throws("wrong arg count throws", FUNCTION() {
+    libc:call("strlen", "size_t(const char*)");  // missing the arg
+});
+
+assert_throws("ffi.sizeof of garbage throws", FUNCTION() {
+    ffi.sizeof("frobnicate");
+});
+
+// ---------------------------------------------------------------------------
+// errno round-trip.
+// ---------------------------------------------------------------------------
+
+print(""); print("[errno]");
+
+ffi.errno(0);
+assert_eq("errno cleared", ffi.errno(), 0);
+
+ffi.errno(42);
+assert_eq("errno set + read", ffi.errno(), 42);
+
+// ---------------------------------------------------------------------------
+// Library close + use-after-close.
+// ---------------------------------------------------------------------------
+
+print(""); print("[close]");
+
+VAR libc2 = ffi.load(libc_path);
+VAR b_pid = libc2:bind("getpid", "int()");
+libc2:close();
+assert_throws("use of binding after lib close throws", FUNCTION() {
+    b_pid:call();
+});
+libc2:close();  // idempotent
+assert_true("repeated close is OK", TRUE);
+
+// Original libc still works -- closing libc2 did not affect it.
+assert_eq("original libc still callable", libc:call("getpid", "int()"), pid);
+
+// ---------------------------------------------------------------------------
+// Summary
+// ---------------------------------------------------------------------------
+
+print(""); print(`==> ${passed} passed, ${failures} failed`);
+IF failures > 0 {
+    THROW `cffi integration tests failed: ${failures} failure(s)`;
+}
+print("cffi integration tests: all passed");

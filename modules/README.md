@@ -21,6 +21,7 @@ platform — see each module's README for platform notes.
 | [`window/`](window/README.md) | Cross-platform OS window with an OpenGL context | Linux, macOS, Windows |
 | [`draw/`](draw/README.md)     | 2D drawing primitives, layered on `window` | Linux, macOS, Windows |
 | [`forms/`](forms/README.md)   | Native widget tree (Form, Button, TextBox, …) | Windows (stub elsewhere) |
+| [`cffi/`](cffi/README.md)     | C foreign-function interface — load .so/.dll, call C with type-string signatures | All (libffi required) |
 
 ## How a module loads
 
