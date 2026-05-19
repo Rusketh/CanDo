@@ -1,0 +1,75 @@
+/* test_console.cdo -- Surface-only smoke for the console library.
+ *
+ * Most console functionality needs a real tty to exercise, so this
+ * script just verifies:
+ *   - The global is registered.
+ *   - Every documented function exists.
+ *   - Output natives don't crash when stdout isn't a tty (they
+ *     silently emit ANSI bytes that the test runner discards).
+ *   - The embedder enable/disable + script-level disable() throws
+ *     work end-to-end.
+ *   - size() / isatty() / exists() return sensible types.
+ */
+
+function assert(cond, msg) { if !cond { throw msg; } }
+
+/* ----- global + methods ----- */
+assert(console != null, "console global registered");
+
+var must_exist = [
+    "write", "print", "moveCursor",
+    "cursorUp", "cursorDown", "cursorLeft", "cursorRight",
+    "saveCursor", "restoreCursor",
+    "clear", "clearLine", "clearToEnd", "clearToStart",
+    "scrollUp", "scrollDown", "setScrollRegion", "resetScrollRegion",
+    "rawMode", "echo", "cursorVisible", "alternateScreen", "enableMouse",
+    "isatty", "size", "title",
+    "readKey", "readKeyTimeout", "pollKey", "readLine", "flushInput",
+    "start", "stop", "wait", "running",
+    "enable", "disable", "enabled", "exists", "attach", "detach",
+    "hide", "show",
+];
+for name of must_exist {
+    assert(console[name] != null, "console." + name + " exists");
+}
+
+/* ----- output natives don't crash off a tty ----- */
+console.write("");
+console.write("text without opts");
+console.print("");
+
+/* Size / isatty / exists return values of the right shape. */
+var sz = console.size();
+assert(sz != null, "size returns object");
+assert(sz.cols >= 0, "size.cols is numeric");
+assert(sz.rows >= 0, "size.rows is numeric");
+
+/* isatty / exists are bools either way. */
+var tty = console.isatty();
+assert(tty == true || tty == false, "isatty returns bool");
+var ex = console.exists();
+assert(ex == true || ex == false, "exists returns bool");
+
+/* ----- enable / disable / enabled ----- */
+assert(console.enabled() == true, "enabled by default");
+console.disable();
+assert(console.enabled() == false, "disabled after disable()");
+
+var threw = false;
+try { console.write("nope"); } catch (e) { threw = true; }
+assert(threw, "console.write throws when disabled");
+
+console.enable();
+assert(console.enabled() == true, "re-enabled");
+console.write("");      /* shouldn't throw now */
+
+/* ----- non-blocking input ----- */
+assert(console.pollKey() == null, "pollKey returns null off a tty");
+assert(console.readKeyTimeout(0) == null, "readKeyTimeout(0) returns null off a tty");
+
+/* ----- start / stop / running ----- */
+/* Don't actually start: the worker thread reads stdin, which would
+ * block in CI.  Just confirm running() returns false initially. */
+assert(console.running() == false, "running() false initially");
+
+print("test_console: all assertions passed");

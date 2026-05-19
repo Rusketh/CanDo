@@ -216,6 +216,7 @@ run_smoke "test_math_ext"   "$SCRIPTS/test_math_ext.cdo"
 run_smoke "test_enhance"  "$SCRIPTS/test_enhance.cdo"
 run_smoke "test_os"     "$SCRIPTS/test_os.cdo"
 run_smoke "test_os_ext" "$SCRIPTS/test_os_ext.cdo"
+run_smoke "test_console" "$SCRIPTS/test_console.cdo"
 run_smoke "test_sys"      "$SCRIPTS/test_sys.cdo"
 
 echo "-----------------------"

@@ -90,6 +90,7 @@
 #include "lib/array.h"
 #include "lib/object.h"
 #include "lib/crypto.h"
+#include "lib/console.h"
 #include "lib/process.h"
 #include "lib/net.h"
 #include "lib/socket.h"

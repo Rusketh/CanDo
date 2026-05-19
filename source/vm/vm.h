@@ -416,6 +416,12 @@ struct CandoVM {
     CandoJitStats jit_stats;
     CandoJit     *jit;          /* NULL until first cando_jit_enable;
                                    then owned by this VM's lifetime      */
+
+    /* Console standard library: default true; flipped off by
+     * cando_console_set_enabled() or `cando --no-console`.  Every
+     * native registered by cando_lib_console_register checks this
+     * flag at entry and throws "console is disabled" when false. */
+    bool          console_enabled;
 };
 
 /* =========================================================================
@@ -455,6 +461,33 @@ CANDO_API void          cando_jit_disable(CandoVM *vm);
 CANDO_API bool          cando_jit_is_enabled(const CandoVM *vm);
 CANDO_API CandoJitStats cando_jit_get_stats(const CandoVM *vm);
 CANDO_API void          cando_jit_reset_stats(CandoVM *vm);
+
+/* =========================================================================
+ * Console standard library — embedder enable / disable
+ *
+ * The console library (cursor, colours, raw-mode input, mouse, async
+ * dispatcher) is always linked into libcando, but a host application
+ * can turn it off so script calls into `console.*` throw cleanly
+ * rather than touching the host's stdio.  Useful for GUI apps,
+ * services, embedded interpreters in IDEs, etc.
+ *
+ * The CLI's `--no-console` flag is implemented on top of these two
+ * functions plus cando_console_detach().
+ * ===================================================================== */
+
+CANDO_API void cando_console_set_enabled(CandoVM *vm, bool enabled);
+CANDO_API bool cando_console_is_enabled(const CandoVM *vm);
+
+/* Drop the inherited console process-wide.  On Windows this calls
+ * FreeConsole() and reopens the standard streams onto NUL.  On POSIX
+ * it dups /dev/null over fd 0/1/2.  Idempotent; safe to call before
+ * any VM exists.
+ *
+ * Does *not* implicitly call cando_console_set_enabled(vm, false);
+ * embedders that detach should also disable the library so script
+ * code throws on attempted console calls rather than silently
+ * sending bytes to NUL. */
+CANDO_API void cando_console_detach(void);
 
 /* cando_jit_last_abort -- the most recent recorder abort reason, or
  * NULL if the recorder has never aborted (or the JIT has never been

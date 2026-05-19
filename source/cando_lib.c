@@ -56,6 +56,7 @@
 #include "lib/array.h"
 #include "lib/object.h"
 #include "lib/crypto.h"
+#include "lib/console.h"
 #include "lib/process.h"
 #include "lib/net.h"
 #include "lib/socket.h"
@@ -206,6 +207,7 @@ CANDO_API void cando_openlibs(CandoVM *vm)
     cando_lib_array_register(vm);
     cando_lib_object_register(vm);
     cando_lib_crypto_register(vm);
+    cando_lib_console_register(vm);
     cando_lib_process_register(vm);
     cando_lib_net_register(vm);
     /* socket sits above net but below http/https; the latter still use the
@@ -235,6 +237,7 @@ CANDO_API void cando_open_threadlib(CandoVM *vm)   { cando_lib_thread_register(v
 CANDO_API void cando_open_oslib(CandoVM *vm)       { cando_lib_os_register(vm);       }
 CANDO_API void cando_open_datetimelib(CandoVM *vm) { cando_lib_datetime_register(vm); }
 CANDO_API void cando_open_cryptolib(CandoVM *vm)   { cando_lib_crypto_register(vm);   }
+CANDO_API void cando_open_consolelib(CandoVM *vm)  { cando_lib_console_register(vm);  }
 CANDO_API void cando_open_processlib(CandoVM *vm)  { cando_lib_process_register(vm);  }
 CANDO_API void cando_open_netlib(CandoVM *vm)      { cando_lib_net_register(vm);      }
 CANDO_API void cando_open_socketlib(CandoVM *vm)        { cando_lib_socket_register(vm);        }
