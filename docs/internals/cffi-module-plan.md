@@ -1,424 +1,367 @@
 # `cffi` module — proposal
 
-A binary include module that lets CanDo scripts call into arbitrary
-C-ABI shared libraries at runtime — the same role LuaJIT's `ffi`,
-Python's `ctypes`, or Node's `koffi` play in their respective
-ecosystems.  Loaded with `include("./modules/cffi/cffi")` exactly like
-`ldap` and `forms`.
+A binary include module for calling into arbitrary C-ABI shared
+libraries from CanDo scripts.  Loaded with
+`include("./modules/cffi/cffi")` exactly like `ldap` and `forms`.
 
-The goal of this document is to fix the **script-facing API** by
-showing how users will write code against it.  Implementation notes
-follow at the end.
-
----
-
-## 1. Loading
-
-```cdo
-VAR ffi = include("./modules/cffi/cffi");
-```
-
-Requires `libffi` at runtime on POSIX; Windows ships its own
-fallback.  See "Platforms" below.
+The model is the one LuaJIT got right: **paste the C header,
+then call the functions like they were CanDo functions.**  No
+per-symbol bind step, no separate type objects, no `restype` /
+`argtypes` ceremony.
 
 ---
 
-## 2. Worked examples
+## The driving example
 
-These are the shape the module is being designed to support.  Each
-example is a complete, copy-pasteable script.
+A real one.  You have an image-processing script and need to load a
+PNG.  CanDo's standard library doesn't decode PNG, but every system
+ships `libpng` and the `stb_image` single-header library exists as a
+tiny `.so` everywhere else.  You want to call into it.
 
-### 2.1 Calling a standard libc function
-
-```cdo
-VAR ffi = include("./modules/cffi/cffi");
-
-VAR libc = ffi.open("libc.so.6");          // or "msvcrt.dll" on Windows
-
-VAR getpid = libc:bind("getpid", "int (void)");
-print(`pid = ${getpid()}`);
-
-VAR atoi = libc:bind("atoi", "int (const char*)");
-print(atoi("42"));                          // 42
-```
-
-`libc:bind(name, signature)` parses the C-style signature once and
-returns a callable.  Calls are ordinary CanDo function calls.
-
-### 2.2 Working with structs
-
-```cdo
-VAR ffi = include("./modules/cffi/cffi");
-VAR libc = ffi.open("libc.so.6");
-
-// Declare a struct.  The body is plain C grammar; the return value
-// is a type descriptor that doubles as a constructor.
-VAR timeval = ffi.struct("struct timeval { long tv_sec; long tv_usec; }");
-
-VAR gettimeofday = libc:bind("gettimeofday",
-    "int (struct timeval*, void*)");
-
-VAR tv = timeval.new();                     // zeroed instance
-gettimeofday(tv, NULL);
-print(`${tv.tv_sec}.${tv.tv_usec}`);
-```
-
-Field access is a property on the script-facing handle; reads and
-writes go through the type descriptor.
-
-### 2.3 Pointers and buffers
+Here is the whole script.  Read it top to bottom — every concept the
+module needs is in here:
 
 ```cdo
 VAR ffi = include("./modules/cffi/cffi");
 
-// Allocate an off-heap byte buffer.  The returned value is an opaque
-// handle that the GC tracks; it is freed when the last reference goes
-// away (or sooner via :free()).
-VAR buf = ffi.malloc(1024);
-
-buf:write_u32(0, 0xdeadbeef);
-print(buf:read_u32(0):toHex());             // "deadbeef"
-
-// Reinterpret the same memory through a typed pointer.
-VAR u32p = ffi.cast("uint32_t*", buf);
-print(u32p[0]:toHex());
-u32p[1] = 0xfeedface;
-
-buf:free();                                 // optional, GC will too
-```
-
-`buf:slice(offset, len)` returns a no-copy view.  `buf:toString()`
-copies the bytes out as a CanDo string.
-
-### 2.4 Strings in / strings out
-
-CanDo strings are immutable and reference-counted; pointers handed to
-C live as long as the call.
-
-```cdo
-VAR strlen = libc:bind("strlen", "size_t (const char*)");
-print(strlen("hello"));                     // 5
-
-VAR strdup = libc:bind("strdup", "char* (const char*)");
-VAR p = strdup("copy me");
-print(ffi.string(p));                        // "copy me"  -- copies into a CanDo string
-libc:bind("free", "void (void*)")(p);
-```
-
-`ffi.string(ptr, len*)` copies a C string into a CanDo string.  Without
-`len` it reads up to a NUL.
-
-### 2.5 Callbacks (C → CanDo)
-
-```cdo
-VAR ffi = include("./modules/cffi/cffi");
-VAR libc = ffi.open("libc.so.6");
-
-VAR qsort = libc:bind("qsort",
-    "void (void*, size_t, size_t, int (*)(const void*, const void*))");
-
-VAR arr = ffi.array("int", [9, 3, 7, 1, 5]);
-
-VAR cmp = ffi.callback("int (const void*, const void*)", FUNCTION(a, b) {
-    VAR ia = ffi.cast("int*", a)[0];
-    VAR ib = ffi.cast("int*", b)[0];
-    RETURN ia - ib;
-});
-
-qsort(arr, #arr, ffi.sizeof("int"), cmp);
-print(arr:toArray());                       // [1, 3, 5, 7, 9]
-
-cmp:free();                                 // releases the trampoline
-```
-
-The callback is a real C function pointer (libffi closure or a
-hand-rolled trampoline) that re-enters the VM on the calling thread.
-
-### 2.6 Loading a third-party library
-
-```cdo
-VAR ffi = include("./modules/cffi/cffi");
-VAR z = ffi.open("libz.so.1");
-
-VAR crc32 = z:bind("crc32", "unsigned long (unsigned long, const char*, unsigned)");
-
-VAR data = "the quick brown fox";
-print(crc32(0, data, #data):toHex());
-```
-
-### 2.7 Header-style batch declaration
-
-For larger surfaces, declare many symbols at once.  The argument is a
-fragment of C (typedefs, structs, function prototypes); no
-preprocessor, no `#include` resolution — just enough grammar to lift
-declarations.
-
-```cdo
-VAR ffi = include("./modules/cffi/cffi");
-VAR sdl = ffi.open("libSDL2-2.0.so.0");
-
-sdl:declare(`
-    typedef struct SDL_Window  SDL_Window;
-    typedef struct SDL_Surface SDL_Surface;
-
-    int   SDL_Init(unsigned flags);
-    void  SDL_Quit(void);
-    SDL_Window* SDL_CreateWindow(const char* title,
-                                  int x, int y, int w, int h,
-                                  unsigned flags);
-    void  SDL_DestroyWindow(SDL_Window*);
-    int   SDL_Delay(unsigned ms);
+// 1. Load the library and tell the runtime what's in it.
+//    The string is plain C: copy it out of the header, paste it here.
+VAR stb = ffi.load("./libstb_image.so");
+stb.declare(`
+    unsigned char* stbi_load(const char* filename,
+                             int* x, int* y, int* channels,
+                             int desired_channels);
+    void stbi_image_free(void* retval_from_stbi_load);
 `);
 
-sdl.SDL_Init(0x20);                          // SDL_INIT_VIDEO
-VAR w = sdl.SDL_CreateWindow("hi", 100, 100, 640, 480, 0x4);
-sdl.SDL_Delay(2000);
-sdl.SDL_DestroyWindow(w);
-sdl.SDL_Quit();
+// 2. Out-parameters: allocate something the C function can write into.
+VAR w = ffi.new("int");
+VAR h = ffi.new("int");
+VAR c = ffi.new("int");
+
+// 3. Call it like a normal CanDo function.
+//    Strings auto-convert.  ffi.new("int") is passed as `int*`.
+VAR pixels = stb.stbi_load("photo.png", w, h, c, 4);
+IF pixels == NULL {
+    THROW "decode failed";
+}
+
+print(`${w.value}x${h.value}, ${c.value} channels`);
+
+// 4. Read the pixel bytes out.  pixels is a typed pointer to
+//    unsigned char; treat it as a buffer.
+VAR rgba = pixels:read(w.value * h.value * 4);
+
+// 5. Hand the memory back.  No GC magic — C allocated it, we free it.
+stb.stbi_image_free(pixels);
+
+// `rgba` is now an ordinary CanDo byte string.
+file.write("dump.bin", rgba);
 ```
 
-After `:declare()`, each function shows up as a property on the
-library handle — no separate `bind` step.
+That's the whole surface in one screen.  No other example introduces
+any new concept; the rest of this doc just expands the pieces.
 
-### 2.8 Errors
+---
+
+## What the script just did
+
+Five mechanics, in order of appearance.
+
+### 1. `ffi.load(path)` + `lib.declare(C source)`
+
+`load` is `dlopen` / `LoadLibrary`.  `declare` parses the C text
+once and attaches every prototype it sees as a property on `lib`.
+After `stb.declare(...)`, `stb.stbi_load` *is* the function — calling
+it does the FFI dance.
+
+`declare` takes plain C.  Typedefs, structs, function prototypes,
+`#define` of integer constants — all lifted.  No preprocessor, no
+`#include` chasing.  You paste the parts you need from the upstream
+header.  If a library has 200 functions and you use 4, you declare 4.
+
+A library is a script value like any other: pass it around, store it
+in a variable, close it with `lib:close()` when done.
+
+### 2. `ffi.new("type", init*)` — a value C can write into
+
+`ffi.new("int")` returns a one-word cell holding a zero `int`.  The
+script side accesses it as `cell.value`; the C side sees `int*`.
+
+It scales straight up to structs:
 
 ```cdo
-TRY {
-    VAR bogus = ffi.open("./does-not-exist.so");
-} CATCH (e) {
-    print(`could not load: ${e}`);
-}
-
-TRY {
-    libc:bind("nope_not_a_symbol", "int (void)");
-} CATCH (e) {
-    print(`missing symbol: ${e}`);
-}
+stb.declare(`struct Color { unsigned char r, g, b, a; };`);
+VAR red = ffi.new("Color", { r: 255, g: 0, b: 0, a: 255 });
+print(red.r);                  // 255
+red.a = 128;
 ```
 
-`dlerror()` / `GetLastError()` messages are forwarded verbatim.  Bad
-signature strings throw a parse error pointing at the offending token.
+Reads and writes go through the layout the declaration installed.  No
+type objects in script — the *string* `"Color"` is the type identity,
+because that's what's already in the C header.
+
+For raw bytes, `ffi.new("char[1024]")` or the shorthand
+`ffi.alloc(1024)`.  Both return a pointer; both are GC-tracked and
+freed when the last reference drops.
+
+### 3. Argument conversion is implicit
+
+| C parameter | What a script passes |
+|---|---|
+| `const char*` | a CanDo string |
+| `int`, `double`, `size_t`, … | a CanDo number |
+| `bool` | a CanDo boolean |
+| `int*`, `Foo*` | the value `ffi.new("int")` / `ffi.new("Foo")` returned |
+| `void*` | any pointer or buffer |
+| `Foo` (by value) | the value `ffi.new("Foo")` returned |
+| `int (*)(int)` | a CanDo function — wrapped on the fly (see below) |
+| `NULL` | the literal `NULL` |
+
+If the conversion is impossible (string passed where an int is
+expected, etc.), the call throws before C is entered.
+
+### 4. Pointers act like buffers
+
+The `unsigned char*` `stbi_load` returns is a typed pointer.  Pointers
+support:
+
+```cdo
+p:read(n)              // copy n bytes out as a CanDo string
+p:write(bytes)         // copy bytes in
+p:slice(off, len)      // no-copy view that keeps p alive
+p[i]                   // typed indexing (uses the element type)
+p[i] = v               // typed write
+p:address()            // numeric address, for debugging
+#p                     // length, if it has one (ffi.alloc / ffi.new arrays do)
+p == NULL              // null check
+```
+
+That's it.  There is no separate "Buffer" type; a `char*` from
+`ffi.alloc(n)` and a `char*` from `stbi_load` use the same operations.
+
+### 5. Lifetime is honest
+
+The script `free`s what C allocated.  The runtime doesn't pretend it
+knows what `stbi_image_free` does — it can't.  Memory that came in
+through `ffi.new` / `ffi.alloc` *is* GC-tracked; memory C handed us is
+not.  This is the same deal Lua, Python, and Node all settled on, and
+trying to be cleverer than that always ends in tears.
+
+If you forget to free, you leak.  The README says so in bold.
 
 ---
 
-## 3. API surface
+## Callbacks, the only other shape
 
-### 3.1 Module-level
+Sometimes C calls *you*.  `qsort`, GUI event loops, audio buffers.
+This is the only place the module does anything non-obvious, and it
+hides behind the same calling convention as everything else: pass a
+CanDo function where a function pointer is expected, the module wraps
+it.
 
-| Function | Returns | Description |
-|---|---|---|
-| `ffi.open(path)` | `Library` | `dlopen` / `LoadLibrary`.  `path` is searched the same way `include()` searches (cwd, then platform loader). |
-| `ffi.current()` | `Library` | Handle for the host process — resolves symbols already linked in. |
-| `ffi.struct(decl)` | `Type` | Declare a struct/union from a C fragment. |
-| `ffi.typedef(decl)` | nothing | Register a typedef for later signature strings. |
-| `ffi.sizeof(type)` | number | Bytes. |
-| `ffi.alignof(type)` | number | Alignment. |
-| `ffi.offsetof(type, field)` | number | Field offset. |
-| `ffi.malloc(n)` / `ffi.calloc(n)` | `Buffer` | GC-tracked off-heap buffer. |
-| `ffi.cast(type, value)` | typed pointer | Reinterpret an integer / buffer / pointer as a typed pointer. |
-| `ffi.callback(sig, fn)` | `Callback` | Wrap a CanDo function as a C function pointer. |
-| `ffi.array(elemType, init)` | `Buffer` | Allocate `Buffer` sized for `init` and populate. |
-| `ffi.string(ptr, len*)` | string | Copy C bytes into a CanDo string. |
-| `ffi.errno()` / `ffi.errno(n)` | number | Read / clear `errno` on the calling thread. |
-| `ffi.NULL` | pointer | The null pointer constant. |
+```cdo
+VAR libc = ffi.load("libc.so.6");
+libc.declare(`
+    void qsort(void* base, size_t nmemb, size_t size,
+               int (*compar)(const void*, const void*));
+`);
 
-### 3.2 `Library`
+VAR nums = ffi.new("int[6]", [5, 2, 8, 1, 9, 3]);
 
-| Method | Description |
-|---|---|
-| `lib:bind(name, signature)` | Return a callable bound to that symbol. |
-| `lib:declare(c_fragment)` | Lift every prototype in `c_fragment` onto `lib` as a property. |
-| `lib:symbol(name)` | Raw pointer to the symbol (for variables, vtables). |
-| `lib:close()` | `dlclose`.  Idempotent.  All bindings derived from `lib` become invalid. |
+libc.qsort(nums, 6, ffi.sizeof("int"), FUNCTION(a, b) {
+    RETURN a[0] - b[0];           // a and b are int* into nums
+});
 
-### 3.3 `Buffer`
+print(nums:toArray());            // [1, 2, 3, 5, 8, 9]
+```
 
-| Method | Description |
-|---|---|
-| `b:read_<u8\|i8\|u16\|i16\|u32\|i32\|u64\|i64\|f32\|f64>(offset)` | Typed scalar read. |
-| `b:write_<…>(offset, value)` | Typed scalar write. |
-| `b:slice(offset, len)` | No-copy view (keeps the parent alive). |
-| `b:toString(offset*, len*)` | Copy bytes to a CanDo string. |
-| `b:address()` | Numeric address (debugging / interop). |
-| `b:free()` | Release immediately.  Subsequent access throws. |
-| `#b` | Length in bytes. |
-
-### 3.4 `Type` (struct / typedef)
-
-| Method | Description |
-|---|---|
-| `t.new(init*)` | Zeroed instance, optionally populated from a CanDo object. |
-| `t.size`, `t.align` | Layout. |
-| `t.fields` | Array of `{ name, type, offset }`. |
-| Instance `obj.field` | Property access — reads / writes through the descriptor. |
-
-### 3.5 `Callback`
-
-| Method | Description |
-|---|---|
-| `cb:free()` | Release the trampoline.  Calling C with a freed callback is undefined; the module guards against use-after-free by parking freed callbacks in a small dead-pool and throwing on entry. |
-
-### 3.6 Type strings
-
-Accepted in any `signature` / `type` argument:
-
-- Primitive: `void`, `bool`, `char`, `signed char`, `unsigned char`,
-  `short`, `unsigned short`, `int`, `unsigned int`, `long`,
-  `unsigned long`, `long long`, `unsigned long long`, `float`,
-  `double`, `size_t`, `ssize_t`, `intptr_t`, `uintptr_t`,
-  `int8_t`…`int64_t`, `uint8_t`…`uint64_t`.
-- Pointer: any of the above followed by `*`, possibly `const`-qualified.
-- Struct: `struct Name` after `ffi.struct(...)`.
-- Function pointer: `ret (args)` or `ret (*)(args)`.
-- Array: `T[n]` (fixed size, decays to `T*` at call boundaries).
-
-`const` is parsed and ignored at the ABI level — it exists only so
-copy-pasted C headers tokenize without edits.
+The wrapping is the libffi closure machinery — a real C function
+pointer that re-enters the VM.  The closure is freed when the
+enclosing call returns; long-lived callbacks (`atexit`, GTK signals)
+use the explicit form `ffi.callback(fn)` which returns a pointer the
+script must keep alive itself.
 
 ---
 
-## 4. Memory & lifetime model
+## API surface
 
-This is the bit that will go wrong if it isn't pinned down up front.
+Module-level:
 
-1. **`Buffer` is GC-tracked.**  The `CdoObject` carries a `__cffi_buf`
-   slot keyed into a module-private pool (the pattern `ldap` uses for
-   `__ldap_slot`, `source/lib/socket.c` for sockets).  When the object
-   is collected the pool entry `free()`s the backing allocation.
-2. **Pointers from C are *not* GC-tracked.**  `strdup`'s return is a
-   raw `void*` wrapped in a typed-pointer value; if you don't pass it
-   to `free` it leaks.  This matches every other FFI in existence and
-   is documented loudly.
-3. **CanDo strings handed to C are valid for the duration of one call
-   only.**  The native shim pins the string for the call and unpins
-   on return.  Storing the `const char*` past the call is a use-after.
-4. **Callbacks pin their CanDo function.**  The closure object holds
-   a strong reference to the function and the function's enclosing
-   environment so the VM can re-enter cleanly.
-5. **`Library:close()` invalidates all derived bindings.**  Calling a
-   freed binding throws `"library was closed"`.  This is the
-   pattern `ldap`'s `unbind` and `sqlite`'s `close` already follow.
+| | |
+|---|---|
+| `ffi.load(path)` | open a shared library |
+| `ffi.current()` | the host process's own symbols |
+| `ffi.new(type, init*)` | allocate a value of `type` |
+| `ffi.alloc(bytes)` | allocate a `bytes`-sized buffer; alias for `ffi.new("char[n]")` |
+| `ffi.sizeof(type)` / `ffi.alignof(type)` / `ffi.offsetof(type, field)` | layout queries |
+| `ffi.callback(fn)` | long-lived callback wrapper |
+| `ffi.string(ptr, len*)` | copy C bytes into a CanDo string |
+| `ffi.errno()` | read `errno` on this thread |
+| `ffi.NULL` | the null pointer |
 
-The module never stores `CdoObject*` across a call — it stores the
-handle index and re-resolves (the rule from `docs/AI-GUIDE.md` §2).
+On a library handle:
+
+| | |
+|---|---|
+| `lib.declare(c_source)` | parse declarations, lift functions onto `lib` |
+| `lib.<name>(args…)` | call a declared function |
+| `lib:symbol(name)` | raw pointer to a global (for variables, vtables) |
+| `lib:close()` | `dlclose`.  Idempotent.  Closed libraries throw on call. |
+
+On a pointer / `ffi.new` value:
+
+| | |
+|---|---|
+| `p.field` | struct field read |
+| `p.field = v` | struct field write |
+| `p[i]` / `p[i] = v` | element indexing |
+| `p:read(n)` / `p:write(bytes)` | byte-level I/O |
+| `p:slice(off, len)` | no-copy view |
+| `p:address()` | numeric address |
+| `p:free()` | release early; otherwise GC does it |
+| `#p` | element count (if known) |
+
+For scalar cells (`ffi.new("int")` and friends), `.value` reads/writes
+the single element — purely shorthand for `p[0]`.
+
+That's the whole user-facing surface.
 
 ---
 
-## 5. Platforms
+## Why this shape
+
+A few specific choices that fall out of the example above:
+
+- **One verb for declaration.**  Every other FFI splits "tell me the
+  type" and "give me the function" into two steps.  This one doesn't.
+  The C declaration *is* the binding.
+- **Types are strings, not objects.**  The script's source of truth
+  for "what is `Color`?" is the `declare` call, not a `ffi.struct`
+  return value the user has to thread around.  This kills the
+  `ffi.types.Color` namespace the previous draft had.
+- **Pointer == buffer.**  Pointers and byte buffers were two concepts
+  in the previous draft pulling the same weight.  Collapse them.
+  `char* x = malloc(n)` and `ffi.alloc(n)` are the same thing.
+- **No type cast operator.**  If you need to reinterpret memory,
+  declare the right struct and `ffi.new` it over the pointer (`new`
+  takes an optional pointer-to-cast-from second form).  Skipping the
+  ambient `ffi.cast` removes a footgun and a screen of doc.
+- **Implicit callback wrapping at call sites.**  The 80% case (one-
+  shot callbacks like `qsort`) reads like ordinary code.  The 20%
+  case (long-lived callbacks) opts into explicit `ffi.callback`.
+
+Match what the user already knows from reading C, do not invent a
+parallel script-side type system on top of it.
+
+---
+
+## Lifetime, written out
+
+Three categories of memory, three rules:
+
+1. **`ffi.new` / `ffi.alloc` — GC-tracked.**  The pool slot pattern
+   from `ldap_module.c` / `source/lib/socket.c`.  When the wrapping
+   `CdoObject` is collected, the backing allocation is freed.
+2. **Returned from C as `T*` — *not* GC-tracked.**  The script must
+   pass it to the matching C `free`-style function.  The module does
+   not guess.
+3. **CanDo strings as `const char*` — pinned for one call.**  The
+   shim pins the string before the call and unpins on return.  C code
+   that stashes the pointer past the call is using freed memory.
+
+Callbacks pin the wrapped function (and its closure environment) for
+as long as the callback object is reachable.  Closing a library
+invalidates every binding derived from it; calling a closed binding
+throws `"library was closed"`.
+
+---
+
+## Platforms
 
 | Platform | Backend |
 |---|---|
-| Linux / macOS | `libffi` (`-lffi`), `dlopen` / `dlsym` / `dlclose` |
-| Windows | `libffi` if available; otherwise a tiny native trampoline for the four common ABIs (System V / SysV-x64, Win64, cdecl, stdcall).  `LoadLibraryW` / `GetProcAddress` / `FreeLibrary`. |
+| Linux / macOS | `libffi` + `dlopen` / `dlsym` |
+| Windows | `libffi` + `LoadLibraryW` / `GetProcAddress` |
 
-`libffi` is the canonical choice — covers every ABI we care about,
-ships with every distro, has a stable API since 3.0.  Adding the
-dependency keeps the module's implementation under ~1500 lines.
-
-If `libffi` is genuinely undesirable, the alternative is to hand-roll
-the call thunk for x86-64 SysV, x86-64 Win64, and AArch64 SysV — the
-three live ABIs.  That's a few hundred lines of assembly per ABI,
-which the rest of the runtime intentionally avoids; libffi pays for
-itself immediately.
+`libffi` is the only system dependency.  Distros all package it; on
+Windows we vendor the static lib (~80 KB).  No hand-rolled assembly
+trampolines — every architecture worth supporting has a working
+libffi port and reinventing that wheel is what the previous draft
+was secretly proposing.
 
 ---
 
-## 6. Files
+## File layout
 
-Following the layout convention in `modules/README.md`:
+Mirrors the convention in `modules/README.md`:
 
 ```
 modules/cffi/
-  README.md            script-facing docs (mirrors the worked examples above)
-  cando.api.json       LSP manifest (mirrors §3 of this plan)
-  cffi_module.c        cando_module_init + every native
-  cffi_types.c/.h      type-string parser, struct layout, sizeof/alignof
+  README.md            user-facing docs (the stb_image story above)
+  cando.api.json       LSP manifest
+  cffi_module.c        cando_module_init + all natives
+  cffi_parse.c/.h      C-header parser used by lib.declare()
+  cffi_layout.c/.h     sizeof / alignof / struct field layout
   cffi_marshal.c/.h    CandoValue <-> C value conversion
-  cffi_callback.c/.h   libffi closure plumbing + dead-pool
-  cffi_lib.c/.h        dlopen wrapper, symbol table, library handle pool
+  cffi_closure.c/.h    libffi closure plumbing for callbacks
   Makefile             builds cffi.so / cffi.dylib / cffi.dll, links -lffi
-  test_cffi.c          unit tests for the type parser and marshaller
-  test_cffi.cdo        integration tests: libc.so getpid/strlen/qsort
-  test_cffi_smoke.cdo  feature detect + load + close
+  test_cffi.c          unit tests for the parser and layout engine
+  test_cffi.cdo        integration: libc.so getpid, strlen, qsort
+  test_cffi_smoke.cdo  feature-detect + load + close
 ```
 
-`test_cffi.cdo` runs against `libc.so.6` on Linux, `libSystem.dylib`
-on macOS, and `msvcrt.dll` on Windows — all present on every CI
-runner.  No third-party libraries pulled into the test matrix.
+`test_cffi.cdo` runs against `libc` (Linux: `libc.so.6`; macOS:
+`libSystem.B.dylib`; Windows: `msvcrt.dll`) — all present on every CI
+runner.  No third-party libs in the test matrix.
 
-Top-level wiring:
-- Add `cffi` to `MODULES =` in `/Makefile`.
-- Add `cffi` to `CMakeLists.txt`.
-- Add a row to the index in `modules/README.md`.
-- Add the build step to `.github/workflows/ci.yml`.
+Top-level wiring: add `cffi` to `MODULES =` in `/Makefile`, the
+`CMakeLists.txt` modules block, and `.github/workflows/ci.yml`.  Add
+a row to the index in `modules/README.md`.
 
 ---
 
-## 7. Implementation milestones
+## Implementation milestones
 
-Each milestone is a separately-mergeable PR:
+Each ships as a separately-mergeable PR.
 
-1. **Skeleton + module loader.**  Empty `cffi_module.c`,
-   `ffi.open` / `ffi.current` / `lib:close`, no calling yet.  Smoke
-   test loads `libc` and closes it.
-2. **Primitive calls.**  Type-string parser for scalars + pointers,
-   `lib:bind`, single-arg / single-return calls.  `test_cffi.cdo`
-   covers `getpid`, `atoi`, `strlen`.
-3. **Buffers and strings.**  `ffi.malloc` / `Buffer` methods,
-   `ffi.string`, automatic C-string marshalling for `const char*`.
-4. **Structs.**  `ffi.struct`, instance read/write, `sizeof` /
-   `alignof` / `offsetof`.
-5. **Callbacks.**  `ffi.callback`, `qsort` test.  This is the
-   highest-risk milestone — schedule a review focused on the
-   re-entrancy story (GC during a callback, throwing from inside a
-   callback, multi-threaded calls).
-6. **`:declare()` batch parser.**  Reuse the type-string parser; lift
-   every prototype onto the library handle.
-7. **Polish.**  `cando.api.json`, README, `make modules-windows`
-   build, dark-corner tests (varargs, unions if we go that far).
+1. **Skeleton.**  `ffi.load`, `lib:close`, `ffi.current`.  Smoke test
+   loads `libc` and closes it.  No calls yet.
+2. **Scalar calls + `declare`.**  Header parser for prototypes
+   involving primitive types and `const char*`.  Worked tests: `getpid`,
+   `atoi`, `strlen`, `abs`.
+3. **Pointers and `ffi.new`.**  Out-parameters work (`gettimeofday`,
+   `stbi_load`).  `ffi.alloc`, indexing, `:read`/`:write`.
+4. **Structs.**  Layout engine, field access, by-value passing.  Test
+   covers `struct timeval` end-to-end.
+5. **Callbacks.**  Implicit and explicit forms.  `qsort` test.  This
+   is the highest-risk milestone; budget time for the re-entrancy
+   review (GC during callback, throw from inside callback,
+   non-VM-thread entry).
+6. **Polish.**  `cando.api.json`, README, Windows build, varargs
+   support (`printf` family via libffi's `ffi_prep_cif_var`).
 
-Milestones 1-3 are the MVP.  4 unlocks most real-world C libraries.
-5 unlocks GUI / async-callback libraries.
+MVP is milestones 1–3.  4 unlocks the bulk of real C libraries.  5
+unlocks GUI and game-engine bindings.
 
 ---
 
-## 8. Open questions to settle before milestone 1
+## Open questions
 
-These are the calls that change the public surface, so worth pinning
-down now:
+Pin down before milestone 1, since they change the public surface:
 
-1. **Varargs.**  `printf` family.  Easy to support (libffi has
-   `ffi_prep_cif_var`); worth a `lib:bind_vararg(name, ret_type,
-   fixed_args)` returning a closure that takes the variable arguments
-   as a script-side array?
-2. **Unions.**  Probably yes for completeness, with the same syntax as
-   `ffi.struct`.
-3. **Pointer arithmetic in script.**  `p + 4` is ambiguous (bytes or
-   elements?) — propose `p:offset(n_elems)` and `p:byte_offset(n)`
-   instead of overloading arithmetic.
-4. **64-bit integers.**  CanDo numbers are `double` (52-bit mantissa).
-   Returning `uint64_t` from C lossily fits in a number; on overflow
-   we'd want a `BigInt`-style boxed integer.  Punt to a follow-up
-   milestone; document the precision limit in the README.
-5. **Thread affinity.**  Can a callback fire on a non-VM thread?  The
-   safe answer is "no, you wrap the C-callee on the VM thread and any
-   other thread re-entry throws."  Sufficient for the common case
-   (qsort, GUI event loop on the main thread); insufficient for
-   audio callbacks etc.  Explicitly document the limitation.
-
----
-
-## 9. Why a binary module, not stdlib
-
-`cffi` could in principle live in `source/lib/cffi.c` and ship in the
-main binary.  Reasons not to:
-
-- It pulls in `libffi`, which not every embedder wants.
-- It is the textbook "load on demand" surface — most scripts never
-  touch C bindings.
-- The platform shim is non-trivial and benefits from being isolated
-  in its own subtree, with its own CI matrix.
-
-Loading as `include("./modules/cffi/cffi")` matches the precedent set
-by every other module that depends on a system library
-(`ldap` → libldap, `sql` → libmysql/libpq, etc.).
+1. **64-bit integers.**  CanDo numbers are IEEE-754 `double` — 53 bits
+   of integer precision.  Returning `uint64_t` from C will silently
+   round above 2⁵³.  Options: (a) document the limit and let it slide,
+   (b) add a boxed-int type returned for `(u)int64_t` fields, (c)
+   return such values as decimal strings.  Recommend (a) for the MVP
+   and revisit if a real library bites us.
+2. **Pointer arithmetic.**  `p[i]` uses the element type, that's
+   clear.  Should `p + n` also work?  Recommend no — it's ambiguous
+   (bytes vs elements?) and `p:slice(n * ffi.sizeof(T), …)` is
+   unambiguous.
+3. **Thread affinity for callbacks.**  Can C fire a callback on a
+   non-VM thread (audio buffer fill, etc.)?  Recommend "no, that
+   throws" for the MVP; revisit when an actual user hits it.
+4. **Unions.**  Easy to add (libffi handles them); not in any real
+   example we've sketched.  Defer until a milestone needs them.
