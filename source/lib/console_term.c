@@ -510,9 +510,15 @@ int console_term_read_input(unsigned char *buf, size_t cap, int timeout_ms)
 
 /* =========================================================================
  * Public detach API (shared with vm.h)
+ *
+ * Explicit CANDO_API decoration here so libcando.dll on Windows
+ * exports the symbol -- main.c links against the import library and
+ * needs the dllexport marking.  cando_console_set_enabled and
+ * cando_console_is_enabled are defined in vm.c, which sees the
+ * declaration via vm.h directly and gets the decoration that way.
  * ======================================================================= */
 
-void cando_console_detach(void)
+CANDO_API void cando_console_detach(void)
 {
     console_term_detach();
 }
