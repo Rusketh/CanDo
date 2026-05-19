@@ -22,10 +22,18 @@ parsed by `cando` itself and are **not** forwarded.
 | `--no-jit` | Force-disable the JIT.  Wins over both `--jit` and the `CANDO_JIT` environment variable. |
 | `--jit-stats` | Print a one-line summary of JIT activity to stderr at exit (back-edges, function entries, traces compiled, traces aborted, last abort reason). |
 | `--jit-dump` | Pretty-print the IR of every compiled trace.  Implies `--jit-stats`. |
+| `--no-console` | Detach the inherited console at startup and disable the `console` standard library for the script's lifetime.  Useful for launching CanDo scripts from a GUI shortcut or as a service.  See [libraries/console.md](libraries/console.md#cli-flag----no-console) for the precise behaviour. |
 
-Flag order does not matter, but all flags must come **after** the script
-path.  This is parsed left to right; the first non-flag argument after
-the script is treated as the start of `args[]`.
+Flag order is free: interpreter flags can appear **before or after** the
+script path.  The first non-flag argument is treated as the script;
+everything after it that isn't a recognised flag becomes part of
+`args[]`.
+
+```bash
+cando script.cdo --jit              # flag after script
+cando --jit script.cdo              # flag before script -- equivalent
+cando --no-console --jit script.cdo arg1 arg2
+```
 
 ## Script arguments
 

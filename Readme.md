@@ -206,7 +206,8 @@ A complete language tour and reference is in
 - Core data: `array`, `string`, `math`, `object`
 - Serialization: `json`, `yaml`, `csv`
 - I/O: `file`, `stream`, `os`, `process`
-- Crypto and time: `crypto`, `datetime`
+- Console / TUI: `console` (cursor, colour, raw input, mouse, async dispatcher)
+- Crypto and time: `crypto` (full `node:crypto` parity), `datetime`
 - Networking: `net`, `socket`, `secure_socket`, `http`, `https`
 - Concurrency: `thread`
 - Runtime control: `gc`, `jit`, `app`, `eval`, `include`, `_meta`
@@ -220,6 +221,7 @@ A complete language tour and reference is in
 - `window` — Cross-platform OS window with an OpenGL context.
 - `draw` — 2D drawing primitives layered on `window`.
 - `forms` — Native widget tree (Win32 today; stub elsewhere).
+- `cffi` — C foreign-function interface: load `.so`/`.dylib`/`.dll` and call into them via libffi.
 
 Each module is documented next to its source in
 [`modules/`](modules/README.md).  Per-function reference for each stdlib

@@ -116,6 +116,45 @@ if (cando_dofile(vm, path) != CANDO_OK) {
 }
 ```
 
+## Disabling the console library
+
+Embedded hosts that own the terminal — windowed GUI apps, services,
+plug-in hosts inside an IDE — usually don't want scripts to start
+emitting ANSI escape sequences into the host's stdio.  Flip the
+console library off before running the script:
+
+```c
+CandoVM *vm = cando_open();
+cando_openlibs(vm);
+cando_console_set_enabled(vm, false);    // throw on any console.* call
+cando_dofile(vm, "user-script.cdo");
+cando_close(vm);
+```
+
+Inside the script, every `console.*` call now throws `"console is
+disabled"`, which `TRY`/`CATCH` handles cleanly.  The flag is
+inherited by VMs spawned via `thread { … }`, so child threads see
+the same disabled state.
+
+The three public symbols:
+
+```c
+void cando_console_set_enabled(CandoVM *vm, bool enabled);
+bool cando_console_is_enabled(const CandoVM *vm);
+void cando_console_detach(void);   /* process-wide */
+```
+
+`cando_console_detach()` is the heavy hammer — it calls `FreeConsole()`
+on Windows and `dup2`'s `/dev/null` over fd 0/1/2 on POSIX, so even
+host code that calls `fputs(stdout, …)` after this won't write to a
+real terminal.  Most embedders want both: detach to drop the
+inherited console window AND set-enabled-false so the script can't
+re-engage it.
+
+The same controls are exposed from script code via `console.disable()`
+/ `console.enable()` / `console.enabled()`, and from the CLI as
+`cando --no-console <script>`.
+
 ## Threading model
 
 The VM is **thread-aware**.  Multiple OS threads can execute script

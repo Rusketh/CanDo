@@ -59,6 +59,7 @@ void cando_open_threadlib(CandoVM *vm);
 void cando_open_oslib(CandoVM *vm);
 void cando_open_datetimelib(CandoVM *vm);
 void cando_open_cryptolib(CandoVM *vm);
+void cando_open_consolelib(CandoVM *vm);
 void cando_open_processlib(CandoVM *vm);
 void cando_open_netlib(CandoVM *vm);
 void cando_open_socketlib(CandoVM *vm);
@@ -107,6 +108,34 @@ const char *cando_errmsg(CandoVM *vm);
 Returns a formatted error message describing the most recent failure.
 Valid until the next entry-point call.  After a successful run, the
 message is `""`.
+
+## Console library control
+
+The `console` standard library is always linked into `libcando`, but
+embedders can disable it (and detach the host process from its
+inherited console) before running user scripts.  See
+[embedding.md § Disabling the console library](embedding.md#disabling-the-console-library)
+for the full embedder walkthrough.
+
+```c
+void cando_console_set_enabled(CandoVM *vm, bool enabled);
+bool cando_console_is_enabled(const CandoVM *vm);
+void cando_console_detach(void);
+```
+
+- `cando_console_set_enabled` flips a per-VM flag.  Default is `true`.
+  When `false`, every script call into `console.*` throws
+  `"console is disabled"`.  Child VMs spawned by `thread { … }`
+  inherit the flag from their parent.
+- `cando_console_is_enabled` reads the flag.
+- `cando_console_detach` is process-wide: `FreeConsole()` on Windows,
+  `dup2(/dev/null)` over fd 0/1/2 on POSIX.  Idempotent; safe to call
+  before any VM exists.  Does **not** implicitly disable the
+  library — call `cando_console_set_enabled(vm, false)` as well.
+
+The CLI flag `cando --no-console <script>` is implemented in terms of
+these symbols: it calls `cando_console_detach()` before `cando_open`
+and `cando_console_set_enabled(vm, false)` afterwards.
 
 ## Included sub-APIs
 

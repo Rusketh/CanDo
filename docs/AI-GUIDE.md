@@ -22,6 +22,8 @@ source/
   vm/                 vm.c (dispatch loop), bridge.c, chunk.c, debug.c
   jit/                trace recorder + IR + native codegen (gated by `--jit`)
   lib/                <name>.c + <name>.h per stdlib namespace
+                      (a few larger libs split into <name>_*.c -- see
+                       console_term.c / console_input.c / ...)
   natives.c, natives.h        print, type, toString, inspect
   cando_lib.c                 cando_open / cando_dofile / cando_openlibs
   main.c                      CLI entry point
