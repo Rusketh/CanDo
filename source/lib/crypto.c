@@ -1557,12 +1557,17 @@ static CandoValue obj_from_name(CandoVM *vm, X509_NAME *nm)
     return v;
 }
 
-/* Convert an ASN1_TIME to a Unix-epoch number. */
+/* Convert an ASN1_TIME to a Unix-epoch number.  Windows uses
+ * _mkgmtime instead of POSIX timegm. */
 static f64 asn1_time_to_unix(const ASN1_TIME *t)
 {
     struct tm tm = {0};
     ASN1_TIME_to_tm(t, &tm);
+#if defined(_WIN32) || defined(_WIN64)
+    return (f64)_mkgmtime(&tm);
+#else
     return (f64)timegm(&tm);
+#endif
 }
 
 static int crypto_x509_create(CandoVM *vm, int argc, CandoValue *args)
