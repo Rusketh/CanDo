@@ -172,6 +172,54 @@ static int math_cosh(CandoVM *vm, int argc, CandoValue *args) {
     return 1;
 }
 
+static int math_tanh(CandoVM *vm, int argc, CandoValue *args) {
+    f64 val = libutil_arg_num_at(args, argc, 0, 0.0);
+    cando_vm_push(vm, cando_number(tanh(val)));
+    return 1;
+}
+
+static int math_trunc(CandoVM *vm, int argc, CandoValue *args) {
+    f64 val = libutil_arg_num_at(args, argc, 0, 0.0);
+    cando_vm_push(vm, cando_number(trunc(val)));
+    return 1;
+}
+
+static int math_cbrt(CandoVM *vm, int argc, CandoValue *args) {
+    f64 val = libutil_arg_num_at(args, argc, 0, 0.0);
+    cando_vm_push(vm, cando_number(cbrt(val)));
+    return 1;
+}
+
+static int math_log2(CandoVM *vm, int argc, CandoValue *args) {
+    f64 val = libutil_arg_num_at(args, argc, 0, 0.0);
+    cando_vm_push(vm, cando_number(log2(val)));
+    return 1;
+}
+
+static int math_fround(CandoVM *vm, int argc, CandoValue *args) {
+    f64 val = libutil_arg_num_at(args, argc, 0, 0.0);
+    cando_vm_push(vm, cando_number((f64)(float)val));
+    return 1;
+}
+
+static int math_hypot(CandoVM *vm, int argc, CandoValue *args) {
+    /* sqrt(sum(x^2)).  Use the libm hypot when there are exactly 2 args
+     * (the overflow-safe code path); otherwise sum-of-squares.  */
+    if (argc == 2 && cando_is_number(args[0]) && cando_is_number(args[1])) {
+        cando_vm_push(vm, cando_number(hypot(cando_as_number(args[0]),
+                                              cando_as_number(args[1]))));
+        return 1;
+    }
+    f64 sum = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!cando_is_number(args[i])) continue;
+        f64 x = cando_as_number(args[i]);
+        sum += x * x;
+    }
+    cando_vm_push(vm, cando_number(sqrt(sum)));
+    return 1;
+}
+
 static int math_sign(CandoVM *vm, int argc, CandoValue *args) {
     f64 val = libutil_arg_num_at(args, argc, 0, 0.0);
     if (val > 0)      cando_vm_push(vm, cando_number(1));
@@ -305,6 +353,12 @@ static const LibutilMethodEntry math_methods[] = {
     { "sign",   math_sign   },
     { "sinh",   math_sinh   },
     { "cosh",   math_cosh   },
+    { "tanh",   math_tanh   },
+    { "trunc",  math_trunc  },
+    { "cbrt",   math_cbrt   },
+    { "log2",   math_log2   },
+    { "fround", math_fround },
+    { "hypot",  math_hypot  },
     { "random", math_random },
     { "round",  math_round  },
     { "floor",  math_floor  },

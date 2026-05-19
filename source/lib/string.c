@@ -560,27 +560,240 @@ static int str_match(CandoVM *vm, int argc, CandoValue *args) {
 }
 
 /* =========================================================================
+ * indexOf, lastIndexOf, includes
+ * ======================================================================= */
+
+static int str_indexOf(CandoVM *vm, int argc, CandoValue *args) {
+    CandoString *s = libutil_arg_str_at(args, argc, 0);
+    CandoString *n = libutil_arg_str_at(args, argc, 1);
+    if (!s || !n) { cando_vm_push(vm, cando_number(-1)); return 1; }
+    i32 from = (i32)libutil_arg_num_at(args, argc, 2, 0);
+    if (from < 0) from = 0;
+    if ((u32)from > s->length) { cando_vm_push(vm, cando_number(-1)); return 1; }
+    if (n->length == 0) { cando_vm_push(vm, cando_number((f64)from)); return 1; }
+    if (n->length > s->length) { cando_vm_push(vm, cando_number(-1)); return 1; }
+    for (u32 i = (u32)from; i + n->length <= s->length; i++) {
+        if (memcmp(s->data + i, n->data, n->length) == 0) {
+            cando_vm_push(vm, cando_number((f64)i));
+            return 1;
+        }
+    }
+    cando_vm_push(vm, cando_number(-1));
+    return 1;
+}
+
+static int str_lastIndexOf(CandoVM *vm, int argc, CandoValue *args) {
+    CandoString *s = libutil_arg_str_at(args, argc, 0);
+    CandoString *n = libutil_arg_str_at(args, argc, 1);
+    if (!s || !n) { cando_vm_push(vm, cando_number(-1)); return 1; }
+    if (n->length > s->length) { cando_vm_push(vm, cando_number(-1)); return 1; }
+    i32 from = (i32)libutil_arg_num_at(args, argc, 2, (f64)(s->length - n->length));
+    if (from < 0) { cando_vm_push(vm, cando_number(-1)); return 1; }
+    if ((u32)from + n->length > s->length) from = (i32)(s->length - n->length);
+    for (i32 i = from; i >= 0; i--) {
+        if (memcmp(s->data + i, n->data, n->length) == 0) {
+            cando_vm_push(vm, cando_number((f64)i));
+            return 1;
+        }
+    }
+    cando_vm_push(vm, cando_number(-1));
+    return 1;
+}
+
+static int str_includes(CandoVM *vm, int argc, CandoValue *args) {
+    CandoString *s = libutil_arg_str_at(args, argc, 0);
+    CandoString *n = libutil_arg_str_at(args, argc, 1);
+    if (!s || !n) { cando_vm_push(vm, cando_bool(false)); return 1; }
+    if (n->length == 0) { cando_vm_push(vm, cando_bool(true)); return 1; }
+    if (n->length > s->length) { cando_vm_push(vm, cando_bool(false)); return 1; }
+    for (u32 i = 0; i + n->length <= s->length; i++) {
+        if (memcmp(s->data + i, n->data, n->length) == 0) {
+            cando_vm_push(vm, cando_bool(true));
+            return 1;
+        }
+    }
+    cando_vm_push(vm, cando_bool(false));
+    return 1;
+}
+
+/* =========================================================================
+ * padStart, padEnd
+ * ======================================================================= */
+
+static void pad_impl(CandoVM *vm, CandoString *s, u32 target_len,
+                     const char *pad, u32 pad_len, bool at_start)
+{
+    if (s->length >= target_len || pad_len == 0) {
+        libutil_push_str(vm, s->data, s->length);
+        return;
+    }
+    u32 fill = target_len - s->length;
+    char *out = (char *)cando_alloc(target_len + 1);
+    if (at_start) {
+        for (u32 i = 0; i < fill; i++) out[i] = pad[i % pad_len];
+        memcpy(out + fill, s->data, s->length);
+    } else {
+        memcpy(out, s->data, s->length);
+        for (u32 i = 0; i < fill; i++) out[s->length + i] = pad[i % pad_len];
+    }
+    out[target_len] = '\0';
+    libutil_push_str(vm, out, target_len);
+    cando_free(out);
+}
+
+static int str_padStart(CandoVM *vm, int argc, CandoValue *args) {
+    CandoString *s = libutil_arg_str_at(args, argc, 0);
+    if (!s) { libutil_push_str(vm, "", 0); return 1; }
+    u32 target = (u32)libutil_arg_num_at(args, argc, 1, (f64)s->length);
+    CandoString *p = libutil_arg_str_at(args, argc, 2);
+    const char *pad = p ? p->data : " ";
+    u32 pad_len = p ? p->length : 1;
+    pad_impl(vm, s, target, pad, pad_len, true);
+    return 1;
+}
+
+static int str_padEnd(CandoVM *vm, int argc, CandoValue *args) {
+    CandoString *s = libutil_arg_str_at(args, argc, 0);
+    if (!s) { libutil_push_str(vm, "", 0); return 1; }
+    u32 target = (u32)libutil_arg_num_at(args, argc, 1, (f64)s->length);
+    CandoString *p = libutil_arg_str_at(args, argc, 2);
+    const char *pad = p ? p->data : " ";
+    u32 pad_len = p ? p->length : 1;
+    pad_impl(vm, s, target, pad, pad_len, false);
+    return 1;
+}
+
+/* =========================================================================
+ * trimStart, trimEnd
+ * ======================================================================= */
+
+static int is_trim_char(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+static int str_trimStart(CandoVM *vm, int argc, CandoValue *args) {
+    CandoString *s = libutil_arg_str_at(args, argc, 0);
+    if (!s) { libutil_push_str(vm, "", 0); return 1; }
+    u32 i = 0;
+    while (i < s->length && is_trim_char((unsigned char)s->data[i])) i++;
+    libutil_push_str(vm, s->data + i, s->length - i);
+    return 1;
+}
+
+static int str_trimEnd(CandoVM *vm, int argc, CandoValue *args) {
+    CandoString *s = libutil_arg_str_at(args, argc, 0);
+    if (!s) { libutil_push_str(vm, "", 0); return 1; }
+    u32 e = s->length;
+    while (e > 0 && is_trim_char((unsigned char)s->data[e - 1])) e--;
+    libutil_push_str(vm, s->data, e);
+    return 1;
+}
+
+/* =========================================================================
+ * codePointAt, fromCodePoint
+ *
+ * UTF-8 aware -- decode the codepoint starting at byte index `i` of
+ * the string.  Byte index, not character index, by convention with
+ * CanDo's other indexing operations.
+ * ======================================================================= */
+
+static int str_codePointAt(CandoVM *vm, int argc, CandoValue *args) {
+    CandoString *s = libutil_arg_str_at(args, argc, 0);
+    if (!s) { cando_vm_push(vm, cando_null()); return 1; }
+    i32 idx = (i32)libutil_arg_num_at(args, argc, 1, 0);
+    if (idx < 0 || (u32)idx >= s->length) { cando_vm_push(vm, cando_null()); return 1; }
+    unsigned char c0 = (unsigned char)s->data[idx];
+    u32 cp = 0;
+    if      (c0 < 0x80) { cp = c0; }
+    else if ((c0 & 0xE0) == 0xC0 && (u32)idx + 1 < s->length) {
+        cp = ((u32)(c0 & 0x1F) << 6)
+           |  (u32)((unsigned char)s->data[idx + 1] & 0x3F);
+    }
+    else if ((c0 & 0xF0) == 0xE0 && (u32)idx + 2 < s->length) {
+        cp = ((u32)(c0 & 0x0F) << 12)
+           | ((u32)((unsigned char)s->data[idx + 1] & 0x3F) << 6)
+           |  (u32)((unsigned char)s->data[idx + 2] & 0x3F);
+    }
+    else if ((c0 & 0xF8) == 0xF0 && (u32)idx + 3 < s->length) {
+        cp = ((u32)(c0 & 0x07) << 18)
+           | ((u32)((unsigned char)s->data[idx + 1] & 0x3F) << 12)
+           | ((u32)((unsigned char)s->data[idx + 2] & 0x3F) << 6)
+           |  (u32)((unsigned char)s->data[idx + 3] & 0x3F);
+    }
+    else { cp = c0; }     /* malformed byte -- return as-is */
+    cando_vm_push(vm, cando_number((f64)cp));
+    return 1;
+}
+
+static int str_fromCodePoint(CandoVM *vm, int argc, CandoValue *args) {
+    /* Build a UTF-8 string from a series of codepoint integers. */
+    char  *buf = (char *)cando_alloc((size_t)argc * 4 + 1);
+    u32 off = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!cando_is_number(args[i])) continue;
+        u32 cp = (u32)cando_as_number(args[i]);
+        if (cp < 0x80) {
+            buf[off++] = (char)cp;
+        } else if (cp < 0x800) {
+            buf[off++] = (char)(0xC0 | (cp >> 6));
+            buf[off++] = (char)(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            buf[off++] = (char)(0xE0 | (cp >> 12));
+            buf[off++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            buf[off++] = (char)(0x80 | (cp & 0x3F));
+        } else if (cp < 0x110000) {
+            buf[off++] = (char)(0xF0 | (cp >> 18));
+            buf[off++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+            buf[off++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            buf[off++] = (char)(0x80 | (cp & 0x3F));
+        }
+    }
+    buf[off] = '\0';
+    libutil_push_str(vm, buf, off);
+    cando_free(buf);
+    return 1;
+}
+
+/* =========================================================================
  * Registration
  * ======================================================================= */
 
 static const LibutilMethodEntry string_methods[] = {
-    { "length",     str_length     },
-    { "sub",        str_sub        },
-    { "char",       str_char       },
-    { "chars",      str_chars      },
-    { "toLower",    str_toLower    },
-    { "toUpper",    str_toUpper    },
-    { "trim",       str_trim       },
-    { "left",       str_left       },
-    { "right",      str_right      },
-    { "repeat",     str_repeat     },
-    { "find",       str_find       },
-    { "split",      str_split      },
-    { "replace",    str_replace    },
-    { "startsWith", str_startsWith },
-    { "endsWith",   str_endsWith   },
-    { "format",     str_format     },
-    { "match",      str_match      },
+    { "length",        str_length        },
+    { "sub",           str_sub           },
+    { "char",          str_char          },
+    { "chars",         str_chars         },
+    { "toLower",       str_toLower       },
+    { "toUpper",       str_toUpper       },
+    { "trim",          str_trim          },
+    { "left",          str_left          },
+    { "right",         str_right         },
+    { "repeat",        str_repeat        },
+    { "find",          str_find          },
+    { "split",         str_split         },
+    { "replace",       str_replace       },
+    { "startsWith",    str_startsWith    },
+    { "endsWith",      str_endsWith      },
+    { "format",        str_format        },
+    { "match",         str_match         },
+
+    /* Querying */
+    { "indexOf",       str_indexOf       },
+    { "lastIndexOf",   str_lastIndexOf   },
+    { "includes",      str_includes      },
+    { "contains",      str_includes      },  /* alias */
+
+    /* Padding */
+    { "padStart",      str_padStart      },
+    { "padEnd",        str_padEnd        },
+
+    /* Trim variants */
+    { "trimStart",     str_trimStart     },
+    { "trimEnd",       str_trimEnd       },
+
+    /* UTF-8 codepoint helpers */
+    { "codePointAt",   str_codePointAt   },
+    { "fromCodePoint", str_fromCodePoint },
 };
 
 void cando_lib_string_register(CandoVM *vm)

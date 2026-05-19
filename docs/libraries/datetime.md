@@ -85,3 +85,43 @@ VAR text = datetime.format(ts, "%Y-%m-%dT%H:%M:%S");
 VAR back = datetime.parse(text, "%Y-%m-%dT%H:%M:%S");
 print(ts == back);                  // true (timezone-dependent on Windows)
 ```
+
+## Component accessors (UTC)
+
+| Function | Returns |
+|---|---|
+| `datetime.year(t)`       | 4-digit year. |
+| `datetime.month(t)`      | 1–12. |
+| `datetime.day(t)`        | 1–31. |
+| `datetime.hour(t)`       | 0–23. |
+| `datetime.minute(t)`     | 0–59. |
+| `datetime.second(t)`     | 0–59. |
+| `datetime.millisecond(t)`| 0–999, derived from fractional `t`. |
+| `datetime.dayOfWeek(t)`  | 0 (Sunday) – 6 (Saturday). |
+| `datetime.dayOfYear(t)`  | 1–366. |
+
+All accept a Unix-epoch timestamp like the one `datetime.now()`
+returns; all use UTC for the breakdown.
+
+## Date math
+
+| Function | Returns |
+|---|---|
+| `datetime.addSeconds(t, n)` | `t + n` |
+| `datetime.addMinutes(t, n)` | `t + n*60` |
+| `datetime.addHours(t, n)`   | `t + n*3600` |
+| `datetime.addDays(t, n)`    | `t + n*86400` |
+| `datetime.addMonths(t, n)`  | Calendar arithmetic (carries year). |
+| `datetime.addYears(t, n)`   | Calendar arithmetic. |
+| `datetime.diff(a, b)`       | `a - b` in seconds. |
+| `datetime.diffDays(a, b)`   | `(a - b)/86400`. |
+| `datetime.diffHours(a, b)`  | `(a - b)/3600`. |
+
+## Calendar helpers
+
+| Function | Description |
+|---|---|
+| `datetime.isLeapYear(year)`   | True for Gregorian leap years. |
+| `datetime.daysInMonth(y, m)`  | Number of days in month `m` of year `y`. |
+| `datetime.startOfDay(t)`      | Midnight (UTC) of the day containing `t`. |
+| `datetime.endOfDay(t)`        | Last second (23:59:59 UTC) of the day. |

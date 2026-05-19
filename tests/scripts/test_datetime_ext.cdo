@@ -1,0 +1,63 @@
+/* test_datetime_ext.cdo -- Tests for the extended datetime library.
+ *
+ * Covers component accessors (year, month, day, ...), date math
+ * (addDays, addMonths, ...), diffs, and calendar helpers (isLeapYear,
+ * daysInMonth, startOfDay, endOfDay).
+ */
+
+function assert(cond, msg) { if !cond { throw msg; } }
+
+/* Known UTC timestamp: 2023-11-14 22:13:20 UTC = 1700000000. */
+var t = 1700000000;
+
+assert(datetime.year(t)   == 2023, "year");
+assert(datetime.month(t)  == 11,   "month");
+assert(datetime.day(t)    == 14,   "day");
+assert(datetime.hour(t)   == 22,   "hour");
+assert(datetime.minute(t) == 13,   "minute");
+assert(datetime.second(t) == 20,   "second");
+
+/* 2023-11-14 is a Tuesday → tm_wday = 2. */
+assert(datetime.dayOfWeek(t) == 2, "dayOfWeek");
+
+/* Day-of-year: nov 14 = day 318 in a non-leap year. */
+assert(datetime.dayOfYear(t) == 318, "dayOfYear");
+
+/* Date math. */
+assert(datetime.addSeconds(t, 60) == t + 60,         "addSeconds");
+assert(datetime.addMinutes(t, 1)  == t + 60,         "addMinutes");
+assert(datetime.addHours(t, 1)    == t + 3600,       "addHours");
+assert(datetime.addDays(t, 1)     == t + 86400,      "addDays");
+
+/* AddMonths/Years use calendar arithmetic. */
+var t_plus_1_year = datetime.addYears(t, 1);
+assert(datetime.year(t_plus_1_year) == 2024, "addYears");
+assert(datetime.month(t_plus_1_year) == 11,  "addYears: month preserved");
+
+var t_plus_2_mo = datetime.addMonths(t, 2);
+assert(datetime.year(t_plus_2_mo) == 2024,   "addMonths: cross year");
+assert(datetime.month(t_plus_2_mo) == 1,     "addMonths: January next");
+
+/* Diffs. */
+assert(datetime.diff(t + 100, t) == 100, "diff: seconds");
+assert(datetime.diffDays(t + 86400 * 3, t) == 3, "diffDays");
+assert(datetime.diffHours(t + 3600 * 5, t) == 5, "diffHours");
+
+/* Calendar helpers. */
+assert(datetime.isLeapYear(2024) == true,  "isLeapYear: 2024");
+assert(datetime.isLeapYear(2023) == false, "isLeapYear: 2023");
+assert(datetime.isLeapYear(2000) == true,  "isLeapYear: 2000");
+assert(datetime.isLeapYear(1900) == false, "isLeapYear: 1900");
+
+assert(datetime.daysInMonth(2024, 2) == 29, "daysInMonth: leap feb");
+assert(datetime.daysInMonth(2023, 2) == 28, "daysInMonth: feb");
+assert(datetime.daysInMonth(2023, 4) == 30, "daysInMonth: apr");
+assert(datetime.daysInMonth(2023, 12) == 31, "daysInMonth: dec");
+
+/* startOfDay / endOfDay are aligned to 86400-second boundaries. */
+var sod = datetime.startOfDay(t);
+assert(sod * 1 == sod, "startOfDay: numeric");
+assert(t - sod < 86400, "startOfDay: in the past day");
+assert(datetime.endOfDay(t) - sod == 86399, "endOfDay: window");
+
+print("test_datetime_ext: all assertions passed");

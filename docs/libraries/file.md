@@ -139,3 +139,32 @@ VAR sink = file.open("copy.log", "w");
 src:pipeTo(sink);
 src:close(); sink:close();
 ```
+
+## File metadata
+
+| Function | Returns |
+|---|---|
+| `file.stat(path)`     | Object with `size`, `mode`, `mtime`, `atime`, `ctime`, `isFile`, `isDir`, `isSymlink`.  Returns `null` if the path does not exist. |
+| `file.isFile(path)`   | True if `path` is a regular file. |
+| `file.isDir(path)`    | True if `path` is a directory. |
+| `file.isSymlink(path)`| True if `path` is a symbolic link (POSIX). |
+
+## Path helpers
+
+Pure-string operations — no filesystem access.
+
+| Function | Returns |
+|---|---|
+| `file.basename(path, ext?)` | Trailing path component, optionally with `ext` stripped. |
+| `file.dirname(path)`        | Everything before the final separator, or `"."` if none. |
+| `file.extname(path)`        | Trailing extension including the dot, or `""`. |
+| `file.join(...parts)`       | Concatenate parts with the platform separator, collapsing duplicates. |
+| `file.resolve(...parts)`    | Like `join`, but the result is made absolute via `realpath` / `GetFullPathName`. |
+| `file.realpath(path)`       | Canonical absolute path; `null` if the path does not exist. |
+
+## Filesystem mutators
+
+| Function | Returns |
+|---|---|
+| `file.rmdir(path)`         | True on success.  Path must be an empty directory. |
+| `file.chmod(path, mode)`   | True on success.  `mode` is a numeric POSIX mode (e.g. `0644`). |

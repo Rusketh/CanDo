@@ -169,6 +169,80 @@ FOR i, v OVER ipairs(xs) { … }         // 0,10  1,20  2,30
 protocol — see [`../language/statements.md`](../language/statements.md)
 for the protocol.)
 
+## JS-style methods
+
+For users coming from JavaScript, the array prototype also exposes the
+standard `Array.prototype` surface.  All callbacks are invoked as
+`fn(value)` (or `fn(value, index)` for `forEach`), matching CanDo's
+existing `map` / `filter` / `reduce` semantics.
+
+### Querying
+
+| Method | Description |
+|---|---|
+| `a:indexOf(v, from?)`     | First index of `v` ≥ `from`, or `-1`. |
+| `a:lastIndexOf(v, from?)` | Last index of `v` ≤ `from`, or `-1`. |
+| `a:includes(v)` / `a:contains(v)` | True if `v` is present. |
+| `a:find(fn)`              | First element where `fn(v)` is truthy, or `null`. |
+| `a:findIndex(fn)`         | Index of that element, or `-1`. |
+| `a:findLast(fn)` / `a:findLastIndex(fn)` | Same, from the end. |
+| `a:some(fn)` / `a:every(fn)` | Short-circuit existential / universal. |
+| `a:at(i)`                 | Element at index `i` (supports negative). |
+
+### Iteration & reduction
+
+| Method | Description |
+|---|---|
+| `a:forEach(fn)`               | Call `fn(v, i)` for each element. |
+| `a:reduceRight(fn, init?)`    | Right-to-left fold. |
+
+### Transforming
+
+| Method | Description |
+|---|---|
+| `a:flat(depth?)`            | Flatten nested arrays, default depth 1. |
+| `a:flatMap(fn)`             | `map` then flatten one level. |
+
+### Combining
+
+| Method | Description |
+|---|---|
+| `a:concat(...arrays)`       | New array of all elements. |
+| `a:slice(start?, end?)`     | Subarray; supports negative indices. |
+| `a:join(sep?)`              | String of element toStrings joined by `sep` (default `","`). |
+
+### Mutating (chainable; return the receiver)
+
+| Method | Description |
+|---|---|
+| `a:reverse()`               | In-place reverse. |
+| `a:sort(comparator?)`       | In-place sort.  Default is lexicographic on `toString` of each element; comparator returns `-1` / `0` / `+1`. |
+| `a:fill(v, start?, end?)`   | Fill range with `v`. |
+
+### Stack / queue
+
+| Method | Returns |
+|---|---|
+| `a:shift()`                 | Removed head, or `null` if empty. |
+| `a:unshift(...vs)`          | New length after prepending. |
+
+### Set-like
+
+| Method | Description |
+|---|---|
+| `a:unique()`                | New array with duplicates removed. |
+| `a:intersection(b)`         | Elements present in both. |
+| `a:union(b)`                | Distinct elements from either. |
+| `a:difference(b)`           | Elements in `a` not in `b`. |
+
+```cdo
+print([1, 2, 3]:includes(2));            // true
+print([1, 2, 3]:join("-"));              // "1-2-3"
+print([[1, 2], [3, 4]]:flat():join(","));// "1,2,3,4"
+print([3, 1, 2]:sort():join(","));        // "1,2,3"
+print([1, 2, 2, 3]:unique():join(","));   // "1,2,3"
+```
+
 ## Iteration order
 
 Arrays iterate in **index order**.  If you've poked named keys onto an

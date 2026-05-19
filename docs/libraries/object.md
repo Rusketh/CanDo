@@ -163,3 +163,20 @@ FUNCTION ancestors(instance) {
     RETURN out;
 }
 ```
+
+## JS-style helpers
+
+| Function | Description |
+|---|---|
+| `object.has(o, key)`         | True if `o` has its own field `key`. |
+| `object.entries(o)`          | Array of `[k, v]` pairs in insertion order. |
+| `object.fromEntries(pairs)`  | Build a new object from `[[k, v], ...]`. |
+| `object.freeze(o)` / `object.isFrozen(o)` | Aliases for `lock` / `locked`.  A frozen object cannot be mutated by other threads until unlocked. |
+| `object.seal(o)` / `object.isSealed(o)`   | Aliases for `lock` / `locked`. |
+
+```cdo
+VAR o = { a: 1, b: 2 };
+print(object.entries(o));               // [[a,1],[b,2]]
+print(object.fromEntries([["x", 10]])); // { x: 10 }
+print(object.has(o, "a"));              // true
+```
