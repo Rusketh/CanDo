@@ -21,7 +21,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            gcc make libssl-dev libldap2-dev \
+            gcc make libssl-dev libldap2-dev libffi-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
             libgl1-mesa-dev libxkbcommon-dev libxext-dev \
             xvfb
@@ -62,6 +62,14 @@ jobs:
         # backend ships in forms.dll and is exercised by the matching
         # smoke step in the Windows job.
         run: cd modules/forms && ../../cando test_forms_smoke.cdo
+
+      - name: Smoke-test modules (script integration -- cffi)
+        run: ./cando modules/cffi/test_cffi_smoke.cdo
+
+      - name: Test modules (script integration -- cffi)
+        # cffi tests bind against the system libc -- present on every
+        # CI runner so no extra setup is required.
+        run: ./cando modules/cffi/test_cffi.cdo
 
       - name: Generate test PNG for the draw script test
         # The full draw test exercises stb_image; bake a 4x4 RGBA PNG
@@ -159,6 +167,7 @@ jobs:
             make
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-libffi
 
       - name: Build cando.exe
         run: make cando.exe MINGW_CC=gcc WINDRES=windres
@@ -193,6 +202,12 @@ jobs:
         # and the offline parse/build round-trip works.  Doesn't make
         # any network calls (the unreachable-host check uses 127.0.0.1).
         run: cd modules/smtp && ../../cando.exe test_smtp_smoke.cdo
+
+      - name: Smoke-test modules (Windows -- cffi)
+        # Verifies cffi.dll loads, the public surface registers, and
+        # the sizeof/alignof helpers work without making any actual
+        # FFI calls.  Full coverage runs on Linux against libc.
+        run: ./cando.exe modules/cffi/test_cffi_smoke.cdo
 
       - name: Verify no MinGW runtime DLL deps
         run: |

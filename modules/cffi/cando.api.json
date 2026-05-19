@@ -1,0 +1,63 @@
+{
+    "$comment": "API manifest for the cffi module. Read by the vscode-cando language server.",
+    "name": "cffi",
+    "version": "0.1.0",
+    "doc": "C foreign-function interface. Load shared libraries via dlopen / LoadLibrary and call into them through libffi.",
+    "exports": {
+        "VERSION":       { "kind": "value",    "type": "string" },
+        "SIZEOF_VOIDP":  { "kind": "constant", "type": "number" },
+        "SIZEOF_LONG":   { "kind": "constant", "type": "number" },
+        "SIZEOF_SIZE_T": { "kind": "constant", "type": "number" },
+
+        "load":     { "kind": "function", "params": [{ "name": "path",  "type": "string", "optional": true, "doc": "Shared-library path; omit for current process." }], "returns": "Library" },
+        "current":  { "kind": "function", "params": [], "returns": "Library" },
+        "close":    { "kind": "function", "params": [{ "name": "lib",   "type": "Library" }], "returns": "null" },
+
+        "call":     { "kind": "function", "params": [
+            { "name": "lib",       "type": "Library" },
+            { "name": "name",      "type": "string", "doc": "C symbol to resolve." },
+            { "name": "signature", "type": "string", "doc": "C signature, e.g. \"size_t(const char*)\"." },
+            { "name": "args",      "type": "any",    "doc": "Arguments matching the signature.", "variadic": true }
+        ], "returns": "any" },
+
+        "bind":     { "kind": "function", "params": [
+            { "name": "lib",       "type": "Library" },
+            { "name": "name",      "type": "string" },
+            { "name": "signature", "type": "string" }
+        ], "returns": "Binding" },
+
+        "sizeof":   { "kind": "function", "params": [{ "name": "type", "type": "string" }], "returns": "number" },
+        "alignof":  { "kind": "function", "params": [{ "name": "type", "type": "string" }], "returns": "number" },
+
+        "alloc":    { "kind": "function", "params": [{ "name": "bytes", "type": "number" }], "returns": "Buffer" },
+        "string":   { "kind": "function", "params": [
+            { "name": "ptr", "type": "Buffer" },
+            { "name": "len", "type": "number", "optional": true }
+        ], "returns": "string" },
+
+        "errno":    { "kind": "function", "params": [{ "name": "value", "type": "number", "optional": true }], "returns": "number" },
+
+        "read":     { "kind": "function", "params": [{ "name": "buf", "type": "Buffer" }, { "name": "offset", "type": "number", "optional": true }, { "name": "len", "type": "number", "optional": true }], "returns": "string" },
+        "write":    { "kind": "function", "params": [{ "name": "buf", "type": "Buffer" }, { "name": "offset_or_bytes", "type": "any" }, { "name": "bytes", "type": "string", "optional": true }], "returns": "null" },
+        "address":  { "kind": "function", "params": [{ "name": "buf", "type": "Buffer" }], "returns": "number" },
+        "size":     { "kind": "function", "params": [{ "name": "buf", "type": "Buffer" }], "returns": "number" },
+        "isNull":   { "kind": "function", "params": [{ "name": "buf", "type": "Buffer" }], "returns": "bool" },
+        "free":     { "kind": "function", "params": [{ "name": "buf", "type": "Buffer" }], "returns": "null" }
+    },
+
+    "types": {
+        "Library": {
+            "doc": "Open shared library.  Methods: call, bind, close."
+        },
+        "Binding": {
+            "doc": "Pre-resolved symbol with a parsed signature.  Methods: call.  Properties: name, signature.",
+            "members": {
+                "name":      { "kind": "value", "type": "string" },
+                "signature": { "kind": "value", "type": "string" }
+            }
+        },
+        "Buffer": {
+            "doc": "Allocated buffer or foreign pointer.  Methods: read, write, address, size, isNull, free."
+        }
+    }
+}

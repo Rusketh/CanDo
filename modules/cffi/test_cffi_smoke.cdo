@@ -1,0 +1,42 @@
+// Smoke test: verify the cffi module loads, registers its public
+// surface, and the basic invariants hold without making any real
+// FFI calls.  Run from any directory:
+//
+//     ./cando modules/cffi/test_cffi_smoke.cdo
+//
+// Mirrors test_sqlite_smoke.cdo / test_forms_smoke.cdo.
+
+VAR ffi = include("./modules/cffi/cffi");
+
+// Module loaded?
+IF ffi == NULL {
+    THROW "include(\"./modules/cffi/cffi\") returned NULL";
+}
+
+// VERSION present?
+IF ffi.VERSION == NULL || #ffi.VERSION == 0 {
+    THROW "ffi.VERSION not registered";
+}
+print(`cffi version: ${ffi.VERSION}`);
+
+// Required module-level functions present?
+VAR required = [
+    "load", "current", "sizeof", "alignof",
+    "alloc", "string", "errno", "call", "bind", "close",
+    "read", "write", "address", "size", "isNull", "free",
+    "SIZEOF_VOIDP", "SIZEOF_LONG", "SIZEOF_SIZE_T",
+];
+FOR name OF required {
+    IF ffi[name] == NULL {
+        THROW `ffi.${name} not registered`;
+    }
+}
+
+// sizeof / alignof of a few primitive types -- doesn't load a library.
+IF ffi.sizeof("int") != 4         { THROW "sizeof(int) should be 4"; }
+IF ffi.sizeof("char") != 1        { THROW "sizeof(char) should be 1"; }
+IF ffi.sizeof("double") != 8      { THROW "sizeof(double) should be 8"; }
+IF ffi.sizeof("void*") != ffi.SIZEOF_VOIDP { THROW "sizeof(void*) mismatch"; }
+IF ffi.sizeof("size_t") != ffi.SIZEOF_SIZE_T { THROW "sizeof(size_t) mismatch"; }
+
+print("smoke: all surface checks passed");
