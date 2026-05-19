@@ -31,9 +31,6 @@
 #include "../core/common.h"
 #include "../core/thread_platform.h"
 
-/* Forward decls -- defined in source/cando_lib.c. */
-extern const char *cando_errmsg(const CandoVM *vm);
-
 #include <stdatomic.h>
 #include <string.h>
 #include <stdio.h>
@@ -154,22 +151,16 @@ static void dispatch_event(ConsoleDispatch *d, const ConsoleEvent *ev)
     }
     cando_vm_call_value(child, handler, &arg, 1);
     if (child->has_error) {
-        /* Try onError; otherwise emit to stderr and clear. */
+        /* Try onError; otherwise log + clear.  The error message
+         * itself isn't passed to onError -- v1 just signals that
+         * something threw inside the previous callback.  Scripts
+         * can use TRY/CATCH inside their own onKey/onMouse for
+         * full error access. */
         CandoValue on_err = lookup_handler(child, d->console_handle, "onError");
         if (!cando_is_null(on_err)) {
-            CandoValue err_arg = cando_null();
-            /* Convert the VM's error into a string arg. */
-            const char *msg = cando_errmsg(child);
-            if (msg) {
-                u32 mlen = (u32)strlen(msg);
-                CdoString *s = cdo_string_intern(msg, mlen);
-                err_arg = cando_bridge_to_cando(child,
-                                                cdo_string_value(s));
-                cdo_string_release(s);
-            }
             child->has_error = false;
+            CandoValue err_arg = cando_null();
             cando_vm_call_value(child, on_err, &err_arg, 1);
-            cando_value_release(err_arg);
             if (child->has_error) {
                 cando_vm_log_uncaught(child, "console.onError");
                 child->has_error = false;
