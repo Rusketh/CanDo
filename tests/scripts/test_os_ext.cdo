@@ -1,0 +1,38 @@
+/* test_os_ext.cdo -- Tests for the extended os library.
+ *
+ * Covers hostname / tmpdir / homedir / arch / platform / cpus /
+ * totalmem / freemem.
+ */
+
+function assert(cond, msg) { if !cond { throw msg; } }
+
+assert(#os.hostname() > 0, "hostname: non-empty");
+assert(#os.tmpdir() > 0,    "tmpdir: non-empty");
+/* homedir may be empty on stripped systems; tolerate. */
+assert(os.homedir() != null, "homedir: not null");
+
+var ar = os.arch();
+assert(ar == "x86_64" || ar == "aarch64" || ar == "x86"
+       || ar == "arm" || ar == "unknown",
+       "arch: known value");
+
+var pl = os.platform();
+assert(pl == "linux" || pl == "darwin" || pl == "windows"
+       || pl == "freebsd" || pl == "unix",
+       "platform: known value");
+
+var cpus = os.cpus();
+assert(cpus:length() > 0, "cpus: at least one");
+
+/* totalmem / freemem: may be 0 on systems without sysinfo (eg some
+ * containers), but must be a number. */
+var tm = os.totalmem();
+var fm = os.freemem();
+assert(tm + 0 == tm, "totalmem: numeric");
+assert(fm + 0 == fm, "freemem: numeric");
+
+/* uptime: same story. */
+var up = os.uptime();
+assert(up + 0 == up, "uptime: numeric");
+
+print("test_os_ext: all assertions passed");

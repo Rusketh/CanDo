@@ -188,3 +188,14 @@ FOR i IN 1 -> 12 {
 }
 print(inspect(points));
 ```
+
+## Additional helpers
+
+| Function | Returns |
+|---|---|
+| `math.trunc(x)`        | Truncate toward zero. |
+| `math.tanh(x)`         | Hyperbolic tangent. |
+| `math.cbrt(x)`         | Cube root. |
+| `math.log2(x)`         | Base-2 logarithm. |
+| `math.hypot(...xs)`    | `sqrt(sum(x_i^2))`. |
+| `math.fround(x)`       | Round to nearest IEEE-754 single-precision. |

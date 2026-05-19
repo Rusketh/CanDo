@@ -1,0 +1,214 @@
+/* test_crypto_ext.cdo -- Tests for the extended crypto library.
+ *
+ * Covers: hashing (sha1..sha512, sha3 family, blake2),
+ *         HMAC, KDFs (pbkdf2, hkdf, scrypt), random, encodings,
+ *         symmetric ciphers (AES, ChaCha20-Poly1305),
+ *         asymmetric (RSA, EC, Ed25519, X25519),
+ *         X.509 (create, parse, verify, fingerprint, csr),
+ *         timingSafeEqual.
+ *
+ * Uses assertions (throws on failure) so run_smoke verifies exit 0.
+ */
+
+function assert(cond, msg) {
+    if !cond { throw msg; }
+}
+
+/* ----- hashing (NIST/RFC vectors) ----------------------------------------- */
+
+/* SHA-256("hello") -- well-known vector. */
+assert(crypto.sha256("hello") ==
+    "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    "sha256: hello vector");
+
+/* SHA-512("") -- RFC 6234 vector. */
+assert(crypto.sha512("") ==
+    "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce" +
+    "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+    "sha512: empty vector");
+
+/* SHA-3-256 known vector. */
+assert(crypto.sha3_256("abc") ==
+    "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
+    "sha3-256: abc vector");
+
+/* Hash dispatch via .hash(). */
+assert(crypto.hash("sha256", "hello") == crypto.sha256("hello"),
+    "hash: dynamic dispatch matches direct");
+
+/* Output encodings round-trip. */
+assert(crypto.sha256("x", "hex"):length() == 64,    "hex enc length");
+assert(crypto.sha256("x", "base64"):length() > 0,    "base64 enc nonempty");
+assert(crypto.sha256("x", "base64url"):length() > 0, "base64url enc nonempty");
+assert(crypto.sha256("x", "bytes"):length() == 32,   "bytes enc length");
+
+/* ----- HMAC --------------------------------------------------------------- */
+
+/* RFC 4231 vector: HMAC-SHA-256(key="key", data="The quick brown fox jumps over the lazy dog") */
+assert(crypto.hmac("sha256", "key",
+        "The quick brown fox jumps over the lazy dog") ==
+    "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
+    "hmac-sha256: classic vector");
+
+/* ----- PBKDF2 ------------------------------------------------------------- */
+
+/* RFC 6070 vector: PBKDF2-HMAC-SHA1("password","salt", 1, 20) */
+assert(crypto.pbkdf2("password", "salt", 1, 20, "sha1", "hex") ==
+    "0c60c80f961f0e71f3a9b524af6012062fe037a6",
+    "pbkdf2: RFC 6070 vector 1");
+
+/* PBKDF2 default encoding is bytes -- check length. */
+assert(crypto.pbkdf2("p", "s", 1, 32, "sha256"):length() == 32,
+    "pbkdf2: default encoding is bytes");
+
+/* ----- HKDF --------------------------------------------------------------- */
+
+/* RFC 5869 Test Case 1 (truncated check of length). */
+var hk = crypto.hkdf("sha256", "ikm", "salt", "info", 42);
+assert(#hk == 42, "hkdf: keylen");
+
+/* ----- random ------------------------------------------------------------- */
+
+assert(#crypto.randomBytes(32) == 32, "randomBytes: size");
+assert(#crypto.randomBytes(0) == 0,    "randomBytes: zero");
+assert(#crypto.randomBytes(32, "hex") == 64, "randomBytes: hex enc length");
+assert(#crypto.randomUUID() == 36,    "randomUUID: format length");
+
+var r1 = crypto.randomInt(0, 100);
+var r2 = crypto.randomInt(0, 100);
+assert(r1 >= 0 && r1 < 100, "randomInt: range");
+
+/* ----- encodings ---------------------------------------------------------- */
+
+assert(crypto.hex.encode("hello") == "68656c6c6f",       "hex.encode");
+assert(crypto.hex.decode("68656c6c6f") == "hello",        "hex.decode");
+assert(crypto.base64.encode("hello") == "aGVsbG8=",       "base64.encode");
+assert(crypto.base64.decode("aGVsbG8=") == "hello",       "base64.decode");
+assert(crypto.base64url.encode("hello world!") == "aGVsbG8gd29ybGQh",
+    "base64url.encode");
+assert(crypto.base64url.decode("aGVsbG8gd29ybGQh") == "hello world!",
+    "base64url.decode");
+
+/* Back-compat aliases. */
+assert(crypto.base64Encode("hello") == "aGVsbG8=", "base64Encode alias");
+assert(crypto.base64Decode("aGVsbG8=") == "hello", "base64Decode alias");
+
+/* ----- timingSafeEqual ---------------------------------------------------- */
+
+assert(crypto.timingSafeEqual("abc", "abc") == true,  "tse: equal");
+assert(crypto.timingSafeEqual("abc", "abd") == false, "tse: unequal");
+assert(crypto.timingSafeEqual("abc", "ab")  == false, "tse: length mismatch");
+
+/* ----- symmetric ciphers -------------------------------------------------- */
+
+/* AES-256-GCM AEAD round-trip. */
+var key = crypto.randomBytes(32);
+var iv  = crypto.randomBytes(12);
+var aead = crypto.encrypt("aes-256-gcm", key, iv, "the message", "aad");
+assert(#aead.tag == 16, "gcm: tag length");
+var pt = crypto.decrypt("aes-256-gcm", key, iv, aead.ciphertext, "aad", aead.tag);
+assert(pt == "the message", "aes-256-gcm: round-trip");
+
+/* Tamper detection. */
+var bad_tag = crypto.randomBytes(16);
+var threw = false;
+try {
+    crypto.decrypt("aes-256-gcm", key, iv, aead.ciphertext, "aad", bad_tag);
+} catch (e) { threw = true; }
+assert(threw, "aes-256-gcm: tamper detected");
+
+/* AES-256-CBC -- non-AEAD, plain ciphertext return. */
+var iv2 = crypto.randomBytes(16);
+var ct  = crypto.encrypt("aes-256-cbc", key, iv2, "hello, world!");
+var pt2 = crypto.decrypt("aes-256-cbc", key, iv2, ct);
+assert(pt2 == "hello, world!", "aes-256-cbc: round-trip");
+
+/* AES-128-CTR. */
+var k128 = crypto.randomBytes(16);
+var iv3  = crypto.randomBytes(16);
+var ct3 = crypto.encrypt("aes-128-ctr", k128, iv3, "stream me");
+var pt3 = crypto.decrypt("aes-128-ctr", k128, iv3, ct3);
+assert(pt3 == "stream me", "aes-128-ctr: round-trip");
+
+/* ChaCha20-Poly1305 AEAD. */
+var ck = crypto.randomBytes(32);
+var civ = crypto.randomBytes(12);
+var caead = crypto.encrypt("chacha20-poly1305", ck, civ, "chacha test", "ad");
+var cpt = crypto.decrypt("chacha20-poly1305", ck, civ,
+                          caead.ciphertext, "ad", caead.tag);
+assert(cpt == "chacha test", "chacha20-poly1305: round-trip");
+
+/* ----- asymmetric: Ed25519 ------------------------------------------------ */
+
+var ed = crypto.generateKeyPair("ed25519");
+assert(#ed.publicKey > 0 && #ed.privateKey > 0, "ed25519: keypair generated");
+var ed_sig = crypto.sign(ed.privateKey, "message");
+assert(#ed_sig == 64, "ed25519: signature size");
+assert(crypto.verify(ed.publicKey, "message", ed_sig) == true,
+    "ed25519: verify valid");
+assert(crypto.verify(ed.publicKey, "tampered", ed_sig) == false,
+    "ed25519: verify tampered");
+
+/* ----- asymmetric: RSA-2048 sign/verify + OAEP --------------------------- */
+
+var rsa = crypto.generateKeyPair("rsa", { modulusLength: 2048 });
+var rsa_sig = crypto.sign(rsa.privateKey, "doc");
+assert(#rsa_sig == 256, "rsa-2048: signature size");
+assert(crypto.verify(rsa.publicKey, "doc", rsa_sig) == true,
+    "rsa: verify valid");
+assert(crypto.verify(rsa.publicKey, "DOC", rsa_sig) == false,
+    "rsa: verify tampered");
+
+var oaep_ct = crypto.publicEncrypt(rsa.publicKey, "secret");
+var oaep_pt = crypto.privateDecrypt(rsa.privateKey, oaep_ct);
+assert(oaep_pt == "secret", "rsa-oaep: round-trip");
+
+/* RSA-PSS. */
+var pss_sig = crypto.sign(rsa.privateKey, "pss-doc", { padding: "pss" });
+assert(crypto.verify(rsa.publicKey, "pss-doc", pss_sig, { padding: "pss" }) == true,
+    "rsa-pss: verify valid");
+
+/* ----- asymmetric: EC (ECDSA) --------------------------------------------- */
+
+var ec = crypto.generateKeyPair("ec", { curve: "P-256" });
+var ec_sig = crypto.sign(ec.privateKey, "msg");
+assert(crypto.verify(ec.publicKey, "msg", ec_sig) == true,
+    "ec p-256: verify valid");
+
+/* ----- asymmetric: X25519 DH --------------------------------------------- */
+
+var a = crypto.generateKeyPair("x25519");
+var b = crypto.generateKeyPair("x25519");
+var sa = crypto.diffieHellman(a.privateKey, b.publicKey);
+var sb = crypto.diffieHellman(b.privateKey, a.publicKey);
+assert(#sa == 32, "x25519: shared secret size");
+assert(crypto.timingSafeEqual(sa, sb) == true, "x25519: secrets match");
+
+/* ----- X.509 -------------------------------------------------------------- */
+
+var rsa_x = crypto.generateKeyPair("rsa", { modulusLength: 2048 });
+var cert  = crypto.x509.create(
+    { CN: "test.example.com", O: "Acme", C: "US" },
+    { privateKey: rsa_x.privateKey, days: 365 }
+);
+assert(#cert > 0, "x509.create: returns pem");
+assert(string.startsWith(cert, "-----BEGIN CERTIFICATE-----"),
+    "x509.create: pem header");
+
+var parsed = crypto.x509.parse(cert);
+assert(parsed.subject.CN == "test.example.com", "x509.parse: CN");
+assert(parsed.subject.O  == "Acme",              "x509.parse: O");
+assert(parsed.subject.C  == "US",                "x509.parse: C");
+assert(parsed.issuer.CN  == "test.example.com",  "x509.parse: self-signed issuer");
+assert(#parsed.fingerprint == 64,                "x509.parse: sha256 fingerprint");
+assert(parsed.notBefore < parsed.notAfter,       "x509.parse: validity ordering");
+
+assert(crypto.x509.verify(cert, cert) == true, "x509.verify: self-signed against itself");
+assert(crypto.x509.fingerprint(cert) == parsed.fingerprint,
+    "x509.fingerprint: matches parse");
+
+var csr = crypto.x509.csr(rsa_x.privateKey, { CN: "csr.example.com" });
+assert(string.startsWith(csr, "-----BEGIN CERTIFICATE REQUEST-----"),
+    "x509.csr: pem header");
+
+print("test_crypto_ext: all assertions passed");

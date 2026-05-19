@@ -1,0 +1,45 @@
+/* test_object_ext.cdo -- Tests for the extended object library.
+ *
+ * Covers entries / fromEntries / has, plus JS-style freeze / isFrozen
+ * / seal / isSealed (aliases over the existing lock primitive).
+ */
+
+function assert(cond, msg) { if !cond { throw msg; } }
+
+/* ----- has ---------------------------------------------------------------- */
+var o = { a: 1, b: 2, c: 3 };
+assert(object.has(o, "a") == true,    "has: present");
+assert(object.has(o, "z") == false,   "has: missing");
+
+/* ----- entries / fromEntries round-trip ---------------------------------- */
+var entries = object.entries(o);
+assert(entries:length() == 3, "entries: count");
+assert(entries:at(0):at(0) == "a", "entries: first key");
+assert(entries:at(0):at(1) == 1,   "entries: first value");
+
+var back = object.fromEntries(entries);
+assert(back.a == 1, "fromEntries: a");
+assert(back.b == 2, "fromEntries: b");
+assert(back.c == 3, "fromEntries: c");
+assert(object.has(back, "a") == true, "fromEntries: has");
+
+/* fromEntries with custom pairs. */
+var made = object.fromEntries([["x", 10], ["y", 20]]);
+assert(made.x == 10, "fromEntries: custom x");
+assert(made.y == 20, "fromEntries: custom y");
+
+/* ----- freeze / isFrozen (alias of lock / locked) ----------------------- */
+var f = { v: 1 };
+assert(object.isFrozen(f) == false, "isFrozen: not yet");
+object.freeze(f);
+assert(object.isFrozen(f) == true,  "isFrozen: after freeze");
+object.unlock(f);
+assert(object.isFrozen(f) == false, "isFrozen: after unlock");
+
+/* seal / isSealed -- same shape (alias). */
+assert(object.isSealed(f) == false, "isSealed: not yet");
+object.seal(f);
+assert(object.isSealed(f) == true,  "isSealed: after seal");
+object.unlock(f);
+
+print("test_object_ext: all assertions passed");

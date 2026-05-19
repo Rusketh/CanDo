@@ -225,3 +225,24 @@ FUNCTION words(s) {
 
 print(inspect(words("  hello   world  ")));    // ["hello", "world"]
 ```
+
+## JS-style methods
+
+| Method | Description |
+|---|---|
+| `string.indexOf(s, n, from?)`     | First index of `n` ≥ `from`, or `-1`. |
+| `string.lastIndexOf(s, n, from?)` | Last index of `n` ≤ `from`, or `-1`. |
+| `string.includes(s, n)` / `string.contains(s, n)` | True if `n` is a substring. |
+| `string.padStart(s, len, fill?)`  | Pad on the left with `fill` (default `" "`) until `s` has length `len`. |
+| `string.padEnd(s, len, fill?)`    | Pad on the right. |
+| `string.trimStart(s)`             | Trim leading whitespace. |
+| `string.trimEnd(s)`               | Trim trailing whitespace. |
+| `string.codePointAt(s, i)`        | UTF-8 codepoint at byte index `i`. |
+| `string.fromCodePoint(...cps)`    | UTF-8 string built from one or more codepoints. |
+
+```cdo
+print(string.indexOf("hello world", "world"));  // 6
+print(string.includes("hello", "ell"));         // true
+print(string.padStart("5", 3, "0"));            // "005"
+print(string.fromCodePoint(72, 105));           // "Hi"
+```

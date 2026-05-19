@@ -174,6 +174,7 @@ TEST_VM_BIN       = tests/test_vm
 TEST_THREAD_BIN   = tests/test_thread
 TEST_SOCKUTIL_BIN = tests/test_sockutil
 TEST_YAML_BIN     = tests/test_yaml
+TEST_CRYPTO_BIN   = tests/test_crypto
 TEST_JIT_IR_BIN    = tests/test_jit_ir
 TEST_JIT_HOT_BIN   = tests/test_jit_hot
 TEST_JIT_MCODE_BIN = tests/test_jit_mcode
@@ -201,7 +202,7 @@ TEST_JIT_MCODE_SRCS = $(CORE_SRCS) source/jit/mcode.c tests/test_jit_mcode.c
 all: libcando.so libcando.a $(CANDO_BIN) \
      $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) \
      $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN) \
-     $(TEST_SOCKUTIL_BIN) $(TEST_YAML_BIN) \
+     $(TEST_SOCKUTIL_BIN) $(TEST_YAML_BIN) $(TEST_CRYPTO_BIN) \
      $(TEST_JIT_IR_BIN) $(TEST_JIT_HOT_BIN) $(TEST_JIT_MCODE_BIN)
 
 # ---------------------------------------------------------------------------
@@ -270,6 +271,13 @@ $(TEST_YAML_BIN): tests/test_yaml.c libcando.so
 	    -L. -lcando -Wl,-rpath,'$$ORIGIN/..' \
 	    -o $@ $(LDFLAGS)
 
+# test_crypto exercises OpenSSL directly to KAT-verify hashes, KDFs,
+# HMAC, AES-GCM, Ed25519, and X.509 round-trip.  Links only -lcrypto
+# (and libssl indirectly via the test layer).
+$(TEST_CRYPTO_BIN): tests/test_crypto.c
+	$(CC) -std=c11 -Wall -Wextra -D_GNU_SOURCE -Iinclude \
+	    tests/test_crypto.c -o $@ -lssl -lcrypto
+
 # test_jit_ir now links the full VM stack because the IR-interpreter
 # (Phase 3.4a+) calls into the bridge/array layer.  Use CFLAGS_VM (no
 # -Wpedantic) to avoid spurious computed-goto warnings.
@@ -297,6 +305,7 @@ test: all
 	./$(TEST_VM_BIN)
 	./$(TEST_SOCKUTIL_BIN)
 	./$(TEST_YAML_BIN)
+	./$(TEST_CRYPTO_BIN)
 	./$(TEST_JIT_IR_BIN)
 	./$(TEST_JIT_HOT_BIN)
 	./$(TEST_JIT_MCODE_BIN)
@@ -328,6 +337,9 @@ test_sockutil: $(TEST_SOCKUTIL_BIN)
 
 test_yaml: $(TEST_YAML_BIN)
 	./$(TEST_YAML_BIN)
+
+test_crypto: $(TEST_CRYPTO_BIN)
+	./$(TEST_CRYPTO_BIN)
 
 test_jit_ir: $(TEST_JIT_IR_BIN)
 	./$(TEST_JIT_IR_BIN)
@@ -447,7 +459,7 @@ modules-clean:
 clean: modules-clean
 	rm -f $(TEST_CORE_BIN) $(TEST_OBJECT_BIN) $(TEST_LEXER_BIN) \
 	      $(TEST_PARSER_BIN) $(TEST_VM_BIN) $(TEST_THREAD_BIN) \
-	      $(TEST_SOCKUTIL_BIN) $(TEST_YAML_BIN) \
+	      $(TEST_SOCKUTIL_BIN) $(TEST_YAML_BIN) $(TEST_CRYPTO_BIN) \
 	      $(TEST_JIT_IR_BIN) $(TEST_JIT_HOT_BIN) \
 	      $(CANDO_BIN) cando.exe \
 	      libcando.so libcando.a libcando.dll libcando.lib icon.res

@@ -98,3 +98,17 @@ FUNCTION timed(label, fn) {
 
 VAR rows = timed("parse", () => csv.parse(file.read("big.csv")));
 ```
+
+## System information
+
+| Function | Returns |
+|---|---|
+| `os.hostname()` | Host name. |
+| `os.tmpdir()`   | Temp directory (`$TMPDIR` / `GetTempPath`). |
+| `os.homedir()`  | User home (`$HOME` / `$USERPROFILE`). |
+| `os.arch()`     | One of `"x86_64"`, `"x86"`, `"aarch64"`, `"arm"`, `"unknown"`. |
+| `os.platform()` | One of `"linux"`, `"darwin"`, `"windows"`, `"freebsd"`, `"unix"`. |
+| `os.uptime()`   | System uptime in seconds. |
+| `os.totalmem()` | Total physical memory in bytes. |
+| `os.freemem()`  | Available physical memory in bytes. |
+| `os.cpus()`     | Array of `{ model, speed }` per logical CPU. |

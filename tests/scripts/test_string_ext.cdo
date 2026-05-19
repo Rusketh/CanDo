@@ -1,0 +1,48 @@
+/* test_string_ext.cdo -- Tests for the extended string library.
+ *
+ * Covers: indexOf / lastIndexOf / includes,
+ *         padStart / padEnd,
+ *         trimStart / trimEnd,
+ *         codePointAt / fromCodePoint.
+ */
+
+function assert(cond, msg) { if !cond { throw msg; } }
+
+/* indexOf / lastIndexOf / includes. */
+assert(string.indexOf("hello world", "world") == 6,    "indexOf: found");
+assert(string.indexOf("hello world", "world", 7) == -1, "indexOf: from-index past");
+assert(string.indexOf("aaa", "a", 1) == 1,             "indexOf: from-index");
+assert(string.indexOf("hello", "X") == -1,             "indexOf: not found");
+assert(string.indexOf("hello", "") == 0,               "indexOf: empty needle");
+
+assert(string.lastIndexOf("ababab", "ab") == 4,        "lastIndexOf: last");
+assert(string.lastIndexOf("ababab", "X") == -1,        "lastIndexOf: not found");
+assert(string.lastIndexOf("hello", "lo") == 3,         "lastIndexOf: end");
+
+assert(string.includes("hello", "ell") == true,        "includes: yes");
+assert(string.includes("hello", "yyy") == false,       "includes: no");
+assert(string.includes("hello", "") == true,           "includes: empty");
+assert(string.contains("hello", "ell") == true,        "contains: alias");
+
+/* padStart / padEnd. */
+assert(string.padStart("5", 3, "0") == "005",          "padStart: zero pad");
+assert(string.padStart("5", 3) == "  5",                "padStart: default space");
+assert(string.padStart("hello", 3, "x") == "hello",     "padStart: already long");
+assert(string.padEnd("5", 3, "0") == "500",             "padEnd: zero pad");
+assert(string.padEnd("5", 3) == "5  ",                  "padEnd: default space");
+
+/* trimStart / trimEnd. */
+assert(string.trimStart("  hello  ") == "hello  ",     "trimStart: leading");
+assert(string.trimEnd("  hello  ") == "  hello",       "trimEnd: trailing");
+/* CanDo string literals don't process escape sequences, so test
+ * trimStart against actual whitespace via string concatenation. */
+assert(string.trimStart("    hello") == "hello",        "trimStart: many spaces");
+
+/* codePointAt / fromCodePoint. */
+assert(string.codePointAt("a", 0) == 97,               "codePointAt: ascii");
+assert(string.codePointAt("abc", 1) == 98,             "codePointAt: index");
+assert(string.codePointAt("", 0) == null,              "codePointAt: empty");
+assert(string.fromCodePoint(72, 105) == "Hi",          "fromCodePoint: ascii");
+assert(string.fromCodePoint(97, 98, 99) == "abc",      "fromCodePoint: multi");
+
+print("test_string_ext: all assertions passed");

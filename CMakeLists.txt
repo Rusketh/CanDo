@@ -351,3 +351,10 @@ target_include_directories(test_yaml PRIVATE
 )
 target_link_libraries(test_yaml PRIVATE libcando)
 add_test(NAME test_yaml COMMAND $<TARGET_FILE:test_yaml>)
+
+# test_crypto — KAT vectors against OpenSSL directly (does not link
+# against libcando; only -lcrypto / -lssl).
+add_executable(test_crypto tests/test_crypto.c)
+target_include_directories(test_crypto PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_crypto PRIVATE OpenSSL::SSL OpenSSL::Crypto ${PLATFORM_LIBS})
+add_test(NAME test_crypto COMMAND $<TARGET_FILE:test_crypto>)

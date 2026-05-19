@@ -414,6 +414,119 @@ static int obj_values(CandoVM *vm, int argc, CandoValue *args) {
 }
 
 /* =========================================================================
+ * object.entries(o) → array of [k, v] pairs
+ * object.fromEntries(arr) → object
+ * object.has(o, key) → bool
+ *
+ * JS-Object-style helpers added on top of keys/values.
+ * ======================================================================= */
+
+typedef struct {
+    CandoVM   *vm;
+    CdoObject *arr;
+} EntriesCtx;
+
+static bool collect_entry(CdoString *key, CdoValue *val, u8 flags, void *ud)
+{
+    CANDO_UNUSED(flags);
+    EntriesCtx *ctx = ud;
+    /* Each entry is a 2-element array: [key, value]. */
+    CdoObject *pair = cdo_array_new();
+    cdo_string_retain(key);
+    cdo_array_push(pair, cdo_string_value(key));
+    cdo_array_push(pair, *val);
+    cdo_array_push(ctx->arr, cdo_array_value(pair));
+    return true;
+}
+
+static int obj_entries(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1 || !cando_is_object(args[0])) {
+        cando_vm_push(vm, cando_null());
+        return 1;
+    }
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
+    if (!obj) { cando_vm_push(vm, cando_null()); return 1; }
+    CandoValue arr_val = cando_bridge_new_array(vm);
+    CdoObject *arr_obj = cando_bridge_resolve(vm, cando_as_handle(arr_val));
+    EntriesCtx ctx = { vm, arr_obj };
+    cdo_object_foreach(obj, collect_entry, &ctx);
+    cando_vm_push(vm, arr_val);
+    return 1;
+}
+
+static int obj_fromEntries(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 1 || !cando_is_object(args[0])) {
+        cando_vm_push(vm, cando_null());
+        return 1;
+    }
+    CdoObject *src = cando_bridge_resolve(vm, cando_as_handle(args[0]));
+    if (!src || src->kind != OBJ_ARRAY) {
+        cando_vm_push(vm, cando_null());
+        return 1;
+    }
+    CandoValue out_val = cando_bridge_new_object(vm);
+    CdoObject *out = cando_bridge_resolve(vm, cando_as_handle(out_val));
+
+    u32 n = cdo_array_len(src);
+    for (u32 i = 0; i < n; i++) {
+        CdoValue pair_cv;
+        if (!cdo_array_rawget_idx(src, i, &pair_cv)) continue;
+        /* Accept any tagged object reference whose underlying kind is
+         * OBJ_ARRAY -- CanDo array literals and arrays built via the
+         * bridge can land with either CDO_ARRAY or CDO_OBJECT tags. */
+        CdoObject *pair = cdo_is_any_object(pair_cv)
+            ? pair_cv.as.object : NULL;
+        if (!pair || pair->kind != OBJ_ARRAY) continue;
+        CdoValue k, v;
+        if (!cdo_array_rawget_idx(pair, 0, &k)) continue;
+        if (!cdo_array_rawget_idx(pair, 1, &v)) v = cdo_null();
+        if (k.tag != CDO_STRING) continue;
+        /* rawset's key-lookup relies on pointer equality of interned
+         * strings; if `k` came from a script-literal array its pointer
+         * is the not-yet-interned heap copy.  Always re-intern. */
+        CdoString *kstr = cdo_string_intern(k.as.string->data, k.as.string->length);
+        cdo_object_rawset(out, kstr, v, FIELD_NONE);
+        cdo_string_release(kstr);
+    }
+    cando_vm_push(vm, out_val);
+    return 1;
+}
+
+static int obj_has(CandoVM *vm, int argc, CandoValue *args)
+{
+    if (argc < 2 || !cando_is_object(args[0]) || !cando_is_string(args[1])) {
+        cando_vm_push(vm, cando_bool(false));
+        return 1;
+    }
+    CdoObject *obj = cando_bridge_resolve(vm, cando_as_handle(args[0]));
+    if (!obj) { cando_vm_push(vm, cando_bool(false)); return 1; }
+    CandoString *kc = cando_as_string(args[1]);
+    CdoString *k = cdo_string_intern(kc->data, kc->length);
+    CdoValue out;
+    bool found = cdo_object_rawget(obj, k, &out);
+    cdo_string_release(k);
+    cando_vm_push(vm, cando_bool(found));
+    return 1;
+}
+
+/* freeze / isFrozen / seal / isSealed are exposed as JS-style
+ * spellings that map to the existing user-level lock primitive.  This
+ * is a coarse approximation: CanDo's lock prevents *all* concurrent
+ * access rather than only mutation, but the visible-to-script effect
+ * matches "no add/remove/modify until unlock" closely enough that
+ * scripts written for JS-style immutability work. */
+static int obj_freeze(CandoVM *vm, int argc, CandoValue *args)
+{ return obj_lock(vm, argc, args); }
+static int obj_isFrozen(CandoVM *vm, int argc, CandoValue *args)
+{ return obj_locked(vm, argc, args); }
+static int obj_seal(CandoVM *vm, int argc, CandoValue *args)
+{ return obj_lock(vm, argc, args); }
+static int obj_isSealed(CandoVM *vm, int argc, CandoValue *args)
+{ return obj_locked(vm, argc, args); }
+
+/* =========================================================================
  * Registration
  * ======================================================================= */
 
@@ -430,6 +543,15 @@ static const LibutilMethodEntry object_methods[] = {
     { "getPrototype", obj_getPrototype },
     { "keys",         obj_keys         },
     { "values",       obj_values       },
+
+    /* New: JS-Object parity. */
+    { "entries",      obj_entries      },
+    { "fromEntries",  obj_fromEntries  },
+    { "has",          obj_has          },
+    { "freeze",       obj_freeze       },
+    { "isFrozen",     obj_isFrozen     },
+    { "seal",         obj_seal         },
+    { "isSealed",     obj_isSealed     },
 };
 
 void cando_lib_object_register(CandoVM *vm)

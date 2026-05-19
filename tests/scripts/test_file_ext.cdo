@@ -1,0 +1,52 @@
+/* test_file_ext.cdo -- Tests for the extended file library.
+ *
+ * Covers stat / isFile / isDir / isSymlink, basename / dirname /
+ * extname / join / resolve / realpath, rmdir / chmod.
+ *
+ * Some checks rely on the cando repo layout: Makefile + source/.
+ */
+
+function assert(cond, msg) { if !cond { throw msg; } }
+
+/* ----- type-checks against repo files ------------------------------------ */
+assert(file.isFile("Makefile") == true,        "isFile: Makefile");
+assert(file.isDir("source") == true,            "isDir: source");
+assert(file.isFile("source") == false,          "isFile: dir");
+assert(file.isDir("Makefile") == false,         "isDir: file");
+assert(file.isFile("does/not/exist") == false,  "isFile: missing");
+
+/* ----- stat returns object ------------------------------------------------ */
+var st = file.stat("Makefile");
+assert(st.size > 0,        "stat: size > 0");
+assert(st.isFile == true,  "stat: isFile");
+assert(st.isDir == false,  "stat: isDir");
+assert(st.mtime > 0,       "stat: mtime");
+
+/* ----- path helpers (no filesystem access) -------------------------------- */
+assert(file.basename("/foo/bar/baz.txt") == "baz.txt",   "basename");
+assert(file.basename("/foo/bar/baz.txt", ".txt") == "baz", "basename: strip ext");
+assert(file.basename("baz.txt") == "baz.txt",             "basename: no dir");
+assert(file.basename("/foo/bar/") == "bar",               "basename: trailing slash");
+
+assert(file.dirname("/foo/bar/baz.txt") == "/foo/bar",   "dirname");
+assert(file.dirname("baz.txt") == ".",                    "dirname: no dir");
+assert(file.dirname("/") == "/",                           "dirname: root");
+
+assert(file.extname("/foo/bar/baz.txt") == ".txt",       "extname: simple");
+assert(file.extname("archive.tar.gz") == ".gz",          "extname: last dot");
+assert(file.extname(".bashrc") == "",                     "extname: dotfile");
+assert(file.extname("noext") == "",                       "extname: none");
+
+assert(file.join("a", "b", "c") == "a/b/c",              "join: simple");
+assert(file.join("a/", "/b") == "a/b",                    "join: collapse slashes");
+assert(file.join("") == "",                                "join: empty");
+
+/* realpath of an existing file should be absolute (start with /). */
+var rp = file.realpath("Makefile");
+assert(string.startsWith(rp, "/"), "realpath: absolute");
+assert(string.endsWith(rp, "Makefile"), "realpath: name");
+
+/* Missing file → null. */
+assert(file.realpath("/no/such/file/exists") == null, "realpath: missing");
+
+print("test_file_ext: all assertions passed");
