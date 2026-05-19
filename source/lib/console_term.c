@@ -154,11 +154,12 @@ void console_term_detach(void)
 #if CT_PLATFORM_WINDOWS
     FreeConsole();
     /* Reopen the C standard streams onto NUL so any later fputs
-     * doesn't crash the runtime. */
-    FILE *unused;
-    (void)freopen_s(&unused, "NUL", "w", stdout);
-    (void)freopen_s(&unused, "NUL", "w", stderr);
-    (void)freopen_s(&unused, "NUL", "r", stdin);
+     * doesn't crash the runtime.  Use plain freopen() rather than
+     * freopen_s() for portability across MSVCRT vs UCRT MinGW
+     * configurations. */
+    (void)freopen("NUL", "w", stdout);
+    (void)freopen("NUL", "w", stderr);
+    (void)freopen("NUL", "r", stdin);
 #else
     int devnull = open("/dev/null", O_RDWR);
     if (devnull >= 0) {
@@ -176,10 +177,9 @@ bool console_term_attach(void)
 #if CT_PLATFORM_WINDOWS
     if (GetConsoleWindow() != NULL) return true;
     if (!AllocConsole()) return false;
-    FILE *unused;
-    (void)freopen_s(&unused, "CONOUT$", "w", stdout);
-    (void)freopen_s(&unused, "CONOUT$", "w", stderr);
-    (void)freopen_s(&unused, "CONIN$",  "r", stdin);
+    (void)freopen("CONOUT$", "w", stdout);
+    (void)freopen("CONOUT$", "w", stderr);
+    (void)freopen("CONIN$",  "r", stdin);
     return true;
 #else
     int fd = open("/dev/tty", O_RDWR);
